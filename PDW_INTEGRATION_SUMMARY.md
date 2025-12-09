@@ -124,6 +124,7 @@ WALRUS_PUBLISHER=https://publisher.walrus-testnet.walrus.space
 WALRUS_AGGREGATOR=https://aggregator.walrus-testnet.walrus.space
 
 # AI Services
+# API keys should be stored in .env file, not committed to git
 ```
 
 ### PDW Features Enabled
