@@ -1,0 +1,15 @@
+.pixel-blast-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: auto;
+  z-index: 0;
+}
+
+.pixel-blast-container canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
