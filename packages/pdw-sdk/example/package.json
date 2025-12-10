@@ -1,0 +1,34 @@
+{
+  "name": "pdw-demo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@google/genai": "^1.22.0",
+    "@mysten/dapp-kit": "^0.19.0",
+    "@mysten/seal": "^0.5.2",
+    "@mysten/sui": "^1.38.0",
+    "@mysten/walrus": "^0.7.1",
+    "@tanstack/react-query": "^5.90.2",
+    "buffer": "^6.0.3",
+    "claude": "^0.1.2",
+    "next": "14.2.5",
+    "personal-data-wallet-sdk": "file:../",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.39",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.0.0"
+  }
+}

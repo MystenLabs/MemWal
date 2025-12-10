@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SimplePDWClient E2E Test</title>
+  <!-- Polyfill for Node.js process.env in browser -->
+  <script>
+    window.process = { env: {} };
+  </script>
+  <!-- Import map for externalized Sui and Walrus packages -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@mysten/sui": "https://esm.sh/@mysten/sui@1.44.0",
+      "@mysten/sui/client": "https://esm.sh/@mysten/sui@1.44.0/client",
+      "@mysten/sui/keypairs/ed25519": "https://esm.sh/@mysten/sui@1.44.0/keypairs/ed25519",
+      "@mysten/sui/keypairs/secp256k1": "https://esm.sh/@mysten/sui@1.44.0/keypairs/secp256k1",
+      "@mysten/sui/keypairs/secp256r1": "https://esm.sh/@mysten/sui@1.44.0/keypairs/secp256r1",
+      "@mysten/sui/cryptography": "https://esm.sh/@mysten/sui@1.44.0/cryptography",
+      "@mysten/sui/transactions": "https://esm.sh/@mysten/sui@1.44.0/transactions",
+      "@mysten/sui/utils": "https://esm.sh/@mysten/sui@1.44.0/utils",
+      "@mysten/sui/verify": "https://esm.sh/@mysten/sui@1.44.0/verify",
+      "@mysten/sui/bcs": "https://esm.sh/@mysten/sui@1.44.0/bcs",
+      "@mysten/sui/experimental": "https://esm.sh/@mysten/sui@1.44.0/experimental",
+      "@mysten/sui/faucet": "https://esm.sh/@mysten/sui@1.44.0/faucet",
+      "@mysten/sui/multisig": "https://esm.sh/@mysten/sui@1.44.0/multisig",
+      "@mysten/sui/graphql": "https://esm.sh/@mysten/sui@1.44.0/graphql",
+      "@mysten/walrus": "https://esm.sh/@mysten/walrus@1.1.0",
+      "@mysten/walrus-wasm": "https://esm.sh/@mysten/walrus-wasm@1.1.0"
+    }
+  }
+  </script>
+  <style>
+    body { font-family: system-ui; padding: 20px; }
+    .test-result { padding: 10px; margin: 5px 0; border-radius: 4px; }
+    .pass { background: #d4edda; color: #155724; }
+    .fail { background: #f8d7da; color: #721c24; }
+    .pending { background: #fff3cd; color: #856404; }
+    pre { background: #f5f5f5; padding: 10px; overflow: auto; }
+    #log { max-height: 400px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h1>SimplePDWClient E2E Test</h1>
+  <div id="status">Initializing...</div>
+  <div id="results"></div>
+  <h3>Log:</h3>
+  <pre id="log"></pre>
+
+  <script type="module">
+    // Test harness exposed to Playwright
+    window.testResults = {};
+    window.testLog = [];
+    window.testReady = false;
+    window.pdw = null;
+
+    function log(msg) {
+      const timestamp = new Date().toISOString();
+      const entry = `[${timestamp}] ${msg}`;
+      window.testLog.push(entry);
+      document.getElementById('log').textContent = window.testLog.join('\n');
+      console.log(entry);
+    }
+
+    function setStatus(msg) {
+      document.getElementById('status').textContent = msg;
+    }
+
+    function addResult(name, passed, details) {
+      window.testResults[name] = { passed, details };
+      const div = document.createElement('div');
+      div.className = `test-result ${passed ? 'pass' : 'fail'}`;
+      div.innerHTML = `<strong>${name}:</strong> ${passed ? 'PASS' : 'FAIL'} ${details ? `- ${details}` : ''}`;
+      document.getElementById('results').appendChild(div);
+    }
+
+    // Main test function called by Playwright
+    window.runTests = async function(config) {
+      log('Starting E2E tests...');
+      setStatus('Running tests...');
+
+      try {
+        // Dynamic import of browser-bundled SDK
+        const { SimplePDWClient } = await import('/dist-browser/pdw-sdk.browser.js');
+        const { Ed25519Keypair } = await import('https://esm.sh/@mysten/sui@1.44.0/keypairs/ed25519');
+        const { decodeSuiPrivateKey } = await import('https://esm.sh/@mysten/sui@1.44.0/cryptography');
+
+        log('SDK loaded successfully');
+
+        // Parse config from Playwright
+        const { geminiApiKey, suiPrivateKey, packageId } = config;
+
+        // Create keypair
+        const { secretKey } = decodeSuiPrivateKey(suiPrivateKey);
+        const keypair = Ed25519Keypair.fromSecretKey(secretKey);
+        log(`Wallet address: ${keypair.getPublicKey().toSuiAddress()}`);
+
+        // Initialize SimplePDWClient
+        log('Initializing SimplePDWClient...');
+        log(`Using packageId: ${packageId}`);
+        window.pdw = new SimplePDWClient({
+          signer: keypair,
+          network: 'testnet',
+          geminiApiKey: geminiApiKey,
+          sui: {
+            packageId: packageId
+          },
+          features: {
+            enableEncryption: false,
+            enableLocalIndexing: true,
+            enableKnowledgeGraph: true
+          }
+        });
+
+        await window.pdw.ready();
+        log('SimplePDWClient initialized successfully');
+        addResult('initialization', true, 'Client ready');
+
+        // Run individual tests
+        await testEmbeddings();
+        await testMemory();
+        await testSearch();
+        await testClassify();
+        await testGraph();
+        await testChat();
+
+        setStatus('All tests completed!');
+        window.testReady = true;
+        return window.testResults;
+
+      } catch (error) {
+        log(`ERROR: ${error.message}`);
+        addResult('initialization', false, error.message);
+        setStatus('Tests failed - see log');
+        window.testReady = true;
+        return window.testResults;
+      }
+    };
+
+    // Test embeddings namespace
+    async function testEmbeddings() {
+      log('Testing embeddings namespace...');
+      try {
+        // Test generate
+        const embedding = await window.pdw.embeddings.generate('Hello world');
+        addResult('embeddings.generate',
+          embedding && embedding.length > 0,
+          `${embedding?.length || 0} dimensions`);
+
+        // Test batch
+        const batch = await window.pdw.embeddings.batch(['Test 1', 'Test 2']);
+        addResult('embeddings.batch',
+          batch && batch.length === 2,
+          `${batch?.length || 0} embeddings`);
+
+        // Test similarity
+        if (batch && batch.length >= 2) {
+          const sim = await window.pdw.embeddings.similarity(batch[0], batch[1]);
+          addResult('embeddings.similarity',
+            typeof sim === 'number',
+            `score: ${sim?.toFixed(4) || 'N/A'}`);
+        }
+
+      } catch (error) {
+        log(`Embeddings error: ${error.message}`);
+        addResult('embeddings.*', false, error.message);
+      }
+    }
+
+    // Test memory namespace
+    async function testMemory() {
+      log('Testing memory namespace...');
+      try {
+        // Test create - API: create(content: string, options?: CreateMemoryOptions)
+        const memory = await window.pdw.memory.create(
+          'E2E test memory: I am a software engineer',
+          { category: 'test', metadata: { tags: ['e2e', 'test'] } }
+        );
+        addResult('memory.create',
+          memory && (memory.id || memory.blobId),
+          `id: ${memory?.id || memory?.blobId || 'N/A'}`);
+
+        // Store for later tests
+        window.testMemoryId = memory?.id || memory?.blobId;
+
+        // Test list
+        const list = await window.pdw.memory.list({ limit: 10 });
+        addResult('memory.list',
+          list && Array.isArray(list.memories || list),
+          `${(list?.memories || list)?.length || 0} memories`);
+
+      } catch (error) {
+        log(`Memory error: ${error.message}`);
+        addResult('memory.*', false, error.message);
+      }
+    }
+
+    // Test search namespace
+    async function testSearch() {
+      log('Testing search namespace...');
+      try {
+        // Test vector search
+        const results = await window.pdw.search.vector('software engineer', { k: 5 });
+        addResult('search.vector',
+          results && Array.isArray(results),
+          `${results?.length || 0} results`);
+
+        // Test byCategory
+        const categoryResults = await window.pdw.search.byCategory('test');
+        addResult('search.byCategory',
+          categoryResults && Array.isArray(categoryResults),
+          `${categoryResults?.length || 0} results`);
+
+      } catch (error) {
+        log(`Search error: ${error.message}`);
+        addResult('search.*', false, error.message);
+      }
+    }
+
+    // Test classify namespace
+    async function testClassify() {
+      log('Testing classify namespace...');
+      try {
+        // Test category
+        const category = await window.pdw.classify.category('I learned TypeScript today');
+        addResult('classify.category',
+          category && typeof category === 'string',
+          `category: ${category || 'N/A'}`);
+
+        // Test importance
+        const importance = await window.pdw.classify.importance('Critical security update');
+        addResult('classify.importance',
+          typeof importance === 'number',
+          `score: ${importance || 'N/A'}`);
+
+        // Test shouldSave with meaningful content
+        const shouldSave = await window.pdw.classify.shouldSave('I am working at CommandOSS as a software engineer');
+        addResult('classify.shouldSave',
+          typeof shouldSave === 'boolean',
+          `result: ${shouldSave}`);
+
+      } catch (error) {
+        log(`Classify error: ${error.message}`);
+        addResult('classify.*', false, error.message);
+      }
+    }
+
+    // Test graph namespace
+    async function testGraph() {
+      log('Testing graph namespace...');
+      try {
+        // Test extract
+        const graph = await window.pdw.graph.extract(
+          'John works at Google as a software engineer. He lives in San Francisco.'
+        );
+        addResult('graph.extract',
+          graph && (graph.entities || graph.nodes),
+          `${graph?.entities?.length || graph?.nodes?.length || 0} entities`);
+
+        // Test stats
+        const stats = await window.pdw.graph.stats();
+        addResult('graph.stats',
+          stats !== undefined,
+          JSON.stringify(stats).slice(0, 50));
+
+      } catch (error) {
+        log(`Graph error: ${error.message}`);
+        addResult('graph.*', false, error.message);
+      }
+    }
+
+    // Test chat namespace
+    async function testChat() {
+      log('Testing chat namespace...');
+      try {
+        // Test createSession
+        const session = await window.pdw.chat.createSession({ title: 'E2E Test Chat' });
+        addResult('chat.createSession',
+          session && session.id,
+          `id: ${session?.id || 'N/A'}`);
+
+        if (session?.id) {
+          // Test send
+          const response = await window.pdw.chat.send(session.id, 'Hello, AI!');
+          addResult('chat.send',
+            response && response.content,
+            `response length: ${response?.content?.length || 0}`);
+
+          // Test getSessions
+          const sessions = await window.pdw.chat.getSessions();
+          addResult('chat.getSessions',
+            sessions && Array.isArray(sessions),
+            `${sessions?.length || 0} sessions`);
+
+          // Cleanup - delete session
+          await window.pdw.chat.delete(session.id);
+          addResult('chat.delete', true, 'Session deleted');
+        }
+
+      } catch (error) {
+        log(`Chat error: ${error.message}`);
+        addResult('chat.*', false, error.message);
+      }
+    }
+  </script>
+</body>
+</html>

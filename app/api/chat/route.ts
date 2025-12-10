@@ -1,4 +1,4 @@
-import { openai } from '@ai-sdk/openai'
+import { google } from '@ai-sdk/google'
 import { streamText } from 'ai'
 import { getPDWClient } from '@/lib/pdw-service'
 
@@ -48,7 +48,7 @@ ${relevantMemories ? `\nHere are relevant memories from the user's blockchain:\n
 Always be helpful, conversational, and respect the user's privacy.`
 
     const result = streamText({
-      model: openai('gpt-4-turbo'),
+      model: google('gemini-2.5-flash-lite'),
       messages,
       system: systemPrompt,
     })
