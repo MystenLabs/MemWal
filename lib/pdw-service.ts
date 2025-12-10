@@ -70,7 +70,7 @@ export async function getPDWClient(): Promise<any> {
       },
       features: {
         enableEncryption: false, // Disable for now (can enable with SEAL later)
-        enableLocalIndexing: false, // Disable for Node.js (requires browser APIs: indexedDB, hnswlib-wasm)
+        enableLocalIndexing: true, // Enable hybrid HNSW (uses hnswlib-node for Node.js)
         enableKnowledgeGraph: true, // Enable knowledge graph extraction
       },
     });

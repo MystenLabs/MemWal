@@ -1,0 +1,468 @@
+/**
+ * GeminiAIService - Real Google Gemini AI Integration
+ * 
+ * Provides AI-powered text analysis capabilities using Google's Gemini API
+ * for entity extraction, relationship identification, and content analysis.
+ * 
+ * Using @google/genai (the actively maintained SDK, not the deprecated @google/generative-ai)
+ */
+
+import { GoogleGenAI } from '@google/genai';
+
+export interface GeminiConfig {
+  apiKey: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  timeout?: number;
+}
+
+export interface EntityExtractionRequest {
+  content: string;
+  context?: string;
+  confidenceThreshold?: number;
+}
+
+export interface EntityExtractionResponse {
+  entities: Array<{
+    id: string;
+    label: string;
+    type: string;
+    confidence: number;
+    properties?: Record<string, any>;
+  }>;
+  relationships: Array<{
+    source: string;
+    target: string;
+    label: string;
+    confidence: number;
+    type?: string;
+  }>;
+  processingTimeMs: number;
+}
+
+/**
+ * Google Gemini AI service for advanced text analysis and knowledge extraction
+ */
+export class GeminiAIService {
+  private genAI: GoogleGenAI;
+  private readonly config: Required<GeminiConfig>;
+
+  constructor(config: GeminiConfig) {
+    this.config = {
+      model: config.model || 'gemini-2.5-flash-lite',
+      temperature: config.temperature || 0.1,
+      maxTokens: config.maxTokens || 4096,
+      timeout: config.timeout || 30000,
+      ...config
+    };
+
+    this.genAI = new GoogleGenAI({ apiKey: this.config.apiKey });
+  }
+
+  /**
+   * Extract entities and relationships from text using Gemini AI
+   */
+  async extractEntitiesAndRelationships(request: EntityExtractionRequest): Promise<EntityExtractionResponse> {
+    const startTime = Date.now();
+    
+    try {
+      // Validate input: return empty result for empty/whitespace-only content
+      const trimmedContent = request.content?.trim();
+      if (!trimmedContent || trimmedContent.length === 0) {
+        return {
+          entities: [],
+          relationships: [],
+          processingTimeMs: Date.now() - startTime
+        };
+      }
+
+      const prompt = this.buildExtractionPrompt(request.content, request.context);
+      const result = await this.genAI.models.generateContent({
+        model: this.config.model,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: this.config.temperature,
+          maxOutputTokens: this.config.maxTokens,
+        }
+      });
+      const text = result.text || '';
+      
+      const parsed = this.parseExtractionResponse(text);
+      const processingTimeMs = Date.now() - startTime;
+
+      return {
+        entities: parsed.entities,
+        relationships: parsed.relationships,
+        processingTimeMs
+      };
+
+    } catch (error) {
+      console.error('Gemini AI extraction failed:', error);
+      
+      // Return empty result with processing time on error
+      return {
+        entities: [],
+        relationships: [],
+        processingTimeMs: Date.now() - startTime
+      };
+    }
+  }
+
+  /**
+   * Extract entities and relationships from multiple texts in batch
+   */
+  async extractBatch(requests: EntityExtractionRequest[]): Promise<EntityExtractionResponse[]> {
+    const results: EntityExtractionResponse[] = [];
+    
+    // Process in batches to avoid rate limiting
+    const batchSize = 3;
+    for (let i = 0; i < requests.length; i += batchSize) {
+      const batch = requests.slice(i, i + batchSize);
+      const batchPromises = batch.map(request => this.extractEntitiesAndRelationships(request));
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+      
+      // Small delay between batches to respect rate limits
+      if (i + batchSize < requests.length) {
+        await this.delay(500);
+      }
+    }
+    
+    return results;
+  }
+
+  /**
+   * Analyze text content for categorization and sentiment
+   */
+  async analyzeContent(content: string): Promise<{
+    categories: string[];
+    sentiment: 'positive' | 'negative' | 'neutral';
+    topics: string[];
+    confidence: number;
+  }> {
+    try {
+      const prompt = `
+Analyze the following text and provide a JSON response with:
+- "categories": array of relevant categories (max 3)
+- "sentiment": "positive", "negative", or "neutral"  
+- "topics": array of main topics/themes (max 5)
+- "confidence": overall analysis confidence (0.0-1.0)
+
+TEXT: ${content}
+
+JSON:`;
+
+      const result = await this.genAI.models.generateContent({
+        model: this.config.model,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: this.config.temperature,
+          maxOutputTokens: this.config.maxTokens,
+        }
+      });
+      const text = result.text || '';
+      
+      return this.parseAnalysisResponse(text);
+      
+    } catch (error) {
+      console.error('Content analysis failed:', error);
+      return {
+        categories: [],
+        sentiment: 'neutral',
+        topics: [],
+        confidence: 0
+      };
+    }
+  }
+
+  // ==================== PRIVATE METHODS ====================
+
+  private buildExtractionPrompt(content: string, context?: string): string {
+    const contextSection = context ? `\nCONTEXT: ${context}\n` : '';
+    
+    return `
+Extract meaningful entities and relationships from the following text. Focus on:
+- People (names, roles, professions)
+- Organizations (companies, institutions, groups)  
+- Locations (cities, countries, places)
+- Concepts (technologies, ideas, skills)
+- Events (meetings, projects, activities)
+- Objects (products, tools, resources)
+
+Return a valid JSON response with "entities" and "relationships" arrays.
+
+For entities:
+- "id": unique identifier using snake_case (e.g., "john_doe", "machine_learning")
+- "label": human-readable name (e.g., "John Doe", "Machine Learning")
+- "type": entity category (person, organization, location, concept, event, object)
+- "confidence": confidence score 0.0-1.0
+- "properties": optional additional attributes
+
+For relationships:
+- "source": source entity id
+- "target": target entity id  
+- "label": relationship description (e.g., "works_at", "located_in", "uses")
+- "confidence": confidence score 0.0-1.0
+- "type": optional relationship category
+
+Only include entities with confidence >= 0.6 and clear, meaningful relationships.
+${contextSection}
+TEXT: ${content}
+
+JSON:`;
+  }
+
+  private parseExtractionResponse(response: string): { entities: any[]; relationships: any[] } {
+    try {
+      // Clean up the response text (remove markdown formatting if present)
+      let cleanResponse = response.trim();
+      if (cleanResponse.startsWith('```json')) {
+        cleanResponse = cleanResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      } else if (cleanResponse.startsWith('```')) {
+        cleanResponse = cleanResponse.replace(/```\s*/, '').replace(/```\s*$/, '');
+      }
+      
+      const parsed = JSON.parse(cleanResponse);
+      
+      if (!parsed.entities || !Array.isArray(parsed.entities)) {
+        throw new Error('Invalid entities format');
+      }
+      if (!parsed.relationships || !Array.isArray(parsed.relationships)) {
+        throw new Error('Invalid relationships format');
+      }
+
+      // Validate and sanitize entities
+      const entities = parsed.entities
+        .filter((e: any) => e.id && e.label && e.type)
+        .map((e: any) => ({
+          id: this.sanitizeId(e.id),
+          label: e.label.trim(),
+          type: e.type.toLowerCase(),
+          confidence: Math.max(0, Math.min(1, e.confidence || 0.7)),
+          properties: e.properties || {}
+        }));
+
+      // Create entity ID map for relationship validation
+      const entityIds = new Set(entities.map((e: any) => e.id));
+
+      // Validate and sanitize relationships
+      const relationships = parsed.relationships
+        .filter((r: any) => r.source && r.target && r.label)
+        .filter((r: any) => entityIds.has(this.sanitizeId(r.source)) && entityIds.has(this.sanitizeId(r.target)))
+        .map((r: any) => ({
+          source: this.sanitizeId(r.source),
+          target: this.sanitizeId(r.target),
+          label: r.label.trim(),
+          confidence: Math.max(0, Math.min(1, r.confidence || 0.7)),
+          type: r.type || 'general'
+        }));
+
+      return { entities, relationships };
+      
+    } catch (error) {
+      // Only log detailed errors in development mode
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Failed to parse Gemini response:', error);
+        console.error('Raw response:', response);
+      }
+      return { entities: [], relationships: [] };
+    }
+  }
+
+  private parseAnalysisResponse(response: string): any {
+    try {
+      let cleanResponse = response.trim();
+      if (cleanResponse.startsWith('```json')) {
+        cleanResponse = cleanResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      }
+      
+      const parsed = JSON.parse(cleanResponse);
+      
+      return {
+        categories: parsed.categories || [],
+        sentiment: parsed.sentiment || 'neutral',
+        topics: parsed.topics || [],
+        confidence: Math.max(0, Math.min(1, parsed.confidence || 0.5))
+      };
+      
+    } catch (error) {
+      console.error('Failed to parse analysis response:', error);
+      return {
+        categories: [],
+        sentiment: 'neutral',
+        topics: [],
+        confidence: 0
+      };
+    }
+  }
+
+  private sanitizeId(id: string): string {
+    return id
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Extract rich metadata from content for memory creation
+   * Returns importance (1-10), topic, and summary
+   */
+  async extractRichMetadata(content: string, categoryHint?: string): Promise<{
+    importance: number;
+    topic: string;
+    summary: string;
+    category: string;
+  }> {
+    try {
+      const prompt = `
+Analyze the following text and extract rich metadata in JSON format:
+- "importance": relevance/importance score from 1-10 (1=trivial, 10=critical)
+- "topic": concise topic/title (max 100 chars)
+- "summary": brief summary (max 200 chars)
+- "category": best-fit category (personal, work, education, health, finance, travel, family, hobbies, goals, ideas)
+
+Consider:
+- Importance: How valuable is this information for future recall?
+- Topic: What's the main subject or theme?
+- Summary: Key points in 1-2 sentences
+${categoryHint ? `- Prefer category: ${categoryHint}` : ''}
+
+TEXT: ${content}
+
+JSON:`;
+
+      const result = await this.genAI.models.generateContent({
+        model: this.config.model,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          temperature: this.config.temperature,
+          maxOutputTokens: this.config.maxTokens,
+        }
+      });
+      const text = result.text || '';
+
+      return this.parseRichMetadataResponse(text, content, categoryHint);
+
+    } catch (error) {
+      console.error('Rich metadata extraction failed:', error);
+      return this.getFallbackMetadata(content, categoryHint);
+    }
+  }
+
+  /**
+   * Extract metadata for multiple contents in batch (with rate limiting)
+   */
+  async extractRichMetadataBatch(
+    contents: Array<{ content: string; category?: string }>
+  ): Promise<Array<{ importance: number; topic: string; summary: string; category: string }>> {
+    const results: Array<{ importance: number; topic: string; summary: string; category: string }> = [];
+
+    // Process in batches to avoid rate limiting
+    const batchSize = 3;
+    for (let i = 0; i < contents.length; i += batchSize) {
+      const batch = contents.slice(i, i + batchSize);
+      const batchPromises = batch.map(item =>
+        this.extractRichMetadata(item.content, item.category)
+      );
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+
+      // Small delay between batches to respect rate limits
+      if (i + batchSize < contents.length) {
+        await this.delay(500);
+      }
+    }
+
+    return results;
+  }
+
+  private parseRichMetadataResponse(response: string, content: string, categoryHint?: string): {
+    importance: number;
+    topic: string;
+    summary: string;
+    category: string;
+  } {
+    try {
+      let cleanResponse = response.trim();
+      if (cleanResponse.startsWith('```json')) {
+        cleanResponse = cleanResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
+      } else if (cleanResponse.startsWith('```')) {
+        cleanResponse = cleanResponse.replace(/```\s*/, '').replace(/```\s*$/, '');
+      }
+
+      const parsed = JSON.parse(cleanResponse);
+
+      return {
+        importance: Math.max(1, Math.min(10, parsed.importance || 5)),
+        topic: (parsed.topic || this.extractTopicFallback(content)).substring(0, 100),
+        summary: (parsed.summary || content.substring(0, 200)).substring(0, 200),
+        category: parsed.category || categoryHint || 'personal'
+      };
+
+    } catch (error) {
+      console.error('Failed to parse rich metadata response:', error);
+      return this.getFallbackMetadata(content, categoryHint);
+    }
+  }
+
+  private getFallbackMetadata(content: string, categoryHint?: string): {
+    importance: number;
+    topic: string;
+    summary: string;
+    category: string;
+  } {
+    return {
+      importance: 5,
+      topic: this.extractTopicFallback(content),
+      summary: content.substring(0, 200) + (content.length > 200 ? '...' : ''),
+      category: categoryHint || 'personal'
+    };
+  }
+
+  private extractTopicFallback(text: string): string {
+    // Try to get first sentence
+    const firstSentence = text.match(/^[^.!?]+[.!?]/);
+    if (firstSentence) {
+      return firstSentence[0].trim().substring(0, 100);
+    }
+
+    // Fallback: first 50 characters
+    return text.substring(0, 50).trim() + (text.length > 50 ? '...' : '');
+  }
+
+  /**
+   * Check if the service is properly configured and can make API calls
+   */
+  async testConnection(): Promise<boolean> {
+    try {
+      const result = await this.genAI.models.generateContent({
+        model: this.config.model,
+        contents: [{ role: 'user', parts: [{ text: 'Test connection. Respond with "OK".' }] }]
+      });
+      return (result.text || '').includes('OK');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get service configuration (without sensitive data)
+   */
+  getConfig(): Omit<Required<GeminiConfig>, 'apiKey'> & { apiKeyConfigured: boolean } {
+    return {
+      model: this.config.model,
+      temperature: this.config.temperature,
+      maxTokens: this.config.maxTokens,
+      timeout: this.config.timeout,
+      apiKeyConfigured: !!this.config.apiKey
+    };
+  }
+}
+
+export default GeminiAIService;

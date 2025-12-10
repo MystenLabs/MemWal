@@ -1,0 +1,2384 @@
+{
+  "id": {
+    "address": "pdw",
+    "name": "memory"
+  },
+  "doc": " Memory management module for Personal Data Wallet\n\n This module provides memory record management with:\n - Rich metadata for encrypted content stored on Walrus\n - Support for both capability-based and legacy address-based access\n - Vector embedding storage for semantic search\n - Knowledge graph integration\n\n V2 Changes (Capability-based):\n - Added capability_id field to link memories to MemoryCap\n - New create_memory_with_cap() for capability-based creation\n - Maintains backward compatibility with existing functions",
+  "immediate_dependencies": [
+    {
+      "address": "pdw",
+      "name": "capability"
+    },
+    {
+      "address": "std",
+      "name": "option"
+    },
+    {
+      "address": "std",
+      "name": "string"
+    },
+    {
+      "address": "sui",
+      "name": "event"
+    },
+    {
+      "address": "sui",
+      "name": "object"
+    },
+    {
+      "address": "sui",
+      "name": "transfer"
+    },
+    {
+      "address": "sui",
+      "name": "tx_context"
+    },
+    {
+      "address": "sui",
+      "name": "vec_map"
+    }
+  ],
+  "attributes": [],
+  "functions": {
+    "create_memory_index": {
+      "source_index": 0,
+      "index": 0,
+      "doc": " Create a new memory index for a user",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "index_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "graph_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "update_memory_index": {
+      "source_index": 1,
+      "index": 1,
+      "doc": " Update an existing memory index with new blob IDs",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory_index",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryIndex",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "expected_version",
+          "type_": "u64"
+        },
+        {
+          "name": "new_index_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_graph_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "create_memory_metadata": {
+      "source_index": 2,
+      "index": 2,
+      "doc": " Create metadata struct with embedding",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "content_type",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "content_size",
+          "type_": "u64"
+        },
+        {
+          "name": "content_hash",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "importance",
+          "type_": "u8"
+        },
+        {
+          "name": "embedding_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "embedding_dimension",
+          "type_": "u64"
+        },
+        {
+          "name": "created_timestamp",
+          "type_": "u64"
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "pdw",
+              "name": "memory"
+            },
+            "name": "MemoryMetadata",
+            "type_arguments": []
+          }
+        }
+      ]
+    },
+    "create_memory_record": {
+      "source_index": 3,
+      "index": 3,
+      "doc": " Create a new memory record with rich metadata (LEGACY - for backward compatibility)\n\n NOTE: For new implementations, use create_memory_with_cap() instead\n which provides capability-based access control.",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "vector_id",
+          "type_": "u64"
+        },
+        {
+          "name": "blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "content_type",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "content_size",
+          "type_": "u64"
+        },
+        {
+          "name": "content_hash",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "importance",
+          "type_": "u8"
+        },
+        {
+          "name": "embedding_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "create_memory_with_cap": {
+      "source_index": 4,
+      "index": 4,
+      "doc": " Create a new memory record with capability-based access control (V2 - RECOMMENDED)\n\n This function links the memory to a MemoryCap for SEAL-compliant access control.\n Benefits:\n - Access controlled via MemoryCap ownership\n - Cross-dApp sharing \"just works\" (same owner = access)\n - No allowlist management needed\n\n @param cap: Reference to the MemoryCap (proves ownership)\n @param category: Memory category\n @param vector_id: Links to HNSW index\n @param blob_id: Pointer to encrypted content on Walrus\n @param content_type: MIME type\n @param content_size: Size in bytes\n @param content_hash: Content hash (blob_id)\n @param topic: Topic classification\n @param importance: Importance scale (1-10)\n @param embedding_blob_id: Pointer to embedding on Walrus\n @param ctx: Transaction context",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cap",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "capability"
+                  },
+                  "name": "MemoryCap",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "vector_id",
+          "type_": "u64"
+        },
+        {
+          "name": "blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "content_type",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "content_size",
+          "type_": "u64"
+        },
+        {
+          "name": "content_hash",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "importance",
+          "type_": "u8"
+        },
+        {
+          "name": "embedding_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "update_memory_metadata": {
+      "source_index": 5,
+      "index": 5,
+      "doc": " Update metadata for an existing memory",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_importance",
+          "type_": "u8"
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "add_custom_metadata": {
+      "source_index": 6,
+      "index": 6,
+      "doc": " Add custom metadata field",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "key",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "value",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "update_memory_record": {
+      "source_index": 7,
+      "index": 7,
+      "doc": " Comprehensive update for a memory record\n\n Updates multiple fields of a Memory object in a single transaction.\n Only non-empty values will be updated (empty vector<u8> = skip update).\n\n This function follows Sui's object model where:\n - Objects are passed as mutable references (&mut)\n - Version number is automatically incremented by Sui runtime\n - Changes are atomic within the transaction\n\n @param memory: Mutable reference to the Memory object\n @param new_blob_id: New Walrus blob ID (empty = no change)\n @param new_category: New category (empty = no change)\n @param new_topic: New topic (empty = no change)\n @param new_importance: New importance (0 = no change, 1-10 = update)\n @param new_embedding_blob_id: New embedding blob ID (empty = no change)\n @param new_content_hash: New content hash (empty = no change)\n @param new_content_size: New content size (0 = no change)\n @param ctx: Transaction context",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_importance",
+          "type_": "u8"
+        },
+        {
+          "name": "new_embedding_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_content_hash",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_content_size",
+          "type_": "u64"
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "update_memory_with_cap": {
+      "source_index": 8,
+      "index": 8,
+      "doc": " Update memory record with capability verification (V2)\n\n Same as update_memory_record but verifies the caller owns the associated MemoryCap.\n Use this for capability-based memories to ensure proper access control.\n\n @param cap: Reference to the MemoryCap (proves ownership)\n @param memory: Mutable reference to the Memory object\n @param new_blob_id: New Walrus blob ID (empty = no change)\n @param new_category: New category (empty = no change)\n @param new_topic: New topic (empty = no change)\n @param new_importance: New importance (0 = no change, 1-10 = update)\n @param new_embedding_blob_id: New embedding blob ID (empty = no change)\n @param new_content_hash: New content hash (empty = no change)\n @param new_content_size: New content size (0 = no change)\n @param ctx: Transaction context",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cap",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "capability"
+                  },
+                  "name": "MemoryCap",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_topic",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_importance",
+          "type_": "u8"
+        },
+        {
+          "name": "new_embedding_blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_content_hash",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "new_content_size",
+          "type_": "u64"
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "create_memory_record_lightweight": {
+      "source_index": 9,
+      "index": 9,
+      "doc": " Create a lightweight memory record (for use with Walrus metadata) - LEGACY\n\n This function creates a minimal on-chain Memory struct with only essential\n queryable fields. Rich metadata should be stored as Walrus blob metadata.\n\n Use this when:\n - Gas costs are a concern\n - Rich metadata is stored on Walrus blob\n - Only need basic filtering (category, vector_id)\n\n NOTE: For new implementations, use create_memory_lightweight_with_cap() instead",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "vector_id",
+          "type_": "u64"
+        },
+        {
+          "name": "blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "blob_object_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "importance",
+          "type_": "u8"
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "create_memory_lightweight_with_cap": {
+      "source_index": 10,
+      "index": 10,
+      "doc": " Create a lightweight memory record with capability-based access (V2 - RECOMMENDED)\n\n Gas-optimized version for capability-based access control.\n\n @param cap: Reference to the MemoryCap (proves ownership)\n @param category: Memory category\n @param vector_id: Links to HNSW index\n @param blob_id: Pointer to encrypted content on Walrus\n @param blob_object_id: Optional Walrus blob object ID\n @param importance: Importance scale (1-10)\n @param ctx: Transaction context",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "cap",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "capability"
+                  },
+                  "name": "MemoryCap",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "category",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "vector_id",
+          "type_": "u64"
+        },
+        {
+          "name": "blob_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "blob_object_id",
+          "type_": {
+            "vector": "u8"
+          }
+        },
+        {
+          "name": "importance",
+          "type_": "u8"
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              true,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "delete_memory_record": {
+      "source_index": 11,
+      "index": 11,
+      "doc": " Delete a memory record",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": true,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Datatype": {
+              "module": {
+                "address": "pdw",
+                "name": "memory"
+              },
+              "name": "Memory",
+              "type_arguments": []
+            }
+          }
+        },
+        {
+          "name": "ctx",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "sui",
+                    "name": "tx_context"
+                  },
+                  "name": "TxContext",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": []
+    },
+    "get_index_blob_id": {
+      "source_index": 12,
+      "index": 12,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory_index",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryIndex",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_graph_blob_id": {
+      "source_index": 13,
+      "index": 13,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory_index",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryIndex",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_version": {
+      "source_index": 14,
+      "index": 14,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory_index",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryIndex",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "get_memory_blob_id": {
+      "source_index": 15,
+      "index": 15,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_memory_vector_id": {
+      "source_index": 16,
+      "index": 16,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "get_memory_category": {
+      "source_index": 17,
+      "index": 17,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_metadata": {
+      "source_index": 18,
+      "index": 18,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "pdw",
+                  "name": "memory"
+                },
+                "name": "MemoryMetadata",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_embedding_blob_id": {
+      "source_index": 19,
+      "index": 19,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_content_type": {
+      "source_index": 20,
+      "index": 20,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_content_size": {
+      "source_index": 21,
+      "index": 21,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "get_topic": {
+      "source_index": 22,
+      "index": 22,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_importance": {
+      "source_index": 23,
+      "index": 23,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u8"
+      ]
+    },
+    "get_created_timestamp": {
+      "source_index": 24,
+      "index": 24,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "get_updated_timestamp": {
+      "source_index": 25,
+      "index": 25,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "u64"
+      ]
+    },
+    "get_custom_metadata": {
+      "source_index": 26,
+      "index": 26,
+      "doc": null,
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "metadata",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "MemoryMetadata",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Reference": [
+            false,
+            {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "vec_map"
+                },
+                "name": "VecMap",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  },
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "get_capability_id": {
+      "source_index": 27,
+      "index": 27,
+      "doc": " Get the capability_id from a memory (if linked to a MemoryCap)",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "std",
+              "name": "option"
+            },
+            "name": "Option",
+            "type_arguments": [
+              {
+                "phantom": false,
+                "argument": "address"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "has_capability": {
+      "source_index": 28,
+      "index": 28,
+      "doc": " Check if memory is linked to a capability (V2)",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    },
+    "is_legacy_access": {
+      "source_index": 29,
+      "index": 29,
+      "doc": " Check if memory is using legacy owner-based access",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    },
+    "get_app_id": {
+      "source_index": 30,
+      "index": 30,
+      "doc": " Get the app_id from a memory (for context-based querying)\n Returns None for legacy memories without capability",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        {
+          "Datatype": {
+            "module": {
+              "address": "std",
+              "name": "option"
+            },
+            "name": "Option",
+            "type_arguments": [
+              {
+                "phantom": false,
+                "argument": {
+                  "Datatype": {
+                    "module": {
+                      "address": "std",
+                      "name": "string"
+                    },
+                    "name": "String",
+                    "type_arguments": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "is_app_context": {
+      "source_index": 31,
+      "index": 31,
+      "doc": " Check if memory belongs to a specific app context",
+      "attributes": [],
+      "visibility": "Public",
+      "entry": false,
+      "type_parameters": [],
+      "parameters": [
+        {
+          "name": "memory",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "pdw",
+                    "name": "memory"
+                  },
+                  "name": "Memory",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "app_id",
+          "type_": {
+            "Reference": [
+              false,
+              {
+                "Datatype": {
+                  "module": {
+                    "address": "std",
+                    "name": "string"
+                  },
+                  "name": "String",
+                  "type_arguments": []
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "return_": [
+        "bool"
+      ]
+    }
+  },
+  "structs": {
+    "MemoryCreated": {
+      "index": 0,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "owner": {
+            "index": 1,
+            "doc": null,
+            "type_": "address"
+          },
+          "category": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "vector_id": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "capability_id": {
+            "index": 4,
+            "doc": " V2: Link to MemoryCap object ID",
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": "address"
+                  }
+                ]
+              }
+            }
+          },
+          "app_id": {
+            "index": 5,
+            "doc": " V2: App context for filtering (e.g., \"MEMO\", \"HEALTH\")\n - Query all: no filter\n - Query by context: filter by app_id",
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "MemoryIndexUpdated": {
+      "index": 1,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "owner": {
+            "index": 1,
+            "doc": null,
+            "type_": "address"
+          },
+          "version": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "index_blob_id": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "graph_blob_id": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "MemoryMetadataUpdated": {
+      "index": 2,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "memory_id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "metadata_blob_id": {
+            "index": 1,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "embedding_dimension": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "MemoryUpdated": {
+      "index": 3,
+      "doc": " Event emitted when a memory record is updated",
+      "attributes": [],
+      "abilities": [
+        "Copy",
+        "Drop"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "ID",
+                "type_arguments": []
+              }
+            }
+          },
+          "owner": {
+            "index": 1,
+            "doc": null,
+            "type_": "address"
+          },
+          "updated_fields": {
+            "index": 2,
+            "doc": " Fields that were updated (bitmask: 1=blob_id, 2=category, 4=topic, 8=importance, 16=embedding)",
+            "type_": "u8"
+          },
+          "new_blob_id": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "new_category": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "updated_at": {
+            "index": 5,
+            "doc": null,
+            "type_": "u64"
+          }
+        }
+      }
+    },
+    "MemoryMetadata": {
+      "index": 4,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Drop",
+        "Store"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "content_type": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "content_size": {
+            "index": 1,
+            "doc": null,
+            "type_": "u64"
+          },
+          "content_hash": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "category": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "topic": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "importance": {
+            "index": 5,
+            "doc": null,
+            "type_": "u8"
+          },
+          "embedding_blob_id": {
+            "index": 6,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "embedding_dimension": {
+            "index": 7,
+            "doc": null,
+            "type_": "u64"
+          },
+          "created_timestamp": {
+            "index": 8,
+            "doc": null,
+            "type_": "u64"
+          },
+          "updated_timestamp": {
+            "index": 9,
+            "doc": null,
+            "type_": "u64"
+          },
+          "custom_metadata": {
+            "index": 10,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "vec_map"
+                },
+                "name": "VecMap",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  },
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "MemoryIndex": {
+      "index": 5,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Key"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "UID",
+                "type_arguments": []
+              }
+            }
+          },
+          "owner": {
+            "index": 1,
+            "doc": null,
+            "type_": "address"
+          },
+          "version": {
+            "index": 2,
+            "doc": null,
+            "type_": "u64"
+          },
+          "index_blob_id": {
+            "index": 3,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "graph_blob_id": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "Memory": {
+      "index": 6,
+      "doc": null,
+      "attributes": [],
+      "abilities": [
+        "Key"
+      ],
+      "type_parameters": [],
+      "fields": {
+        "positional_fields": false,
+        "fields": {
+          "id": {
+            "index": 0,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "sui",
+                  "name": "object"
+                },
+                "name": "UID",
+                "type_arguments": []
+              }
+            }
+          },
+          "owner": {
+            "index": 1,
+            "doc": null,
+            "type_": "address"
+          },
+          "category": {
+            "index": 2,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "vector_id": {
+            "index": 3,
+            "doc": null,
+            "type_": "u64"
+          },
+          "blob_id": {
+            "index": 4,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "string"
+                },
+                "name": "String",
+                "type_arguments": []
+              }
+            }
+          },
+          "metadata": {
+            "index": 5,
+            "doc": null,
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "pdw",
+                  "name": "memory"
+                },
+                "name": "MemoryMetadata",
+                "type_arguments": []
+              }
+            }
+          },
+          "capability_id": {
+            "index": 6,
+            "doc": " V2: Link to MemoryCap for capability-based access control\n If set, access is controlled via MemoryCap ownership\n If none, falls back to owner-based access (legacy)",
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": "address"
+                  }
+                ]
+              }
+            }
+          },
+          "app_id": {
+            "index": 7,
+            "doc": " V2: App context for context-based querying\n Copied from MemoryCap.app_id for efficient filtering\n - Query all memories: getOwnedObjects without filter\n - Query by context: filter by app_id field",
+            "type_": {
+              "Datatype": {
+                "module": {
+                  "address": "std",
+                  "name": "option"
+                },
+                "name": "Option",
+                "type_arguments": [
+                  {
+                    "phantom": false,
+                    "argument": {
+                      "Datatype": {
+                        "module": {
+                          "address": "std",
+                          "name": "string"
+                        },
+                        "name": "String",
+                        "type_arguments": []
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "enums": {}
+}
