@@ -53,6 +53,11 @@ export class KeypairSigner implements UnifiedSigner {
       }
     });
 
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.client.waitForTransaction({ digest: result.digest });
+    }
+
     return {
       digest: result.digest,
       effects: result.effects,

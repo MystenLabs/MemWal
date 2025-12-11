@@ -751,6 +751,11 @@ export class SuiService {
         }
       });
 
+      // Wait for transaction to be finalized to prevent gas coin version conflicts
+      if (result.digest) {
+        await this.client.waitForTransaction({ digest: result.digest });
+      }
+
       // Update statistics
       const gasUsed = result.effects?.gasUsed?.computationCost || 0;
       this.updateGasStats(typeof gasUsed === 'string' ? parseInt(gasUsed) : gasUsed);

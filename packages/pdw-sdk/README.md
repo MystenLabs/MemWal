@@ -358,6 +358,83 @@ const memory = await pdw.memory.create('content');
 
 ## Changelog
 
+### v0.4.1 (Latest)
+
+#### Multi-Device Index Sync
+
+**Index Staleness Detection**
+- Automatic detection when index file is modified by another process
+- Auto-reload index from disk before search if file is newer than cache
+- Supports multi-tab and multi-process scenarios on same device
+
+**Rebuild Index from Blockchain**
+- New `rebuildIndexNode()` utility for Node.js environments
+- Rebuilds HNSW index by fetching memories from Sui blockchain + Walrus
+- Use when logging in on a new device or after index corruption
+
+```typescript
+import { rebuildIndexNode, hasExistingIndexNode } from 'personal-data-wallet-sdk';
+import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
+
+// Check if index exists
+const hasIndex = await hasExistingIndexNode(userAddress);
+
+if (!hasIndex) {
+  // Rebuild from blockchain
+  const client = new SuiClient({ url: getFullnodeUrl('testnet') });
+  const result = await rebuildIndexNode({
+    userAddress,
+    client,
+    packageId: process.env.PACKAGE_ID,
+    walrusAggregator: 'https://aggregator.walrus-testnet.walrus.space',
+    onProgress: (current, total, status) => console.log(`${current}/${total}: ${status}`)
+  });
+  console.log(`Indexed ${result.indexedMemories}/${result.totalMemories} memories`);
+}
+```
+
+#### New Exports
+- `rebuildIndexNode()` - Rebuild index from blockchain (Node.js)
+- `hasExistingIndexNode()` - Check if local index exists (Node.js)
+- `clearIndexNode()` - Delete local index (Node.js)
+
+---
+
+### v0.4.0
+
+#### Major Features
+
+**Hybrid HNSW Implementation (Node.js + Browser Support)**
+- `hnswlib-node` support for Node.js/Next.js Server Components
+- `createHnswService()` factory with automatic environment detection
+- Singleton pattern to prevent redundant initializations
+- Full Next.js RSC support
+
+```typescript
+import { createHnswService } from 'personal-data-wallet-sdk';
+
+// Auto-detects: hnswlib-node (Node.js) or hnswlib-wasm (browser)
+const hnswService = await createHnswService({ indexConfig: { dimension: 768 } });
+```
+
+**Optimized Sui Transaction Handling**
+- Exponential backoff retry for gas coin conflicts (500ms -> 1000ms -> 2000ms)
+- Automatic transaction rebuilding on version conflicts
+
+#### Configuration Changes
+- Default AI model: `gemini-2.5-flash-lite` (higher rate limits, better reliability)
+- Updated all services: `ClientMemoryManager`, `GeminiAIService`, `ChatService`, `GraphService`, etc.
+
+#### Bug Fixes
+- Fixed Webpack bundling with native Node.js modules
+- Added `serverComponentsExternalPackages` for Next.js
+
+#### New Exports
+- `createHnswService`, `isHnswAvailable()`, `getHnswServiceType()`, `resetHnswServiceSingleton()`
+- `isBrowser()` / `isNode()` environment utilities
+
+---
+
 ### v0.3.3
 
 - **CRITICAL FIX**: Added `waitForTransaction` after each Sui transaction to prevent Gas Coin Version Conflict

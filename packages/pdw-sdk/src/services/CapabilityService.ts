@@ -83,6 +83,11 @@ export class CapabilityService {
       },
     });
 
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.suiClient.waitForTransaction({ digest: result.digest });
+    }
+
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to create MemoryCap: ${result.effects?.status?.error}`);
     }
@@ -230,6 +235,11 @@ export class CapabilityService {
       },
     });
 
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.suiClient.waitForTransaction({ digest: result.digest });
+    }
+
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to transfer MemoryCap: ${result.effects?.status?.error}`);
     }
@@ -264,6 +274,11 @@ export class CapabilityService {
         showEvents: true,
       },
     });
+
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.suiClient.waitForTransaction({ digest: result.digest });
+    }
 
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to burn MemoryCap: ${result.effects?.status?.error}`);
