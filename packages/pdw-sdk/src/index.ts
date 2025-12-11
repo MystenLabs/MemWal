@@ -432,9 +432,13 @@ export type {
 // Legacy version for compatibility
 export const VERSION = '1.0.0';
 
-// Rebuild utility
+// Rebuild utility (Browser)
 export { rebuildIndex, hasExistingIndex, clearIndex } from './utils/rebuildIndex';
 export type { RebuildIndexOptions, RebuildIndexResult } from './utils/rebuildIndex';
+
+// Rebuild utility (Node.js)
+export { rebuildIndexNode, hasExistingIndexNode, clearIndexNode } from './utils/rebuildIndexNode';
+export type { RebuildIndexNodeOptions, RebuildIndexNodeResult } from './utils/rebuildIndexNode';
 
 // ==================== AI SDK INTEGRATION ====================
 // AI SDK tools and vector store for Vercel AI SDK integration

@@ -115,6 +115,11 @@ export class CrossContextPermissionService {
       },
     });
 
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.client.waitForTransaction({ digest: result.digest });
+    }
+
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to register context: ${result.effects?.status?.error}`);
     }
@@ -166,6 +171,11 @@ export class CrossContextPermissionService {
         showEvents: true,
       },
     });
+
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.client.waitForTransaction({ digest: result.digest });
+    }
 
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to grant access: ${result.effects?.status?.error}`);
@@ -222,6 +232,11 @@ export class CrossContextPermissionService {
         showEvents: true,
       },
     });
+
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.client.waitForTransaction({ digest: result.digest });
+    }
 
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to revoke access: ${result.effects?.status?.error}`);

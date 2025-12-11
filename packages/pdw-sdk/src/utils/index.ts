@@ -42,7 +42,7 @@ export {
   type EnvironmentConfig,
 } from '../config/ConfigurationHelper';
 
-// Rebuild index utility for re-indexing existing memories
+// Rebuild index utility for re-indexing existing memories (Browser)
 export {
   rebuildIndex,
   hasExistingIndex,
@@ -50,6 +50,15 @@ export {
   type RebuildIndexOptions,
   type RebuildIndexResult,
 } from './rebuildIndex';
+
+// Rebuild index utility for Node.js environments
+export {
+  rebuildIndexNode,
+  hasExistingIndexNode,
+  clearIndexNode,
+  type RebuildIndexNodeOptions,
+  type RebuildIndexNodeResult,
+} from './rebuildIndexNode';
 
 // Future utility exports will go here
 // export * from './crypto';

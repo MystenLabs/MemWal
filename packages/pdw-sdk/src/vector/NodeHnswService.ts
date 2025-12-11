@@ -25,6 +25,7 @@ type HierarchicalNSW = any;
 interface IndexCacheEntry {
   index: HierarchicalNSW;
   lastModified: Date;
+  fileModifiedTime: number; // File mtime in ms for staleness check
   pendingVectors: Map<number, number[]>;
   isDirty: boolean;
   version: number;
@@ -136,11 +137,54 @@ export class NodeHnswService implements IHnswService {
     return `${this.indexDirectory}/${safeAddress}.hnsw`;
   }
 
+  /**
+   * Check if cached index is stale (file on disk is newer)
+   * Returns true if index should be reloaded
+   */
+  private async isIndexStale(userAddress: string): Promise<boolean> {
+    const entry = this.indexCache.get(userAddress);
+    if (!entry) return false;
+
+    try {
+      const fs = await import('fs/promises');
+      const indexPath = this.getIndexPath(userAddress);
+      const stats = await fs.stat(indexPath);
+      const fileMtime = stats.mtimeMs;
+
+      // If file on disk is newer than our cached version, index is stale
+      if (fileMtime > entry.fileModifiedTime) {
+        console.log(`[NodeHnswService] Index stale for ${userAddress} (file: ${fileMtime}, cache: ${entry.fileModifiedTime})`);
+        return true;
+      }
+      return false;
+    } catch {
+      // File doesn't exist or error - not stale
+      return false;
+    }
+  }
+
+  /**
+   * Reload index from disk if it's stale (modified by another process)
+   */
+  async reloadIfStale(userAddress: string): Promise<boolean> {
+    const isStale = await this.isIndexStale(userAddress);
+    if (isStale) {
+      console.log(`[NodeHnswService] Reloading stale index for ${userAddress}`);
+      this.indexCache.delete(userAddress);
+      return await this.loadIndex(userAddress);
+    }
+    return false;
+  }
+
   async getOrCreateIndex(userAddress: string): Promise<void> {
     await this.initialize();
 
+    // Check if cached index is stale and reload if needed
     if (this.indexCache.has(userAddress)) {
-      return;
+      await this.reloadIfStale(userAddress);
+      if (this.indexCache.has(userAddress)) {
+        return;
+      }
     }
 
     // Try to load existing index
@@ -163,6 +207,7 @@ export class NodeHnswService implements IHnswService {
     this.indexCache.set(userAddress, {
       index,
       lastModified: new Date(),
+      fileModifiedTime: Date.now(),
       pendingVectors: new Map(),
       isDirty: false,
       version: 1,
@@ -321,8 +366,11 @@ export class NodeHnswService implements IHnswService {
         metadata: metadataObj
       }));
 
+      // Update fileModifiedTime to match the file we just saved
+      const stats = await fs.stat(indexPath);
+      entry.fileModifiedTime = stats.mtimeMs;
       entry.isDirty = false;
-      console.log(`[NodeHnswService] Saved index for ${userAddress}`);
+      console.log(`[NodeHnswService] Saved index for ${userAddress} (mtime: ${entry.fileModifiedTime})`);
     } catch (error) {
       console.error('[NodeHnswService] Save index error:', error);
       throw error;
@@ -337,9 +385,11 @@ export class NodeHnswService implements IHnswService {
     try {
       const fs = await import('fs/promises');
 
-      // Check if index file exists
+      // Check if index file exists and get its modification time
+      let fileModifiedTime: number;
       try {
-        await fs.access(indexPath);
+        const stats = await fs.stat(indexPath);
+        fileModifiedTime = stats.mtimeMs;
       } catch {
         return false;
       }
@@ -347,7 +397,8 @@ export class NodeHnswService implements IHnswService {
       // Load index
       const HierarchicalNSW = this.hnswlib.HierarchicalNSW;
       const index = new HierarchicalNSW(this.indexConfig.spaceType, this.indexConfig.dimension);
-      index.readIndex(indexPath, this.indexConfig.maxElements);
+      // readIndex is async - must await to properly initialize index before use
+      await index.readIndex(indexPath, false);
 
       // Load metadata
       const metadataPath = indexPath + '.meta.json';
@@ -372,6 +423,7 @@ export class NodeHnswService implements IHnswService {
       this.indexCache.set(userAddress, {
         index,
         lastModified: new Date(),
+        fileModifiedTime,
         pendingVectors: new Map(),
         isDirty: false,
         version,
@@ -379,7 +431,7 @@ export class NodeHnswService implements IHnswService {
         dimensions
       });
 
-      console.log(`[NodeHnswService] Loaded index for ${userAddress}`);
+      console.log(`[NodeHnswService] Loaded index for ${userAddress} (mtime: ${fileModifiedTime})`);
       return true;
     } catch (error) {
       console.warn(`[NodeHnswService] Failed to load index for ${userAddress}:`, error);

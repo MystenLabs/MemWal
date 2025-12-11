@@ -398,6 +398,21 @@ export class TransactionService {
         },
       });
 
+      // Wait for transaction to be finalized on-chain
+      // This prevents gas coin version conflicts in subsequent transactions
+      // by ensuring the gas coin state is updated on the network
+      if (result.digest) {
+        try {
+          await this.client.waitForTransaction({
+            digest: result.digest,
+            options: { showEffects: true },
+          });
+        } catch (waitError) {
+          // Log but don't fail - transaction was already submitted
+          console.warn('waitForTransaction warning:', waitError);
+        }
+      }
+
       // Parse the result
       const transactionResult: TransactionResult = {
         digest: result.digest,

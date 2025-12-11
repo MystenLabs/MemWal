@@ -126,6 +126,11 @@ export class ContextWalletService {
       },
     });
 
+    // Wait for transaction to be finalized to prevent gas coin version conflicts
+    if (result.digest) {
+      await this.suiClient.waitForTransaction({ digest: result.digest });
+    }
+
     if (result.effects?.status?.status !== 'success') {
       throw new Error(`Failed to create context wallet: ${result.effects?.status?.error}`);
     }
