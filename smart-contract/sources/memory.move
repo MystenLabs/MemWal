@@ -13,6 +13,7 @@
 module pdw::memory {
     use std::string::{Self, String};
     use sui::vec_map::{Self, VecMap};
+    use sui::clock::{Self, Clock};
 
     // Events
     public struct MemoryCreated has copy, drop {
@@ -218,12 +219,13 @@ module pdw::memory {
         topic: vector<u8>,
         importance: u8,
         embedding_blob_id: vector<u8>,
+        clock: &Clock,
         ctx: &mut tx_context::TxContext
     ) {
         let owner = tx_context::sender(ctx);
         let id = object::new(ctx);
         let object_id = object::uid_to_inner(&id);
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
 
         // Create metadata
         let metadata = create_memory_metadata(
@@ -300,12 +302,13 @@ module pdw::memory {
         topic: vector<u8>,
         importance: u8,
         embedding_blob_id: vector<u8>,
+        clock: &Clock,
         ctx: &mut tx_context::TxContext
     ) {
         let owner = tx_context::sender(ctx);
         let id = object::new(ctx);
         let object_id = object::uid_to_inner(&id);
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
 
         // Get capability info for linking
         let cap_id = pdw::capability::get_cap_id(cap);
@@ -360,16 +363,17 @@ module pdw::memory {
         memory: &mut Memory,
         new_topic: vector<u8>,
         new_importance: u8,
+        clock: &Clock,
         ctx: &tx_context::TxContext
     ) {
         let sender = tx_context::sender(ctx);
         assert!(sender == memory.owner, ENonOwner);
         assert!(new_importance >= 1 && new_importance <= 10, EInvalidImportance);
-        
+
         // Update metadata
         memory.metadata.topic = string::utf8(new_topic);
         memory.metadata.importance = new_importance;
-        memory.metadata.updated_timestamp = tx_context::epoch_timestamp_ms(ctx);
+        memory.metadata.updated_timestamp = clock::timestamp_ms(clock);
         
         // Emit metadata update event
         sui::event::emit(MemoryMetadataUpdated {
@@ -384,6 +388,7 @@ module pdw::memory {
         memory: &mut Memory,
         key: vector<u8>,
         value: vector<u8>,
+        clock: &Clock,
         ctx: &tx_context::TxContext
     ) {
         let sender = tx_context::sender(ctx);
@@ -393,7 +398,7 @@ module pdw::memory {
                        string::utf8(key),
                        string::utf8(value));
 
-        memory.metadata.updated_timestamp = tx_context::epoch_timestamp_ms(ctx);
+        memory.metadata.updated_timestamp = clock::timestamp_ms(clock);
     }
 
     /// Comprehensive update for a memory record
@@ -424,12 +429,13 @@ module pdw::memory {
         new_embedding_blob_id: vector<u8>,
         new_content_hash: vector<u8>,
         new_content_size: u64,
+        clock: &Clock,
         ctx: &tx_context::TxContext
     ) {
         let sender = tx_context::sender(ctx);
         assert!(sender == memory.owner, ENonOwner);
 
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
         let mut updated_fields: u8 = 0;
 
         // Update blob_id if provided
@@ -515,6 +521,7 @@ module pdw::memory {
         new_embedding_blob_id: vector<u8>,
         new_content_hash: vector<u8>,
         new_content_size: u64,
+        clock: &Clock,
         ctx: &tx_context::TxContext
     ) {
         // Verify capability matches memory's capability_id
@@ -522,7 +529,7 @@ module pdw::memory {
         assert!(option::is_some(&memory.capability_id), ENonOwner);
         assert!(*option::borrow(&memory.capability_id) == cap_id, ENonOwner);
 
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
         let mut updated_fields: u8 = 0;
 
         // Update blob_id if provided
@@ -600,12 +607,13 @@ module pdw::memory {
         blob_id: vector<u8>,
         blob_object_id: vector<u8>, // Optional: Walrus blob object ID for metadata queries
         importance: u8,
+        clock: &Clock,
         ctx: &mut tx_context::TxContext
     ) {
         let owner = tx_context::sender(ctx);
         let id = object::new(ctx);
         let object_id = object::uid_to_inner(&id);
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
 
         // Validate importance
         assert!(importance >= 1 && importance <= 10, EInvalidImportance);
@@ -674,12 +682,13 @@ module pdw::memory {
         blob_id: vector<u8>,
         blob_object_id: vector<u8>,
         importance: u8,
+        clock: &Clock,
         ctx: &mut tx_context::TxContext
     ) {
         let owner = tx_context::sender(ctx);
         let id = object::new(ctx);
         let object_id = object::uid_to_inner(&id);
-        let timestamp = tx_context::epoch_timestamp_ms(ctx);
+        let timestamp = clock::timestamp_ms(clock);
 
         // Get capability info for linking
         let cap_id = pdw::capability::get_cap_id(cap);
