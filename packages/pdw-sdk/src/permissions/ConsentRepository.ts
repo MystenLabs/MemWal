@@ -1,9 +1,3 @@
-// Conditional import for Node.js file system (not available in browser)
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const fsPromises = typeof window === 'undefined' ? require('fs/promises') : null;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pathModule = typeof window === 'undefined' ? require('path') : null;
-
 import {
   ConsentRequestRecord,
   ConsentStatus,
@@ -38,10 +32,7 @@ export class FileSystemConsentRepository implements ConsentRepository {
   private initialized = false;
 
   constructor(options?: { filePath?: string }) {
-    if (!fsPromises || !pathModule) {
-      throw new Error('FileSystemConsentRepository is not available in browser. Use IndexedDBConsentRepository instead.');
-    }
-    this.filePath = options?.filePath ?? pathModule.resolve(pathModule.dirname(''), '../../storage/consents/requests.json');
+    this.filePath = options?.filePath ?? '';
   }
 
   async save(request: ConsentRequestRecord): Promise<void> {
@@ -107,8 +98,9 @@ export class FileSystemConsentRepository implements ConsentRepository {
 
   private async readAll(): Promise<StoredConsentRecord[]> {
     await this.ensureInitialized();
+    const fs = await import('fs/promises');
     try {
-      const buffer = await fsPromises.readFile(this.filePath);
+      const buffer = await fs.readFile(this.filePath);
       const parsed = JSON.parse(buffer.toString()) as StoredConsentRecord[];
       if (!Array.isArray(parsed)) {
         return [];
@@ -124,8 +116,9 @@ export class FileSystemConsentRepository implements ConsentRepository {
 
   private async writeAll(records: StoredConsentRecord[]): Promise<void> {
     await this.ensureInitialized();
+    const fs = await import('fs/promises');
     const serialized = JSON.stringify(records, null, 2);
-    await fsPromises.writeFile(this.filePath, serialized, { encoding: 'utf-8' });
+    await fs.writeFile(this.filePath, serialized, { encoding: 'utf-8' });
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -133,8 +126,15 @@ export class FileSystemConsentRepository implements ConsentRepository {
       return;
     }
 
-    const dir = pathModule.dirname(this.filePath);
-    await fsPromises.mkdir(dir, { recursive: true });
+    const fs = await import('fs/promises');
+    const path = await import('path');
+
+    if (!this.filePath) {
+      this.filePath = path.resolve(process.cwd(), 'storage/consents/requests.json');
+    }
+
+    const dir = path.dirname(this.filePath);
+    await fs.mkdir(dir, { recursive: true });
     this.initialized = true;
   }
 }
@@ -354,8 +354,8 @@ export function createConsentRepository(options?: {
     return new IndexedDBConsentRepository({ dbName: options?.dbName });
   }
 
-  // Node.js environment - use FileSystem
-  if (typeof window === 'undefined' && fsPromises) {
+  // Node.js environment - use FileSystem (will lazy-load fs/path via import())
+  if (typeof window === 'undefined') {
     return new FileSystemConsentRepository({ filePath: options?.filePath });
   }
 
