@@ -100,7 +100,7 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
     const hnswService = new NodeHnswService({
       indexDirectory,
       indexConfig: {
-        dimension: 768,
+        dimension: 3072,
         maxElements: 10000,
         m: 16,
         efConstruction: 200
@@ -221,7 +221,7 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
 
         // Extract embedding
         const embedding = memoryData.embedding;
-        if (!embedding || embedding.length !== 768) {
+        if (!embedding || embedding.length !== 3072) {
           throw new Error(`Invalid embedding: length=${embedding?.length || 0}`);
         }
 

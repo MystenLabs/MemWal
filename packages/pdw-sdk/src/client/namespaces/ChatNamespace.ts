@@ -48,7 +48,7 @@ export class ChatNamespace {
   async createSession(options?: { title?: string; model?: string }): Promise<ChatSession> {
     const result = await this.services.chat.createSession({
       userAddress: this.services.config.userAddress,
-      modelName: options?.model || 'gemini-2.5-flash-lite',
+      modelName: options?.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
       title: options?.title || 'New Chat'
     });
 

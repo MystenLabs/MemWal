@@ -626,7 +626,7 @@ export class MemoryService {
     
     return {
       embeddings: result.embeddings,
-      dimension: result.dimension || 768,
+      dimension: result.dimension || 3072,
       model: result.model || 'text-embedding-004',
       processingTime: Date.now() - startTime
     };

@@ -82,7 +82,7 @@ export class TxNamespace {
     return this.services.tx.buildUpdateMemoryMetadata({
       memoryId,
       metadataBlobId,
-      embeddingDimension: 768 // Default for Gemini
+      embeddingDimension: 3072 // Default for Gemini
     });
   }
 

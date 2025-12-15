@@ -96,8 +96,44 @@ export interface SimplePDWConfig {
 
   /**
    * Gemini API key for AI features (embeddings, chat, classification)
+   * @deprecated Use `embedding.apiKey` instead for more flexibility
    */
   geminiApiKey?: string;
+
+  /**
+   * Optional: Embedding configuration
+   * Allows customizing the embedding provider, model, and dimensions
+   */
+  embedding?: {
+    /**
+     * Embedding provider
+     * - google: Direct Google AI API
+     * - openai: Direct OpenAI API
+     * - openrouter: OpenRouter API gateway (recommended - supports multiple models)
+     * - cohere: Direct Cohere API
+     * @default 'google'
+     */
+    provider?: 'google' | 'openai' | 'openrouter' | 'cohere';
+    /**
+     * API key for the embedding provider
+     * Falls back to geminiApiKey for backward compatibility
+     */
+    apiKey?: string;
+    /**
+     * Model name to use
+     * - Google: 'text-embedding-004', 'gemini-embedding-001'
+     * - OpenAI: 'text-embedding-3-small', 'text-embedding-3-large'
+     * - OpenRouter: 'google/gemini-embedding-001', 'openai/text-embedding-3-small', etc.
+     * - Cohere: 'embed-english-v3.0', 'embed-multilingual-v3.0'
+     * @default 'text-embedding-004' (for google), 'google/gemini-embedding-001' (for openrouter)
+     */
+    modelName?: string;
+    /**
+     * Embedding dimensions
+     * @default 768 (for google/openrouter), 1536 (for openai)
+     */
+    dimensions?: number;
+  };
 
   /**
    * Optional: Detailed Walrus configuration
@@ -115,6 +151,23 @@ export interface SimplePDWConfig {
     network?: 'testnet' | 'mainnet' | 'devnet';
     packageId?: string;
     rpcUrl?: string;
+  };
+
+  /**
+   * Optional: AI model configuration for chat and analysis
+   */
+  ai?: {
+    /**
+     * Chat/analysis model to use
+     * Can be OpenRouter format (e.g., 'google/gemini-2.5-flash') or direct provider format
+     * @default process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash'
+     */
+    chatModel?: string;
+    /**
+     * API key for chat model (if different from embedding)
+     * For OpenRouter, use OPENROUTER_API_KEY
+     */
+    apiKey?: string;
   };
 
   /**
@@ -167,6 +220,14 @@ interface ResolvedConfig {
   };
   ai: {
     geminiApiKey?: string;
+    chatModel: string;
+    apiKey?: string;
+  };
+  embedding: {
+    provider: 'google' | 'openai' | 'openrouter' | 'cohere';
+    apiKey?: string;
+    modelName: string;
+    dimensions: number;
   };
   features: {
     enableEncryption: boolean;
@@ -257,6 +318,12 @@ export class SimplePDWClient {
       url: config.sui?.rpcUrl || getFullnodeUrl(network)
     });
 
+    // Resolve embedding configuration with defaults
+    const embeddingProvider = config.embedding?.provider || 'google';
+    const embeddingApiKey = config.embedding?.apiKey || config.geminiApiKey;
+    const embeddingModelName = config.embedding?.modelName || this.getDefaultEmbeddingModel(embeddingProvider);
+    const embeddingDimensions = config.embedding?.dimensions || this.getDefaultEmbeddingDimensions(embeddingProvider);
+
     return {
       signer,
       userAddress,
@@ -274,7 +341,15 @@ export class SimplePDWClient {
         client: suiClient
       },
       ai: {
-        geminiApiKey: config.geminiApiKey
+        geminiApiKey: config.geminiApiKey,
+        chatModel: config.ai?.chatModel || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+        apiKey: config.ai?.apiKey || process.env.OPENROUTER_API_KEY || config.geminiApiKey
+      },
+      embedding: {
+        provider: embeddingProvider,
+        apiKey: embeddingApiKey,
+        modelName: embeddingModelName,
+        dimensions: embeddingDimensions
       },
       features: {
         enableEncryption: config.features?.enableEncryption ?? false,
@@ -283,6 +358,42 @@ export class SimplePDWClient {
       },
       indexManager: config.indexManager
     };
+  }
+
+  /**
+   * Get default embedding model for provider
+   */
+  private getDefaultEmbeddingModel(provider: string): string {
+    switch (provider) {
+      case 'google':
+        return 'text-embedding-004';
+      case 'openai':
+        return 'text-embedding-3-small';
+      case 'openrouter':
+        return 'google/gemini-embedding-001';
+      case 'cohere':
+        return 'embed-english-v3.0';
+      default:
+        return 'text-embedding-004';
+    }
+  }
+
+  /**
+   * Get default embedding dimensions for provider
+   */
+  private getDefaultEmbeddingDimensions(provider: string): number {
+    switch (provider) {
+      case 'google':
+        return 3072;
+      case 'openai':
+        return 1536;
+      case 'openrouter':
+        return 3072; // google/gemini-embedding-001 returns 3072 dimensions
+      case 'cohere':
+        return 1024;
+      default:
+        return 3072;
+    }
   }
 
   /**
@@ -305,7 +416,7 @@ export class SimplePDWClient {
    * Initialize all services with proper dependency injection
    */
   private initializeServices(config: ResolvedConfig): ServiceContainer {
-    const { sui, walrus, ai, userAddress } = config;
+    const { sui, walrus, ai, embedding: embeddingConfig, userAddress } = config;
 
     // 1. Storage Service (foundation)
     const storage = new StorageService({
@@ -320,13 +431,15 @@ export class SimplePDWClient {
 
     // 2. Embedding Service (if API key provided)
     let embedding: EmbeddingService | undefined;
-    if (ai.geminiApiKey) {
+    if (embeddingConfig.apiKey) {
       embedding = new EmbeddingService({
-        provider: 'google',
-        apiKey: ai.geminiApiKey,
-        modelName: 'text-embedding-004',
-        dimensions: 768
+        provider: embeddingConfig.provider,
+        apiKey: embeddingConfig.apiKey,
+        modelName: embeddingConfig.modelName,
+        dimensions: embeddingConfig.dimensions
       });
+
+      console.log(`✅ Embedding Service initialized: ${embeddingConfig.provider}/${embeddingConfig.modelName} (${embeddingConfig.dimensions}d)`);
 
       // Connect to storage for search
       storage.initializeSearch(embedding);
@@ -353,24 +466,24 @@ export class SimplePDWClient {
 
     // 8. Classifier Service (if AI enabled)
     let classifier: ClassifierService | undefined;
-    if (ai.geminiApiKey) {
+    if (embeddingConfig.apiKey) {
       classifier = new ClassifierService(
         clientAdapter,      // client
         pdwConfig,          // config
         embedding,          // embeddingService
-        ai.geminiApiKey     // aiApiKey
+        embeddingConfig.apiKey     // aiApiKey
       );
     }
 
     // 9. Vector Service (if local indexing enabled)
     let vector: VectorService | undefined;
-    if (config.features.enableLocalIndexing && embedding && ai.geminiApiKey) {
+    if (config.features.enableLocalIndexing && embedding && embeddingConfig.apiKey) {
       vector = new VectorService(
         {
           embedding: {
-            apiKey: ai.geminiApiKey,
-            model: 'text-embedding-004',
-            dimensions: 768
+            apiKey: embeddingConfig.apiKey,
+            model: embeddingConfig.modelName,
+            dimensions: embeddingConfig.dimensions
           },
           index: {
             maxElements: 10000,
@@ -388,7 +501,7 @@ export class SimplePDWClient {
     if (config.features.enableLocalIndexing) {
       memoryIndex = new MemoryIndexService(storage, {
         maxElements: 10000,
-        dimension: 768,
+        dimension: embeddingConfig.dimensions,
         efConstruction: 200,
         m: 16
       });

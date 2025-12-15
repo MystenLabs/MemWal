@@ -105,7 +105,7 @@ export class VectorService {
 
     this.hnswServicePromise = createHnswService({
       indexConfig: {
-        dimension: this.config.index?.dimension || 768,
+        dimension: this.config.index?.dimension || 3072,
         maxElements: this.config.index?.maxElements || 10000,
         efConstruction: this.config.index?.efConstruction || 200,
         m: this.config.index?.m || 16
@@ -276,7 +276,7 @@ export class VectorService {
         category: 'vector-index',
         topic: spaceId,
         importance: 8,
-        embeddingDimension: 768,
+        embeddingDimension: 3072,
         createdTimestamp: Date.now(),
         customMetadata: {
           type: 'hnsw-index',

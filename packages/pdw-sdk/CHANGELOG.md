@@ -5,6 +5,128 @@ All notable changes to the Personal Data Wallet SDK will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-12-16
+
+### 🎉 Major Features
+
+#### OpenRouter Integration (Unified AI Gateway)
+- **Added** Full OpenRouter support as the default AI provider for embeddings and chat
+- **Added** `google/gemini-embedding-001` model via OpenRouter (3072 dimensions)
+- **Added** `google/gemini-2.5-flash` model via OpenRouter for chat/classification
+- **Refactored** `GeminiAIService` to use OpenRouter Chat Completions API instead of direct `@google/genai`
+- **Refactored** `EmbeddingService` to support OpenRouter embeddings endpoint
+
+**Benefits**:
+- ✅ Single API key (`OPENROUTER_API_KEY`) for all AI operations
+- ✅ Access to 200+ AI models through unified API
+- ✅ Better rate limits and reliability
+- ✅ Fallback support across multiple providers
+- ✅ Cost optimization with model selection flexibility
+
+**Configuration**:
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  embedding: {
+    provider: 'openrouter',
+    apiKey: process.env.OPENROUTER_API_KEY,
+    modelName: 'google/gemini-embedding-001', // 3072 dimensions
+  },
+  features: {
+    enableLocalIndexing: true,
+  }
+});
+```
+
+**Environment Variables**:
+```env
+OPENROUTER_API_KEY=sk-or-v1-...
+AI_CHAT_MODEL=google/gemini-2.5-flash        # Chat/classification model
+AI_EMBEDDING_MODEL=google/gemini-embedding-001  # Embedding model (3072 dims)
+```
+
+#### Vector Dimension Upgrade (768 → 3072)
+- **Changed** Default embedding dimension from 768 to 3072
+- **Updated** All HNSW services (`NodeHnswService`, `HnswWasmService`, `BrowserHnswIndexService`)
+- **Updated** All namespace defaults (`IndexNamespace`, `SearchNamespace`, `TxNamespace`)
+- **Updated** All service defaults (`EmbeddingService`, `VectorService`, `MemoryIndexService`)
+- **Updated** LangChain integration (`PDWEmbeddings`, `PDWVectorStore`)
+- **Updated** Utility scripts (`rebuildIndex`, `rebuildIndexNode`)
+
+**Migration Note**:
+⚠️ Existing HNSW indexes created with 768 dimensions must be rebuilt:
+```typescript
+import { rebuildIndexNode, clearIndexNode } from 'personal-data-wallet-sdk';
+
+// Clear old index
+await clearIndexNode(userAddress);
+
+// Rebuild with new 3072 dimensions
+const result = await rebuildIndexNode({
+  userAddress,
+  client,
+  packageId,
+  walrusAggregator,
+  force: true
+});
+```
+
+### 🔧 Bug Fixes
+
+#### ESM Module Compatibility
+- **Fixed** ESM import issues with `@openrouter/ai-sdk-provider`
+- **Fixed** AI SDK v5 compatibility (removed unsupported `compatibility` option)
+- **Fixed** OpenRouter API endpoint (uses `/chat/completions` not `/responses`)
+
+#### API Route Fixes
+- **Fixed** `pdw.pipeline.createMemory is not a function` error
+  - Changed to correct method: `pdw.memory.create()`
+- **Fixed** Memory save result property access (`saveResult.id` instead of `saveResult.memoryObjectId`)
+
+### ✨ Enhancements
+
+#### Model Configuration via Environment
+- **Added** Environment variable support for AI models:
+  - `AI_CHAT_MODEL` - Default: `google/gemini-2.5-flash`
+  - `AI_EMBEDDING_MODEL` - Default: `google/gemini-embedding-001`
+- **Updated** All services to read from environment with fallback defaults
+
+### 📦 Dependencies
+
+- **Recommended** `@openrouter/ai-sdk-provider` for Vercel AI SDK integration
+- **Maintained** `@google/genai` for backward compatibility
+- **Maintained** `ai` v5.x for AI SDK core
+
+### 🔄 Breaking Changes
+
+1. **Embedding Dimensions**: Default changed from 768 to 3072
+   - Existing indexes need rebuilding
+   - Walrus blobs with old embeddings remain readable
+
+2. **OpenRouter as Default**:
+   - Direct Google Gemini API still supported via `provider: 'google'`
+   - OpenRouter recommended for production use
+
+### 📊 Performance
+
+- **Improved** Embedding quality with 3072 dimensions (4x more semantic information)
+- **Improved** Rate limiting with OpenRouter's unified gateway
+- **Maintained** HNSW search performance (dimension increase has minimal impact)
+
+---
+
+## [0.4.1] - 2025-12-15
+
+### 🔧 Bug Fixes
+
+#### Multi-Device Index Sync
+- **Added** Index staleness detection for multi-process scenarios
+- **Added** Auto-reload index from disk when file is newer than cache
+- **Added** `rebuildIndexNode()` utility for Node.js environments
+
+---
+
 ## [0.4.0] - 2025-12-11
 
 ### 🎉 Major Features

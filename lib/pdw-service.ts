@@ -38,10 +38,10 @@ export async function getPDWClient(): Promise<any> {
   }
 
   // Validate required environment variables
+  // Note: GEMINI_API_KEY is optional if using custom embedding provider
   const requiredEnvVars = {
     SUI_PRIVATE_KEY: process.env.SUI_PRIVATE_KEY,
     PACKAGE_ID: process.env.PACKAGE_ID,
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
     SUI_NETWORK: process.env.SUI_NETWORK,
     WALLET_ADDRESS: process.env.WALLET_ADDRESS,
   };
@@ -56,17 +56,34 @@ export async function getPDWClient(): Promise<any> {
     );
   }
 
+  // Resolve embedding configuration from environment
+  // Default to 'openrouter' for unified API access to multiple models
+  const embeddingProvider = (process.env.EMBEDDING_PROVIDER as 'google' | 'openai' | 'openrouter' | 'cohere') || 'openrouter';
+  const embeddingApiKey = process.env.EMBEDDING_API_KEY || process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY;
+  const embeddingModelName = process.env.EMBEDDING_MODEL || undefined; // Let SDK use defaults (google/gemini-embedding-001 for openrouter)
+  const embeddingDimensions = process.env.EMBEDDING_DIMENSIONS ? parseInt(process.env.EMBEDDING_DIMENSIONS) : undefined;
+
+  if (!embeddingApiKey) {
+    throw new Error('Missing embedding API key. Set EMBEDDING_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY');
+  }
+
   try {
     // Decode the Sui private key
     const { secretKey } = decodeSuiPrivateKey(process.env.SUI_PRIVATE_KEY!);
     const keypair = Ed25519Keypair.fromSecretKey(secretKey);
 
-    // Initialize the PDW client
+    // Initialize the PDW client with configurable embedding
     pdwInstance = new SimplePDWClient({
       signer: keypair,
       network: (process.env.SUI_NETWORK as 'testnet' | 'mainnet') || 'testnet',
       packageId: process.env.PACKAGE_ID!,
-      geminiApiKey: process.env.GEMINI_API_KEY!,
+      // Embedding configuration (new flexible approach)
+      embedding: {
+        provider: embeddingProvider,
+        apiKey: embeddingApiKey,
+        ...(embeddingModelName && { modelName: embeddingModelName }),
+        ...(embeddingDimensions && { dimensions: embeddingDimensions }),
+      },
       walrus: {
         aggregatorUrl: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
         publisherUrl: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',

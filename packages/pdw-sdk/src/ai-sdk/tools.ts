@@ -31,7 +31,7 @@
  * @module ai-sdk/tools
  */
 
-import { tool } from 'ai';
+import { tool, embed } from 'ai';
 import { z } from 'zod';
 import type { EmbeddingModel } from 'ai';
 import { PDWVectorStore } from './PDWVectorStore';
@@ -136,16 +136,17 @@ class PDWToolsManager {
       );
     }
 
-    // Use AI SDK's doEmbed method
-    const { embeddings } = await this.embedModel.doEmbed({
-      values: [text]
+    // Use AI SDK v5 embed function
+    const result = await embed({
+      model: this.embedModel,
+      value: text
     });
 
-    if (!embeddings || embeddings.length === 0) {
+    if (!result.embedding || result.embedding.length === 0) {
       throw new Error('Failed to generate embedding');
     }
 
-    return embeddings[0];
+    return result.embedding;
   }
 
   /**
@@ -359,7 +360,7 @@ export function pdwTools(config: PDWToolsConfig) {
         `Use this when the user asks about past conversations, stored facts, or wants to recall information. ` +
         `Examples: "What did I say about...", "Do you remember when...", "What do I know about..."`,
 
-      parameters: z.object({
+      inputSchema: z.object({
         query: z.string().describe('The search query text to find relevant memories'),
         limit: z.number().optional().describe('Maximum number of results to return (default: 5)'),
         minScore: z.number().optional().describe('Minimum similarity score 0-1 (default: 0.7)'),
@@ -369,7 +370,8 @@ export function pdwTools(config: PDWToolsConfig) {
         endDate: z.string().optional().describe('Filter memories until this date (ISO format)')
       }),
 
-      execute: async (params) => manager.searchMemory(params)
+      execute: async ({ query, limit, minScore, category, startDate, endDate }) =>
+        manager.searchMemory({ query, limit, minScore, category, startDate, endDate })
     });
   }
 
@@ -381,7 +383,7 @@ export function pdwTools(config: PDWToolsConfig) {
         `Use this when the user shares important facts, preferences, or information they want to remember. ` +
         `Examples: "Remember that...", "Save this...", "I prefer...", "My favorite is..."`,
 
-      parameters: z.object({
+      inputSchema: z.object({
         text: z.string().describe('The text content to save to memory'),
         category: z.enum(['fact', 'preference', 'todo', 'note', 'general']).optional()
           .describe('Category of the memory (default: general)'),
@@ -389,7 +391,8 @@ export function pdwTools(config: PDWToolsConfig) {
           .describe('Importance level 1-10 (default: 5)')
       }),
 
-      execute: async (params) => manager.saveMemory(params)
+      execute: async ({ text, category, importance }) =>
+        manager.saveMemory({ text, category, importance })
     });
   }
 
@@ -400,13 +403,14 @@ export function pdwTools(config: PDWToolsConfig) {
         `Get information about stored memories. ` +
         `Use when the user asks "what do you know about me", "what have I told you", or wants a memory summary.`,
 
-      parameters: z.object({
+      inputSchema: z.object({
         limit: z.number().optional().describe('Number of memories to list (default: 10)'),
         category: z.enum(['fact', 'preference', 'todo', 'note', 'general']).optional()
           .describe('Filter by category')
       }),
 
-      execute: async (params) => manager.listMemories(params)
+      execute: async ({ limit, category }) =>
+        manager.listMemories({ limit, category })
     });
   }
 

@@ -967,7 +967,7 @@ class IndexSubNamespace {
       const stats = service.getIndexStats(spaceId);
       return {
         totalVectors: stats.totalMemories || 0,
-        dimension: 768,
+        dimension: 3072,
         spaceType: 'cosine',
         maxElements: 10000,
         currentCount: stats.indexSize || stats.totalMemories || 0
@@ -980,7 +980,7 @@ class IndexSubNamespace {
       const currentCount = entry.index.getCurrentCount?.() || 0;
       return {
         totalVectors: currentCount,
-        dimension: 768,
+        dimension: 3072,
         spaceType: 'cosine',
         maxElements: 10000,
         currentCount

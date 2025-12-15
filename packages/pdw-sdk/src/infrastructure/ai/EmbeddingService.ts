@@ -68,7 +68,7 @@ export class EmbeddingService {
 
     this.genAI = new GoogleGenAI({ apiKey });
     this.model = config.model || 'text-embedding-004';
-    this.dimensions = config.dimensions || 768;
+    this.dimensions = config.dimensions || 3072;
     this.maxRequestsPerMinute = config.requestsPerMinute || 1500; // Gemini rate limit
     
     if (process.env.NODE_ENV === 'development') {

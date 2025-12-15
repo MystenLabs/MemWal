@@ -11,7 +11,7 @@ SDK for building applications with decentralized memory storage, SEAL encryption
 - **SEAL Encryption** - Identity-based encryption with MemoryCap capability pattern
 - **Walrus Storage** - Decentralized blob storage on Walrus network
 - **Sui Blockchain** - On-chain ownership registration with transaction retry
-- **Vector Search** - Semantic search with HNSW (768 dimensions, hnswlib-wasm)
+- **Vector Search** - Semantic search with HNSW (3072 dimensions, hnswlib-node/wasm)
 - **Knowledge Graph** - Entity and relationship extraction with AI
 - **LangChain & AI-SDK Integration** - RAG workflows with PDWVectorStore
 
@@ -36,7 +36,14 @@ const pdw = new SimplePDWClient({
   signer: keypair,
   network: 'testnet',
   packageId: process.env.PACKAGE_ID,
-  geminiApiKey: process.env.GEMINI_API_KEY,
+  // OpenRouter (recommended) - unified access to multiple models
+  embedding: {
+    provider: 'openrouter',
+    apiKey: process.env.OPENROUTER_API_KEY,
+    // Uses google/gemini-embedding-001 by default (3072 dimensions)
+  },
+  // Or use Google directly:
+  // geminiApiKey: process.env.GEMINI_API_KEY,
   features: {
     enableEncryption: false,
     enableLocalIndexing: true,
@@ -60,7 +67,7 @@ const classification = await pdw.ai.classifyFull('I am working at CommandOSS');
 
 // Generate embedding
 const vector = await pdw.ai.embed('Hello world');
-// Float32Array[768]
+// Float32Array[3072]
 ```
 
 ### 3. Create Memory
@@ -74,6 +81,70 @@ const memory = await pdw.memory.create(
 console.log('Memory ID:', memory.id);     // On-chain object ID
 console.log('Blob ID:', memory.blobId);   // Walrus blob ID
 ```
+
+### Memory Keywords (Natural Language)
+
+When using the chat API, you can save memories using natural language keywords. The SDK automatically detects these patterns and extracts the content to store:
+
+| Keyword Pattern | Example | Extracted Content |
+|----------------|---------|-------------------|
+| `remember that...` | "Remember that my birthday is Dec 25" | "my birthday is Dec 25" |
+| `remember...` | "Remember I like pizza" | "I like pizza" |
+| `don't forget that...` | "Don't forget that meeting is at 3pm" | "meeting is at 3pm" |
+| `don't forget...` | "Don't forget to call mom" | "to call mom" |
+| `please remember...` | "Please remember my email is test@example" | "my email is test@example" |
+| `store in memory...` | "Store in memory: API key is abc123" | "API key is abc123" |
+| `save to memory...` | "Save to memory my address is..." | "my address is..." |
+| `add to memory...` | "Add to my memory: project deadline Friday" | "project deadline Friday" |
+| `keep in mind...` | "Keep in mind: use TypeScript" | "use TypeScript" |
+| `note that...` | "Note that the server runs on port 3000" | "the server runs on port 3000" |
+
+```typescript
+// Single memory extraction
+const content = pdw.ai.extractMemoryContent('Remember that my name is John');
+// Returns: 'my name is John'
+
+const noContent = pdw.ai.extractMemoryContent('Hello there');
+// Returns: null (no memory keyword detected)
+```
+
+### Multiple Memories in One Message
+
+The SDK can split a single message into multiple separate memories:
+
+```typescript
+// Comma + "and" separated
+const memories = pdw.ai.extractMultipleMemories(
+  'Remember that my name is John, I work at Google, and my birthday is Dec 25'
+);
+// Returns: ['my name is John', 'I work at Google', 'my birthday is Dec 25']
+
+// Semicolon-separated
+const memories2 = pdw.ai.extractMultipleMemories(
+  'Note that: API key is abc123; server port is 3000; database is PostgreSQL'
+);
+// Returns: ['API key is abc123', 'server port is 3000', 'database is PostgreSQL']
+
+// Numbered list
+const memories3 = pdw.ai.extractMultipleMemories(
+  'Remember: 1. My email is test@example 2. My phone is 123-456 3. I prefer dark mode'
+);
+// Returns: ['My email is test@example', 'My phone is 123-456', 'I prefer dark mode']
+
+// Batch save all extracted memories
+const extractedMemories = pdw.ai.extractMultipleMemories(userMessage);
+if (extractedMemories.length > 0) {
+  // Save each as separate memory
+  const results = await pdw.memory.createBatch(extractedMemories, { category: 'custom' });
+  console.log(`Saved ${results.length} memories`);
+}
+```
+
+**Supported formats:**
+- Comma-separated: `"x, y, z"` or `"x, y, and z"`
+- Semicolon-separated: `"x; y; z"`
+- Numbered list: `"1. x 2. y 3. z"`
+- Bullet list: `"- x - y - z"` or `"• x • y • z"`
 
 ### 4. Search Memories
 
@@ -256,7 +327,21 @@ const results = await vectorStore.search('query', { limit: 5 });
 SUI_NETWORK=testnet
 PACKAGE_ID=0x...
 SUI_PRIVATE_KEY=suiprivkey1qz...
-GEMINI_API_KEY=AIzaSy...
+
+# Embedding Provider (choose one)
+# Option 1: OpenRouter (recommended - unified API for multiple models)
+EMBEDDING_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+
+# Option 2: Google Gemini directly
+# EMBEDDING_PROVIDER=google
+# GEMINI_API_KEY=AIzaSy...
+
+# Option 3: OpenAI
+# EMBEDDING_PROVIDER=openai
+# OPENAI_API_KEY=sk-...
+
+# Walrus Storage
 WALRUS_PUBLISHER=https://publisher.walrus-testnet.walrus.space
 WALRUS_AGGREGATOR=https://aggregator.walrus-testnet.walrus.space
 ```
@@ -268,7 +353,15 @@ const pdw = new SimplePDWClient({
   signer: keypair,
   network: 'testnet',
   packageId: '0x...',
-  geminiApiKey: 'AIza...',
+  // Embedding configuration (new in v0.5.0)
+  embedding: {
+    provider: 'openrouter',  // 'openrouter' | 'google' | 'openai' | 'cohere'
+    apiKey: 'sk-or-v1-...',
+    modelName: 'google/gemini-embedding-001',  // optional, uses defaults
+    dimensions: 3072,  // optional, model default
+  },
+  // Legacy: still works if embedding.provider not set
+  // geminiApiKey: 'AIza...',
   walrus: {
     aggregatorUrl: 'https://aggregator.walrus-testnet.walrus.space',
     publisherUrl: 'https://publisher.walrus-testnet.walrus.space'
@@ -296,7 +389,10 @@ const keypair = Ed25519Keypair.fromSecretKey(secretKey);
 const pdw = new SimplePDWClient({
   signer: keypair,
   network: 'testnet',
-  geminiApiKey: 'your-key'
+  embedding: {
+    provider: 'openrouter',
+    apiKey: 'your-openrouter-key'
+  }
 });
 
 await pdw.ready();
@@ -358,7 +454,59 @@ const memory = await pdw.memory.create('content');
 
 ## Changelog
 
-### v0.4.1 (Latest)
+### v0.5.0 (Latest)
+
+#### OpenRouter Integration
+
+**Unified AI Gateway Support**
+- New `embedding.provider` configuration option supporting `'openrouter'`, `'google'`, `'openai'`, `'cohere'`
+- OpenRouter as recommended provider for unified access to multiple AI models
+- Default embedding model: `google/gemini-embedding-001` (3072 dimensions)
+- Flexible configuration with `embedding.apiKey`, `embedding.modelName`, `embedding.dimensions`
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  packageId: '0x...',
+  embedding: {
+    provider: 'openrouter',
+    apiKey: process.env.OPENROUTER_API_KEY,
+  }
+});
+```
+
+#### Vector Dimension Upgrade
+
+**768 → 3072 Dimensions**
+- Updated all default vector dimensions from 768 to 3072
+- Better semantic representation with higher-dimensional embeddings
+- Supports `google/gemini-embedding-001` output natively
+
+#### Bug Fixes
+
+- **ESM Module Compatibility**: Fixed ESM import issues for Next.js and modern bundlers
+- **API Route Fixes**: Fixed `pdw.pipeline.createMemory` → `pdw.memory.create` in chat routes
+- **AI SDK v5 Compatibility**: Added support for `@openrouter/ai-sdk-provider` for Vercel AI SDK v5
+
+#### Breaking Changes
+
+- **Index Rebuild Required**: Due to dimension change from 768 → 3072, existing HNSW indexes must be rebuilt
+- Run `rebuildIndexNode()` or `clearIndexNode()` to rebuild from blockchain data
+
+```typescript
+import { clearIndexNode, rebuildIndexNode } from 'personal-data-wallet-sdk';
+
+// Clear old 768-dimension index
+await clearIndexNode(userAddress);
+
+// Rebuild with 3072 dimensions
+await rebuildIndexNode({ userAddress, client, packageId, walrusAggregator });
+```
+
+---
+
+### v0.4.1
 
 #### Multi-Device Index Sync
 
@@ -414,7 +562,7 @@ if (!hasIndex) {
 import { createHnswService } from 'personal-data-wallet-sdk';
 
 // Auto-detects: hnswlib-node (Node.js) or hnswlib-wasm (browser)
-const hnswService = await createHnswService({ indexConfig: { dimension: 768 } });
+const hnswService = await createHnswService({ indexConfig: { dimension: 3072 } });
 ```
 
 **Optimized Sui Transaction Handling**
