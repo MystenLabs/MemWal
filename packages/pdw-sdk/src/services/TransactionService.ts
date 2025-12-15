@@ -37,33 +37,33 @@ export class TransactionService {
    */
   buildCreateMemoryRecord(options: CreateMemoryRecordTxOptions): Transaction {
     const tx = new Transaction();
-    
+
     // Set gas budget if provided
     if (options.gasBudget) {
       tx.setGasBudget(options.gasBudget);
     }
-    
+
     // Set gas price if provided
     if (options.gasPrice) {
       tx.setGasPrice(options.gasPrice);
     }
 
-    // Call the memory contract function
-    const moveCall = MemoryModule.createMemoryRecord({
-      package: this.config.packageId!,
+    // Call the memory contract function with Clock for real-time timestamp
+    tx.moveCall({
+      target: `${this.config.packageId}::memory::create_memory_record`,
       arguments: [
-        Array.from(new TextEncoder().encode(options.category)),
-        options.vectorId,
-        Array.from(new TextEncoder().encode(options.blobId)),
-        Array.from(new TextEncoder().encode(options.contentType)),
-        options.contentSize,
-        Array.from(new TextEncoder().encode(options.contentHash)),
-        Array.from(new TextEncoder().encode(options.topic)),
-        options.importance,
-        Array.from(new TextEncoder().encode(options.embeddingBlobId)),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.category))),
+        tx.pure.u64(options.vectorId),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.blobId))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.contentType))),
+        tx.pure.u64(options.contentSize),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.contentHash))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.topic))),
+        tx.pure.u8(options.importance),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.embeddingBlobId))),
+        tx.object('0x6'), // Sui Clock object for real-time timestamp
       ],
     });
-    moveCall(tx);
 
     return tx;
   }
@@ -99,6 +99,7 @@ export class TransactionService {
     // Note: Walrus blob_id is a base64 string (URL-safe, no padding)
     // Example: "E7_nNXvFU_3qZVu3OH1yycRG7LZlyn1-UxEDCDDqGGU"
     // We encode the string to vector<u8> for the Move function parameter
+    // Clock object (0x6) is required for real-time timestamp
     tx.moveCall({
       target: `${this.config.packageId}::memory::create_memory_record_lightweight`,
       arguments: [
@@ -107,6 +108,7 @@ export class TransactionService {
         tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.blobId))),
         tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.blobObjectId || ''))),
         tx.pure.u8(options.importance),
+        tx.object('0x6'), // Sui Clock object for real-time timestamp
       ],
     });
 
@@ -118,22 +120,23 @@ export class TransactionService {
    */
   buildUpdateMemoryMetadata(options: UpdateMemoryMetadataTxOptions): Transaction {
     const tx = new Transaction();
-    
+
     if (options.gasBudget) {
       tx.setGasBudget(options.gasBudget);
     }
-    
+
     if (options.gasPrice) {
       tx.setGasPrice(options.gasPrice);
     }
 
-    // Note: Using tx.moveCall for actual implementation
+    // Note: Using tx.moveCall with Clock for real-time timestamp
     tx.moveCall({
       target: `${this.config.packageId}::memory::update_memory_metadata`,
       arguments: [
-        tx.pure.string(options.memoryId),
-        tx.pure.string(options.metadataBlobId),
-        tx.pure.u64(options.embeddingDimension || 0)
+        tx.object(options.memoryId),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.metadataBlobId))),
+        tx.pure.u8(options.embeddingDimension || 5),
+        tx.object('0x6'), // Sui Clock object for real-time timestamp
       ]
     });
 
@@ -160,21 +163,21 @@ export class TransactionService {
       tx.setGasPrice(options.gasPrice);
     }
 
-    // Use generated updateMemoryRecord function
-    const moveCall = MemoryModule.updateMemoryRecord({
-      package: this.config.packageId!,
-      arguments: {
-        memory: options.memoryId,
-        newBlobId: Array.from(new TextEncoder().encode(options.newBlobId || '')),
-        newCategory: Array.from(new TextEncoder().encode(options.newCategory || '')),
-        newTopic: Array.from(new TextEncoder().encode(options.newTopic || '')),
-        newImportance: options.newImportance || 0,
-        newEmbeddingBlobId: Array.from(new TextEncoder().encode(options.newEmbeddingBlobId || '')),
-        newContentHash: Array.from(new TextEncoder().encode(options.newContentHash || '')),
-        newContentSize: options.newContentSize || 0,
-      },
+    // Use direct moveCall with Clock object for real-time timestamp
+    tx.moveCall({
+      target: `${this.config.packageId}::memory::update_memory_record`,
+      arguments: [
+        tx.object(options.memoryId),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.newBlobId || ''))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.newCategory || ''))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.newTopic || ''))),
+        tx.pure.u8(options.newImportance || 0),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.newEmbeddingBlobId || ''))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.newContentHash || ''))),
+        tx.pure.u64(options.newContentSize || 0),
+        tx.object('0x6'), // Sui Clock object for real-time timestamp
+      ],
     });
-    moveCall(tx);
 
     return tx;
   }
