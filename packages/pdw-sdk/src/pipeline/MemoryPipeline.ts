@@ -148,12 +148,12 @@ export class MemoryPipeline {
     this.config = {
       embedding: {
         apiKey: config.embedding?.apiKey || '',
-        model: config.embedding?.model || 'gemini-2.5-flash-lite',
+        model: config.embedding?.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
         enableBatching: config.embedding?.enableBatching !== false,
         batchSize: config.embedding?.batchSize || 20
       },
       vector: {
-        dimensions: config.vector?.dimensions || 768,
+        dimensions: config.vector?.dimensions || 3072,
         maxElements: config.vector?.maxElements || 10000,
         enablePersistence: config.vector?.enablePersistence !== false
       },

@@ -104,7 +104,7 @@ class TxSubNamespace {
     return this.services.tx.buildUpdateMemoryMetadata({
       memoryId,
       metadataBlobId,
-      embeddingDimension: 768
+      embeddingDimension: 3072
     });
   }
 

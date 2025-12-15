@@ -107,7 +107,7 @@ export class PDWVectorStore {
       this.embeddingService = new EmbeddingService({
         apiKey: config.geminiApiKey,
         model: 'text-embedding-004',
-        dimensions: 768,
+        dimensions: 3072,
       });
 
       this.storageService.initializeSearch(this.embeddingService);

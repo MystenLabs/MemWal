@@ -582,7 +582,7 @@ export class BlockchainManager {
       topic: memory.metadata?.topic || `Memory about ${memory.category || 'general'}`,
       importance: memory.metadata?.importance || 5,
       embeddingBlobId: memory.blobId || '',
-      embeddingDimension: memory.embedding ? memory.embedding.length : 768,
+      embeddingDimension: memory.embedding ? memory.embedding.length : 3072,
       createdTimestamp: memory.createdAt?.getTime() || Date.now(),
       updatedTimestamp: memory.processedAt?.getTime() || memory.createdAt?.getTime() || Date.now(),
       customMetadata: {

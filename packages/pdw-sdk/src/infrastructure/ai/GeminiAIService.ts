@@ -1,13 +1,11 @@
 /**
- * GeminiAIService - Real Google Gemini AI Integration
- * 
- * Provides AI-powered text analysis capabilities using Google's Gemini API
+ * GeminiAIService - AI Integration via OpenRouter
+ *
+ * Provides AI-powered text analysis capabilities using OpenRouter API
  * for entity extraction, relationship identification, and content analysis.
- * 
- * Using @google/genai (the actively maintained SDK, not the deprecated @google/generative-ai)
+ *
+ * Supports any model available on OpenRouter (Google Gemini, OpenAI, Anthropic, etc.)
  */
-
-import { GoogleGenAI } from '@google/genai';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -42,30 +40,90 @@ export interface EntityExtractionResponse {
 }
 
 /**
- * Google Gemini AI service for advanced text analysis and knowledge extraction
+ * AI service for advanced text analysis and knowledge extraction
+ * Uses OpenRouter API for maximum flexibility and model choice
  */
 export class GeminiAIService {
-  private genAI: GoogleGenAI;
+  private readonly apiKey: string;
   private readonly config: Required<GeminiConfig>;
 
   constructor(config: GeminiConfig) {
+    // Resolve API key: prefer OPENROUTER_API_KEY, fallback to provided apiKey
+    this.apiKey = process.env.OPENROUTER_API_KEY || config.apiKey;
+
+    if (!this.apiKey) {
+      throw new Error(
+        'API key is required. Set OPENROUTER_API_KEY environment variable or provide apiKey in config.'
+      );
+    }
+
     this.config = {
-      model: config.model || 'gemini-2.5-flash-lite',
+      model: config.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
       temperature: config.temperature || 0.1,
       maxTokens: config.maxTokens || 4096,
       timeout: config.timeout || 30000,
-      ...config
+      apiKey: this.apiKey
     };
 
-    this.genAI = new GoogleGenAI({ apiKey: this.config.apiKey });
+    console.log(`✅ GeminiAIService initialized with OpenRouter (${this.config.model})`);
   }
 
   /**
-   * Extract entities and relationships from text using Gemini AI
+   * Call OpenRouter Chat Completions API
+   */
+  private async callOpenRouter(prompt: string): Promise<string> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/personal-data-wallet',
+          'X-Title': 'Personal Data Wallet SDK'
+        },
+        body: JSON.stringify({
+          model: this.config.model,
+          messages: [
+            { role: 'user', content: prompt }
+          ],
+          temperature: this.config.temperature,
+          max_tokens: this.config.maxTokens
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        throw new Error(`OpenRouter API error: ${response.status} - ${errorData}`);
+      }
+
+      const data = await response.json();
+
+      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+        throw new Error('Invalid response from OpenRouter API');
+      }
+
+      return data.choices[0].message.content || '';
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`OpenRouter request timed out after ${this.config.timeout}ms`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Extract entities and relationships from text using AI
    */
   async extractEntitiesAndRelationships(request: EntityExtractionRequest): Promise<EntityExtractionResponse> {
     const startTime = Date.now();
-    
+
     try {
       // Validate input: return empty result for empty/whitespace-only content
       const trimmedContent = request.content?.trim();
@@ -78,16 +136,8 @@ export class GeminiAIService {
       }
 
       const prompt = this.buildExtractionPrompt(request.content, request.context);
-      const result = await this.genAI.models.generateContent({
-        model: this.config.model,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: {
-          temperature: this.config.temperature,
-          maxOutputTokens: this.config.maxTokens,
-        }
-      });
-      const text = result.text || '';
-      
+      const text = await this.callOpenRouter(prompt);
+
       const parsed = this.parseExtractionResponse(text);
       const processingTimeMs = Date.now() - startTime;
 
@@ -98,8 +148,8 @@ export class GeminiAIService {
       };
 
     } catch (error) {
-      console.error('Gemini AI extraction failed:', error);
-      
+      console.error('AI extraction failed:', error);
+
       // Return empty result with processing time on error
       return {
         entities: [],
@@ -114,7 +164,7 @@ export class GeminiAIService {
    */
   async extractBatch(requests: EntityExtractionRequest[]): Promise<EntityExtractionResponse[]> {
     const results: EntityExtractionResponse[] = [];
-    
+
     // Process in batches to avoid rate limiting
     const batchSize = 3;
     for (let i = 0; i < requests.length; i += batchSize) {
@@ -122,13 +172,13 @@ export class GeminiAIService {
       const batchPromises = batch.map(request => this.extractEntitiesAndRelationships(request));
       const batchResults = await Promise.all(batchPromises);
       results.push(...batchResults);
-      
+
       // Small delay between batches to respect rate limits
       if (i + batchSize < requests.length) {
         await this.delay(500);
       }
     }
-    
+
     return results;
   }
 
@@ -145,7 +195,7 @@ export class GeminiAIService {
       const prompt = `
 Analyze the following text and provide a JSON response with:
 - "categories": array of relevant categories (max 3)
-- "sentiment": "positive", "negative", or "neutral"  
+- "sentiment": "positive", "negative", or "neutral"
 - "topics": array of main topics/themes (max 5)
 - "confidence": overall analysis confidence (0.0-1.0)
 
@@ -153,18 +203,9 @@ TEXT: ${content}
 
 JSON:`;
 
-      const result = await this.genAI.models.generateContent({
-        model: this.config.model,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: {
-          temperature: this.config.temperature,
-          maxOutputTokens: this.config.maxTokens,
-        }
-      });
-      const text = result.text || '';
-      
+      const text = await this.callOpenRouter(prompt);
       return this.parseAnalysisResponse(text);
-      
+
     } catch (error) {
       console.error('Content analysis failed:', error);
       return {
@@ -180,11 +221,11 @@ JSON:`;
 
   private buildExtractionPrompt(content: string, context?: string): string {
     const contextSection = context ? `\nCONTEXT: ${context}\n` : '';
-    
+
     return `
 Extract meaningful entities and relationships from the following text. Focus on:
 - People (names, roles, professions)
-- Organizations (companies, institutions, groups)  
+- Organizations (companies, institutions, groups)
 - Locations (cities, countries, places)
 - Concepts (technologies, ideas, skills)
 - Events (meetings, projects, activities)
@@ -201,7 +242,7 @@ For entities:
 
 For relationships:
 - "source": source entity id
-- "target": target entity id  
+- "target": target entity id
 - "label": relationship description (e.g., "works_at", "located_in", "uses")
 - "confidence": confidence score 0.0-1.0
 - "type": optional relationship category
@@ -222,9 +263,9 @@ JSON:`;
       } else if (cleanResponse.startsWith('```')) {
         cleanResponse = cleanResponse.replace(/```\s*/, '').replace(/```\s*$/, '');
       }
-      
+
       const parsed = JSON.parse(cleanResponse);
-      
+
       if (!parsed.entities || !Array.isArray(parsed.entities)) {
         throw new Error('Invalid entities format');
       }
@@ -259,11 +300,11 @@ JSON:`;
         }));
 
       return { entities, relationships };
-      
+
     } catch (error) {
       // Only log detailed errors in development mode
       if (process.env.NODE_ENV === 'development') {
-        console.error('Failed to parse Gemini response:', error);
+        console.error('Failed to parse AI response:', error);
         console.error('Raw response:', response);
       }
       return { entities: [], relationships: [] };
@@ -276,16 +317,16 @@ JSON:`;
       if (cleanResponse.startsWith('```json')) {
         cleanResponse = cleanResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
       }
-      
+
       const parsed = JSON.parse(cleanResponse);
-      
+
       return {
         categories: parsed.categories || [],
         sentiment: parsed.sentiment || 'neutral',
         topics: parsed.topics || [],
         confidence: Math.max(0, Math.min(1, parsed.confidence || 0.5))
       };
-      
+
     } catch (error) {
       console.error('Failed to parse analysis response:', error);
       return {
@@ -314,11 +355,8 @@ JSON:`;
    */
   async testConnection(): Promise<boolean> {
     try {
-      const result = await this.genAI.models.generateContent({
-        model: this.config.model,
-        contents: [{ role: 'user', parts: [{ text: 'Test connection. Respond with "OK".' }] }]
-      });
-      return (result.text || '').includes('OK');
+      const text = await this.callOpenRouter('Test connection. Respond with only "OK".');
+      return text.includes('OK');
     } catch {
       return false;
     }
@@ -333,7 +371,7 @@ JSON:`;
       temperature: this.config.temperature,
       maxTokens: this.config.maxTokens,
       timeout: this.config.timeout,
-      apiKeyConfigured: !!this.config.apiKey
+      apiKeyConfigured: !!this.apiKey
     };
   }
 }

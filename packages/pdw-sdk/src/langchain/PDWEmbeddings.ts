@@ -36,7 +36,7 @@ export interface PDWEmbeddingsParams extends EmbeddingsParams {
 
   /**
    * Embedding dimensions
-   * @default 768
+   * @default 3072
    */
   dimensions?: number;
 
@@ -71,7 +71,7 @@ export class PDWEmbeddings extends Embeddings {
     }
 
     this.model = params.model || 'text-embedding-004';
-    this.dimensions = params.dimensions || 768;
+    this.dimensions = params.dimensions || 3072;
 
     // Initialize PDW's EmbeddingService
     const config: EmbeddingConfig = {

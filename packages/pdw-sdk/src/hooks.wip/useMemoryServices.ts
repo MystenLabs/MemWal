@@ -89,7 +89,7 @@ export function useMemoryServices(
   const memoizedConfig = useMemo(() => ({
     geminiApiKey: config.geminiApiKey || '',
     embeddingModel: config.embeddingModel || 'text-embedding-004',
-    embeddingDimension: config.embeddingDimension || 768,
+    embeddingDimension: config.embeddingDimension || 3072,
     hnswMaxElements: config.hnswMaxElements || 10000,
     hnswM: config.hnswM || 16,
     hnswEfConstruction: config.hnswEfConstruction || 200,
@@ -166,7 +166,7 @@ export function useMemoryServices(
         // Initialize Gemini AI service for metadata extraction
         const geminiAIService = new GeminiAIService({
           apiKey: memoizedConfig.geminiApiKey,
-          model: 'gemini-2.5-flash-lite',
+          model: process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
           temperature: 0.1
         });
 

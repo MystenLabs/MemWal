@@ -204,7 +204,7 @@ export class MemoryRetrievalService {
       this.storageManager as any, // TODO: Fix type compatibility
       {
         embedding: { apiKey: '' },
-        index: { dimension: 768 },
+        index: { dimension: 3072 },
         batch: { maxBatchSize: 10 }
       }
     );

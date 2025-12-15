@@ -100,12 +100,12 @@ export async function rebuildIndex(options: RebuildIndexOptions): Promise<Rebuil
     const embeddingService = new EmbeddingService({
       apiKey: geminiApiKey,
       model: 'text-embedding-004',
-      dimensions: 768
+      dimensions: 3072
     });
 
     const hnswService = new BrowserHnswIndexService(
       {
-        dimension: 768,
+        dimension: 3072,
         maxElements: 10000,
         m: 16,
         efConstruction: 200
@@ -196,7 +196,7 @@ export async function rebuildIndex(options: RebuildIndexOptions): Promise<Rebuil
 
         // Generate/extract embedding
         let embedding = memoryData.embedding;
-        if (!embedding || embedding.length !== 768) {
+        if (!embedding || embedding.length !== 3072) {
           console.log(`  ⚠️ No valid embedding found, generating new one...`);
           const embeddingResult = await embeddingService.embedText({
             text: memoryData.content

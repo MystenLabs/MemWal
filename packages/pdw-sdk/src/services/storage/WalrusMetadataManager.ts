@@ -109,7 +109,7 @@ export class WalrusMetadataManager {
       importance: (options.importance || 5).toString(),
 
       // Vector embedding
-      embedding_dimensions: (options.embedding?.length || 768).toString(),
+      embedding_dimensions: (options.embedding?.length || 3072).toString(),
       embedding_model: 'text-embedding-004',
       embedding_blob_id: options.embeddingBlobId || '',
 

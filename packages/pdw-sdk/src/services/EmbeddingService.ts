@@ -11,18 +11,18 @@
  * - Flexible configuration: Direct model OR provider config
  */
 
-import type { EmbeddingModelV1 } from '@ai-sdk/provider';
+import type { EmbeddingModelV2 } from '@ai-sdk/provider';
 import { embed, embedMany } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 
-// Type alias for embedding models - V1 is default, V2 is compatible at runtime
-// OpenAI uses V2 internally but is compatible with ai SDK's embed/embedMany
-type EmbeddingModel<VALUE> = EmbeddingModelV1<VALUE>;
+// Type alias for embedding models - V2 is the default in AI SDK v5
+type EmbeddingModel<VALUE> = EmbeddingModelV2<VALUE>;
 
 // Provider instances (lazily initialized)
 let googleProvider: ReturnType<typeof createGoogleGenerativeAI> | null = null;
 let openaiProvider: ReturnType<typeof createOpenAI> | null = null;
+let openrouterProvider: ReturnType<typeof createOpenAI> | null = null;
 let cohereProvider: any = null;
 
 export interface EmbeddingConfig {
@@ -51,14 +51,20 @@ export interface EmbeddingConfig {
   /**
    * Option 2: Provider-based configuration
    * PDW creates the model from provider settings
+   *
+   * - google: Direct Google AI API
+   * - openai: Direct OpenAI API
+   * - openrouter: OpenRouter API gateway (supports multiple models)
+   * - cohere: Direct Cohere API
    */
-  provider?: 'google' | 'openai' | 'cohere';
+  provider?: 'google' | 'openai' | 'openrouter' | 'cohere';
 
   /**
    * API key for the provider
    * Falls back to environment variables:
    * - GEMINI_API_KEY or GOOGLE_AI_API_KEY (for google)
    * - OPENAI_API_KEY (for openai)
+   * - OPENROUTER_API_KEY (for openrouter)
    * - COHERE_API_KEY (for cohere)
    */
   apiKey?: string;
@@ -66,7 +72,8 @@ export interface EmbeddingConfig {
   /**
    * Model name to use
    * - Google: 'text-embedding-004', 'gemini-embedding-001'
-   * - OpenAI: 'text-embedding-3-small', 'text-embedding-3-large', 'text-embedding-ada-002'
+   * - OpenAI: 'text-embedding-3-small', 'text-embedding-3-large'
+   * - OpenRouter: 'google/gemini-embedding-001', 'openai/text-embedding-3-small', etc.
    * - Cohere: 'embed-english-v3.0', 'embed-multilingual-v3.0'
    */
   modelName?: string;
@@ -75,6 +82,7 @@ export interface EmbeddingConfig {
    * Embedding dimensions (optional, provider-dependent)
    * - Google: Up to 768
    * - OpenAI: 256, 512, 1024, 1536, 3072 (depending on model)
+   * - OpenRouter: Depends on the underlying model
    * - Cohere: Model-specific
    */
   dimensions?: number;
@@ -112,15 +120,17 @@ export interface BatchEmbeddingResult {
 /**
  * Embedding service using Vercel AI SDK
  * Supports all AI SDK compatible providers
+ * OpenRouter uses native fetch API for better compatibility
  */
 export class EmbeddingService {
-  private embeddingModel: EmbeddingModel<string>;
+  private embeddingModel: EmbeddingModel<string> | null = null;
   private modelName: string;
   private dimensions: number;
   private requestCount = 0;
   private lastReset = Date.now();
   private readonly maxRequestsPerMinute: number;
-  private provider: 'google' | 'openai' | 'cohere' | 'custom';
+  private provider: 'google' | 'openai' | 'openrouter' | 'cohere' | 'custom';
+  private apiKey: string = '';
 
   constructor(config: EmbeddingConfig = {}) {
     this.maxRequestsPerMinute = config.requestsPerMinute || 1500;
@@ -134,9 +144,9 @@ export class EmbeddingService {
 
         // Treat string as modelName and use provider config path
         const provider = config.provider || 'google';
-        const apiKey = this.resolveApiKey(provider, config.apiKey);
+        this.apiKey = this.resolveApiKey(provider, config.apiKey);
 
-        if (!apiKey) {
+        if (!this.apiKey) {
           throw new Error(
             `API key is required for ${provider} provider. ` +
             `Provide it via config.apiKey or environment variable.`
@@ -146,7 +156,11 @@ export class EmbeddingService {
         this.provider = provider;
         this.modelName = modelNameFromString;
         this.dimensions = config.dimensions || this.getDefaultDimensions(provider);
-        this.embeddingModel = this.createModel(provider, apiKey, this.modelName);
+
+        // OpenRouter uses native fetch, others use AI SDK
+        if (provider !== 'openrouter') {
+          this.embeddingModel = this.createModel(provider, this.apiKey, this.modelName);
+        }
 
         console.log(`✅ EmbeddingService initialized with ${provider} provider (${this.modelName}) [backward compat mode]`);
         return;
@@ -155,7 +169,7 @@ export class EmbeddingService {
       // New behavior: Direct EmbeddingModel from ai-sdk
       this.embeddingModel = config.model;
       this.modelName = 'custom';
-      this.dimensions = config.dimensions || 768;
+      this.dimensions = config.dimensions || 3072;
       this.provider = 'custom';
       console.log('✅ EmbeddingService initialized with custom ai-sdk model');
       return;
@@ -163,9 +177,9 @@ export class EmbeddingService {
 
     // Case 2: Provider-based configuration
     const provider = config.provider || 'google'; // Default to google for backward compat
-    const apiKey = this.resolveApiKey(provider, config.apiKey);
+    this.apiKey = this.resolveApiKey(provider, config.apiKey);
 
-    if (!apiKey) {
+    if (!this.apiKey) {
       throw new Error(
         `API key is required for ${provider} provider. ` +
         `Provide it via config.apiKey or environment variable.`
@@ -176,8 +190,11 @@ export class EmbeddingService {
     this.modelName = config.modelName || this.getDefaultModelName(provider);
     this.dimensions = config.dimensions || this.getDefaultDimensions(provider);
 
-    // Lazily create the model
-    this.embeddingModel = this.createModel(provider, apiKey, this.modelName);
+    // OpenRouter uses native fetch API for better compatibility
+    // Other providers use AI SDK
+    if (provider !== 'openrouter') {
+      this.embeddingModel = this.createModel(provider, this.apiKey, this.modelName);
+    }
 
     console.log(`✅ EmbeddingService initialized with ${provider} provider (${this.modelName})`);
   }
@@ -193,6 +210,8 @@ export class EmbeddingService {
         return process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY || '';
       case 'openai':
         return process.env.OPENAI_API_KEY || '';
+      case 'openrouter':
+        return process.env.OPENROUTER_API_KEY || '';
       case 'cohere':
         return process.env.COHERE_API_KEY || '';
       default:
@@ -209,6 +228,8 @@ export class EmbeddingService {
         return 'text-embedding-004';
       case 'openai':
         return 'text-embedding-3-small';
+      case 'openrouter':
+        return 'google/gemini-embedding-001'; // Default OpenRouter embedding model
       case 'cohere':
         return 'embed-english-v3.0';
       default:
@@ -222,13 +243,15 @@ export class EmbeddingService {
   private getDefaultDimensions(provider: string): number {
     switch (provider) {
       case 'google':
-        return 768;
+        return 3072;
       case 'openai':
         return 1536; // text-embedding-3-small default
+      case 'openrouter':
+        return 3072; // google/gemini-embedding-001 returns 3072 dimensions
       case 'cohere':
         return 1024;
       default:
-        return 768;
+        return 3072;
     }
   }
 
@@ -254,6 +277,18 @@ export class EmbeddingService {
         }
         // OpenAI returns EmbeddingModelV2 but is compatible with ai SDK
         return openaiProvider.textEmbeddingModel(modelName) as unknown as EmbeddingModel<string>;
+      }
+
+      case 'openrouter': {
+        // OpenRouter uses OpenAI-compatible API with custom baseURL
+        if (!openrouterProvider) {
+          openrouterProvider = createOpenAI({
+            baseURL: 'https://openrouter.ai/api/v1',
+            apiKey,
+          });
+        }
+        // OpenRouter embedding models use the same interface as OpenAI
+        return openrouterProvider.textEmbeddingModel(modelName) as unknown as EmbeddingModel<string>;
       }
 
       case 'cohere': {
@@ -285,7 +320,16 @@ export class EmbeddingService {
     await this.checkRateLimit();
 
     try {
-      // Call ai-sdk embed function
+      // OpenRouter uses native fetch API for better compatibility
+      if (this.provider === 'openrouter') {
+        return await this.embedTextOpenRouter(options.text, startTime);
+      }
+
+      // Other providers use AI SDK
+      if (!this.embeddingModel) {
+        throw new Error('Embedding model not initialized');
+      }
+
       const result = await embed({
         model: this.embeddingModel,
         value: options.text,
@@ -309,6 +353,47 @@ export class EmbeddingService {
   }
 
   /**
+   * Generate embedding using OpenRouter native API
+   * Uses direct fetch to /api/v1/embeddings endpoint
+   */
+  private async embedTextOpenRouter(text: string, startTime: number): Promise<EmbeddingResult> {
+    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/personal-data-wallet',
+        'X-Title': 'Personal Data Wallet SDK'
+      },
+      body: JSON.stringify({
+        model: this.modelName,
+        input: text
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      throw new Error(`OpenRouter embedding failed: ${response.status} - ${errorData}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.data || !data.data[0] || !data.data[0].embedding) {
+      throw new Error('Invalid response from OpenRouter embeddings API');
+    }
+
+    this.requestCount++;
+
+    return {
+      vector: data.data[0].embedding,
+      dimension: data.data[0].embedding.length,
+      model: this.modelName,
+      processingTime: Date.now() - startTime,
+      tokenCount: data.usage?.total_tokens
+    };
+  }
+
+  /**
    * Generate embeddings for multiple texts (batched)
    */
   async embedBatch(
@@ -322,7 +407,16 @@ export class EmbeddingService {
     try {
       await this.checkRateLimit();
 
-      // Use ai-sdk's embedMany for batch processing
+      // OpenRouter uses native fetch API for better compatibility
+      if (this.provider === 'openrouter') {
+        return await this.embedBatchOpenRouter(texts, startTime);
+      }
+
+      // Other providers use AI SDK
+      if (!this.embeddingModel) {
+        throw new Error('Embedding model not initialized');
+      }
+
       const result = await embedMany({
         model: this.embeddingModel,
         values: texts,
@@ -349,6 +443,53 @@ export class EmbeddingService {
   }
 
   /**
+   * Generate batch embeddings using OpenRouter native API
+   */
+  private async embedBatchOpenRouter(texts: string[], startTime: number): Promise<BatchEmbeddingResult> {
+    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/personal-data-wallet',
+        'X-Title': 'Personal Data Wallet SDK'
+      },
+      body: JSON.stringify({
+        model: this.modelName,
+        input: texts
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      throw new Error(`OpenRouter batch embedding failed: ${response.status} - ${errorData}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.data || !Array.isArray(data.data)) {
+      throw new Error('Invalid response from OpenRouter embeddings API');
+    }
+
+    // Sort by index to ensure correct order
+    const sortedData = data.data.sort((a: any, b: any) => a.index - b.index);
+    const vectors = sortedData.map((item: any) => item.embedding);
+
+    this.requestCount++;
+    const totalTime = Date.now() - startTime;
+
+    return {
+      vectors,
+      dimension: vectors[0]?.length || this.dimensions,
+      model: this.modelName,
+      totalProcessingTime: totalTime,
+      averageProcessingTime: totalTime / texts.length,
+      successCount: vectors.length,
+      failedCount: texts.length - vectors.length
+    };
+  }
+
+  /**
    * Get provider-specific options
    */
   private getProviderOptions(options: EmbeddingOptions): any {
@@ -362,6 +503,14 @@ export class EmbeddingService {
         },
       };
     } else if (this.provider === 'openai') {
+      providerOpts.providerOptions = {
+        openai: {
+          dimensions: this.dimensions,
+        },
+      };
+    } else if (this.provider === 'openrouter') {
+      // OpenRouter uses OpenAI-compatible options
+      // Note: dimensions may not be supported for all models via OpenRouter
       providerOpts.providerOptions = {
         openai: {
           dimensions: this.dimensions,

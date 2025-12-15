@@ -149,12 +149,12 @@ export class ClientMemoryManager {
       this.embeddingService = new EmbeddingService({
         apiKey: this.config.geminiApiKey,
         model: 'text-embedding-004',
-        dimensions: 768
+        dimensions: 3072
       });
 
       this.geminiAIService = new GeminiAIService({
         apiKey: this.config.geminiApiKey,
-        model: 'gemini-2.5-flash-lite',
+        model: process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
         temperature: 0.1
       });
 
@@ -178,7 +178,7 @@ export class ClientMemoryManager {
     try {
       const service = await createHnswService({
         indexConfig: {
-          dimension: 768,
+          dimension: 3072,
           maxElements: 10000,
           m: 16,
           efConstruction: 200

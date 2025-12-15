@@ -146,7 +146,7 @@ export class PDWVectorStore extends VectorStore {
     this.embeddingService = new EmbeddingService({
       apiKey: this.config.geminiApiKey,
       model: this.config.embeddingModel || 'text-embedding-004',
-      dimensions: this.config.embeddingDimensions || 768,
+      dimensions: this.config.embeddingDimensions || 3072,
     });
 
     this.storageService = new StorageService({
@@ -159,7 +159,7 @@ export class PDWVectorStore extends VectorStore {
       this.storageService,
       {
         maxElements: this.config.maxElements || 10000,
-        dimension: this.config.embeddingDimensions || 768,
+        dimension: this.config.embeddingDimensions || 3072,
         efConstruction: this.config.efConstruction || 200,
         m: this.config.m || 16,
       }

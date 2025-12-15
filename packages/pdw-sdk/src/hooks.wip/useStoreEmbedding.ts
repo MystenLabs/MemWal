@@ -231,7 +231,7 @@ export function useStoreEmbedding(
       const embeddingService = new EmbeddingService({
         apiKey: geminiApiKey,
         model: 'text-embedding-004',
-        dimensions: 768
+        dimensions: 3072
       });
 
       const embeddingStartTime = Date.now();

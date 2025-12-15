@@ -20,6 +20,11 @@ export interface ClassificationOptions {
   confidenceThreshold?: number;
   categories?: string[];
   patterns?: RegExp[];
+  /**
+   * If true, only explicit memory commands trigger save (e.g., "remember that", "store in memory")
+   * Default: true - to give users control over what gets saved
+   */
+  explicitOnly?: boolean;
 }
 
 export interface PatternAnalysisResult {
@@ -40,8 +45,26 @@ export class ClassifierService {
   private embeddingService?: EmbeddingService;
   private aiApiKey?: string;
   
-  // Regex patterns for detecting factual statements (adapted from backend)
+  // Explicit memory command patterns - only these trigger by default
+  private readonly explicitPatterns: RegExp[] = [
+    // Explicit memory requests
+    /remember that ([^.!?]+)/i,
+    /remember:?\s*([^.!?]+)/i,
+    /don't forget that ([^.!?]+)/i,
+    /don't forget:?\s*([^.!?]+)/i,
+    /please remember ([^.!?]+)/i,
+    /store (?:this )?(?:in|to) memory:?\s*([^.!?]*)/i,
+    /save (?:this )?(?:in|to) memory:?\s*([^.!?]*)/i,
+    /add (?:this )?to (?:my )?memory:?\s*([^.!?]*)/i,
+    /keep in mind:?\s*([^.!?]+)/i,
+    /note that ([^.!?]+)/i,
+  ];
+
+  // Full regex patterns for detecting factual statements (used when explicitOnly=false)
   private readonly factPatterns: RegExp[] = [
+    // Include explicit patterns first
+    ...this.explicitPatterns,
+
     // Personal information
     /my name is ([a-zA-Z\s]+)/i,
     /my email is ([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i,
@@ -63,11 +86,6 @@ export class ClassifierService {
     /i don't like ([^.!?]+)/i,
     /my favorite ([^.!?]+) is ([^.!?]+)/i,
     /my favourite ([^.!?]+) is ([^.!?]+)/i,
-
-    // Explicit memory requests
-    /remember that ([^.!?]+)/i,
-    /don't forget that ([^.!?]+)/i,
-    /please remember ([^.!?]+)/i,
 
     // Personal facts
     /i am ([^.!?]+)/i,
@@ -103,8 +121,14 @@ export class ClassifierService {
 
     // Explicit memory requests
     'remember that': 'custom',
+    'remember': 'custom',
     "don't forget": 'custom',
     'please remember': 'custom',
+    'store': 'custom',
+    'save': 'custom',
+    'add': 'custom',
+    'keep in mind': 'custom',
+    'note that': 'custom',
 
     // Personal facts
     'i am': 'personal_info',
@@ -145,7 +169,8 @@ export class ClassifierService {
       const {
         useAI = true,
         confidenceThreshold = 0.7,
-        patterns = this.factPatterns
+        explicitOnly = true, // Default to explicit-only mode for user control
+        patterns = explicitOnly ? this.explicitPatterns : this.factPatterns
       } = options;
 
       // Step 1: Check for obvious patterns using regex
@@ -349,21 +374,27 @@ export class ClassifierService {
     // Base confidence for any pattern match
     let confidence = 0.85;
 
-    // Higher confidence for explicit statements
-    if (pattern.source.includes('my name is') || 
-        pattern.source.includes('remember that') ||
-        pattern.source.includes('don\'t forget')) {
+    // Highest confidence for explicit memory commands
+    if (pattern.source.includes('remember') ||
+        pattern.source.includes('forget') ||
+        pattern.source.includes('store') ||
+        pattern.source.includes('save') ||
+        pattern.source.includes('note that') ||
+        pattern.source.includes('keep in mind')) {
+      confidence = 0.98;
+    }
+    // High confidence for specific personal info
+    else if (pattern.source.includes('my name is')) {
       confidence = 0.95;
     }
-
     // Higher confidence for specific patterns (email, phone, etc.)
-    if (pattern.source.includes('@') || pattern.source.includes('[0-9]')) {
+    else if (pattern.source.includes('@') || pattern.source.includes('[0-9]')) {
       confidence = 0.92;
     }
 
     // Adjust based on match length (longer matches tend to be more specific)
     if (match.length > 30) {
-      confidence = Math.min(confidence + 0.05, 1.0);
+      confidence = Math.min(confidence + 0.02, 1.0);
     }
 
     return confidence;

@@ -468,7 +468,7 @@ export class WalrusStorageService {
       category,
       topic: topic || `Memory about ${category}`,
       importance: Math.max(1, Math.min(10, importance)),
-      embeddingDimension: 768,
+      embeddingDimension: 3072,
       createdTimestamp: timestamp,
       customMetadata
     };
@@ -526,7 +526,7 @@ export class WalrusStorageService {
         category: 'unknown',
         topic: 'Retrieved memory',
         importance: 5,
-        embeddingDimension: 768,
+        embeddingDimension: 3072,
         createdTimestamp: Date.now()
       };
 

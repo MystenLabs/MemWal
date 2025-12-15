@@ -320,7 +320,7 @@ export class ChatService {
   /**
    * Create a convenient chat interface with session management
    */
-  async createChatInterface(userAddress: string, modelName: string = 'gemini-2.5-flash-lite') {
+  async createChatInterface(userAddress: string, modelName: string = process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash') {
     const sessionResponse = await this.createSession({
       userAddress,
       modelName,

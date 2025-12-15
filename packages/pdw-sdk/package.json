@@ -1,6 +1,6 @@
 {
   "name": "personal-data-wallet-sdk",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "TypeScript SDK for Personal Data Wallet - Decentralized memory system with AI embeddings, HNSW vector search, SEAL encryption and Walrus storage",
   "type": "module",
   "main": "dist/index.js",
@@ -37,7 +37,7 @@
   ],
   "scripts": {
     "build": "npm run build:ts && node scripts/fix-esm-imports.cjs",
-    "build:full": "npm run codegen && npm run build:ts && node scripts/fix-esm-imports.cjs",
+    "build:full": "npm run codegen && npm run build:ts &&                               ",
     "build:ts": "tsc",
     "build:browser": "npx esbuild src/index.ts --bundle --format=esm --outfile=dist-browser/pdw-sdk.browser.js --platform=browser --external:@mysten/sui --external:@mysten/sui/* --external:@mysten/walrus --external:@mysten/walrus-wasm --external:fs --external:path --external:fs/promises --external:crypto --sourcemap --target=es2022",
     "codegen": "sui-ts-codegen generate && node scripts/fix-codegen-paths.cjs",
@@ -100,8 +100,8 @@
     }
   },
   "dependencies": {
-    "@ai-sdk/google": "^1.0.0",
-    "@ai-sdk/openai": "^2.0.68",
+    "@ai-sdk/google": "^2.0.46",
+    "@ai-sdk/openai": "^2.0.86",
     "@google/genai": "^1.20.0",
     "@langchain/core": "^0.3.0",
     "@langchain/google-genai": "^0.1.12",
@@ -112,7 +112,7 @@
     "@mysten/sui": ">=1.44.0",
     "@mysten/utils": "^0.2.0",
     "@mysten/walrus": "^0.8.3",
-    "ai": "^4.0.0",
+    "ai": "^5.0.113",
     "eventemitter3": "^5.0.1",
     "hnswlib-node": "^3.0.0",
     "hnswlib-wasm": "^0.8.2",
