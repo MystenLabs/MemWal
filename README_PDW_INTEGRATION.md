@@ -2,32 +2,62 @@
 
 ## 🎯 Quick Status
 
-- ✅ **SDK Installed**: v0.3.4
+- ✅ **SDK Installed**: v0.5.1
 - ✅ **Personal Data Detection**: Working
-- ✅ **Blockchain Storage**: Working  
+- ✅ **Blockchain Storage**: Working
 - ✅ **Knowledge Graph**: Working
-- ⚠️ **Vector Search/RAG**: Disabled (requires browser APIs)
+- ✅ **Vector Search/RAG**: Working (with hnswlib-node)
 
 ---
 
 ## 🚀 How to Use
 
-### 1. Start Server
+### 1. Install Dependencies
+
+```bash
+pnpm install
+```
+
+### 2. Build Native Addon (hnswlib-node)
+
+`hnswlib-node` is a native Node.js addon for HNSW vector search. It requires compilation:
+
+```bash
+cd node_modules/.pnpm/hnswlib-node@3.0.0/node_modules/hnswlib-node
+npx node-gyp configure && npx node-gyp build
+```
+
+**Why is this needed?**
+
+- `hnswlib-node` contains C++ code that must be compiled for your specific Node.js version, OS, and architecture
+- pnpm ignores build scripts by default (security)
+- Without the compiled `addon.node` file, the app will crash with "Could not locate the bindings file"
+
+**When to rebuild:**
+
+- After `pnpm install` or clearing `node_modules`
+- After upgrading Node.js version
+- When switching between different machines/environments
+
+### 3. Start Server
+
 ```bash
 pnpm run dev
 ```
 
-### 2. Visit Showcase
-```
+### 4. Visit Showcase
+
+```text
 http://localhost:3000/showcase
 ```
 
-### 3. Send Personal Data
-```
+### 5. Send Personal Data
+
+```text
 "My name is [Your Name] and I love [hobby]"
 ```
 
-### 4. Check Results
+### 6. Check Results
 - **Console**: Look for ✅ "Memory stored on blockchain!"
 - **UI**: Click "[N] memories stored" button
 - **Blockchain**: Copy Memory ID → Visit Sui Explorer
@@ -146,54 +176,35 @@ Test these scenarios:
 
 ## 🐛 Known Limitations
 
-### 1. No RAG (Retrieval-Augmented Generation)
-**Issue**: Vector search requires local indexing (disabled)
+### 1. Native Addon Build Required
 
-**Impact**: AI can't retrieve past memories in responses
+**Issue**: `hnswlib-node` requires manual compilation after install
 
-**Workaround**: None yet. SDK needs server-side search option.
+**Impact**: App crashes with "Could not locate the bindings file" if not built
 
-**When Fixed**: AI will remember and reference past conversations
-
-### 2. No Semantic Search
-**Issue**: Same as above (no local indexing)
-
-**Impact**: Can't search memories by meaning
-
-**Workaround**: None. Can list all memories, but not search.
-
-### 3. Patch Required After `pnpm install`
-**Issue**: `ConsentRepository.js` has top-level await bug
-
-**Fix**: Run `./scripts/patch-pdw-sdk.sh` after any SDK reinstall
+**Fix**: See "Build Native Addon (hnswlib-node)" section above
 
 ---
 
 ## 📞 Support & Bug Reports
 
-### Files to Send SDK Author:
-1. `SDK_BUG_v0.3.4.md` - Top-level await bug
-2. This integration report (show what's working/broken)
+For issues with the SDK, check:
 
-### What to Request:
-1. Fix top-level await in `ConsentRepository.js`
-2. Add server-side vector search (query on-chain HNSW index)
-3. Better environment detection (browser vs Node.js)
-4. Publish fixed version (v0.3.5 or v0.4.0)
+- [personal-data-wallet-sdk on npm](https://www.npmjs.com/package/personal-data-wallet-sdk)
+- SDK documentation in `packages/pdw-sdk/docs/`
 
 ---
 
 ## 🎉 What's Actually Working
 
-Despite the limitations, you have:
 - ✅ **AI-powered personal data detection**
 - ✅ **Blockchain memory storage** (Sui + Walrus)
 - ✅ **Decentralized, encrypted storage**
 - ✅ **Knowledge graph extraction**
+- ✅ **Vector search/RAG** (with hnswlib-node)
 - ✅ **Beautiful UI with blockchain references**
 - ✅ **Persistent memories** (survive page refresh)
-
-**This is already impressive!** The RAG feature will come once SDK adds server-side search. 🚀
+- ✅ **Real-time timestamps** (using Sui Clock)
 
 ---
 
