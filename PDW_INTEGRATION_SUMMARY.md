@@ -115,16 +115,16 @@ From your `.env` file:
 ```bash
 # Sui Blockchain
 SUI_NETWORK=testnet
-PACKAGE_ID=0xf63a61b8d056ffb2e0efdd057445e15c9c64a1c6f2d13516812d7031b7e7dc9e
-SUI_PRIVATE_KEY=suiprivkey1qzh3rwxxfs38d53p4v98ddnf4dcrad6qs872gvgus6ff5qa852qvsmwgcx5
-WALLET_ADDRESS=0xb59f00b2454bef14d538b3609fb99e32fcf17f96ce7a4195d145ca67b1c93e07
+PACKAGE_ID=<your-package-id>
+SUI_PRIVATE_KEY=<your-sui-private-key>
+WALLET_ADDRESS=<your-wallet-address>
 
 # Walrus Storage
 WALRUS_PUBLISHER=https://publisher.walrus-testnet.walrus.space
 WALRUS_AGGREGATOR=https://aggregator.walrus-testnet.walrus.space
 
 # AI Services
-# API keys should be stored in .env file, not committed to git
+GEMINI_API_KEY=<your-gemini-api-key>
 ```
 
 ### PDW Features Enabled

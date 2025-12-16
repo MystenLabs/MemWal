@@ -21,7 +21,8 @@ async function runFullMemoryCycle() {
   // Configuration
   const packageId = process.env.SUI_PACKAGE_ID || '0xe17807a2cfdb60c506ecdb6c24fe407384d9287fc5d7ae677872ba1b7f8d8623';
   const privateKey = process.env.TEST_PRIVATE_KEY || 'suiprivkey1qzgvdp7vl3c50nqpyxpzpvlvlvnqzlvnqzlvnqzlvnqzlvnqzlvnqzlvnqzlv';
-  const googleApiKey = process.env.GOOGLE_AI_API_KEY || 'AIzaSyBUmLkn4M7ZfZvZIRHAx7yGv2K63MDpPaI';
+  const googleApiKey = process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY;
+  if (!googleApiKey) throw new Error('GOOGLE_AI_API_KEY or GEMINI_API_KEY required');
   const testContent = "I am a blockchain engineer working on decentralized storage solutions in Silicon Valley";
 
   console.log('📋 Test Configuration:');
