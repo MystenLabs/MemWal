@@ -23,6 +23,9 @@ pnpm-debug.log*
 .env
 .env*.local
 .env.production
+.env.test
+*/.env.test
+**/.env.test
 
 # Editor directories and files
 .vscode/*
