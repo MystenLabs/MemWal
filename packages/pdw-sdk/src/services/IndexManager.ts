@@ -645,11 +645,12 @@ export class IndexManager {
     }
 
     // Build serialized package
+    const currentState = this.indexStates.get(spaceId);
     const pkg: SerializedIndexPackage = {
       formatVersion: '1.0',
       spaceId,
-      version: (this.indexStates.get(spaceId)?.version || 0) + 1,
-      dimension: 3072, // TODO: Get from index
+      version: (currentState?.version || 0) + 1,
+      dimension: currentState?.dimension || 3072,
       timestamp: Date.now(),
       vectors: allVectors
         .filter(({ vectorId }) => vectorMap.has(vectorId))
@@ -744,7 +745,7 @@ export class IndexManager {
       formatVersion: '1.0',
       spaceId,
       version: newVersion,
-      dimension: 3072,
+      dimension: currentState?.dimension || 3072,
       timestamp: Date.now(),
       vectors: allVectors
         .filter(({ vectorId }) => vectorMap.has(vectorId))
