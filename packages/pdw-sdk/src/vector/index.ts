@@ -50,25 +50,6 @@ export type {
   VectorError
 } from '../embedding/types';
 
-// Lazy exports for specific implementations (use dynamic import)
-// These avoid static import of WASM/native modules at module load time
-
-/**
- * @deprecated Use createHnswService() instead for automatic environment detection
- */
-export const getBrowserHnswService = async () => {
-  const { BrowserHnswIndexService } = await import('./BrowserHnswIndexService');
-  return BrowserHnswIndexService;
-};
-
-/**
- * @deprecated Use createHnswService() instead for automatic environment detection
- */
-export const getNodeHnswService = async () => {
-  const { NodeHnswService } = await import('./NodeHnswService');
-  return NodeHnswService;
-};
-
 // Default export with lazy loaders
 export default {
   createHnswService: async () => (await import('./createHnswService')).createHnswService,

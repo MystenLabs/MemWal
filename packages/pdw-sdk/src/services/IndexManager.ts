@@ -861,7 +861,7 @@ export class IndexManager {
     vector: number[],
     metadata?: any
   ): Promise<void> {
-    await this.vectorService.addVector(spaceId, vectorId, metadata);
+    await this.vectorService.addVector(spaceId, vectorId, vector, metadata);
 
     // Cache vector for later serialization
     let vectorMap = this.vectorCache.get(spaceId);
