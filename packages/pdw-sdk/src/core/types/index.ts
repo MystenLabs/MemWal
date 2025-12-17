@@ -5,6 +5,25 @@
 import type { Transaction, TransactionArgument } from '@mysten/sui/transactions';
 import type { Signer } from '@mysten/sui/cryptography';
 
+// Batch processing types
+export interface BatchConfig {
+  batchSize: number;
+  delayMs: number;
+}
+
+export interface BatchStats {
+  totalBatches: number;
+  totalItems: number;
+  averageBatchSize: number;
+  totalProcessingTime: number;
+  averageProcessingTime: number;
+  successCount: number;
+  errorCount: number;
+  lastProcessed: Date;
+  pendingBatches: number;
+  processedToday: number;
+}
+
 // Base configuration for the SDK
 export interface PDWConfig {
   /** Package ID for the deployed Move contracts */
