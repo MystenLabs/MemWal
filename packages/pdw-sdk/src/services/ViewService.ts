@@ -65,6 +65,8 @@ export interface ContentRegistry {
 
 export class ViewService {
   private static readonly MAX_QUERY_LIMIT = 50;
+  private static readonly MAX_RETRIES = 3;
+  private static readonly RETRY_DELAY_MS = 1000;
   private client: SuiClient;
   private config: PDWConfig;
 
@@ -72,6 +74,38 @@ export class ViewService {
     // Extract SuiClient from the core API wrapper
     this.client = (client as any).client || client;
     this.config = config;
+  }
+
+  /**
+   * Retry wrapper with exponential backoff for network operations
+   */
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    operationName: string
+  ): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= ViewService.MAX_RETRIES; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        const isNetworkError = error.message?.includes('fetch failed') ||
+                               error.message?.includes('ECONNREFUSED') ||
+                               error.message?.includes('ETIMEDOUT') ||
+                               error.code === 'ENOTFOUND';
+
+        if (!isNetworkError || attempt === ViewService.MAX_RETRIES) {
+          throw error;
+        }
+
+        const delay = ViewService.RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+        console.warn(`[ViewService] ${operationName} failed (attempt ${attempt}/${ViewService.MAX_RETRIES}), retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
   }
 
   // ==================== MEMORY QUERIES ====================
@@ -89,18 +123,21 @@ export class ViewService {
     hasMore: boolean;
   }> {
     try {
-      const response = await this.client.getOwnedObjects({
-        owner: userAddress,
-        filter: {
-          StructType: `${this.config.packageId}::memory::Memory`,
-        },
-        options: {
-          showContent: true,
-          showType: true,
-        },
-        limit: options?.limit || 50,
-        cursor: options?.cursor,
-      });
+      const response = await this.withRetry(
+        () => this.client.getOwnedObjects({
+          owner: userAddress,
+          filter: {
+            StructType: `${this.config.packageId}::memory::Memory`,
+          },
+          options: {
+            showContent: true,
+            showType: true,
+          },
+          limit: options?.limit || 50,
+          cursor: options?.cursor,
+        }),
+        'getUserMemories'
+      );
 
       const memories: MemoryRecord[] = [];
       
@@ -147,13 +184,16 @@ export class ViewService {
    */
   async getMemory(memoryId: string): Promise<MemoryRecord | null> {
     try {
-      const response = await this.client.getObject({
-        id: memoryId,
-        options: {
-          showContent: true,
-          showType: true,
-        },
-      });
+      const response = await this.withRetry(
+        () => this.client.getObject({
+          id: memoryId,
+          options: {
+            showContent: true,
+            showType: true,
+          },
+        }),
+        'getMemory'
+      );
 
       if (!response.data?.content || !('fields' in response.data.content)) {
         return null;
@@ -186,17 +226,20 @@ export class ViewService {
    */
   async getMemoryIndex(userAddress: string): Promise<MemoryIndex | null> {
     try {
-      const response = await this.client.getOwnedObjects({
-        owner: userAddress,
-        filter: {
-          StructType: `${this.config.packageId}::memory::MemoryIndex`,
-        },
-        options: {
-          showContent: true,
-          showType: true,
-        },
-        limit: 1,
-      });
+      const response = await this.withRetry(
+        () => this.client.getOwnedObjects({
+          owner: userAddress,
+          filter: {
+            StructType: `${this.config.packageId}::memory::MemoryIndex`,
+          },
+          options: {
+            showContent: true,
+            showType: true,
+          },
+          limit: 1,
+        }),
+        'getMemoryIndex'
+      );
 
       if (response.data.length === 0) {
         return null;

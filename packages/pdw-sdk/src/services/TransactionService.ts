@@ -1,4 +1,4 @@
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction, SerialTransactionExecutor } from '@mysten/sui/transactions';
 import { SuiClient } from '@mysten/sui/client';
 import {
   PDWConfig,
@@ -23,12 +23,45 @@ import * as CapabilityModule from '../generated/pdw/capability';
 /**
  * TransactionService provides high-level transaction building and execution
  * for Personal Data Wallet Move contracts with proper error handling and gas management.
+ *
+ * Uses SerialTransactionExecutor to prevent gas coin version conflicts and equivocation
+ * when multiple transactions are executed in sequence. The executor caches object versions
+ * and manages gas coins automatically.
+ *
+ * @see https://sdk.mystenlabs.com/typescript/executors
  */
 export class TransactionService {
+  private executor: SerialTransactionExecutor | null = null;
+  private currentSigner: any = null;
+
   constructor(
     private client: SuiClient,
     private config: PDWConfig
   ) {}
+
+  /**
+   * Get or create SerialTransactionExecutor for the given signer.
+   * The executor caches object versions and prevents equivocation.
+   */
+  private getExecutor(signer: any): SerialTransactionExecutor {
+    // Create new executor if signer changed or doesn't exist
+    if (!this.executor || this.currentSigner !== signer) {
+      this.executor = new SerialTransactionExecutor({
+        client: this.client,
+        signer,
+      });
+      this.currentSigner = signer;
+    }
+    return this.executor;
+  }
+
+  /**
+   * Reset the executor (useful when gas coin is exhausted or for cleanup)
+   */
+  resetExecutor(): void {
+    this.executor = null;
+    this.currentSigner = null;
+  }
 
   // ==================== MEMORY TRANSACTIONS ====================
 
@@ -373,13 +406,132 @@ export class TransactionService {
   // ==================== EXECUTION METHODS ====================
 
   /**
-   * Execute a transaction and return structured result
+   * Execute a transaction using SerialTransactionExecutor with automatic retry.
    *
-   * Note: For version conflict errors (stale gas coin), retry logic should be
-   * implemented at the caller level with a fresh transaction build, since
-   * the transaction object holds reference to the gas coin.
+   * The executor automatically:
+   * - Caches object versions to prevent version conflicts within same session
+   * - Manages gas coins to prevent equivocation (24h lock)
+   * - Queues transactions sequentially for safe execution
+   *
+   * When version conflict occurs (external modification), the executor cache
+   * is reset and transaction is retried with fresh object references.
+   *
+   * @see https://sdk.mystenlabs.com/typescript/executors
+   * @see https://docs.sui.io/concepts/sui-architecture/epochs#equivocation
    */
   async executeTransaction(
+    tx: Transaction,
+    signer: any,
+    options: TransactionOptions = {}
+  ): Promise<TransactionResult> {
+    const maxRetries = 3;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Set sender if provided
+        if (options.sender) {
+          tx.setSender(options.sender);
+        }
+
+        // Use SerialTransactionExecutor to prevent equivocation and version conflicts
+        const executor = this.getExecutor(signer);
+        // Pass options to get full response data including objectChanges
+        const executorResult = await executor.executeTransaction(tx, {
+          showEffects: true,
+          showObjectChanges: true,
+          showEvents: true,
+        });
+
+        // SerialTransactionExecutor returns { digest, effects (string), data (SuiTransactionBlockResponse) }
+        // The actual response data is in executorResult.data
+        const result = executorResult.data;
+
+        // Parse the result
+        const transactionResult: TransactionResult = {
+          digest: executorResult.digest,
+          effects: result.effects,
+          status: result.effects?.status?.status === 'success' ? 'success' : 'failure',
+          gasUsed: result.effects?.gasUsed?.computationCost
+            ? Number(result.effects.gasUsed.computationCost)
+            : undefined,
+        };
+
+        // Extract created objects
+        if (result.objectChanges) {
+          transactionResult.createdObjects = result.objectChanges
+            .filter((change: any) => change.type === 'created')
+            .map((change: any) => ({
+              objectId: change.objectId,
+              objectType: change.objectType || 'unknown',
+            }));
+
+          transactionResult.mutatedObjects = result.objectChanges
+            .filter((change: any) => change.type === 'mutated')
+            .map((change: any) => ({
+              objectId: change.objectId,
+              objectType: change.objectType || 'unknown',
+            }));
+
+          transactionResult.deletedObjects = result.objectChanges
+            .filter((change: any) => change.type === 'deleted')
+            .map((change: any) => change.objectId);
+        }
+
+        // Add error if transaction failed
+        if (transactionResult.status === 'failure') {
+          transactionResult.error = result.effects?.status?.error || 'Unknown transaction error';
+        }
+
+        return transactionResult;
+      } catch (error: any) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+
+        // Check if it's a version conflict error (external modification)
+        const isVersionConflict =
+          errorMsg.includes('is not available for consumption') ||
+          errorMsg.includes('current version') ||
+          errorMsg.includes('ObjectVersionTooOld') ||
+          errorMsg.includes('EquivocationError');
+
+        if (isVersionConflict && attempt < maxRetries) {
+          // Reset executor cache to get fresh object versions
+          console.log(`⚠️ Version conflict detected (attempt ${attempt}/${maxRetries}), resetting cache...`);
+          await this.executor?.resetCache();
+
+          // Exponential backoff: 500ms, 1000ms, 2000ms
+          const delay = 500 * Math.pow(2, attempt - 1);
+          console.log(`   Retrying in ${delay}ms with fresh object references...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
+        console.error('Transaction execution failed:', error);
+        // Reset executor on final failure to get fresh state for next call
+        this.resetExecutor();
+        return {
+          digest: '',
+          status: 'failure',
+          error: errorMsg,
+        };
+      }
+    }
+
+    // Should never reach here, but TypeScript needs a return
+    return {
+      digest: '',
+      status: 'failure',
+      error: 'Max retries exceeded',
+    };
+  }
+
+  /**
+   * Execute a transaction directly without the executor (legacy method).
+   * Use this only when you need direct control over execution or for one-off transactions.
+   *
+   * WARNING: This method does not protect against equivocation.
+   * For sequential transactions, use executeTransaction() instead.
+   */
+  async executeTransactionDirect(
     tx: Transaction,
     signer: any,
     options: TransactionOptions = {}
@@ -390,7 +542,7 @@ export class TransactionService {
         tx.setSender(options.sender);
       }
 
-      // Execute the transaction
+      // Execute the transaction directly
       const result = await this.client.signAndExecuteTransaction({
         transaction: tx,
         signer,
@@ -402,8 +554,6 @@ export class TransactionService {
       });
 
       // Wait for transaction to be finalized on-chain
-      // This prevents gas coin version conflicts in subsequent transactions
-      // by ensuring the gas coin state is updated on the network
       if (result.digest) {
         try {
           await this.client.waitForTransaction({
@@ -411,7 +561,6 @@ export class TransactionService {
             options: { showEffects: true },
           });
         } catch (waitError) {
-          // Log but don't fail - transaction was already submitted
           console.warn('waitForTransaction warning:', waitError);
         }
       }

@@ -8,7 +8,8 @@ async function testGoogleEmbedding() {
   console.log('🔍 Testing Google AI Embedding Generation');
   console.log('==========================================\n');
 
-  const googleApiKey = 'AIzaSyBUmLkn4M7ZfZvZIRHAx7yGv2K63MDpPaI';
+  const googleApiKey = process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY;
+  if (!googleApiKey) throw new Error('GOOGLE_AI_API_KEY or GEMINI_API_KEY required');
   const testInputs = [
     "I am a software engineer",
     "The weather is beautiful today",

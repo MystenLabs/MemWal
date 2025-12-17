@@ -24,7 +24,8 @@ async function runMemoryWorkflowWithSeal() {
   // Configuration
   const packageId = process.env.SUI_PACKAGE_ID || '0x4679ded81ece3dbc13e1d76e1785a45c3da25f0268d7584219a3e0a3e1e998ab';
   const privateKey = process.env.TEST_PRIVATE_KEY || 'suiprivkey1qp0f8lavfvndyru7e2v4rrtevlnmzemsppudkgc6s8grz9v7y4p4sp905g6';
-  const googleApiKey = process.env.GOOGLE_AI_API_KEY || 'AIzaSyBUmLkn4M7ZfZvZIRHAx7yGv2K63MDpPaI';
+  const googleApiKey = process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY;
+  if (!googleApiKey) throw new Error('GOOGLE_AI_API_KEY or GEMINI_API_KEY required');
   const userInput = "i am living in Ho Chi Minh City";
 
   console.log('📋 Configuration:');

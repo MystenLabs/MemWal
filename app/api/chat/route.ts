@@ -29,18 +29,34 @@ export async function POST(req: Request) {
         console.log(`🔍 Processing message: "${latestUserMessage.content.substring(0, 50)}..."`)
         const pdw = await getPDWClient()
 
-        // Step 1: Check for explicit memory command (e.g., "remember that X")
-        const memoryContent = pdw.ai.extractMemoryContent(latestUserMessage.content)
-        if (memoryContent) {
-          console.log(`💾 Explicit memory command detected: "${memoryContent}"`)
+        // Step 1: Check for explicit memory commands (supports multiple memories in one prompt)
+        // e.g., "Remember that my name is John, I work at Acme Corp, and my favorite color is blue"
+        const memoryContents = pdw.ai.extractMultipleMemories(latestUserMessage.content)
+        if (memoryContents.length > 0) {
+          console.log(`💾 Memory command detected: ${memoryContents.length} memories to save`)
+          memoryContents.forEach((m: string, i: number) => console.log(`   ${i + 1}. "${m}"`))
+
           try {
-            const saveResult = await pdw.memory.create(memoryContent, {
-              category: 'custom',
-              importance: 5,
-            })
-            memorySaved = true
-            savedMemoryContent = memoryContent
-            console.log(`✅ Memory saved to blockchain: ${saveResult.id}`)
+            if (memoryContents.length === 1) {
+              // Single memory - use regular create
+              const saveResult = await pdw.memory.create(memoryContents[0], {
+                category: 'custom',
+                importance: 5,
+              })
+              memorySaved = true
+              savedMemoryContent = memoryContents[0]
+              console.log(`✅ Memory saved to blockchain: ${saveResult.id}`)
+            } else {
+              // Multiple memories - use batch create with Quilt (single transaction!)
+              const saveResults = await pdw.memory.createBatch(memoryContents, {
+                category: 'custom',
+                importance: 5,
+              })
+              memorySaved = true
+              savedMemoryContent = memoryContents.join('; ')
+              console.log(`✅ ${saveResults.length} memories saved to blockchain via Quilt batch`)
+              saveResults.forEach((r: { id: string }, i: number) => console.log(`   ${i + 1}. ${r.id}`))
+            }
           } catch (saveError) {
             console.error('⚠️ Failed to save memory:', saveError)
           }
@@ -48,8 +64,8 @@ export async function POST(req: Request) {
 
         console.log(`🔍 PDW search.vector available: ${typeof pdw.search?.vector}`)
         const searchResults = await pdw.search.vector(latestUserMessage.content, {
-          limit: 5,
-          threshold: 0.3,  // Lower threshold to find more results
+          limit: 10,  // Increased from 5 to return more memories
+          threshold: 0.5,  // Lower threshold to find more results
           fetchContent: true  // Fetch content from Walrus
         })
 

@@ -1,6 +1,6 @@
 {
   "name": "personal-data-wallet-sdk",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "TypeScript SDK for Personal Data Wallet - Decentralized memory system with AI embeddings, HNSW vector search, SEAL encryption and Walrus storage",
   "type": "module",
   "main": "dist/index.js",
@@ -114,9 +114,11 @@
     "@mysten/walrus": "^0.8.3",
     "ai": "^5.0.113",
     "eventemitter3": "^5.0.1",
-    "hnswlib-node": "^3.0.0",
     "hnswlib-wasm": "^0.8.2",
     "sha3": "^2.1.4"
+  },
+  "optionalDependencies": {
+    "hnswlib-node": "^3.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",

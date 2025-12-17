@@ -16,7 +16,8 @@ import type {
   IHnswIndexConfig,
   IHnswSearchOptions,
   IHnswSearchResultItem,
-  IHnswBatchStats
+  IHnswBatchStats,
+  WalrusBackupConfig
 } from './IHnswService';
 
 // Dynamic import types for hnswlib-node
@@ -31,6 +32,7 @@ interface IndexCacheEntry {
   version: number;
   metadata: Map<number, any>;
   dimensions: number;
+  walrusBlobId?: string; // Walrus blob ID if backed up
 }
 
 /**
@@ -41,6 +43,7 @@ export class NodeHnswService implements IHnswService {
   private readonly indexCache = new Map<string, IndexCacheEntry>();
   private readonly indexConfig: Required<IHnswIndexConfig>;
   private readonly indexDirectory: string;
+  private readonly walrusConfig?: WalrusBackupConfig;
   private batchProcessor?: ReturnType<typeof setInterval>;
   private initPromise: Promise<void> | null = null;
   private _isInitialized = false;
@@ -64,6 +67,7 @@ export class NodeHnswService implements IHnswService {
     };
 
     this.indexDirectory = config.indexDirectory || './.pdw-indexes';
+    this.walrusConfig = config.walrusBackup;
   }
 
   /**
@@ -87,7 +91,8 @@ export class NodeHnswService implements IHnswService {
 
       // Dynamic import to avoid bundling issues
       const hnswModule = await import('hnswlib-node');
-      this.hnswlib = hnswModule;
+      // hnswlib-node exports as default in ESM
+      this.hnswlib = hnswModule.default || hnswModule;
 
       // Ensure index directory exists
       const fs = await import('fs/promises');
@@ -360,10 +365,22 @@ export class NodeHnswService implements IHnswService {
       for (const [k, v] of entry.metadata) {
         metadataObj[k] = v;
       }
+
+      // Preserve existing walrus blob ID if present
+      const existingMeta: Record<string, any> = {};
+      try {
+        const existingContent = await fs.readFile(metadataPath, 'utf-8');
+        Object.assign(existingMeta, JSON.parse(existingContent));
+      } catch {
+        // No existing metadata file
+      }
+
       await fs.writeFile(metadataPath, JSON.stringify({
         version: entry.version,
         dimensions: entry.dimensions,
-        metadata: metadataObj
+        metadata: metadataObj,
+        walrusBlobId: existingMeta.walrusBlobId,
+        walrusSyncTime: existingMeta.walrusSyncTime
       }));
 
       // Update fileModifiedTime to match the file we just saved
@@ -371,6 +388,14 @@ export class NodeHnswService implements IHnswService {
       entry.fileModifiedTime = stats.mtimeMs;
       entry.isDirty = false;
       console.log(`[NodeHnswService] Saved index for ${userAddress} (mtime: ${entry.fileModifiedTime})`);
+
+      // Auto-sync to Walrus if enabled
+      if (this.walrusConfig?.enabled && this.walrusConfig.autoSync !== false) {
+        // Run sync in background to not block saveIndex
+        this.syncToWalrus(userAddress).catch(err => {
+          console.error('[NodeHnswService] Auto-sync to Walrus failed:', err);
+        });
+      }
     } catch (error) {
       console.error('[NodeHnswService] Save index error:', error);
       throw error;
@@ -405,12 +430,14 @@ export class NodeHnswService implements IHnswService {
       let metadata = new Map<number, any>();
       let version = 1;
       let dimensions = this.indexConfig.dimension;
+      let walrusBlobId: string | undefined;
 
       try {
         const metaContent = await fs.readFile(metadataPath, 'utf-8');
         const metaObj = JSON.parse(metaContent);
         version = metaObj.version || 1;
         dimensions = metaObj.dimensions || this.indexConfig.dimension;
+        walrusBlobId = metaObj.walrusBlobId;
         if (metaObj.metadata) {
           for (const [k, v] of Object.entries(metaObj.metadata)) {
             metadata.set(parseInt(k), v);
@@ -428,7 +455,8 @@ export class NodeHnswService implements IHnswService {
         isDirty: false,
         version,
         metadata,
-        dimensions
+        dimensions,
+        walrusBlobId
       });
 
       console.log(`[NodeHnswService] Loaded index for ${userAddress} (mtime: ${fileModifiedTime})`);
@@ -453,6 +481,187 @@ export class NodeHnswService implements IHnswService {
     } catch (error) {
       console.warn('[NodeHnswService] Delete index error:', error);
     }
+  }
+
+  // ==================== Walrus Backup Methods ====================
+
+  /**
+   * Sync index to Walrus storage
+   * @returns Walrus blob ID if successful, null if Walrus backup is disabled
+   */
+  async syncToWalrus(userAddress: string): Promise<string | null> {
+    if (!this.walrusConfig?.enabled) {
+      console.log('[NodeHnswService] Walrus backup disabled, skipping sync');
+      return null;
+    }
+
+    const entry = this.indexCache.get(userAddress);
+    if (!entry) {
+      console.warn(`[NodeHnswService] No index found for ${userAddress}, nothing to sync`);
+      return null;
+    }
+
+    try {
+      const fs = await import('fs/promises');
+      const indexPath = this.getIndexPath(userAddress);
+
+      // Read the index file
+      const indexBuffer = await fs.readFile(indexPath);
+
+      // Read metadata
+      const metadataPath = indexPath + '.meta.json';
+      let metadataBuffer: Buffer;
+      try {
+        metadataBuffer = await fs.readFile(metadataPath);
+      } catch {
+        metadataBuffer = Buffer.from('{}');
+      }
+
+      // Combine index + metadata into a single package
+      const packageData = {
+        index: indexBuffer.toString('base64'),
+        metadata: metadataBuffer.toString('utf-8'),
+        version: entry.version,
+        dimensions: entry.dimensions,
+        spaceType: this.indexConfig.spaceType,
+        timestamp: Date.now()
+      };
+
+      const packageBuffer = Buffer.from(JSON.stringify(packageData));
+
+      // Upload to Walrus
+      const publisherUrl = this.walrusConfig.publisherUrl;
+      const epochs = this.walrusConfig.epochs || 3;
+
+      console.log(`[NodeHnswService] Uploading index to Walrus (${packageBuffer.length} bytes)...`);
+
+      const response = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream'
+        },
+        body: packageBuffer
+      });
+
+      if (!response.ok) {
+        throw new Error(`Walrus upload failed: ${response.status} ${response.statusText}`);
+      }
+
+      const result = await response.json() as any;
+
+      // Handle both newlyCreated and alreadyCertified responses
+      const blobId = result.newlyCreated?.blobObject?.blobId ||
+                     result.alreadyCertified?.blobId ||
+                     result.blobId;
+
+      if (!blobId) {
+        throw new Error('No blobId in Walrus response');
+      }
+
+      // Update cache with blob ID
+      entry.walrusBlobId = blobId;
+
+      // Save blob ID to metadata file for persistence
+      const metaContent = JSON.parse(metadataBuffer.toString('utf-8') || '{}');
+      metaContent.walrusBlobId = blobId;
+      metaContent.walrusSyncTime = Date.now();
+      await fs.writeFile(metadataPath, JSON.stringify(metaContent, null, 2));
+
+      console.log(`[NodeHnswService] Index synced to Walrus: ${blobId}`);
+      return blobId;
+    } catch (error) {
+      console.error('[NodeHnswService] Walrus sync failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Load index from Walrus storage
+   * @returns true if index was loaded successfully
+   */
+  async loadFromWalrus(userAddress: string, blobId: string): Promise<boolean> {
+    if (!this.walrusConfig?.enabled) {
+      console.log('[NodeHnswService] Walrus backup disabled');
+      return false;
+    }
+
+    await this.initialize();
+
+    try {
+      const aggregatorUrl = this.walrusConfig.aggregatorUrl;
+
+      console.log(`[NodeHnswService] Loading index from Walrus: ${blobId}`);
+
+      // Download from Walrus
+      const response = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
+
+      if (!response.ok) {
+        throw new Error(`Walrus download failed: ${response.status} ${response.statusText}`);
+      }
+
+      const packageBuffer = await response.arrayBuffer();
+      const packageData = JSON.parse(Buffer.from(packageBuffer).toString('utf-8'));
+
+      // Validate package
+      if (!packageData.index || !packageData.dimensions) {
+        throw new Error('Invalid index package from Walrus');
+      }
+
+      // Decode index data
+      const indexBuffer = Buffer.from(packageData.index, 'base64');
+
+      // Write to filesystem
+      const fs = await import('fs/promises');
+      const indexPath = this.getIndexPath(userAddress);
+
+      // Ensure directory exists
+      const path = await import('path');
+      await fs.mkdir(path.dirname(indexPath), { recursive: true });
+
+      await fs.writeFile(indexPath, indexBuffer);
+
+      // Write metadata
+      const metadataPath = indexPath + '.meta.json';
+      const metaContent = {
+        version: packageData.version || 1,
+        dimensions: packageData.dimensions,
+        metadata: JSON.parse(packageData.metadata || '{}').metadata || {},
+        walrusBlobId: blobId,
+        walrusLoadTime: Date.now()
+      };
+      await fs.writeFile(metadataPath, JSON.stringify(metaContent, null, 2));
+
+      // Load into memory
+      const loaded = await this.loadIndex(userAddress);
+
+      if (loaded) {
+        const entry = this.indexCache.get(userAddress);
+        if (entry) {
+          entry.walrusBlobId = blobId;
+        }
+        console.log(`[NodeHnswService] Index loaded from Walrus successfully`);
+      }
+
+      return loaded;
+    } catch (error) {
+      console.error('[NodeHnswService] Failed to load from Walrus:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get the Walrus blob ID for a user's index (if backed up)
+   */
+  getWalrusBlobId(userAddress: string): string | null {
+    const entry = this.indexCache.get(userAddress);
+    return entry?.walrusBlobId || null;
+  }
+
+  /**
+   * Check if Walrus backup is enabled
+   */
+  isWalrusEnabled(): boolean {
+    return this.walrusConfig?.enabled === true;
   }
 
   destroy(): void {

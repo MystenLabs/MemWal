@@ -146,12 +146,45 @@ export interface IHnswService {
   deleteIndex(userAddress: string): Promise<void>;
 
   /**
+   * Sync index to Walrus storage (optional - returns blobId if Walrus backup is enabled)
+   */
+  syncToWalrus?(userAddress: string): Promise<string | null>;
+
+  /**
+   * Load index from Walrus storage
+   * @param blobId - Walrus blob ID containing the index
+   * @returns true if index was loaded, false if failed
+   */
+  loadFromWalrus?(userAddress: string, blobId: string): Promise<boolean>;
+
+  /**
+   * Get the latest Walrus blob ID for the index (if backed up)
+   */
+  getWalrusBlobId?(userAddress: string): string | null;
+
+  /**
    * Destroy the service and cleanup resources
    */
   destroy(): void;
 }
 
 // ==================== Factory Configuration ====================
+
+/**
+ * Walrus storage configuration for index backup
+ */
+export interface WalrusBackupConfig {
+  /** Enable Walrus backup */
+  enabled: boolean;
+  /** Walrus aggregator URL */
+  aggregatorUrl: string;
+  /** Walrus publisher URL */
+  publisherUrl: string;
+  /** Auto-sync to Walrus after saveIndex() */
+  autoSync?: boolean;
+  /** Storage epochs (default: 3) */
+  epochs?: number;
+}
 
 /**
  * Configuration for creating HNSW service via factory
@@ -168,6 +201,8 @@ export interface HnswServiceConfig {
   };
   /** Directory for storing indexes (Node.js only) */
   indexDirectory?: string;
+  /** Walrus backup configuration (optional) */
+  walrusBackup?: WalrusBackupConfig;
 }
 
 // ==================== Environment Detection ====================

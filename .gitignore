@@ -23,6 +23,14 @@ pnpm-debug.log*
 .env
 .env*.local
 .env.production
+.env.test
+*/.env.test
+**/.env.test
+# Keep .env.example for documentation
+!.env.example
+
+# PDW Local Indexes (user-specific, regenerated from blockchain)
+.pdw-indexes/
 
 # Editor directories and files
 .vscode/*

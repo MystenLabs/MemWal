@@ -782,108 +782,54 @@ export class IndexManager {
 
     console.log(`💾 Index uploaded to Walrus: ${result.blobId} (${pkg.vectors.length} vectors)`);
 
-    // Step 2: Create or update MemoryIndex on-chain (with retry logic)
+    // Step 2: Create or update MemoryIndex on-chain
+    // SerialTransactionExecutor handles gas coin management and prevents equivocation
     let onChainIndexId = currentState?.onChainIndexId;
     const graphBlobId = currentState?.graphBlobId || ''; // Empty for now, could be knowledge graph
 
     if (this.options.transactionService && this.options.executeTransaction) {
-      const maxRetries = 3;
+      try {
+        if (!onChainIndexId) {
+          // Create new MemoryIndex on-chain
+          console.log('📝 Creating new MemoryIndex on-chain...');
+          const tx = this.options.transactionService.buildCreateMemoryIndex({
+            indexBlobId: result.blobId,
+            graphBlobId: graphBlobId,
+          });
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          if (!onChainIndexId) {
-            // Create new MemoryIndex on-chain
-            console.log(`📝 Creating new MemoryIndex on-chain (attempt ${attempt}/${maxRetries})...`);
-            // Build fresh transaction for each attempt to avoid stale gas coin
-            const tx = this.options.transactionService.buildCreateMemoryIndex({
-              indexBlobId: result.blobId,
-              graphBlobId: graphBlobId,
-            });
+          const txResult = await this.options.executeTransaction(tx, signer);
 
-            const txResult = await this.options.executeTransaction(tx, signer);
+          if (txResult.digest && !txResult.error) {
+            console.log(`✅ MemoryIndex created on-chain: ${txResult.digest}`);
 
-            if (txResult.digest && !txResult.error) {
-              console.log(`✅ MemoryIndex created on-chain: ${txResult.digest}`);
-
-              // Extract created object ID from transaction effects
-              if (txResult.effects?.created?.[0]?.reference?.objectId) {
-                onChainIndexId = txResult.effects.created[0].reference.objectId;
-                console.log(`   Object ID: ${onChainIndexId}`);
-              }
-              break; // Success, exit retry loop
-            }
-
-            // Check for version conflict error (gas coin version mismatch)
-            const isVersionConflict =
-              txResult.error?.includes('is not available for consumption') ||
-              txResult.error?.includes('current version') ||
-              txResult.error?.includes('ObjectVersionTooOld');
-
-            if (isVersionConflict && attempt < maxRetries) {
-              const delay = 1000 * attempt; // Linear backoff: 1s, 2s, 3s
-              console.log(`⚠️ Version conflict detected (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-              continue;
-            }
-
-            // Non-retriable error or max retries reached
-            if (attempt === maxRetries) {
-              console.warn('⚠️ Failed to create on-chain MemoryIndex after all retries:', txResult.error);
+            // Extract created object ID from transaction effects
+            if (txResult.effects?.created?.[0]?.reference?.objectId) {
+              onChainIndexId = txResult.effects.created[0].reference.objectId;
+              console.log(`   Object ID: ${onChainIndexId}`);
             }
           } else {
-            // Update existing MemoryIndex on-chain
-            console.log(`📝 Updating MemoryIndex on-chain (v${currentState?.version} → v${newVersion}, attempt ${attempt}/${maxRetries})...`);
-            // Build fresh transaction for each attempt to avoid stale gas coin
-            const tx = this.options.transactionService.buildUpdateMemoryIndex({
-              indexId: onChainIndexId,
-              expectedVersion: currentState?.version || 1,
-              newIndexBlobId: result.blobId,
-              newGraphBlobId: graphBlobId,
-            });
-
-            const txResult = await this.options.executeTransaction(tx, signer);
-
-            if (txResult.digest && !txResult.error) {
-              console.log(`✅ MemoryIndex updated on-chain: ${txResult.digest}`);
-              break; // Success, exit retry loop
-            }
-
-            // Check for version conflict error (gas coin version mismatch)
-            const isVersionConflict =
-              txResult.error?.includes('is not available for consumption') ||
-              txResult.error?.includes('current version') ||
-              txResult.error?.includes('ObjectVersionTooOld');
-
-            if (isVersionConflict && attempt < maxRetries) {
-              const delay = 1000 * attempt; // Linear backoff: 1s, 2s, 3s
-              console.log(`⚠️ Version conflict detected (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-              continue;
-            }
-
-            // Non-retriable error or max retries reached
-            if (attempt === maxRetries) {
-              console.warn('⚠️ Failed to update on-chain MemoryIndex after all retries:', txResult.error);
-            }
+            console.warn('⚠️ Failed to create on-chain MemoryIndex:', txResult.error);
           }
-        } catch (error: any) {
-          // Check if it's a version conflict error from thrown exception
-          const isVersionConflict =
-            error.message?.includes('is not available for consumption') ||
-            error.message?.includes('current version') ||
-            error.message?.includes('ObjectVersionTooOld');
+        } else {
+          // Update existing MemoryIndex on-chain
+          console.log(`📝 Updating MemoryIndex on-chain (v${currentState?.version} → v${newVersion})...`);
+          const tx = this.options.transactionService.buildUpdateMemoryIndex({
+            indexId: onChainIndexId,
+            expectedVersion: currentState?.version || 1,
+            newIndexBlobId: result.blobId,
+            newGraphBlobId: graphBlobId,
+          });
 
-          if (isVersionConflict && attempt < maxRetries) {
-            const delay = 1000 * attempt;
-            console.log(`⚠️ Version conflict detected (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          }
+          const txResult = await this.options.executeTransaction(tx, signer);
 
-          if (attempt === maxRetries) {
-            console.warn('⚠️ Failed to update on-chain MemoryIndex after all retries:', error);
+          if (txResult.digest && !txResult.error) {
+            console.log(`✅ MemoryIndex updated on-chain: ${txResult.digest}`);
+          } else {
+            console.warn('⚠️ Failed to update on-chain MemoryIndex:', txResult.error);
           }
         }
+      } catch (error: any) {
+        console.warn('⚠️ Failed to sync MemoryIndex on-chain:', error.message);
       }
     }
 

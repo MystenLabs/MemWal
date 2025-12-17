@@ -19,7 +19,8 @@ export type {
   IHnswIndexConfig,
   IHnswSearchOptions,
   IHnswSearchResultItem,
-  IHnswBatchStats
+  IHnswBatchStats,
+  WalrusBackupConfig
 } from './IHnswService';
 export { isBrowser, isNode } from './IHnswService';
 

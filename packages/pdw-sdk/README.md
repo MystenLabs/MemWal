@@ -21,6 +21,29 @@ SDK for building applications with decentralized memory storage, SEAL encryption
 npm install personal-data-wallet-sdk @mysten/sui
 ```
 
+### Vector Search (HNSW)
+
+The SDK supports two HNSW implementations for vector search:
+
+| Implementation | Environment | Performance | Installation |
+|----------------|-------------|-------------|--------------|
+| `hnswlib-wasm` | Browser + Node.js | Good | Included by default |
+| `hnswlib-node` | Node.js only | **Best** (native C++) | Optional install |
+
+**For Node.js/Next.js applications** (recommended for production):
+
+```bash
+npm install hnswlib-node
+```
+
+> **Note:** `hnswlib-node` requires native compilation (node-gyp). See [hnswlib-node build requirements](https://github.com/yoshoku/hnswlib-node#build-requirements):
+>
+> - **Windows:** Visual Studio Build Tools with C++ workload
+> - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+> - **Linux:** `build-essential` package
+
+If `hnswlib-node` is not installed or fails to compile, the SDK will use `hnswlib-wasm` as fallback (slower but works everywhere).
+
 ## Quick Start
 
 ### 1. Initialize

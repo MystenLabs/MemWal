@@ -2,7 +2,7 @@
  * Rebuild HNSW Index from Blockchain + Walrus (Node.js)
  *
  * This utility fetches all existing memories from the Sui blockchain,
- * downloads embeddings from Walrus, and rebuilds the local HNSW index.
+ * downloads embeddings from Walrus using the Walrus SDK, and rebuilds the local HNSW index.
  *
  * Use this when:
  * 1. User logs in on a new device
@@ -20,13 +20,14 @@
  *   userAddress: '0x...',
  *   client,
  *   packageId: process.env.PACKAGE_ID!,
- *   walrusAggregator: 'https://aggregator.walrus-testnet.walrus.space',
+ *   network: 'testnet',
  *   onProgress: (current, total, status) => console.log(`${current}/${total}: ${status}`)
  * });
  * ```
  */
 
 import type { SuiClient } from '@mysten/sui/client';
+import { WalrusClient } from '@mysten/walrus';
 
 export interface RebuildIndexNodeOptions {
   /** User's blockchain address */
@@ -38,8 +39,11 @@ export interface RebuildIndexNodeOptions {
   /** Package ID for the PDW smart contract */
   packageId: string;
 
-  /** Walrus aggregator URL */
-  walrusAggregator: string;
+  /** Walrus network (testnet or mainnet) */
+  network?: 'testnet' | 'mainnet';
+
+  /** @deprecated Use network instead. Walrus aggregator URL (fallback) */
+  walrusAggregator?: string;
 
   /** Index directory (default: .pdw-indexes) */
   indexDirectory?: string;
@@ -79,6 +83,7 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
     userAddress,
     client,
     packageId,
+    network = (process.env.WALRUS_NETWORK as 'testnet' | 'mainnet') || 'testnet',
     walrusAggregator,
     indexDirectory = './.pdw-indexes',
     onProgress,
@@ -95,6 +100,16 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
     // Dynamic imports for Node.js modules
     const { NodeHnswService } = await import('../vector/NodeHnswService');
     const fs = await import('fs/promises');
+
+    // Initialize Walrus client
+    const walrusClient = client.$extend(
+      WalrusClient.experimental_asClientExtension({
+        network,
+        storageNodeClientOptions: {
+          timeout: 60_000,
+        },
+      })
+    );
 
     // Initialize HNSW service
     const hnswService = new NodeHnswService({
@@ -209,15 +224,13 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
       onProgress?.(i + 1, totalMemories, `Processing ${progress}...`);
 
       try {
-        // Download content from Walrus
-        const walrusUrl = `${walrusAggregator}/v1/${memory.blobId}`;
-        const response = await fetch(walrusUrl);
+        // Download content from Walrus using SDK
+        const blobContent = await walrusClient.walrus.readBlob({ blobId: memory.blobId });
 
-        if (!response.ok) {
-          throw new Error(`Failed to fetch blob: ${response.status}`);
-        }
-
-        const memoryData: MemoryContent = await response.json();
+        // Parse JSON content
+        const textDecoder = new TextDecoder();
+        const jsonString = textDecoder.decode(blobContent);
+        const memoryData: MemoryContent = JSON.parse(jsonString);
 
         // Extract embedding
         const embedding = memoryData.embedding;
