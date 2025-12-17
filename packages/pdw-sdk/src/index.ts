@@ -399,9 +399,6 @@ export type {
   ClientMemoryMetadata
 } from './client/ClientMemoryManager';
 
-// React Hooks - Moved to hooks.wip (not currently maintained)
-// If you need React hooks, import from './hooks.wip' directly
-
 // Wallet architecture components
 export { MainWalletService } from './wallet/MainWalletService';
 export { ContextWalletService } from './wallet/ContextWalletService';
