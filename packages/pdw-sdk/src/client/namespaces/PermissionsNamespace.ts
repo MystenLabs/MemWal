@@ -12,7 +12,7 @@ import type {
   ConsentRequestRecord,
   AccessGrant,
   PermissionScope
-} from '../../types/wallet';
+} from '../../core/types/wallet';
 
 /**
  * Consent request options

@@ -36,11 +36,11 @@ import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 
-import { 
-  ContextWallet, 
+import {
+  ContextWallet,
   CreateContextWalletOptions,
-  MainWallet 
-} from '../types/wallet';
+  MainWallet
+} from '../core/types/wallet';
 import { MainWalletService } from './MainWalletService.js';
 import { StorageService } from '../services/StorageService.js';
 import { EncryptionService } from '../services/EncryptionService.js';

@@ -15,7 +15,7 @@ import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 import type { Signer } from '@mysten/sui/cryptography';
 
-import { 
+import {
   ConsentRequest,
   ConsentRequestRecord,
   ConsentStatus,
@@ -23,8 +23,8 @@ import {
   PermissionScope,
   RequestConsentOptions,
   GrantPermissionsOptions,
-  RevokePermissionsOptions 
-} from '../types/wallet.js';
+  RevokePermissionsOptions
+} from '../core/types/wallet.js';
 import { ContextWalletService } from '../wallet/ContextWalletService.js';
 import { CrossContextPermissionService } from '../services/CrossContextPermissionService';
 import type { WalletAllowlistPermission } from '../services/CrossContextPermissionService';

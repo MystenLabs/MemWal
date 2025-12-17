@@ -8,10 +8,10 @@
 import { SuiClient } from '@mysten/sui/client';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 
-import { 
+import {
   AggregatedQueryOptions,
-  PermissionScope 
-} from '../types/wallet.js';
+  PermissionScope
+} from '../core/types/wallet.js';
 import { PermissionService } from '../access/PermissionService.js';
 import { ContextWalletService } from '../wallet/ContextWalletService.js';
 

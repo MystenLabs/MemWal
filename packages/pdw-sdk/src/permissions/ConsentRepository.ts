@@ -1,7 +1,7 @@
 import {
   ConsentRequestRecord,
   ConsentStatus,
-} from '../types/wallet.js';
+} from '../core/types/wallet.js';
 import { normalizeSuiAddress } from '@mysten/sui/utils';
 
 export interface ConsentRepository {

@@ -24,7 +24,7 @@ import type {
   ConsentRequestRecord,
   AccessGrant,
   PermissionScope
-} from '../../../types/wallet';
+} from '../../../core/types/wallet';
 import { CapabilityService } from '../../../services/CapabilityService';
 
 // ============================================================================

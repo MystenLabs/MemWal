@@ -39,14 +39,14 @@ const bytesToHex = (bytes: Uint8Array): string => {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
-import { 
-  MainWallet, 
-  CreateMainWalletOptions, 
-  DeriveContextIdOptions, 
-  RotateKeysOptions, 
+import {
+  MainWallet,
+  CreateMainWalletOptions,
+  DeriveContextIdOptions,
+  RotateKeysOptions,
   RotateKeysResult,
   DerivedContext
-} from '../types/wallet';
+} from '../core/types/wallet';
 
 /**
  * Configuration for MainWalletService
