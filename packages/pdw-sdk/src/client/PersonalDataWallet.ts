@@ -11,6 +11,7 @@ import { StorageService } from '../services/StorageService';
 import { EncryptionService } from '../services/EncryptionService';
 import { TransactionService } from '../services/TransactionService';
 import { ViewService } from '../services/ViewService';
+import { CapabilityService } from '../services/CapabilityService';
 import { MainWalletService } from '../wallet/MainWalletService';
 import { ContextWalletService } from '../wallet/ContextWalletService';
 import { PermissionService } from '../access/PermissionService';
@@ -112,11 +113,15 @@ export interface PersonalDataWalletExtension {
   storage: StorageService;
   encryption: EncryptionService;
   viewService: ViewService;
+  /** Capability-based access control service (preferred) */
+  capabilityService: CapabilityService;
+  /** @deprecated Use capabilityService instead */
   mainWalletService: MainWalletService;
+  /** @deprecated Use ContextNamespace instead */
   contextWalletService: ContextWalletService;
   permissionService: PermissionService;
   aggregationService: AggregationService;
-  
+
   // Configuration
   config: PDWConfig;
 }
@@ -129,7 +134,10 @@ export class PersonalDataWallet {
   #memory: MemoryService;
   #storage: StorageService;
   #encryption: EncryptionService;
+  #capability: CapabilityService;
+  /** @deprecated Use #capability instead */
   #mainWallet: MainWalletService;
+  /** @deprecated Use ContextNamespace instead */
   #contextWallet: ContextWalletService;
   #permission: PermissionService;
   #aggregation: AggregationService;
@@ -144,13 +152,19 @@ export class PersonalDataWallet {
     this.#memory = new MemoryService(client, this.#config);
     this.#storage = new StorageService(this.#config);
     this.#encryption = new EncryptionService(client, this.#config);
-    
-    // Initialize wallet architecture services
+
+    // Initialize capability service (new architecture)
+    this.#capability = new CapabilityService({
+      suiClient: (client as any).client || client,
+      packageId: this.#config.packageId || ''
+    });
+
+    // Initialize wallet architecture services (legacy - deprecated)
     this.#mainWallet = new MainWalletService({
       suiClient: (client as any).client || client,
       packageId: this.#config.packageId || ''
     });
-    
+
     this.#contextWallet = new ContextWalletService({
       suiClient: (client as any).client || client,
       packageId: this.#config.packageId || '',
@@ -158,18 +172,20 @@ export class PersonalDataWallet {
       storageService: this.#storage,
       encryptionService: this.#encryption
     });
-    
+
     this.#permission = new PermissionService({
       suiClient: (client as any).client || client,
       packageId: this.#config.packageId || '',
       accessRegistryId: this.#config.accessRegistryId || '',
+      capabilityService: this.#capability,
       contextWalletService: this.#contextWallet
     });
-    
+
     this.#aggregation = new AggregationService({
       suiClient: (client as any).client || client,
       packageId: this.#config.packageId || '',
       permissionService: this.#permission,
+      capabilityService: this.#capability,
       contextWalletService: this.#contextWallet
     });
     
@@ -297,7 +313,11 @@ export class PersonalDataWallet {
   get encryption() { return this.#encryption; }
   get config() { return this.#config; }
   get viewService() { return this.#view; }
+  /** Capability-based access control service (preferred) */
+  get capabilityService() { return this.#capability; }
+  /** @deprecated Use capabilityService instead */
   get mainWalletService() { return this.#mainWallet; }
+  /** @deprecated Use ContextNamespace instead */
   get contextWalletService() { return this.#contextWallet; }
   get permissionService() { return this.#permission; }
   get aggregationService() { return this.#aggregation; }

@@ -9,7 +9,6 @@
 import { EmbeddingService, EmbeddingOptions, EmbeddingResult, BatchEmbeddingResult } from '../services/EmbeddingService';
 import { createHnswService, isBrowser, isNode } from './createHnswService';
 import type { IHnswService } from './IHnswService';
-import { StorageService } from '../services/StorageService';
 import {
   VectorEmbedding,
   EmbeddingConfig,
@@ -58,10 +57,7 @@ export class VectorManager {
   private memoryCache = new Map<string, VectorEmbedding>(); // text hash -> embedding
   private config: VectorManagerConfig;
 
-  constructor(
-    storageService: StorageService,
-    config: VectorManagerConfig
-  ) {
+  constructor(config: VectorManagerConfig) {
     this.config = config;
 
     // Initialize embedding service

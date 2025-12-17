@@ -13,6 +13,7 @@ import {
   PermissionScope
 } from '../core/types/wallet.js';
 import { PermissionService } from '../access/PermissionService.js';
+import { CapabilityService } from '../services/CapabilityService.js';
 import { ContextWalletService } from '../wallet/ContextWalletService.js';
 
 /**
@@ -25,7 +26,12 @@ export interface AggregationServiceConfig {
   packageId: string;
   /** Permission service for access validation */
   permissionService: PermissionService;
-  /** Context wallet service for data access */
+  /** Capability service for capability-based access (preferred) */
+  capabilityService?: CapabilityService;
+  /**
+   * @deprecated Use capabilityService and a ContextNamespace implementation instead
+   * Context wallet service for data access (legacy)
+   */
   contextWalletService: ContextWalletService;
 }
 
@@ -68,12 +74,15 @@ export class AggregationService {
   private suiClient: SuiClient;
   private packageId: string;
   private permissionService: PermissionService;
+  private capabilityService?: CapabilityService;
+  /** @deprecated Use capabilityService instead */
   private contextWalletService: ContextWalletService;
 
   constructor(config: AggregationServiceConfig) {
     this.suiClient = config.suiClient;
     this.packageId = config.packageId;
     this.permissionService = config.permissionService;
+    this.capabilityService = config.capabilityService;
     this.contextWalletService = config.contextWalletService;
   }
 

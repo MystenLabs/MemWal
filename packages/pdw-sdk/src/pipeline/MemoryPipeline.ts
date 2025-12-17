@@ -522,17 +522,14 @@ export class MemoryPipeline {
       requestsPerMinute: 60
     });
 
-    this.vectorManager = new VectorManager(
-      {} as any, // TODO: Fix storage service dependency
-      {
-        embedding: { apiKey: '' },
-        index: {
-          dimension: this.config.vector.dimensions,
-          maxElements: this.config.vector.maxElements
-        },
-        batch: { maxBatchSize: 10 }
-      } as any
-    );
+    this.vectorManager = new VectorManager({
+      embedding: { apiKey: '' },
+      index: {
+        dimension: this.config.vector.dimensions,
+        maxElements: this.config.vector.maxElements
+      },
+      batch: { maxBatchSize: 10 }
+    });
 
     this.batchManager = new BatchManager({
       embedding: {

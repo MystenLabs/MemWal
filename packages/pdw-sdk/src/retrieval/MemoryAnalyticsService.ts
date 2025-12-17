@@ -168,8 +168,8 @@ export interface MemoryInsights {
  */
 export class MemoryAnalyticsService {
   private graphManager: KnowledgeGraphManager;
-  private vectorManager: VectorManager;
-  
+  private vectorManager: VectorManager | null;
+
   // Analytics cache
   private analyticsCache = new Map<string, { analytics: MemoryAnalytics; timestamp: number }>();
   private readonly ANALYTICS_CACHE_TTL = 60 * 60 * 1000; // 1 hour
@@ -179,8 +179,8 @@ export class MemoryAnalyticsService {
     vectorManager?: VectorManager;
   }) {
     this.graphManager = config?.graphManager ?? new KnowledgeGraphManager();
-    // Use placeholder vector manager until proper service injection is implemented
-    this.vectorManager = config?.vectorManager ?? ({} as any);
+    // VectorManager is optional - some analytics work without it
+    this.vectorManager = config?.vectorManager ?? null;
   }
 
   // ==================== MAIN ANALYTICS METHODS ====================

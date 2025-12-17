@@ -26,6 +26,7 @@ import {
   RevokePermissionsOptions
 } from '../core/types/wallet.js';
 import { ContextWalletService } from '../wallet/ContextWalletService.js';
+import { CapabilityService } from '../services/CapabilityService.js';
 import { CrossContextPermissionService } from '../services/CrossContextPermissionService';
 import type { WalletAllowlistPermission } from '../services/CrossContextPermissionService';
 import type { ConsentRepository } from '../permissions/ConsentRepository.js';
@@ -40,8 +41,13 @@ export interface PermissionServiceConfig {
   packageId: string;
   /** Access registry ID for wallet allowlists */
   accessRegistryId: string;
-  /** ContextWalletService for validation */
+  /**
+   * @deprecated Use capabilityService instead for capability-based architecture
+   * ContextWalletService for validation (legacy)
+   */
   contextWalletService?: ContextWalletService;
+  /** CapabilityService for capability-based validation (preferred) */
+  capabilityService?: CapabilityService;
   /** Optional injected cross-context permission service */
   crossContextPermissionService?: CrossContextPermissionService;
   /** Optional repository for consent persistence */
@@ -54,7 +60,9 @@ export interface PermissionServiceConfig {
 export class PermissionService {
   private suiClient: SuiClient;
   private packageId: string;
+  /** @deprecated Use capabilityService instead */
   private contextWalletService?: ContextWalletService;
+  private capabilityService?: CapabilityService;
   private crossContextPermissions: CrossContextPermissionService;
   private pendingConsents: Map<string, ConsentRequestRecord> = new Map();
   private consentRepository?: ConsentRepository;
@@ -63,6 +71,7 @@ export class PermissionService {
     this.suiClient = config.suiClient;
     this.packageId = config.packageId;
     this.contextWalletService = config.contextWalletService;
+    this.capabilityService = config.capabilityService;
     this.consentRepository = config.consentRepository;
 
     if (!config.accessRegistryId) {
@@ -118,15 +127,15 @@ export class PermissionService {
    */
   async grantPermissions(
     userAddress: string,
-    options: GrantPermissionsOptions & { signer?: Signer }
+    options: GrantPermissionsOptions & { signer?: Signer; appId?: string }
   ): Promise<AccessGrant> {
     const requestingWallet = normalizeSuiAddress(options.requestingWallet);
     const targetWallet = normalizeSuiAddress(options.targetWallet);
-    if (this.contextWalletService) {
-      const ownsContext = await this.contextWalletService.validateAccess(targetWallet, userAddress);
-      if (!ownsContext) {
-        throw new Error('User does not own the specified target wallet');
-      }
+
+    // Validate ownership - prefer capability-based validation
+    const hasAccess = await this.validateOwnership(userAddress, targetWallet, options.appId);
+    if (!hasAccess) {
+      throw new Error('User does not own the specified target wallet or capability');
     }
 
     let lastDigest: string | undefined;
@@ -192,16 +201,15 @@ export class PermissionService {
    */
   async revokePermissions(
     userAddress: string,
-    options: RevokePermissionsOptions & { signer?: Signer }
+    options: RevokePermissionsOptions & { signer?: Signer; appId?: string }
   ): Promise<boolean> {
     const requestingWallet = normalizeSuiAddress(options.requestingWallet);
     const targetWallet = normalizeSuiAddress(options.targetWallet);
 
-    if (this.contextWalletService) {
-      const ownsContext = await this.contextWalletService.validateAccess(targetWallet, userAddress);
-      if (!ownsContext) {
-        throw new Error('User does not own the specified target wallet');
-      }
+    // Validate ownership - prefer capability-based validation
+    const hasAccess = await this.validateOwnership(userAddress, targetWallet, options.appId);
+    if (!hasAccess) {
+      throw new Error('User does not own the specified target wallet or capability');
     }
 
     if (options.signer) {
@@ -559,6 +567,34 @@ export class PermissionService {
    */
   setConsentRepository(repository?: ConsentRepository): void {
     this.consentRepository = repository;
+  }
+
+  /**
+   * Validate user ownership of a target wallet or capability
+   * Prefers capability-based validation over legacy ContextWalletService
+   *
+   * @param userAddress - User's address
+   * @param targetWallet - Target wallet address
+   * @param appId - Optional app ID for capability lookup
+   * @returns True if user has ownership/access
+   */
+  private async validateOwnership(
+    userAddress: string,
+    targetWallet: string,
+    appId?: string
+  ): Promise<boolean> {
+    // Prefer capability-based validation (new architecture)
+    if (this.capabilityService && appId) {
+      return await this.capabilityService.hasCapability(userAddress, appId);
+    }
+
+    // Fall back to legacy ContextWalletService validation
+    if (this.contextWalletService) {
+      return await this.contextWalletService.validateAccess(targetWallet, userAddress);
+    }
+
+    // If neither service is available, skip validation (trust caller)
+    return true;
   }
 
   private async updateConsentStatus(params: {

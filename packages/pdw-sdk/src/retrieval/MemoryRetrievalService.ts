@@ -173,9 +173,9 @@ export class MemoryRetrievalService {
   private graphManager: KnowledgeGraphManager;
   private storageManager: StorageManager;
   private blockchainManager: BlockchainManager;
-  private encryptionService: EncryptionService;
+  private encryptionService: EncryptionService | null;
   private batchManager: BatchManager;
-  private decryptionPipeline: MemoryDecryptionPipeline;
+  private decryptionPipeline: MemoryDecryptionPipeline | null;
   
   // Multi-tier caching system
   private queryCache = new Map<string, { result: RetrievalContext; timestamp: number }>();
@@ -200,25 +200,24 @@ export class MemoryRetrievalService {
     // Initialize services (can be injected or created with default configs)
     this.embeddingService = config?.embeddingService ?? new EmbeddingService();
     this.storageManager = config?.storageManager ?? new StorageManager();
-    this.vectorManager = config?.vectorManager ?? new VectorManager(
-      this.storageManager as any, // TODO: Fix type compatibility
-      {
-        embedding: { apiKey: '' },
-        index: { dimension: 3072 },
-        batch: { maxBatchSize: 10 }
-      }
-    );
+    this.vectorManager = config?.vectorManager ?? new VectorManager({
+      embedding: { apiKey: '' },
+      index: { dimension: 3072 },
+      batch: { maxBatchSize: 10 }
+    });
     this.graphManager = config?.graphManager ?? new KnowledgeGraphManager();
     this.blockchainManager = config?.blockchainManager ?? new BlockchainManager();
-    this.encryptionService = config?.encryptionService ?? new EncryptionService({} as any, {} as any);
+    this.encryptionService = config?.encryptionService ?? null;
     this.batchManager = config?.batchManager ?? new BatchManager();
-    
-    // Initialize decryption pipeline
-    this.decryptionPipeline = new MemoryDecryptionPipeline(
-      this.encryptionService,
-      this.storageManager,
-      config?.decryptionConfig
-    );
+
+    // Initialize decryption pipeline only if encryption service is provided
+    this.decryptionPipeline = this.encryptionService
+      ? new MemoryDecryptionPipeline(
+          this.encryptionService,
+          this.storageManager,
+          config?.decryptionConfig
+        )
+      : null;
   }
 
   // ==================== UNIFIED SEARCH ====================
@@ -271,7 +270,7 @@ export class MemoryRetrievalService {
       results = this.rankAndSortResults(results, query);
       
       // Auto-decrypt encrypted memories if decryption is available
-      if (this.decryptionPipeline.isReady()) {
+      if (this.decryptionPipeline?.isReady()) {
         try {
           results = await this.decryptionPipeline.decryptMemoryResults(results, query.userId);
         } catch (error) {
