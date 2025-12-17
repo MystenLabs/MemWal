@@ -500,10 +500,7 @@ export class MemoryNamespace {
     try {
       // Build and execute delete transaction on blockchain
       const tx = await this.services.memory.tx.deleteMemory(memoryId);
-      const signer = this.services.config.signer?.getSigner?.() || this.services.config.signer;
-      await (signer as any).signAndExecuteTransaction({
-        transaction: tx,
-      });
+      await this.services.config.signer.signAndExecuteTransaction(tx);
 
       // Remove from local vector index if it exists
       if (this.services.memoryIndex) {
