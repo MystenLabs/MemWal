@@ -311,20 +311,7 @@ export interface CreateSessionOptions {
   title?: string;
 }
 
-export interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp?: string;
-  memoryContext?: MemoryContext;
-}
-
-export interface ChatSession {
-  id: string;
-  userAddress: string;
-  messages: ChatMessage[];
-  createdAt: string;
-  updatedAt: string;
-}
+// Note: ChatMessage and ChatSession are defined in "Chat System Types" section below
 
 // Storage operations (unified interface)
 export interface StorageConfig {

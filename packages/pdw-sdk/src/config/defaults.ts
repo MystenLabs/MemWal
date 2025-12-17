@@ -30,27 +30,6 @@ export function createDefaultConfig(): PDWConfig {
   };
 }
 
-export function createProductionConfig(overrides: Partial<PDWConfig> = {}): PDWConfig {
-  return {
-    ...createDefaultConfig(),
-    accessRegistryId: overrides.accessRegistryId ?? '0x0',
-    encryptionConfig: {
-      enabled: true,
-      keyServers: [
-        // Production SEAL key servers - to be configured
-        '0x0' // Placeholder
-      ],
-      policyConfig: {
-        threshold: 2,
-      },
-    },
-    // Production Walrus endpoints
-    walrusPublisherUrl: 'https://publisher.walrus.space',
-    walrusAggregatorUrl: 'https://aggregator.walrus.space',
-    ...overrides,
-  };
-}
-
 export function createTestnetConfig(overrides: Partial<PDWConfig> = {}): PDWConfig {
   return {
     ...createDefaultConfig(),
