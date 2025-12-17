@@ -10,7 +10,7 @@ import { MemoryService } from '../services/MemoryService';
 import { StorageService } from '../services/StorageService';
 import { EncryptionService } from '../services/EncryptionService';
 import { TransactionService } from '../services/TransactionService';
-import { ViewService } from '../view/ViewService';
+import { ViewService } from '../services/ViewService';
 import { MainWalletService } from '../wallet/MainWalletService';
 import { ContextWalletService } from '../wallet/ContextWalletService';
 import { PermissionService } from '../access/PermissionService';

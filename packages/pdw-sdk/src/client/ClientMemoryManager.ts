@@ -458,7 +458,7 @@ export class ClientMemoryManager {
       // Step 1: Fetch from Walrus
       console.log('🐳 Step 1: Fetching from Walrus...');
       onProgress?.('Fetching from Walrus...');
-      const encryptedData = await this.fetchFromWalrus(blobId);
+      const encryptedData = await this.fetchFromWalrus(blobId, client);
       console.log('✅ Retrieved:', encryptedData.length, 'bytes');
 
       // Step 2: Decrypt with SEAL
@@ -515,7 +515,7 @@ export class ClientMemoryManager {
 
         try {
           // Fetch from Walrus
-          const encryptedData = await this.fetchFromWalrus(blobId);
+          const encryptedData = await this.fetchFromWalrus(blobId, client);
 
           // Decrypt using shared session (NO SIGNING!)
           const decryptedData = await session.sealClient.decrypt({
@@ -815,16 +815,17 @@ export class ClientMemoryManager {
     });
   }
 
-  private async fetchFromWalrus(blobId: string): Promise<Uint8Array> {
-    const url = `${this.config.walrusAggregator}/v1/blobs/${blobId}`;
-    const response = await fetch(url);
+  private async fetchFromWalrus(blobId: string, client: SuiClient): Promise<Uint8Array> {
+    // Use Walrus SDK for reading blobs (consistent with uploadToWalrus)
+    const extendedClient = (client as any).$extend(
+      WalrusClient.experimental_asClientExtension({
+        network: this.config.walrusNetwork,
+      })
+    );
 
-    if (!response.ok) {
-      throw new Error(`Failed to fetch from Walrus: ${response.statusText}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    return new Uint8Array(arrayBuffer);
+    const walrusClient = extendedClient.walrus as any;
+    const blob = await walrusClient.readBlob({ blobId });
+    return blob;
   }
 
   /**

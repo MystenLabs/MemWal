@@ -18,7 +18,7 @@ import type { VectorService } from './VectorService';
 import type { StorageService } from './StorageService';
 import type { EmbeddingService } from './EmbeddingService';
 import type { TransactionService } from './TransactionService';
-import type { MemoryIndex } from '../view/ViewService';
+import type { MemoryIndex } from './ViewService';
 
 /**
  * Index state stored in localStorage/persistent storage
