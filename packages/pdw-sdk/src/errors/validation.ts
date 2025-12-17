@@ -473,13 +473,6 @@ export function validatePDWConfig(config: any): void {
     validateObjectId(config.packageId, 'packageId');
   }
 
-  // Validate API URL if provided
-  if (config.apiUrl !== undefined) {
-    validateString(config.apiUrl, 'apiUrl', {
-      pattern: /^https?:\/\/.+/,
-    });
-  }
-
   // Validate encryption config if provided
   if (config.encryptionConfig !== undefined) {
     validateEncryptionConfig(config.encryptionConfig);

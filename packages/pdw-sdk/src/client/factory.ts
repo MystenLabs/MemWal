@@ -27,7 +27,6 @@ import type { Keypair } from '@mysten/sui/cryptography';
  * const client = createPDWClient(
  *   { url: 'https://fullnode.devnet.sui.io' },
  *   {
- *     apiUrl: 'https://api.pdw.example.com',
  *     packageId: '0x123...'
  *   }
  * );
@@ -72,7 +71,6 @@ export function extendWithPDW(
  */
 export function createDevPDWClient(overrides?: {
   suiUrl?: string;
-  apiUrl?: string;
   packageId?: string;
 }) {
   return createPDWClient(
@@ -80,7 +78,6 @@ export function createDevPDWClient(overrides?: {
       url: overrides?.suiUrl || 'https://fullnode.devnet.sui.io',
     },
     {
-      apiUrl: overrides?.apiUrl || 'http://localhost:3000/api',
       packageId: overrides?.packageId || '0x0',
       encryptionConfig: {
         enabled: true,

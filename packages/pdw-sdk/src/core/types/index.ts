@@ -9,8 +9,6 @@ import type { Signer } from '@mysten/sui/cryptography';
 export interface PDWConfig {
   /** Package ID for the deployed Move contracts */
   packageId?: string;
-  /** Backend API URL for hybrid operations */
-  apiUrl?: string;
   /** Access Registry ID for OAuth-style permission management */
   accessRegistryId?: string;
   /** Wallet Registry ID for wallet tracking */

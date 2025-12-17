@@ -444,9 +444,8 @@ export class SimplePDWClient {
     // 3. Create client adapter for services requiring ClientWithCoreApi
     const clientAdapter = this.createClientAdapter(sui.client);
 
-    // 4. Memory Service (uses backend API)
+    // 4. Memory Service (blockchain operations)
     const pdwConfig: PDWConfig = {
-      apiUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api',
       packageId: sui.packageId
     };
     const memory = new MemoryService(clientAdapter, pdwConfig);

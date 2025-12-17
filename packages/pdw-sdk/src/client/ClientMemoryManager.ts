@@ -647,42 +647,21 @@ export class ClientMemoryManager {
   }
 
   private async generateEmbedding(text: string): Promise<number[]> {
-    // ✅ FIX: Use client-side embeddingService if available
-    if (this.embeddingService) {
-      console.log('🔮 Using client-side embedding generation (Gemini API)...');
-      try {
-        const result = await this.embeddingService.embedText({
-          text,
-          type: 'content'
-        });
-        console.log('✅ Client-side embedding generated:', result.vector.length, 'dimensions');
-        return result.vector;
-      } catch (error) {
-        console.error('❌ Client-side embedding failed:', error);
-        throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+    if (!this.embeddingService) {
+      throw new Error(
+        'EmbeddingService not configured. Please provide an API key for embedding generation ' +
+        '(e.g., GEMINI_API_KEY or OPENROUTER_API_KEY in environment variables).'
+      );
     }
 
-    // Fallback to backend API (for backwards compatibility)
-    console.log('🔮 Using backend API for embedding generation...');
     try {
-      const response = await fetch('/api/embed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+      const result = await this.embeddingService.embedText({
+        text,
+        type: 'content'
       });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to generate embedding');
-      }
-
-      const data = await response.json();
-      console.log('✅ Backend embedding generated:', data.embedding?.length || 0, 'dimensions');
-      return data.embedding;
+      return result.vector;
     } catch (error) {
-      console.error('❌ Backend embedding failed:', error);
-      throw new Error(`Failed to generate embedding via backend: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(`Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

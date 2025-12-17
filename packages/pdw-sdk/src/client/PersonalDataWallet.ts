@@ -163,7 +163,6 @@ export class PersonalDataWallet {
       suiClient: (client as any).client || client,
       packageId: this.#config.packageId || '',
       accessRegistryId: this.#config.accessRegistryId || '',
-      apiUrl: this.#config.apiUrl,
       contextWalletService: this.#contextWallet
     });
     

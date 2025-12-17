@@ -40,8 +40,6 @@ export interface PermissionServiceConfig {
   packageId: string;
   /** Access registry ID for wallet allowlists */
   accessRegistryId: string;
-  /** API URL for backend consent UI */
-  apiUrl?: string;
   /** ContextWalletService for validation */
   contextWalletService?: ContextWalletService;
   /** Optional injected cross-context permission service */
@@ -56,7 +54,6 @@ export interface PermissionServiceConfig {
 export class PermissionService {
   private suiClient: SuiClient;
   private packageId: string;
-  private apiUrl: string;
   private contextWalletService?: ContextWalletService;
   private crossContextPermissions: CrossContextPermissionService;
   private pendingConsents: Map<string, ConsentRequestRecord> = new Map();
@@ -65,7 +62,6 @@ export class PermissionService {
   constructor(config: PermissionServiceConfig) {
     this.suiClient = config.suiClient;
     this.packageId = config.packageId;
-    this.apiUrl = config.apiUrl || 'http://localhost:3001/api';
     this.contextWalletService = config.contextWalletService;
     this.consentRepository = config.consentRepository;
 

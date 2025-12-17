@@ -17,17 +17,8 @@ export function validateConfig(config: Partial<PDWConfig>): PDWConfig {
   const errors: string[] = [];
 
   // Validate required fields
-  if (!config.apiUrl) {
-    errors.push('apiUrl is required');
-  }
-
   if (!config.packageId || config.packageId === '0x0') {
     console.warn('PDW SDK: packageId not configured. Please set a valid deployed package ID.');
-  }
-
-  // Validate API URL format
-  if (config.apiUrl && !isValidUrl(config.apiUrl)) {
-    errors.push('apiUrl must be a valid HTTP or HTTPS URL');
   }
 
   // Validate encryption config
@@ -54,15 +45,6 @@ export function validateConfig(config: Partial<PDWConfig>): PDWConfig {
   }
 
   return config as PDWConfig;
-}
-
-function isValidUrl(string: string): boolean {
-  try {
-    const url = new URL(string);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
 }
 
 export function mergeConfigs(base: PDWConfig, overrides: Partial<PDWConfig>): PDWConfig {

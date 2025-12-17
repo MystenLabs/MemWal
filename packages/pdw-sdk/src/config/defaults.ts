@@ -11,7 +11,6 @@ export function createDefaultConfig(): PDWConfig {
     // Updated October 3, 2025 - Dynamic Fields Implementation
     packageId: '0x6dc2fe501926b17f441e46c3ac121ad0924da3aa7c5bc78781ddd7df1080694a',
     accessRegistryId: '0x0',
-    apiUrl: 'http://localhost:3000/api',
     encryptionConfig: {
       enabled: true,
       keyServers: [], // To be configured based on environment
@@ -34,7 +33,6 @@ export function createDefaultConfig(): PDWConfig {
 export function createProductionConfig(overrides: Partial<PDWConfig> = {}): PDWConfig {
   return {
     ...createDefaultConfig(),
-    apiUrl: 'https://api.personaldatawallet.com',
     accessRegistryId: overrides.accessRegistryId ?? '0x0',
     encryptionConfig: {
       enabled: true,
@@ -56,7 +54,6 @@ export function createProductionConfig(overrides: Partial<PDWConfig> = {}): PDWC
 export function createTestnetConfig(overrides: Partial<PDWConfig> = {}): PDWConfig {
   return {
     ...createDefaultConfig(),
-    apiUrl: 'https://testnet-api.personaldatawallet.com',
     accessRegistryId: overrides.accessRegistryId ?? '0x0',
     encryptionConfig: {
       enabled: true,
