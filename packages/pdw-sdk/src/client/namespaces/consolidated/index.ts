@@ -11,8 +11,6 @@ export { AINamespace } from './AINamespace';
 export type {
   PatternAnalysis,
   ClassificationResult,
-  ChatSession,
-  ChatMessage,
   EmbedOptions
 } from './AINamespace';
 

@@ -498,12 +498,12 @@ export class MemoryNamespace {
    */
   async delete(memoryId: string): Promise<void> {
     try {
-      // Delete from blockchain
-      await this.services.memory.deleteMemoryRecord(
-        memoryId,
-        this.services.config.userAddress,
-        this.services.config.signer as any // Type compatibility
-      );
+      // Build and execute delete transaction on blockchain
+      const tx = await this.services.memory.tx.deleteMemory(memoryId);
+      const signer = this.services.config.signer?.getSigner?.() || this.services.config.signer;
+      await (signer as any).signAndExecuteTransaction({
+        transaction: tx,
+      });
 
       // Remove from local vector index if it exists
       if (this.services.memoryIndex) {
@@ -911,27 +911,35 @@ export class MemoryNamespace {
 
     // Get related memories if requested
     if (options.includeRelated && memory.content) {
-      // Use MemoryService text-based search as fallback
+      // Use local vector search if available
       try {
-        const searchResults = await this.services.memory.searchMemories({
-          query: memory.content.substring(0, 100), // Use first 100 chars as query
-          userAddress: this.services.config.userAddress,
-          k: 5,
-          threshold: 0.6
-        });
+        if (this.services.memoryIndex) {
+          // Generate embedding for the memory content
+          const embedding = this.services.embedding
+            ? await this.services.embedding.embedText({ text: memory.content.substring(0, 500) })
+            : null;
 
-        context.related = searchResults
-          .filter((r: any) => (r.blobId || r.id) !== memoryId)
-          .slice(0, 5)
-          .map((r: any) => ({
-            id: r.id,
-            content: r.content || '',
-            category: r.category,
-            importance: r.metadata?.importance,
-            blobId: r.blobId || r.id,
-            metadata: r.metadata,
-            createdAt: r.timestamp ? new Date(r.timestamp).getTime() : Date.now()
-          }));
+          if (embedding) {
+            const searchResults = await this.services.memoryIndex.searchMemories({
+              userAddress: this.services.config.userAddress,
+              vector: embedding.vector,
+              k: 5
+            });
+
+            context.related = searchResults
+              .filter((r: any) => r.memoryObjectId !== memoryId)
+              .slice(0, 5)
+              .map((r: any) => ({
+                id: r.memoryObjectId || r.id,
+                content: r.content || '',
+                category: r.category || 'general',
+                importance: r.importance,
+                blobId: r.blobId || r.memoryObjectId || r.id,
+                metadata: r.metadata,
+                createdAt: r.timestamp || Date.now()
+              }));
+          }
+        }
       } catch (error) {
         console.warn('Failed to get related memories:', error);
         context.related = [];
@@ -976,11 +984,25 @@ export class MemoryNamespace {
     }
 
     try {
-      const searchResults = await this.services.memory.searchMemories({
-        query: memory.content.substring(0, 100), // Use content as query
+      // Generate embedding for content to find similar memories
+      if (!this.services.embedding) {
+        console.warn('Embedding service not available for related memories search');
+        return [];
+      }
+
+      const embResult = await this.services.embedding.embedText({
+        text: memory.content.substring(0, 500)
+      });
+
+      if (!this.services.memoryIndex) {
+        console.warn('Memory index service not available for related memories search');
+        return [];
+      }
+
+      const searchResults = await this.services.memoryIndex.searchMemories({
         userAddress: this.services.config.userAddress,
-        k: k + 1,
-        threshold: 0.5
+        vector: embResult.vector,
+        k: k + 1
       });
 
       return searchResults

@@ -7,7 +7,6 @@
 
 import type { ClientWithCoreApi, PDWConfig } from '../types';
 import { MemoryService } from '../services/MemoryService';
-import { ChatService } from '../services/ChatService';
 import { StorageService } from '../services/StorageService';
 import { EncryptionService } from '../services/EncryptionService';
 import { TransactionService } from '../services/TransactionService';
@@ -16,7 +15,6 @@ import { MainWalletService } from '../wallet/MainWalletService';
 import { ContextWalletService } from '../wallet/ContextWalletService';
 import { PermissionService } from '../access/PermissionService';
 import { AggregationService } from '../aggregation/AggregationService';
-import { PDWApiClient } from '../api/client';
 import { createDefaultConfig } from '../config/defaults';
 import { validateConfig } from '../config/validation';
 import type { ConsentRepository } from '../permissions/ConsentRepository';
@@ -28,9 +26,6 @@ import * as walletBcsTypes from '../generated/pdw/wallet';
 
 export interface PersonalDataWalletExtension {
   // Top-level imperative methods
-  createMemory: MemoryService['createMemory'];
-  searchMemories: MemoryService['searchMemories'];
-  getMemoryContext: MemoryService['getMemoryContext'];
   setConsentRepository: (repository?: ConsentRepository) => void;
   
   // Storage methods
@@ -62,8 +57,6 @@ export interface PersonalDataWalletExtension {
     getMemoryIndex: ViewService['getMemoryIndex'];
     getMemory: ViewService['getMemory'];
     getMemoryStats: ViewService['getMemoryStats'];
-    getChatSessions: ChatService['getSessions'];
-    getChatSession: ChatService['getSession'];
     getAccessPermissions: ViewService['getAccessPermissions'];
     getContentRegistry: ViewService['getContentRegistry'];
     objectExists: ViewService['objectExists'];
@@ -116,7 +109,6 @@ export interface PersonalDataWalletExtension {
   
   // Service instances for advanced usage
   memory: MemoryService;
-  chat: ChatService;
   storage: StorageService;
   encryption: EncryptionService;
   viewService: ViewService;
@@ -132,11 +124,9 @@ export interface PersonalDataWalletExtension {
 export class PersonalDataWallet {
   #client: ClientWithCoreApi;
   #config: PDWConfig;
-  #apiClient: PDWApiClient;
   #transactions: TransactionService;
   #view: ViewService;
   #memory: MemoryService;
-  #chat: ChatService;
   #storage: StorageService;
   #encryption: EncryptionService;
   #mainWallet: MainWalletService;
@@ -147,13 +137,11 @@ export class PersonalDataWallet {
   constructor(client: ClientWithCoreApi, config?: Partial<PDWConfig>) {
     this.#client = client;
     this.#config = validateConfig({ ...createDefaultConfig(), ...config });
-    this.#apiClient = new PDWApiClient(this.#config.apiUrl!);
-    
+
     // Initialize services
     this.#transactions = new TransactionService(client as any, this.#config);
     this.#view = new ViewService(client, this.#config);
     this.#memory = new MemoryService(client, this.#config);
-    this.#chat = new ChatService(this.#apiClient);
     this.#storage = new StorageService(this.#config);
     this.#encryption = new EncryptionService(client, this.#config);
     
@@ -187,17 +175,11 @@ export class PersonalDataWallet {
     });
     
     // Bind methods after services are initialized
-    this.createMemory = this.#memory.createMemory.bind(this.#memory);
-    this.searchMemories = this.#memory.searchMemories.bind(this.#memory);
-    this.getMemoryContext = this.#memory.getMemoryContext.bind(this.#memory);
     this.uploadToStorage = this.#storage.upload.bind(this.#storage);
     this.retrieveFromStorage = this.#storage.retrieve.bind(this.#storage);
   }
 
   // Top-level imperative methods (declarations)
-  createMemory: MemoryService['createMemory'];
-  searchMemories: MemoryService['searchMemories'];
-  getMemoryContext: MemoryService['getMemoryContext'];
   uploadToStorage: StorageService['upload'];
   retrieveFromStorage: StorageService['retrieve'];
   setConsentRepository(repository?: ConsentRepository): void {
@@ -236,8 +218,6 @@ export class PersonalDataWallet {
       getMemoryIndex: this.#view.getMemoryIndex.bind(this.#view),
       getMemory: this.#view.getMemory.bind(this.#view),
       getMemoryStats: this.#view.getMemoryStats.bind(this.#view),
-      getChatSessions: this.#chat.getSessions.bind(this.#chat),
-      getChatSession: this.#chat.getSession.bind(this.#chat),
       getStorageStats: this.#storage.getStats.bind(this.#storage),
       listStoredItems: this.#storage.list.bind(this.#storage),
       getAccessPermissions: this.#view.getAccessPermissions.bind(this.#view),
@@ -314,7 +294,6 @@ export class PersonalDataWallet {
 
   // Service instances
   get memory() { return this.#memory; }
-  get chat() { return this.#chat; }
   get storage() { return this.#storage; }
   get encryption() { return this.#encryption; }
   get config() { return this.#config; }

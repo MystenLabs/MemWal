@@ -33,7 +33,6 @@ import { KeypairSigner, WalletAdapterSigner } from './signers';
 import { StorageService } from '../services/StorageService';
 import { EmbeddingService } from '../services/EmbeddingService';
 import { MemoryService } from '../services/MemoryService';
-import { ChatService } from '../services/ChatService';
 import { QueryService } from '../services/QueryService';
 import { ClassifierService } from '../services/ClassifierService';
 import { VectorService } from '../services/VectorService';
@@ -48,7 +47,6 @@ import { SearchNamespace } from './namespaces/SearchNamespace';
 import { ClassifyNamespace } from './namespaces/ClassifyNamespace';
 import { GraphNamespace } from './namespaces/GraphNamespace';
 import { EmbeddingsNamespace } from './namespaces/EmbeddingsNamespace';
-import { ChatNamespace } from './namespaces/ChatNamespace';
 import { BatchNamespace } from './namespaces/BatchNamespace';
 import { CacheNamespace } from './namespaces/CacheNamespace';
 import { IndexNamespace } from './namespaces/IndexNamespace';
@@ -66,7 +64,6 @@ import { SecurityNamespace } from './namespaces/consolidated/SecurityNamespace';
 import { BlockchainNamespace } from './namespaces/consolidated/BlockchainNamespace';
 import { StorageNamespace as ConsolidatedStorageNamespace } from './namespaces/consolidated/StorageNamespace';
 import type { PDWConfig, ClientWithCoreApi } from '../types';
-import { PDWApiClient } from '../api/client';
 import { ClientMemoryManager } from './ClientMemoryManager';
 import { ViewService } from '../services/ViewService';
 import { CapabilityService } from '../services/CapabilityService';
@@ -249,7 +246,6 @@ export interface ServiceContainer {
   storage: StorageService;
   embedding?: EmbeddingService;
   memory: MemoryService;
-  chat: ChatService;
   query: QueryService;
   classifier?: ClassifierService;
   vector?: VectorService;
@@ -455,13 +451,7 @@ export class SimplePDWClient {
     };
     const memory = new MemoryService(clientAdapter, pdwConfig);
 
-    // 5. API Client for backend services
-    const apiClient = new PDWApiClient(pdwConfig.apiUrl!);
-
-    // 6. Chat Service (uses API client)
-    const chat = new ChatService(apiClient);
-
-    // 7. Query Service (advanced search)
+    // 5. Query Service (advanced search)
     const query = new QueryService();
 
     // 8. Classifier Service (if AI enabled)
@@ -652,7 +642,6 @@ export class SimplePDWClient {
       storage,
       embedding,
       memory,
-      chat,
       query,
       classifier,
       vector,
@@ -927,13 +916,6 @@ export class SimplePDWClient {
    */
   get embeddings(): EmbeddingsNamespace {
     return new EmbeddingsNamespace(this.services);
-  }
-
-  /**
-   * Chat operations namespace
-   */
-  get chat(): ChatNamespace {
-    return new ChatNamespace(this.services);
   }
 
   /**

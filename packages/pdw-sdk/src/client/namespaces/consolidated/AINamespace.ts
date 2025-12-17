@@ -4,7 +4,6 @@
  * Merges functionality from:
  * - EmbeddingsNamespace: Vector embedding generation
  * - ClassifyNamespace: Content classification & analysis
- * - ChatNamespace: AI chat with memory context
  *
  * Provides a unified interface for all AI-powered operations.
  *
@@ -41,176 +40,10 @@ export interface ClassificationResult {
 }
 
 /**
- * Chat session
- */
-export interface ChatSession {
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  messageCount: number;
-}
-
-/**
- * Chat message
- */
-export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: number;
-}
-
-/**
  * Embedding options
  */
 export interface EmbedOptions {
   type?: 'query' | 'document';
-}
-
-/**
- * Chat sub-namespace for chat operations
- */
-class ChatSubNamespace {
-  constructor(private services: ServiceContainer) {}
-
-  /**
-   * Create a new chat session
-   *
-   * @param options - Session options
-   * @returns Created session
-   *
-   * @example
-   * ```typescript
-   * const session = await pdw.ai.chat.createSession({ title: 'Work Discussion' });
-   * ```
-   */
-  async createSession(options?: { title?: string; model?: string }): Promise<ChatSession> {
-    const result = await this.services.chat.createSession({
-      userAddress: this.services.config.userAddress,
-      modelName: options?.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
-      title: options?.title || 'New Chat'
-    });
-    return result.session as any as ChatSession;
-  }
-
-  /**
-   * Get chat session by ID
-   *
-   * @param sessionId - Session ID
-   * @returns Session with messages
-   */
-  async get(sessionId: string): Promise<ChatSession> {
-    const result = await this.services.chat.getSession(
-      sessionId,
-      this.services.config.userAddress
-    );
-    return result.session as any as ChatSession;
-  }
-
-  /**
-   * Get all user sessions
-   *
-   * @returns Array of sessions
-   */
-  async list(): Promise<ChatSession[]> {
-    const result = await this.services.chat.getSessions(
-      this.services.config.userAddress
-    );
-    return result.sessions as any as ChatSession[];
-  }
-
-  /**
-   * Send message (non-streaming)
-   *
-   * @param sessionId - Session ID
-   * @param message - Message text
-   * @returns AI response
-   *
-   * @example
-   * ```typescript
-   * const response = await pdw.ai.chat.send(sessionId, 'What do you remember about TypeScript?');
-   * console.log(response.content);
-   * ```
-   */
-  async send(sessionId: string, message: string): Promise<ChatMessage> {
-    const result = await this.services.chat.sendMessage({
-      text: message,
-      userId: this.services.config.userAddress,
-      userAddress: this.services.config.userAddress,
-      sessionId
-    });
-
-    return {
-      role: 'assistant' as const,
-      content: result.content || '',
-      timestamp: Date.now()
-    };
-  }
-
-  /**
-   * Stream chat response
-   *
-   * @param sessionId - Session ID
-   * @param message - Message text
-   * @param callbacks - Streaming callbacks
-   *
-   * @example
-   * ```typescript
-   * await pdw.ai.chat.stream(sessionId, 'Tell me about my preferences', {
-   *   onMessage: (chunk) => process.stdout.write(chunk.data),
-   *   onDone: () => console.log('\nDone!')
-   * });
-   * ```
-   */
-  async stream(
-    sessionId: string,
-    message: string,
-    callbacks: {
-      onMessage?: (chunk: { data: string; event?: string }) => void;
-      onDone?: () => void;
-      onError?: (error: Error) => void;
-    }
-  ): Promise<void> {
-    await this.services.chat.streamChat(
-      {
-        text: message,
-        userId: this.services.config.userAddress,
-        userAddress: this.services.config.userAddress,
-        sessionId
-      },
-      {
-        onMessage: callbacks.onMessage || (() => {}),
-        onDone: callbacks.onDone || (() => {}),
-        onError: callbacks.onError ? (event: any) => callbacks.onError!(new Error(event.data)) : undefined
-      }
-    );
-  }
-
-  /**
-   * Update session title
-   *
-   * @param sessionId - Session ID
-   * @param title - New title
-   */
-  async updateTitle(sessionId: string, title: string): Promise<void> {
-    await this.services.chat.updateSessionTitle(
-      sessionId,
-      this.services.config.userAddress,
-      title
-    );
-  }
-
-  /**
-   * Delete chat session
-   *
-   * @param sessionId - Session ID
-   */
-  async delete(sessionId: string): Promise<void> {
-    await this.services.chat.deleteSession(
-      sessionId,
-      this.services.config.userAddress
-    );
-  }
 }
 
 // ============================================================================
@@ -220,7 +53,7 @@ class ChatSubNamespace {
 /**
  * AI Namespace - Unified AI Operations
  *
- * Consolidates embeddings, classification, and chat into one namespace.
+ * Consolidates embeddings and classification into one namespace.
  *
  * @example
  * ```typescript
@@ -229,29 +62,10 @@ class ChatSubNamespace {
  *
  * // Classify content
  * const category = await pdw.ai.classify('I love TypeScript');
- *
- * // Chat with memory context
- * const session = await pdw.ai.chat.createSession();
- * const response = await pdw.ai.chat.send(session.id, 'What do you know about me?');
  * ```
  */
 export class AINamespace {
-  private _chat: ChatSubNamespace;
-
-  constructor(private services: ServiceContainer) {
-    this._chat = new ChatSubNamespace(services);
-  }
-
-  // ==========================================================================
-  // Chat Sub-Namespace
-  // ==========================================================================
-
-  /**
-   * Chat operations with memory context
-   */
-  get chat(): ChatSubNamespace {
-    return this._chat;
-  }
+  constructor(private services: ServiceContainer) {}
 
   // ==========================================================================
   // Embedding Operations (from EmbeddingsNamespace)

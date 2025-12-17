@@ -241,11 +241,12 @@ export class BatchNamespace {
 
     for (const id of ids) {
       try {
-        await this.services.memory.deleteMemoryRecord(
-          id,
-          this.services.config.userAddress,
-          this.services.config.signer.getSigner()
-        );
+        // Build and execute delete transaction
+        const tx = await this.services.memory.tx.deleteMemory(id);
+        const signer = this.services.config.signer?.getSigner?.() || this.services.config.signer;
+        await (signer as any).signAndExecuteTransaction({
+          transaction: tx,
+        });
         successCount++;
       } catch (error) {
         console.warn(`Failed to delete memory ${id}:`, error);

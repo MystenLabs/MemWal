@@ -27,7 +27,6 @@ export { MemoryIndexService } from './services/MemoryIndexService';
 export { ViewService } from './services/ViewService';
 export { TransactionService } from './services/TransactionService';
 export { BatchService } from './services/BatchService';
-export { ChatService } from './services/ChatService';
 export { CrossContextPermissionService } from './services/CrossContextPermissionService';
 export { MemoryService } from './services/MemoryService';
 export { VectorService } from './services/VectorService';

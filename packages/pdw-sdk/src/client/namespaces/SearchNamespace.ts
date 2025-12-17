@@ -448,9 +448,10 @@ export class SearchNamespace {
     max: number = 10,
     options: VectorSearchOptions = {}
   ): Promise<SearchResult[]> {
-    const allMemories = await this.services.memory.view.getUserMemories(
+    const memoriesResult = await this.services.viewService?.getUserMemories(
       this.services.config.userAddress
     );
+    const allMemories = memoriesResult?.data || [];
 
     const filtered = allMemories.filter((m: any) => {
       const importance = m.importance || m.metadata?.importance || 5;
@@ -496,9 +497,10 @@ export class SearchNamespace {
         });
       } else {
         // Get all memories
-        const memories = await this.services.memory.view.getUserMemories(
+        const memoriesResult = await this.services.viewService?.getUserMemories(
           this.services.config.userAddress
         );
+        const memories = memoriesResult?.data || [];
 
         results = memories.map((m: any) => ({
           id: m.id || m.blobId,

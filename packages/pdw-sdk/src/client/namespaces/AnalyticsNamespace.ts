@@ -293,18 +293,13 @@ export class AnalyticsNamespace {
       ? memory.content
       : new TextDecoder().decode(memory.content);
 
-    // Get related memories
-    const related = await this.services.memory.searchMemories({
-      query: content,
-      userAddress: this.services.config.userAddress,
-      k: 5
-    });
-
+    // Related memories search requires vector service
+    // For now return basic analysis without related count
     return {
       memoryId,
       importance: memory.metadata.importance || 5,
       category: memory.metadata.category,
-      relatedCount: related.length - 1, // Exclude self
+      relatedCount: 0, // Would require vector search
       clusterInfo: undefined // Would require full clustering analysis
     };
   }
