@@ -129,7 +129,9 @@ export type {
 } from './client/ClientMemoryManager';
 
 // Wallet architecture components
+/** @deprecated Use CapabilityService instead */
 export { MainWalletService } from './wallet/MainWalletService';
+/** @deprecated Use ContextNamespace instead */
 export { ContextWalletService } from './wallet/ContextWalletService';
 export { PermissionService } from './access/PermissionService';
 export type { ConsentRepository } from './permissions/ConsentRepository';
