@@ -402,6 +402,25 @@ curl -X POST http://localhost:3000/api/index/rebuild   # Rebuild HNSW index
 - Ensure you have enough SUI: `sui client faucet`
 - Check gas budget: use `--gas-budget 100000000`
 
+**6. "hnswlib-node bindings not found" (Windows)**
+
+Error: `Could not locate the bindings file` or `MSB8036: The Windows SDK version 10.0.22621.0 was not found`
+
+This happens because `hnswlib-node` requires native compilation with Windows SDK.
+
+**Solution:**
+1. Open **Visual Studio Installer**
+2. Select **Modify** for VS Build Tools 2022
+3. Go to **Individual components** tab
+4. Check **Windows 10/11 SDK (10.0.22621.0)** or newer version
+5. Click **Modify** to install
+6. Restart terminal and rebuild:
+   ```bash
+   npm rebuild hnswlib-node
+   ```
+
+**Alternative:** If you can't install Windows SDK, the SDK will fall back to `hnswlib-wasm` (slower but works without native compilation).
+
 ### Debug Mode
 
 Enable verbose logging:

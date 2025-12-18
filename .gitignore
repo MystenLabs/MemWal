@@ -53,3 +53,19 @@ next-env.d.ts
 
 # Debug
 .vscode/launch.json
+
+# Serena
+.serena/
+
+# Claude Code
+.claude/
+
+# Walrus CLI
+walrus.exe
+
+# Benchmark outputs
+benchmark-*.json
+benchmark-*.txt
+
+# Whitepaper LaTeX
+Personal_Data_Wallet___whitepaper*/

@@ -10,7 +10,7 @@ const nextConfig = {
     // External packages that should not be bundled by webpack
     // hnswlib-node requires native bindings and must be loaded directly by Node.js
     serverComponentsExternalPackages: [
-      'personal-data-wallet-sdk',
+      '@cmdoss/memwal',
       '@mysten/walrus',
       'hnswlib-wasm',
       'hnswlib-node',  // Native Node.js module for HNSW
