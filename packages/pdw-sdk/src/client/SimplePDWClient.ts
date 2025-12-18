@@ -69,6 +69,8 @@ import { ViewService } from '../services/ViewService';
 import { CapabilityService } from '../services/CapabilityService';
 import { MemoryIndexService } from '../services/MemoryIndexService';
 import { IndexManager, type IndexManagerOptions, type IndexProgressCallback } from '../services/IndexManager';
+import { createHnswService } from '../vector/createHnswService';
+import type { IHnswService } from '../vector/IHnswService';
 
 /**
  * Configuration for Simple PDW Client
@@ -260,6 +262,8 @@ export interface ServiceContainer {
   viewService?: ViewService; // For read operations
   capability?: CapabilityService; // For capability-based access control
   indexManager?: IndexManager; // For hybrid index persistence
+  /** Shared HNSW service instance (singleton) */
+  sharedHnswService?: IHnswService;
 }
 
 /**
@@ -272,6 +276,9 @@ export class SimplePDWClient {
   private services: ServiceContainer;
   private initialized: boolean = false;
   private initPromise: Promise<void> | null = null;
+  /** Shared HNSW service instance - created once and shared across all services */
+  private sharedHnswService: IHnswService | null = null;
+  private sharedHnswServicePromise: Promise<IHnswService> | null = null;
 
   constructor(config: SimplePDWConfig) {
     // Resolve configuration with defaults
@@ -450,10 +457,7 @@ export class SimplePDWClient {
     };
     const memory = new MemoryService(clientAdapter, pdwConfig);
 
-    // 5. Query Service (advanced search)
-    const query = new QueryService();
-
-    // 8. Classifier Service (if AI enabled)
+    // 5. Classifier Service (if AI enabled)
     let classifier: ClassifierService | undefined;
     if (embeddingConfig.apiKey) {
       classifier = new ClassifierService(
@@ -464,7 +468,28 @@ export class SimplePDWClient {
       );
     }
 
-    // 9. Vector Service (if local indexing enabled)
+    // 9. Create shared HNSW service (singleton for all vector operations)
+    // Note: This starts async initialization - services will wait for it when needed
+    let sharedHnswService: IHnswService | undefined;
+    if (config.features.enableLocalIndexing) {
+      // Start HNSW initialization early, store promise for later await
+      this.sharedHnswServicePromise = createHnswService({
+        indexConfig: {
+          dimension: embeddingConfig.dimensions,
+          maxElements: 10000,
+          efConstruction: 200,
+          m: 16
+        },
+        batchConfig: {
+          maxBatchSize: 100,
+          batchDelayMs: 5000
+        }
+      });
+      console.log('✅ Shared HNSW service initialization started (singleton for all vector services)');
+    }
+
+    // 9a. Vector Service (if local indexing enabled)
+    // Note: HNSW service will be injected after async initialization
     let vector: VectorService | undefined;
     if (config.features.enableLocalIndexing && embedding && embeddingConfig.apiKey) {
       vector = new VectorService(
@@ -479,6 +504,7 @@ export class SimplePDWClient {
             m: 16,
             efConstruction: 200
           }
+          // Note: hnswService will be set after async init completes
         },
         embedding,  // Already instantiated
         storage
@@ -486,6 +512,7 @@ export class SimplePDWClient {
     }
 
     // 9b. MemoryIndexService (for HNSW indexing with Walrus persistence)
+    // Note: HNSW service will be injected after async initialization
     let memoryIndex: MemoryIndexService | undefined;
     if (config.features.enableLocalIndexing) {
       memoryIndex = new MemoryIndexService(storage, {
@@ -493,6 +520,7 @@ export class SimplePDWClient {
         dimension: embeddingConfig.dimensions,
         efConstruction: 200,
         m: 16
+        // Note: hnswService will be set after async init completes
       });
       // Initialize with embedding service if available
       if (embedding) {
@@ -501,6 +529,7 @@ export class SimplePDWClient {
     }
 
     // 10. ClientMemoryManager (for full create pipeline)
+    // Note: HNSW service will be injected after async initialization
     let clientMemoryManager: ClientMemoryManager | undefined;
     if (ai.geminiApiKey) {
       clientMemoryManager = new ClientMemoryManager({
@@ -511,6 +540,7 @@ export class SimplePDWClient {
         geminiApiKey: ai.geminiApiKey,
         walrusNetwork: walrus.network,
         enableLocalIndexing: config.features.enableLocalIndexing
+        // Note: hnswService will be set after async init completes
       });
     }
 
@@ -636,6 +666,14 @@ export class SimplePDWClient {
       );
     }
 
+    // 20. QueryService (advanced search) - initialized with all dependencies
+    const query = new QueryService(
+      memoryIndex,    // MemoryIndexService for vector search
+      embedding,      // EmbeddingService for query embedding generation
+      storage,        // StorageService for content retrieval
+      undefined       // GraphService - will be set if knowledge graph is enabled
+    );
+
     return {
       config,
       storage,
@@ -665,7 +703,16 @@ export class SimplePDWClient {
     if (this.initialized) return;
 
     try {
+      // Initialize shared HNSW service FIRST (singleton for all vector operations)
+      // This ensures all subsequent service initializations get the same instance
+      if (this.sharedHnswServicePromise) {
+        this.sharedHnswService = await this.sharedHnswServicePromise;
+        this.services.sharedHnswService = this.sharedHnswService;
+        console.log('✅ Shared HNSW service ready (singleton)');
+      }
+
       // Initialize vector service if enabled (WASM loading)
+      // Note: VectorService.initialize() will use singleton from createHnswService
       if (this.services.vector) {
         await this.services.vector.initialize();
       }

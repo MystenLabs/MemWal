@@ -1,16 +1,16 @@
 /**
  * WalrusStorageService - Production Decentralized Storage
- * 
- * Official Walrus client integration with SEAL encryption,
+ *
+ * Walrus client integration with SEAL encryption,
  * content verification, and standardized tagging per https://docs.wal.app/
- * 
- * Removed all demo/placeholder code including:
- * - XOR encryption fallbacks
- * - Local storage fallbacks
- * - Node.js fs/path dependencies
- * - Mock availability checks
+ *
+ * Uses @mysten/walrus SDK for writeBlob/readBlob operations when signer is available.
+ * Falls back to REST API for read-only operations without signer.
  */
 
+import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
+import { walrus } from '@mysten/walrus';
+import type { Signer } from '@mysten/sui/cryptography';
 import type { SealService } from '../seal/SealService';
 
 export interface WalrusConfig {
@@ -18,9 +18,11 @@ export interface WalrusConfig {
   adminAddress?: string;
   storageEpochs?: number;
   uploadRelayHost?: string;
+  aggregatorHost?: string;
   retryAttempts?: number;
   timeoutMs?: number;
   sealService?: SealService;
+  signer?: Signer; // Required for writeBlob operations
 }
 
 export interface MemoryMetadata {
@@ -95,10 +97,13 @@ interface CachedBlob {
 }
 
 /**
- * Production-ready Walrus storage service with official client integration
+ * Production-ready Walrus storage service using @mysten/walrus SDK
  */
 export class WalrusStorageService {
-  private readonly config: Omit<Required<WalrusConfig>, 'sealService'> & { sealService?: SealService };
+  private readonly config: Omit<Required<WalrusConfig>, 'sealService' | 'signer'> & {
+    sealService?: SealService;
+    signer?: Signer;
+  };
   private readonly cache = new Map<string, CachedBlob>();
   private stats: WalrusStats = {
     totalUploads: 0,
@@ -114,19 +119,42 @@ export class WalrusStorageService {
 
   private readonly CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
   private sealService?: SealService;
+  private walrusClient: ReturnType<typeof this.createWalrusClient> | null = null;
 
   constructor(config: Partial<WalrusConfig> = {}) {
+    const network = config.network || 'testnet';
+
     this.config = {
-      network: config.network || 'testnet',
+      network,
       adminAddress: config.adminAddress || '',
       storageEpochs: config.storageEpochs || 12,
       uploadRelayHost: config.uploadRelayHost || 'https://upload-relay.testnet.walrus.space',
+      aggregatorHost: config.aggregatorHost || 'https://aggregator.walrus-testnet.walrus.space',
       retryAttempts: config.retryAttempts || 3,
       timeoutMs: config.timeoutMs || 60000,
-      sealService: config.sealService
+      sealService: config.sealService,
+      signer: config.signer
     };
 
     this.sealService = config.sealService;
+
+    // Initialize Walrus SDK client
+    this.walrusClient = this.createWalrusClient(network);
+  }
+
+  /**
+   * Create Walrus client using @mysten/walrus SDK
+   * Uses $extend to add walrus capabilities to SuiClient
+   */
+  private createWalrusClient(network: 'testnet' | 'mainnet') {
+    const suiClient = new SuiClient({
+      url: getFullnodeUrl(network)
+    });
+
+    // Extend SuiClient with Walrus capabilities using $extend
+    return suiClient.$extend(walrus({
+      network,
+    }));
   }
 
   // ==================== PUBLIC API ====================
@@ -474,19 +502,29 @@ export class WalrusStorageService {
     };
   }
 
-  private async uploadToWalrus(content: string, metadata: MemoryMetadata): Promise<string> {
-    // TODO: Replace with official @mysten/walrus client
-    // This is a placeholder implementation that needs to be replaced
-    // with the actual Walrus client following https://docs.wal.app/
-    
-    const tags = this.createWalrusTags(metadata);
-    
+  private async uploadToWalrus(content: string, _metadata: MemoryMetadata): Promise<string> {
+    // Use Walrus SDK writeBlob when signer is available
+    if (this.walrusClient && this.config.signer) {
+      try {
+        const blob = new TextEncoder().encode(content);
+        const { blobId } = await this.walrusClient.walrus.writeBlob({
+          blob,
+          deletable: false,
+          epochs: this.config.storageEpochs,
+          signer: this.config.signer
+        });
+        return blobId;
+      } catch (error) {
+        throw new WalrusError(`Walrus SDK upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
+      }
+    }
+
+    // Fallback to REST API if no signer (read-only mode or relay upload)
     try {
-      const response = await fetch(`${this.config.uploadRelayHost}/v1/store`, {
-        method: 'POST',
+      const response = await fetch(`${this.config.uploadRelayHost}/v1/store?epochs=${this.config.storageEpochs}`, {
+        method: 'PUT',
         headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-Walrus-Tags': JSON.stringify(tags)
+          'Content-Type': 'application/octet-stream'
         },
         body: new TextEncoder().encode(content)
       });
@@ -496,20 +534,43 @@ export class WalrusStorageService {
       }
 
       const result = await response.json();
-      return result.blobId || result.id;
-
+      // Handle both newlyCreated and alreadyCertified responses
+      const newBlob = result.newlyCreated?.blobObject;
+      const certifiedBlob = result.alreadyCertified?.blobId;
+      return newBlob?.blobId || certifiedBlob || result.blobId;
     } catch (error) {
-      throw new WalrusError(`Walrus upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
+      throw new WalrusError(`Walrus REST upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
     }
   }
 
   private async retrieveFromWalrus(blobId: string): Promise<{ content: string; metadata: MemoryMetadata }> {
-    // TODO: Replace with official @mysten/walrus client
-    // This is a placeholder implementation that needs to be replaced
-    // with the actual Walrus client following https://docs.wal.app/
-    
+    // Use Walrus SDK readBlob when client is available
+    if (this.walrusClient) {
+      try {
+        const blob = await this.walrusClient.walrus.readBlob({ blobId });
+        const content = new TextDecoder().decode(blob);
+
+        const metadata: MemoryMetadata = {
+          contentType: 'text/plain',
+          contentSize: content.length,
+          contentHash: blobId,
+          category: 'unknown',
+          topic: 'Retrieved memory',
+          importance: 5,
+          embeddingDimension: 3072,
+          createdTimestamp: Date.now()
+        };
+
+        return { content, metadata };
+      } catch (error) {
+        // Fall through to REST API on SDK error
+        console.warn('Walrus SDK readBlob failed, falling back to REST API:', error);
+      }
+    }
+
+    // Fallback to REST API
     try {
-      const response = await fetch(`${this.config.uploadRelayHost.replace('upload-relay', 'retrieval')}/v1/retrieve/${blobId}`);
+      const response = await fetch(`${this.config.aggregatorHost}/v1/${blobId}`);
 
       if (!response.ok) {
         throw new Error(`Retrieval failed: ${response.status} ${response.statusText}`);
@@ -517,12 +578,10 @@ export class WalrusStorageService {
 
       const content = await response.text();
 
-      // Extract metadata from headers or separate metadata blob
-      // This is simplified - actual implementation would retrieve proper metadata
       const metadata: MemoryMetadata = {
         contentType: 'text/plain',
         contentSize: content.length,
-        contentHash: blobId, // Use Walrus blob_id as content hash
+        contentHash: blobId,
         category: 'unknown',
         topic: 'Retrieved memory',
         importance: 5,
@@ -531,27 +590,9 @@ export class WalrusStorageService {
       };
 
       return { content, metadata };
-
     } catch (error) {
       throw new WalrusError(`Walrus retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
     }
-  }
-
-  private createWalrusTags(metadata: MemoryMetadata): Record<string, string> {
-    const tags: Record<string, string> = {
-      'content-type': metadata.contentType,
-      'content-hash': metadata.contentHash,
-      'category': metadata.category,
-      'topic': metadata.topic,
-      'importance': metadata.importance.toString(),
-      'created-at': new Date(metadata.createdTimestamp).toISOString()
-    };
-
-    if (metadata.customMetadata) {
-      Object.assign(tags, metadata.customMetadata);
-    }
-
-    return tags;
   }
 
   private isCacheValid(timestamp: Date): boolean {

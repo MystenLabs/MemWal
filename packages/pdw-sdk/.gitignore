@@ -23,6 +23,7 @@ build/
 .idea/
 .serena/
 .claude/
+CLAUDE.md
 *.swp
 *.swo
 *~

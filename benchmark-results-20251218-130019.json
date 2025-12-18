@@ -1,0 +1,28 @@
+{
+  "timestamp": "2025-12-18T13:00:33+07:00",
+  "baseUrl": "http://localhost:3000",
+  "results": {
+    "chatSimple": {"timeMs": 🔄 Testing: Chat - Simple Query
+
+2389, "description": "Vector search + RAG"},
+    "chatSaveMemory": {"timeMs": 🔄 Testing: Chat - Save Memory
+
+2325, "description": "Create memory + index"},
+    "chatKnowledge": {"timeMs": 🔄 Testing: Chat - General Knowledge
+
+2304, "description": "General knowledge query"},
+    "listMemories": {"timeMs": 🔄 Testing: List Memories
+
+2304, "description": "Blockchain query"},
+    "extractMemory": {"timeMs": 🔄 Testing: Extract Memory
+
+2304, "description": "AI classification"},
+    "batchSave": {"timeMs": 🔄 Testing: Chat - Batch Save (2 items)
+
+2302, "description": "Quilt batch upload"}
+  },
+  "summary": {
+    "averageQueryMs": 0,
+    "optionAPlusWorking": false
+  }
+}

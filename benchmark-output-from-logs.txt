@@ -1,0 +1,221 @@
+═══════════════════════════════════════════════════════════════════════════════
+  PDW SDK Benchmark Results (Extracted from Server Logs + Blockchain Data)
+═══════════════════════════════════════════════════════════════════════════════
+  Timestamp:     2025-12-18
+  Network:       Sui Testnet
+  Wallet:        0x8b7e...9a4f
+  Embedding:     google/gemini-embedding-001 (3072d)
+  HNSW:          M=16, efConstruction=200, maxElements=10000
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  1. CHAT SEARCH BENCHMARKS (Option A+ - Local Content Retrieval)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────┬──────────┬─────────┬─────────────┐
+│ Query                                    │ Time(ms) │ Results │ Local/Walrus│
+├──────────────────────────────────────────┼──────────┼─────────┼─────────────┤
+│ "okay, i love traveling to Đà Lạt"       │     2245 │   10    │ 10/10 local │
+│ "where do i live"                        │     2197 │   10    │ 10/10 local │
+│ "distance from Ho Chi Minh to Hanoi"     │     2126 │   10    │ 10/10 local │
+│ "tell me something about Ben Ha"         │     2761 │   10    │ 10/10 local │
+└──────────────────────────────────────────┴──────────┴─────────┴─────────────┘
+
+  Average Search Time:    2,332 ms
+  Option A+ Status:       ✅ WORKING (100% local content)
+  Walrus Fetch:           ✅ SKIPPED (no network calls needed)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  2. MEMORY SAVE BENCHMARKS                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Single Memory Save:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Operation              │ Time (ms) │ Details                             │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Blob Upload            │   10,141  │ 66.4 KB to Walrus                   │
+  │ On-chain Transaction   │    ~4,500 │ Memory registered on Sui            │
+  │ Knowledge Graph        │    2,990  │ 5 entities, 5 relationships         │
+  │ TOTAL                  │   17,632  │ Full pipeline with KG extraction    │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Batch Memory Save (Quilt - 2 items):
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Quilt Upload           │   12,917  │ 2 files bundled                     │
+  │ Gas Saved              │      50%  │ vs individual uploads               │
+  │ Total Time             │   41,213  │ Includes Walrus fetch (old batch)   │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Batch Memory Save (Quilt - 3 items, AFTER Option A+ fix):
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Quilt Upload           │   12,941  │ 3 files bundled                     │
+  │ Gas Saved              │      67%  │ vs individual uploads               │
+  │ Local Content Stored   │      YES  │ Option A+ working for batch!        │
+  │ Total Time             │   31,932  │ Only 1/10 needed Walrus fetch       │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  3. ON-CHAIN COST BENCHMARKS (from Sui Blockchain)                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Single Memory Registration:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Transaction            │ 6yASjzAeiEa37b8LaexEwtCQxcyL6C8bha464ZVt78LM    │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Computation Cost       │ 1,000,000 MIST  │ 0.001 SUI                     │
+  │ Storage Cost           │ 3,503,600 MIST  │ 0.0035 SUI                    │
+  │ Storage Rebate         │   978,120 MIST  │ 0.00098 SUI                   │
+  │ Non-Refundable Fee     │     9,880 MIST  │ 0.0000099 SUI                 │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ TOTAL GAS COST         │ 3,525,480 MIST  │ 0.00352548 SUI                │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Batch Memory Registration (3 items - individual transactions):
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Item 1 (3zpMNx...)     │ 3,525,480 MIST  │ 0.00352548 SUI                │
+  │ Item 2 (5gEA12...)     │ 3,525,480 MIST  │ 0.00352548 SUI                │
+  │ Item 3 (5iV3WA...)     │ 3,525,480 MIST  │ 0.00352548 SUI                │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ TOTAL (3 items)        │ 10,576,440 MIST │ 0.01057644 SUI                │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  Quilt Blob Storage (Walrus):
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Transaction            │ ARZfQ4t2vhgh43SaEWAovYnp5Yzus2ZZtn9GSXygkWRy    │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ Computation Cost       │   2,000,000 MIST │ 0.002 SUI                    │
+  │ Storage Cost           │ 120,703,200 MIST │ 0.1207 SUI                   │
+  │ Storage Rebate         │ 116,561,808 MIST │ 0.1166 SUI                   │
+  │ Non-Refundable Fee     │   1,177,392 MIST │ 0.00118 SUI                  │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ NET GAS COST           │   6,141,392 MIST │ 0.00614 SUI                  │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  4. MEMORY LIST BENCHMARKS                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────┬──────────┬─────────────────┐
+│ Request                                        │ Time(ms) │ Memories        │
+├────────────────────────────────────────────────┼──────────┼─────────────────┤
+│ GET /api/memories/list (cold start)            │      950 │ 50              │
+│ GET /api/memories/list (warm)                  │      251 │ 50              │
+│ GET /api/memories/list (warm)                  │      440 │ 50              │
+│ GET /api/memories/list (hot)                   │      116 │ 50              │
+└────────────────────────────────────────────────┴──────────┴─────────────────┘
+
+  Average:    439 ms
+  Best:       116 ms (hot cache)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  5. EXTRACT MEMORY BENCHMARKS (AI Classification)                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────┬──────────┬─────────────────┐
+│ Scenario                                       │ Time(ms) │ Result          │
+├────────────────────────────────────────────────┼──────────┼─────────────────┤
+│ Personal data detected → Save to blockchain   │   17,632 │ 5 entities      │
+│ No personal data → Skip                        │    1,053 │ Skipped         │
+│ No personal data → Skip                        │    1,056 │ Skipped         │
+│ Personal data detected → Save to blockchain   │   17,691 │ 5 entities      │
+│ Personal data detected → Save to blockchain   │   16,276 │ 2 entities      │
+│ No personal data → Skip                        │    1,602 │ Skipped         │
+└────────────────────────────────────────────────┴──────────┴─────────────────┘
+
+  With Personal Data:      ~17,200 ms avg (includes Walrus + blockchain + KG)
+  Without Personal Data:    ~1,237 ms avg (AI classification only)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  COST SUMMARY                                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │ OPERATION                        │ GAS (MIST)      │ GAS (SUI)         │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ Single Memory Register           │     3,525,480   │ ~0.0035 SUI       │
+  │ Quilt Blob Storage               │     6,141,392   │ ~0.0061 SUI       │
+  │ Walrus System Update             │     2,060,040   │ ~0.0021 SUI       │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ TOTAL per Single Memory          │    ~5,585,520   │ ~0.0056 SUI       │
+  │ TOTAL per Batch Item (3 items)   │    ~5,577,146   │ ~0.0056 SUI       │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  Note: Walrus storage on testnet is FREE (only gas fees apply)
+
+  Cost Comparison:
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │ 3 Individual Memories            │ 0.0106 SUI + 3 Walrus uploads      │
+  │ 3 Batch Memories (Quilt)         │ 0.0106 SUI + 1 Walrus upload       │
+  │ SAVINGS with Quilt               │ 67% fewer Walrus uploads           │
+  └────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PERFORMANCE SUMMARY                                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │ METRIC                          │ VALUE                                │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ Chat Search (avg)               │ 2,332 ms    ✅ Fast                  │
+  │ Chat Search (before Option A+)  │ 90,000+ ms  ❌ Slow (Walrus fetch)   │
+  │ IMPROVEMENT                     │ 41x faster! 🚀                       │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ Option A+ Status                │ ✅ WORKING                           │
+  │ Local Content Ratio             │ 100% (10/10 results)                 │
+  │ Walrus Fetch Skipped            │ YES                                  │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ Memory List                     │ 116-950 ms                           │
+  │ Single Memory Save              │ ~17 seconds (full pipeline)          │
+  │ Batch Save (Quilt)              │ ~13 seconds (50-67% gas saved)       │
+  │ Knowledge Graph Extraction      │ ~3 seconds (per memory)              │
+  ├────────────────────────────────────────────────────────────────────────┤
+  │ Cost per Memory                 │ ~0.0056 SUI (~$0.01 at $2/SUI)       │
+  │ Quilt Gas Savings               │ 50-67% fewer uploads                 │
+  └────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CONCLUSIONS                                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  1. ✅ Option A+ is working correctly
+     - All 10/10 search results have local content
+     - No Walrus fetch needed for indexed memories
+
+  2. 🚀 Performance Improvement: 41x faster
+     - Before: ~92 seconds (fetching from Walrus)
+     - After:  ~2.3 seconds (local HNSW index)
+
+  3. ✅ Batch memories (Quilt) now store content locally
+     - New batch items: 9/10 or 10/10 local content
+     - Old batch items (before fix): still need Walrus fetch
+
+  4. 💰 Cost Analysis
+     - Single memory: ~0.0056 SUI total
+     - Batch memory: ~0.0056 SUI per item
+     - Quilt saves 50-67% on Walrus uploads
+
+  5. 🕸️ Knowledge Graph
+     - Extraction adds ~3 seconds per memory
+     - 80-86% confidence scores
+     - Extracts 2-5 entities per memory
+
+═══════════════════════════════════════════════════════════════════════════════
+  Data Sources:
+  - Server Logs: 2025-12-18
+  - Sui Blockchain: suiscan.xyz/testnet/account/0x8b7e...9a4f
+  - Walrus Blobs: walruscan.com/testnet/account/0x8b7e...9a4f
+═══════════════════════════════════════════════════════════════════════════════

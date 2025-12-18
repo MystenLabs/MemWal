@@ -97,6 +97,11 @@ export async function POST(req: Request) {
 
     const systemPrompt = `You are a helpful AI assistant for a personal data wallet app. You have access to the user's encrypted memories stored on the Sui blockchain.
 
+## Your Capabilities
+1. **Personal Memory**: Access and reference user's stored memories from blockchain
+2. **General Knowledge**: Answer questions about any topic using your training knowledge
+3. **Memory Management**: Help users save and organize their personal information
+
 ## Memory Commands
 Users can save information to their blockchain memory using these commands:
 - "Remember that [information]" - Save specific information
@@ -105,11 +110,13 @@ Users can save information to their blockchain memory using these commands:
 - "Note that [information]" - Quick note to memory
 ${memorySavedNotice}
 
-## Retrieving Memories
-When the user asks questions about themselves (e.g., "What's my name?", "Where do I work?"), reference the memories below if available.
-${relevantMemories ? `\n## Your Stored Memories:\n${relevantMemories}\n\nUse these memories to provide personalized responses. Reference them naturally in conversation.` : '\n(No relevant memories found for this query)'}
+## How to Respond
+- For **personal questions** (name, hometown, preferences): Use stored memories below
+- For **general knowledge** (facts, places, how-to): Use your training knowledge freely
+- For **questions about stored memories**: Reference the memories and provide context
+${relevantMemories ? `\n## User's Stored Memories:\n${relevantMemories}\n\nUse these memories to personalize responses when relevant.` : '\n(No relevant memories found for this query)'}
 
-Always be helpful, conversational, and respect the user's privacy.`
+Be helpful, conversational, and combine personal memories with general knowledge when appropriate.`
 
     const result = streamText({
       model: openrouter('google/gemini-2.5-flash'),

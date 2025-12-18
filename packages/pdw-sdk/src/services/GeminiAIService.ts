@@ -1,11 +1,15 @@
 /**
- * GeminiAIService - AI Integration via OpenRouter
+ * GeminiAIService - AI Integration via OpenRouter SDK
  *
- * Provides AI-powered text analysis capabilities using OpenRouter API
+ * Provides AI-powered text analysis capabilities using OpenRouter SDK
  * for entity extraction, relationship identification, and content analysis.
  *
  * Supports any model available on OpenRouter (Google Gemini, OpenAI, Anthropic, etc.)
+ *
+ * Refactored to use official @openrouter/sdk instead of raw fetch calls.
  */
+
+import { OpenRouter } from '@openrouter/sdk';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -41,11 +45,12 @@ export interface EntityExtractionResponse {
 
 /**
  * AI service for advanced text analysis and knowledge extraction
- * Uses OpenRouter API for maximum flexibility and model choice
+ * Uses OpenRouter SDK for maximum flexibility and model choice
  */
 export class GeminiAIService {
   private readonly apiKey: string;
   private readonly config: Required<GeminiConfig>;
+  private readonly openRouterClient: OpenRouter;
 
   constructor(config: GeminiConfig) {
     // Resolve API key: prefer OPENROUTER_API_KEY, fallback to provided apiKey
@@ -65,54 +70,49 @@ export class GeminiAIService {
       apiKey: this.apiKey
     };
 
-    console.log(`✅ GeminiAIService initialized with OpenRouter (${this.config.model})`);
+    // Initialize OpenRouter SDK client
+    this.openRouterClient = new OpenRouter({
+      apiKey: this.apiKey
+    });
+
+    console.log(`✅ GeminiAIService initialized with OpenRouter SDK (${this.config.model})`);
   }
 
   /**
-   * Call OpenRouter Chat Completions API
+   * Call OpenRouter Chat Completions API using SDK
    */
   private async callOpenRouter(prompt: string): Promise<string> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
-
     try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/personal-data-wallet',
-          'X-Title': 'Personal Data Wallet SDK'
-        },
-        body: JSON.stringify({
-          model: this.config.model,
-          messages: [
-            { role: 'user', content: prompt }
-          ],
-          temperature: this.config.temperature,
-          max_tokens: this.config.maxTokens
-        }),
-        signal: controller.signal
+      const result = await this.openRouterClient.chat.send({
+        model: this.config.model,
+        messages: [
+          { role: 'user', content: prompt }
+        ],
+        temperature: this.config.temperature,
+        maxTokens: this.config.maxTokens,
+        stream: false
       });
 
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorData = await response.text();
-        throw new Error(`OpenRouter API error: ${response.status} - ${errorData}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      if (!result.choices || !result.choices[0] || !result.choices[0].message) {
         throw new Error('Invalid response from OpenRouter API');
       }
 
-      return data.choices[0].message.content || '';
+      // Handle content which can be string or array
+      const content = result.choices[0].message.content;
+      if (typeof content === 'string') {
+        return content;
+      }
+      if (Array.isArray(content)) {
+        // Extract text from content items
+        return content
+          .filter((item: any) => item.type === 'text')
+          .map((item: any) => item.text || '')
+          .join('');
+      }
+      return '';
     } catch (error) {
-      clearTimeout(timeoutId);
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`OpenRouter request timed out after ${this.config.timeout}ms`);
+      if (error instanceof Error) {
+        throw new Error(`OpenRouter API error: ${error.message}`);
       }
       throw error;
     }

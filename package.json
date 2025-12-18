@@ -1,16 +1,25 @@
 {
-  "name": "my-v0-project",
+  "name": "personal-data-wallet",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "next build",
+    "build:sdk": "npm run build -w @cmdoss/memwal",
     "dev": "next dev",
     "lint": "next lint",
-    "start": "next start"
+    "start": "next start",
+    "changeset": "changeset",
+    "changeset:add": "changeset add",
+    "version": "changeset version",
+    "release": "npm run build:sdk && changeset publish"
   },
   "dependencies": {
     "@ai-sdk/google": "^2.0.45",
     "@ai-sdk/openai": "^2.0.86",
+    "@cmdoss/memwal": "workspace:*",
     "@emotion/is-prop-valid": "latest",
     "@hookform/resolvers": "^3.10.0",
     "@mysten/sui": "^1.45.2",
@@ -61,7 +70,6 @@
     "next": "14.2.25",
     "next-themes": "^0.4.6",
     "ogl": "latest",
-    "personal-data-wallet-sdk": "file:./packages/pdw-sdk",
     "postprocessing": "latest",
     "react": "^18.2.0",
     "react-day-picker": "9.8.0",
@@ -78,6 +86,8 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22",
     "@types/react": "^18.2.0",

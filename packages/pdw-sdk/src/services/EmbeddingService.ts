@@ -5,6 +5,8 @@
  * Supports any AI SDK compatible provider (OpenAI, Google, Cohere, etc.)
  * while maintaining backward compatibility with existing PDW code.
  *
+ * OpenRouter now uses the official @openrouter/sdk instead of raw fetch calls.
+ *
  * Key features:
  * - Provider-agnostic: Accept any ai-sdk EmbeddingModel
  * - Backward compatible: Existing code continues to work
@@ -15,6 +17,7 @@ import type { EmbeddingModelV2 } from '@ai-sdk/provider';
 import { embed, embedMany } from 'ai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
+import { OpenRouter } from '@openrouter/sdk';
 
 // Type alias for embedding models - V2 is the default in AI SDK v5
 type EmbeddingModel<VALUE> = EmbeddingModelV2<VALUE>;
@@ -120,7 +123,7 @@ export interface BatchEmbeddingResult {
 /**
  * Embedding service using Vercel AI SDK
  * Supports all AI SDK compatible providers
- * OpenRouter uses native fetch API for better compatibility
+ * OpenRouter uses the official @openrouter/sdk for better type safety
  */
 export class EmbeddingService {
   private embeddingModel: EmbeddingModel<string> | null = null;
@@ -131,6 +134,7 @@ export class EmbeddingService {
   private readonly maxRequestsPerMinute: number;
   private provider: 'google' | 'openai' | 'openrouter' | 'cohere' | 'custom';
   private apiKey: string = '';
+  private openRouterClient: OpenRouter | null = null;
 
   constructor(config: EmbeddingConfig = {}) {
     this.maxRequestsPerMinute = config.requestsPerMinute || 1500;
@@ -157,8 +161,10 @@ export class EmbeddingService {
         this.modelName = modelNameFromString;
         this.dimensions = config.dimensions || this.getDefaultDimensions(provider);
 
-        // OpenRouter uses native fetch, others use AI SDK
-        if (provider !== 'openrouter') {
+        // OpenRouter uses SDK, others use AI SDK
+        if (provider === 'openrouter') {
+          this.openRouterClient = new OpenRouter({ apiKey: this.apiKey });
+        } else {
           this.embeddingModel = this.createModel(provider, this.apiKey, this.modelName);
         }
 
@@ -190,9 +196,10 @@ export class EmbeddingService {
     this.modelName = config.modelName || this.getDefaultModelName(provider);
     this.dimensions = config.dimensions || this.getDefaultDimensions(provider);
 
-    // OpenRouter uses native fetch API for better compatibility
-    // Other providers use AI SDK
-    if (provider !== 'openrouter') {
+    // OpenRouter uses SDK, others use AI SDK
+    if (provider === 'openrouter') {
+      this.openRouterClient = new OpenRouter({ apiKey: this.apiKey });
+    } else {
       this.embeddingModel = this.createModel(provider, this.apiKey, this.modelName);
     }
 
@@ -353,43 +360,45 @@ export class EmbeddingService {
   }
 
   /**
-   * Generate embedding using OpenRouter native API
-   * Uses direct fetch to /api/v1/embeddings endpoint
+   * Generate embedding using OpenRouter SDK
+   * Uses official @openrouter/sdk for embeddings
    */
   private async embedTextOpenRouter(text: string, startTime: number): Promise<EmbeddingResult> {
-    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/personal-data-wallet',
-        'X-Title': 'Personal Data Wallet SDK'
-      },
-      body: JSON.stringify({
-        model: this.modelName,
-        input: text
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.text();
-      throw new Error(`OpenRouter embedding failed: ${response.status} - ${errorData}`);
+    if (!this.openRouterClient) {
+      throw new Error('OpenRouter client not initialized');
     }
 
-    const data = await response.json();
+    const result = await this.openRouterClient.embeddings.generate({
+      model: this.modelName,
+      input: text
+    });
 
-    if (!data.data || !data.data[0] || !data.data[0].embedding) {
+    // Handle union type - result can be string or object
+    if (typeof result === 'string') {
+      throw new Error('Unexpected string response from OpenRouter embeddings API');
+    }
+
+    const data = (result as any).data;
+    if (!data || !data[0] || !data[0].embedding) {
       throw new Error('Invalid response from OpenRouter embeddings API');
     }
 
     this.requestCount++;
 
+    // Handle embedding which can be string or number[]
+    const embedding = data[0].embedding;
+    const vector = typeof embedding === 'string'
+      ? JSON.parse(embedding) as number[]
+      : embedding as number[];
+
+    const usage = (result as any).usage;
+
     return {
-      vector: data.data[0].embedding,
-      dimension: data.data[0].embedding.length,
+      vector,
+      dimension: vector.length,
       model: this.modelName,
       processingTime: Date.now() - startTime,
-      tokenCount: data.usage?.total_tokens
+      tokenCount: usage?.totalTokens
     };
   }
 
@@ -443,37 +452,36 @@ export class EmbeddingService {
   }
 
   /**
-   * Generate batch embeddings using OpenRouter native API
+   * Generate batch embeddings using OpenRouter SDK
    */
   private async embedBatchOpenRouter(texts: string[], startTime: number): Promise<BatchEmbeddingResult> {
-    const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/personal-data-wallet',
-        'X-Title': 'Personal Data Wallet SDK'
-      },
-      body: JSON.stringify({
-        model: this.modelName,
-        input: texts
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.text();
-      throw new Error(`OpenRouter batch embedding failed: ${response.status} - ${errorData}`);
+    if (!this.openRouterClient) {
+      throw new Error('OpenRouter client not initialized');
     }
 
-    const data = await response.json();
+    const result = await this.openRouterClient.embeddings.generate({
+      model: this.modelName,
+      input: texts
+    });
 
-    if (!data.data || !Array.isArray(data.data)) {
+    // Handle union type - result can be string or object
+    if (typeof result === 'string') {
+      throw new Error('Unexpected string response from OpenRouter embeddings API');
+    }
+
+    const data = (result as any).data;
+    if (!data || !Array.isArray(data)) {
       throw new Error('Invalid response from OpenRouter embeddings API');
     }
 
     // Sort by index to ensure correct order
-    const sortedData = data.data.sort((a: any, b: any) => a.index - b.index);
-    const vectors = sortedData.map((item: any) => item.embedding);
+    const sortedData = [...data].sort((a: any, b: any) => (a.index || 0) - (b.index || 0));
+    const vectors = sortedData.map((item: any) => {
+      const embedding = item.embedding;
+      return typeof embedding === 'string'
+        ? JSON.parse(embedding) as number[]
+        : embedding as number[];
+    });
 
     this.requestCount++;
     const totalTime = Date.now() - startTime;

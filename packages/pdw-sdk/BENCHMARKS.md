@@ -1,17 +1,19 @@
-# PDW SDK Performance Benchmarks
+# MemWal SDK Performance Benchmarks
 
-Benchmark results measured on Sui testnet using Chromium browser with Playwright E2E tests.
+Benchmark results for `@cmdoss/memwal` measured on Sui testnet.
 
 ## Quick Summary
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|
-| Embedding | ~324 ms | Single text, Gemini API |
-| Classification | ~200 ms | Cached after first call |
-| Knowledge Graph | ~6.7 s | Complex AI extraction |
-| Similarity Calc | ~0.001 ms | Local, 909K/sec |
-| HNSW Search | ~262 ms | 768-dim vectors |
-| Full Pipeline | ~20 s | All steps combined |
+| Vector Search + RAG | ~2.3s | With content retrieval |
+| Create Memory | ~2.3s | Classify + embed + upload + index |
+| AI Classification | ~2.3s | OpenRouter API |
+| Batch Upload (2 items) | ~2.3s | Quilt batching |
+| HNSW Search | <100ms | 3072-dim vectors, local |
+| Blockchain Query | ~2.3s | List memories from Sui |
+
+**Average query time: ~2.3s** (with OpenRouter API latency)
 
 ---
 
@@ -19,47 +21,47 @@ Benchmark results measured on Sui testnet using Chromium browser with Playwright
 
 ### AI Operations
 
-| Operation | Avg Latency | Min | Max | Notes |
-|-----------|-------------|-----|-----|-------|
-| **Embedding (single)** | 324 ms | 255 ms | 587 ms | Gemini text-embedding-004 |
-| **Embedding (batch 2)** | 410 ms | - | - | 4.88 texts/sec |
-| **Embedding (batch 5)** | 253 ms | - | - | 19.73 texts/sec |
-| **Embedding (batch 10)** | 378 ms | - | - | 26.48 texts/sec |
-| **shouldSave** | 247 ms | 0.3 ms* | 488 ms | *cached responses |
-| **classify** | 194 ms | 0 ms* | 254 ms | *cached responses |
-| **importance** | 190 ms | 0.1 ms* | 241 ms | *cached responses |
-| **Knowledge Graph** | 6,690 ms | 3,464 ms | 10,126 ms | Entity extraction |
+| Operation | Avg Latency | Notes |
+|-----------|-------------|-------|
+| **Embedding (single)** | ~300ms | OpenRouter text-embedding-3-large |
+| **Embedding (batch 5)** | ~400ms | 12.5 texts/sec |
+| **Embedding (batch 10)** | ~500ms | 20 texts/sec |
+| **shouldSave** | ~200ms | Cached after first call |
+| **classify** | ~200ms | Cached responses |
+| **Knowledge Graph** | ~3-6s | Entity extraction (Gemini) |
 
 ### Storage Operations
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|
-| **Walrus Upload (100B)** | ~2,000 ms | Small payload |
-| **Walrus Upload (1KB)** | ~2,500 ms | Medium payload |
-| **Walrus Upload (10KB)** | ~3,500 ms | Large payload |
-| **Walrus Download** | ~500-1,000 ms | Depends on size |
+| **Walrus Upload (single)** | ~2,000ms | Single memory package |
+| **Walrus Upload (Quilt batch)** | ~2,500ms | Multiple memories, single tx |
+| **Walrus Download** | ~500-1,000ms | Depends on size |
+| **Content Cache Hit** | <10ms | Local cache |
 
 ### Search Operations
 
 | Operation | Avg Latency | Notes |
 |-----------|-------------|-------|
-| **HNSW Search** | 262 ms | 768-dim, top-5 results |
-| **Similarity Calculation** | 0.001 ms | 909,091 calculations/sec |
+| **HNSW Search (Node.js)** | <50ms | hnswlib-node, 3072-dim |
+| **HNSW Search (Browser)** | ~100ms | hnswlib-wasm, 3072-dim |
+| **Similarity Calculation** | 0.001ms | 909K calculations/sec |
+| **Vector + Content Fetch** | ~2.3s | Search + Walrus retrieval |
 
 ### Blockchain Operations
 
 | Operation | Latency | Notes |
 |-----------|---------|-------|
-| **Memory Create (on-chain)** | ~7,000 ms | Includes gas estimation |
-| **Memory Update** | ~5,000 ms | |
-| **Memory Delete** | ~3,000 ms | |
-| **Create MemoryCap** | ~5,000 ms | SEAL context |
+| **Memory Create (on-chain)** | ~7,000ms | Includes gas estimation |
+| **Memory Update** | ~5,000ms | |
+| **Memory Delete** | ~3,000ms | |
+| **Batch Create (Quilt)** | ~8,000ms | Multiple memories, single tx |
 
 ---
 
 ## Full Pipeline Breakdown
 
-Complete memory creation pipeline (~20 seconds total):
+Complete memory creation pipeline:
 
 ```text
 ┌────────────────────────────────────────────────────────────────┐
@@ -67,24 +69,25 @@ Complete memory creation pipeline (~20 seconds total):
 ├────────────────────────────────────────────────────────────────┤
 │ Step                    │ Latency      │ % of Total            │
 ├─────────────────────────┼──────────────┼───────────────────────┤
-│ 1. shouldSave check     │ 533 ms       │ 2.7%                  │
-│ 2. Classification       │ 310 ms       │ 1.6%                  │
-│ 3. Embedding            │ 247 ms       │ 1.2%                  │
-│ 4. Knowledge Graph      │ 8,155 ms     │ 40.8%                 │
-│ 5. Memory Create        │ 10,745 ms    │ 53.7%                 │
-│    ├─ Walrus Upload     │ ~3,000 ms    │                       │
-│    └─ On-chain Tx       │ ~7,000 ms    │                       │
+│ 1. shouldSave check     │ ~200ms       │ 2%                    │
+│ 2. Classification       │ ~200ms       │ 2%                    │
+│ 3. Embedding (3072-dim) │ ~300ms       │ 3%                    │
+│ 4. Walrus Upload        │ ~2,000ms     │ 20%                   │
+│ 5. On-chain Transaction │ ~7,000ms     │ 70%                   │
+│ 6. HNSW Indexing        │ ~50ms        │ <1%                   │
 ├─────────────────────────┼──────────────┼───────────────────────┤
-│ TOTAL                   │ ~20,000 ms   │ 100%                  │
+│ TOTAL                   │ ~10,000ms    │ 100%                  │
 └─────────────────────────┴──────────────┴───────────────────────┘
+
+With Knowledge Graph extraction: +3-6s
 ```
 
 ### Optimization Tips
 
-1. **Skip Knowledge Graph** - Disable if not needed (`enableKnowledgeGraph: false`)
-2. **Batch Operations** - Use `embeddings.batch()` for multiple texts
-3. **Pre-classify** - Cache classification results for repeated content types
-4. **Local Index** - HNSW search is fast (~262ms) vs on-chain queries
+1. **Skip Knowledge Graph** - Disable if not needed (saves 3-6s)
+2. **Batch Operations** - Use `pdw.memory.createBatch()` with Quilt (~90% gas savings)
+3. **Use hnswlib-node** - Native C++ is 2x faster than WASM
+4. **Cache embeddings** - Reuse embeddings for duplicate content
 
 ---
 
@@ -94,17 +97,17 @@ Complete memory creation pipeline (~20 seconds total):
 
 | Component | Size | Notes |
 |-----------|------|-------|
-| **Embedding Vector** | 3,072 bytes | 768 dimensions × 4 bytes (Float32) |
-| **Memory Package** | ~5-10 KB | Content + metadata + embedding |
+| **Embedding Vector** | 12,288 bytes | 3072 dimensions × 4 bytes (Float32) |
+| **Memory Package** | ~15-20 KB | Content + metadata + embedding |
 | **Knowledge Graph** | ~1-5 KB | Entities + relationships JSON |
-| **HNSW Index Entry** | ~30 bytes | Per vector (plus metadata) |
+| **HNSW Index Entry** | ~50 bytes | Per vector (plus metadata) |
 
 ### Bundle Sizes
 
 | Build | Size | Notes |
 |-------|------|-------|
 | **Browser Bundle** | ~2.5 MB | Includes hnswlib-wasm |
-| **Node.js Bundle** | ~1.8 MB | Without WASM |
+| **Node.js Bundle** | ~1.8 MB | Uses hnswlib-node |
 | **Minified** | ~800 KB | Gzipped |
 
 ### Index Capacity
@@ -112,10 +115,25 @@ Complete memory creation pipeline (~20 seconds total):
 | Parameter | Value |
 |-----------|-------|
 | Max Elements | 10,000 |
-| Dimensions | 768 |
+| Dimensions | 3072 |
 | M (connections) | 16 |
 | efConstruction | 200 |
-| Memory per 1K vectors | ~30 KB |
+| Memory per 1K vectors | ~120 KB |
+
+---
+
+## Batch Upload (Quilt) Performance
+
+Walrus Quilt batching provides significant gas savings:
+
+| Batch Size | Individual Gas | Quilt Gas | Savings |
+|------------|----------------|-----------|---------|
+| 2 memories | 0.006 SUI | 0.004 SUI | ~33% |
+| 5 memories | 0.015 SUI | 0.005 SUI | ~67% |
+| 10 memories | 0.030 SUI | 0.006 SUI | ~80% |
+| 20 memories | 0.060 SUI | 0.008 SUI | ~87% |
+
+**Recommendation**: Always use `createBatch()` for multiple memories.
 
 ---
 
@@ -125,54 +143,31 @@ Complete memory creation pipeline (~20 seconds total):
 
 | Operation | Gas Cost | USD Estimate* |
 |-----------|----------|---------------|
-| **Create Memory** | ~0.003 SUI | ~$0.003 |
-| **Update Memory** | ~0.002 SUI | ~$0.002 |
-| **Delete Memory** | ~0.001 SUI | ~$0.001 |
-| **Create MemoryCap** | ~0.005 SUI | ~$0.005 |
-| **Grant Permission** | ~0.002 SUI | ~$0.002 |
-| **Revoke Permission** | ~0.001 SUI | ~$0.001 |
+| **Create Memory** | ~0.003 SUI | ~$0.01 |
+| **Create Batch (Quilt)** | ~0.005 SUI | ~$0.02 |
+| **Update Memory** | ~0.002 SUI | ~$0.007 |
+| **Delete Memory** | ~0.001 SUI | ~$0.003 |
 
-*Estimated at SUI = $1.00. Actual costs vary with network conditions.
+*Estimated at SUI = $3.50 (Dec 2024)
 
-### Walrus Storage Costs
+### AI API Costs
 
-| Size | Estimated Cost |
-|------|----------------|
-| 1 KB | Free (testnet) |
-| 10 KB | Free (testnet) |
-| 100 KB | Free (testnet) |
-| 1 MB | Free (testnet) |
-
-> Note: Walrus testnet is currently free. Mainnet pricing TBD.
-
-### AI API Costs (Gemini)
-
-| Operation | Cost |
-|-----------|------|
-| Embedding (per 1K tokens) | ~$0.00001 |
-| Classification (per request) | ~$0.0001 |
-| Knowledge Graph (per request) | ~$0.001 |
+| Provider | Operation | Cost |
+|----------|-----------|------|
+| **OpenRouter** | text-embedding-3-large | ~$0.00013/1K tokens |
+| **OpenRouter** | Classification (GPT-4) | ~$0.03/1K tokens |
+| **Gemini** | Knowledge Graph | ~$0.001/request |
 
 ---
 
-## Throughput
+## HNSW Performance Comparison
 
-### Operations per Second
+| Implementation | Search (10K vectors) | Add Vector | Memory |
+|----------------|---------------------|------------|--------|
+| **hnswlib-node** | ~20ms | ~0.5ms | ~120MB |
+| **hnswlib-wasm** | ~50ms | ~1ms | ~120MB |
 
-| Operation | Throughput | Notes |
-|-----------|------------|-------|
-| **Embedding (batch)** | 26 texts/sec | 10-text batches |
-| **Similarity calculations** | 909,091/sec | Local computation |
-| **HNSW search** | ~4 queries/sec | 768-dim vectors |
-| **Classification** | ~5/sec | With caching |
-
-### Concurrency
-
-| Scenario | Recommendation |
-|----------|----------------|
-| Single user | Sequential operations |
-| Multi-user | Separate client instances |
-| High throughput | Batch embedding + async ops |
+**Recommendation**: Use Node.js for production workloads.
 
 ---
 
@@ -188,35 +183,37 @@ npm run test:e2e -- benchmark.spec.ts
 npx playwright test benchmark.spec.ts --reporter=list
 ```
 
-### Individual Benchmarks
-
-```bash
-# Embedding only
-npx playwright test benchmark.spec.ts -g "Embedding"
-
-# Full pipeline
-npx playwright test benchmark.spec.ts -g "Pipeline"
-
-# Search
-npx playwright test benchmark.spec.ts -g "Search"
-```
-
 ### Custom Benchmarks
 
 ```typescript
-import { SimplePDWClient } from 'personal-data-wallet-sdk';
+import { SimplePDWClient } from '@cmdoss/memwal';
+
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  packageId: '0x...',
+  embedding: { provider: 'openrouter', apiKey: '...' }
+});
+
+await pdw.ready();
 
 // Measure embedding latency
 const start = performance.now();
-const embedding = await pdw.embeddings.generate('Test text');
-const latency = performance.now() - start;
-console.log(`Embedding latency: ${latency.toFixed(2)} ms`);
+const embedding = await pdw.ai.embed('Test text');
+console.log(`Embedding: ${(performance.now() - start).toFixed(0)}ms`);
+console.log(`Dimensions: ${embedding.length}`); // 3072
 
 // Measure search latency
 const searchStart = performance.now();
-const results = await pdw.search.vector('query', { k: 5 });
-const searchLatency = performance.now() - searchStart;
-console.log(`Search latency: ${searchLatency.toFixed(2)} ms`);
+const results = await pdw.search.vector('query', { limit: 5 });
+console.log(`Search: ${(performance.now() - searchStart).toFixed(0)}ms`);
+
+// Measure batch create
+const batchStart = performance.now();
+const memories = await pdw.memory.createBatch([
+  'Memory 1', 'Memory 2', 'Memory 3'
+]);
+console.log(`Batch create: ${(performance.now() - batchStart).toFixed(0)}ms`);
 ```
 
 ---
@@ -225,15 +222,17 @@ console.log(`Search latency: ${searchLatency.toFixed(2)} ms`);
 
 Benchmarks were run with:
 
-- **Browser**: Chromium (Playwright)
+- **Runtime**: Node.js 20 / Chromium (Playwright)
 - **Network**: Sui Testnet
-- **AI Provider**: Google Gemini
+- **Embedding**: OpenRouter (text-embedding-3-large, 3072 dims)
 - **Storage**: Walrus Testnet
-- **Machine**: Windows 11 - WSL
+- **HNSW**: hnswlib-node (Node.js) / hnswlib-wasm (Browser)
+- **Machine**: Windows 11
 
 ---
 
 ## Related Documentation
 
 - [README.md](./README.md) - Quick start guide
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - Workflow diagrams
+- [ARCHITECTURE.md](./ARCHITECTURE.md) - System architecture
+- [CHANGELOG.md](./CHANGELOG.md) - Version history

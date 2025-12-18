@@ -4,7 +4,7 @@
 
 export async function loadPDWClient() {
   try {
-    const pdwModule = await import('personal-data-wallet-sdk');
+    const pdwModule = await import('@cmdoss/memwal');
     const ClientClass = pdwModule.SimplePDWClient;
 
     if (!ClientClass) {

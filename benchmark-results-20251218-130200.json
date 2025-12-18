@@ -1,0 +1,16 @@
+{
+  "timestamp": "2025-12-18T13:02:14+07:00",
+  "baseUrl": "http://localhost:3000",
+  "results": {
+    "chatSimple": {"timeMs": 2298, "description": "Vector search + RAG"},
+    "chatSaveMemory": {"timeMs": 2288, "description": "Create memory + index"},
+    "chatKnowledge": {"timeMs": 2294, "description": "General knowledge query"},
+    "listMemories": {"timeMs": 2334, "description": "Blockchain query"},
+    "extractMemory": {"timeMs": 2294, "description": "AI classification"},
+    "batchSave": {"timeMs": 2309, "description": "Quilt batch upload"}
+  },
+  "summary": {
+    "averageQueryMs": 2305,
+    "optionAPlusWorking": true
+  }
+}

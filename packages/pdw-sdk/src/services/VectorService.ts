@@ -39,6 +39,8 @@ export interface VectorServiceConfig {
   batch?: Partial<BatchConfig>;
   enableAutoIndex?: boolean;
   enableMemoryCache?: boolean;
+  /** Pre-initialized HNSW service instance (shared singleton) */
+  hnswService?: IHnswService;
 }
 
 interface IndexCacheEntry {
@@ -73,8 +75,14 @@ export class VectorService {
     this.embeddingService = embeddingService || new EmbeddingService(config.embedding);
     this.storageService = storageService || new StorageService({ packageId: '' }); // Will be properly configured
 
-    const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
-    console.log(`✅ VectorService initializing with hybrid HNSW (${envType})`);
+    // Use pre-initialized HNSW service if provided (shared singleton pattern)
+    if (config.hnswService) {
+      this.hnswService = config.hnswService;
+      console.log('✅ VectorService using shared HNSW service instance');
+    } else {
+      const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
+      console.log(`✅ VectorService initializing with hybrid HNSW (${envType})`);
+    }
   }
 
   /**
@@ -92,10 +100,11 @@ export class VectorService {
 
   /**
    * Initialize the HNSW service (must be called before using any index operations)
+   * If a shared HNSW service was provided in config, this is a no-op.
    */
   async initialize(): Promise<void> {
     if (this.hnswService) {
-      return; // Already initialized
+      return; // Already initialized (or using shared instance)
     }
 
     if (this.hnswServicePromise) {
@@ -103,6 +112,7 @@ export class VectorService {
       return;
     }
 
+    // Create own HNSW service only if not provided externally
     this.hnswServicePromise = createHnswService({
       indexConfig: {
         dimension: this.config.index?.dimension || 3072,

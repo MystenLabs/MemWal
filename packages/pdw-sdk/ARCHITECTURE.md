@@ -1,15 +1,67 @@
-# PDW SDK Architecture
+# MemWal SDK Architecture
 
-Detailed workflow diagrams and architecture documentation for the Personal Data Wallet SDK.
+Detailed workflow diagrams and architecture documentation for MemWal (`@cmdoss/memwal`).
 
 ## Table of Contents
 
+- [Architecture Overview](#architecture-overview)
 - [Memory Creation Flow](#memory-creation-flow)
 - [Search Flow](#search-flow)
+- [Batch Upload (Quilt)](#batch-upload-quilt)
+- [HNSW Vector Indexing](#hnsw-vector-indexing)
 - [SEAL Encryption Flow](#seal-encryption-flow)
-- [Architecture Overview](#architecture-overview)
-- [Consolidated Namespaces](#consolidated-namespaces)
-- [Index Persistence (Hybrid Pattern)](#index-persistence-hybrid-pattern)
+- [API Namespaces](#api-namespaces)
+
+---
+
+## Architecture Overview
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          MemWal SDK Architecture                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            SimplePDWClient                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                         Primary Namespaces                              ││
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ││
+│  │  │ memory   │  │ search   │  │ index    │  │ ai       │  │ graph    │  ││
+│  │  │          │  │          │  │          │  │          │  │          │  ││
+│  │  │• create  │  │• vector  │  │• add     │  │• embed   │  │• extract │  ││
+│  │  │• createBatch│• hybrid  │  │• search  │  │• classify│  │• query   │  ││
+│  │  │• get     │  │• byCategory│ │• save    │  │• shouldSave│          │  ││
+│  │  │• delete  │  │• semantic│  │• load    │  │          │  │          │  ││
+│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                        Service Container                                ││
+│  │  embedding | memoryIndex | storage | tx | encryption | capability      ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                    ▼               ▼               ▼
+┌─────────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
+│   Embedding API     │ │  Sui Blockchain │ │   Walrus Storage    │
+│                     │ │                 │ │                     │
+│ • OpenRouter        │ │ • Testnet       │ │ • Publisher API     │
+│ • Gemini            │ │ • Mainnet       │ │ • Aggregator API    │
+│ • 3072 dimensions   │ │ • Package ID    │ │ • Quilt Batching    │
+└─────────────────────┘ └─────────────────┘ └─────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                    ▼               ▼               ▼
+┌─────────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
+│  HNSW Vector Index  │ │  SEAL Encryption│ │  Knowledge Graph    │
+│                     │ │                 │ │                     │
+│ • hnswlib-node      │ │ • Threshold IBE │ │ • Entity extraction │
+│ • hnswlib-wasm      │ │ • 2-of-N decrypt│ │ • Relationships     │
+│ • Auto-detect env   │ │ • Mysten SEAL   │ │ • Gemini-powered    │
+└─────────────────────┘ └─────────────────┘ └─────────────────────┘
+```
 
 ---
 
@@ -17,93 +69,50 @@ Detailed workflow diagrams and architecture documentation for the Personal Data 
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         PDW Memory Creation Workflow                        │
+│                      MemWal Memory Creation Workflow                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 User Input: "I am working at CommandOSS as a software engineer"
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: AI Pre-check (Optional but Recommended)                             │
+│ STEP 1: AI Pre-check (Optional)                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ pdw.ai.shouldSave(content) ──► true/false                                   │
+│ pdw.ai.shouldSave(content) → true/false                                     │
 │                                                                             │
 │ • Analyzes content relevance                                                │
 │ • Filters noise/spam                                                        │
-│ • Returns: true (save) or false (skip)                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
-                          (if shouldSave = true)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ STEP 2: AI Classification                                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Gemini API (text-embedding-004)                                             │
+│ pdw.ai.classify(content) → { category, importance, topic, summary }         │
 │                                                                             │
-│ Input:  "I am working at CommandOSS as a software engineer"                 │
-│ Output: {                                                                   │
-│   category: "fact",                                                         │
-│   importance: 8,                                                            │
-│   topic: "employment",                                                      │
-│   summary: "User works at CommandOSS as software engineer"                  │
-│ }                                                                           │
+│ Output: { category: "fact", importance: 8, topic: "employment" }            │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ STEP 3: Embedding Generation                                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Gemini API (text-embedding-004)                                             │
+│ pdw.ai.embed(content) → Float32Array[3072]                                  │
 │                                                                             │
-│ Input:  "I am working at CommandOSS as a software engineer"                 │
-│ Output: Float32Array[768] = [0.0234, -0.0156, 0.0891, ...]                   │
-│                                                                             │
-│ • 768 dimensions                                                            │
-│ • Normalized vector                                                         │
-│ • Used for semantic search                                                  │
+│ • OpenRouter or Gemini API                                                  │
+│ • 3072 dimensions (text-embedding-3-large)                                  │
+│ • Normalized vector for cosine similarity                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 4: Knowledge Graph Extraction                                          │
+│ STEP 4: Walrus Upload                                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Gemini API (gemini-1.5-flash)                                               │
-│                                                                             │
-│ Entities:                                                                   │
-│ ┌──────────────┬──────────────┬────────────┐                                │
-│ │ ID           │ Type         │ Confidence │                                │
-│ ├──────────────┼──────────────┼────────────┤                                │
-│ │ user         │ person       │ 1.0        │                                │
-│ │ commandoss   │ organization │ 1.0        │                                │
-│ │ software_eng │ concept      │ 0.95       │                                │
-│ └──────────────┴──────────────┴────────────┘                                │
-│                                                                             │
-│ Relationships:                                                              │
-│ ┌──────────┬─────────────┬────────────┐                                     │
-│ │ Source   │ Target      │ Type       │                                     │
-│ ├──────────┼─────────────┼────────────┤                                     │
-│ │ user     │ commandoss  │ works_at   │                                     │
-│ │ user     │ software_eng│ occupation │                                     │
-│ └──────────┴─────────────┴────────────┘                                     │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 5: Walrus Upload                                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Walrus Publisher (https://publisher.walrus-testnet.walrus.space)            │
-│                                                                             │
-│ Memory Package:                                                             │
+│ Memory Package uploaded to Walrus:                                          │
 │ {                                                                           │
 │   content: "I am working at CommandOSS...",                                 │
-│   embedding: [0.0234, -0.0156, ...],                                        │
-│   metadata: {                                                               │
-│     category: "fact",                                                       │
-│     importance: 8,                                                          │
-│     topic: "employment",                                                    │
-│     entities: [...],                                                        │
-│     relationships: [...]                                                    │
-│   },                                                                        │
+│   embedding: [0.0234, -0.0156, ...],  // 3072 dims                          │
+│   metadata: { category, importance, topic },                                │
 │   timestamp: 1701705600000,                                                 │
 │   identity: "0xb59f00b2454bef14d538b..."                                    │
 │ }                                                                           │
@@ -113,70 +122,63 @@ User Input: "I am working at CommandOSS as a software engineer"
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 6: On-chain Registration (Sui Blockchain)                              │
+│ STEP 5: On-chain Registration (Sui Blockchain)                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ Transaction: memory::create_memory_record                                   │
 │                                                                             │
-│ ┌─────────────────────────────────────────────────────────────────────────┐ │
-│ │ Move Call Parameters:                                                   │ │
-│ │ • index_id: 0xc42287aeec73b7c3350753e3aab52ce59e2234c9566c38eb0e...     │ │
-│ │ • blob_id: "KEG_kj_5nx8wr3eJFZwIkJtjKvEGaUNMvTvhDYddaPU"               │ │
-│ │ • category: "fact"                                                      │ │
-│ │ • topic: "employment"                                                   │ │
-│ │ • importance: 8                                                         │ │
-│ │ • content_hash: keccak256(content)                                      │ │
-│ │ • content_size: 52                                                      │ │
-│ └─────────────────────────────────────────────────────────────────────────┘ │
+│ Parameters:                                                                 │
+│ • blob_id: "KEG_kj_5nx8wr3eJFZwIkJtjKvEGaUNMvTvhDYddaPU"                    │
+│ • category: "fact"                                                          │
+│ • importance: 8                                                             │
+│ • content_hash: keccak256(content)                                          │
 │                                                                             │
-│ Output: MemoryRecord {                                                      │
-│   id: "0x6bce7d4140b7e6572df79aa1c8b12abfb6965268fe3186e5a1b2434163279a6a", │
-│   owner: "0xb59f00b2454bef14d538b3609fb99e32fcf17f96ce7a4195d145ca67b1c93e07"│
-│ }                                                                           │
-│                                                                             │
-│ • Auto-retry on version conflict (up to 3 attempts)                         │
-│ • Gas estimation before execution                                           │
+│ Output: MemoryRecord { id: "0x6bce7d4140b7e6572...", owner: "0xb59f..." }   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 7: Local HNSW Indexing                                                 │
+│ STEP 6: Local HNSW Indexing                                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ hnswlib-wasm (WebAssembly)                                                  │
+│ Auto-detected implementation:                                               │
+│ • Node.js: hnswlib-node (native C++, fastest)                               │
+│ • Browser: hnswlib-wasm (WebAssembly fallback)                              │
 │                                                                             │
-│ Index Parameters:                                                           │
-│ • Max elements: 10,000                                                      │
-│ • Dimensions: 768                                                           │
-│ • M: 16 (connections per layer)                                             │
-│ • efConstruction: 200                                                       │
+│ Index entry (NO content stored for privacy):                                │
+│ { memoryId, blobId, category, importance, timestamp, vectorId }             │
 │                                                                             │
-│ Stored Metadata (NO content for privacy):                                   │
-│ {                                                                           │
-│   memoryId: "0x6bce7d4140b7e6572df79aa1c8b12abfb6965268...",                │
-│   blobId: "KEG_kj_5nx8wr3eJFZwIkJtjKvEGaUNMvTvhDYddaPU",                    │
-│   category: "fact",                                                         │
-│   importance: 8,                                                            │
-│   timestamp: 1701705600000                                                  │
-│ }                                                                           │
-│                                                                             │
-│ • Persisted to IndexedDB (browser)                                          │
-│ • Can be saved to Walrus for cross-device sync                              │
+│ Persistence:                                                                │
+│ • Node.js: Filesystem (.pdw-indexes/)                                       │
+│ • Browser: IndexedDB                                                        │
+│ • Cloud: Optional Walrus backup                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ RESULT                                                                      │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ {                                                                           │
-│   id: "0x6bce7d4140b7e6572df79aa1c8b12abfb6965268fe3186e5a1b2434163279a6a", │
-│   blobId: "KEG_kj_5nx8wr3eJFZwIkJtjKvEGaUNMvTvhDYddaPU",                    │
-│   embedding: [0.0234, -0.0156, ...],  // 768 dimensions                     │
-│   category: "fact",                                                         │
-│   importance: 8,                                                            │
-│   topic: "employment",                                                      │
-│   entities: [...],                                                          │
-│   relationships: [...]                                                      │
-│ }                                                                           │
-└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Usage
+
+```typescript
+import { SimplePDWClient } from '@cmdoss/memwal';
+
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  packageId: '0x...',
+  embedding: { provider: 'openrouter', apiKey: '...' }
+});
+
+await pdw.ready();
+
+// Create single memory
+const memory = await pdw.memory.create('I work at CommandOSS', {
+  category: 'fact',
+  importance: 8
+});
+
+// Create batch (uses Quilt for ~90% gas savings)
+const memories = await pdw.memory.createBatch([
+  'Memory 1 content',
+  'Memory 2 content',
+  'Memory 3 content'
+]);
 ```
 
 ---
@@ -185,7 +187,7 @@ User Input: "I am working at CommandOSS as a software engineer"
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           PDW Search Workflow                               │
+│                          MemWal Search Workflow                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 Query: "What company do I work for?"
@@ -195,7 +197,7 @@ Query: "What company do I work for?"
 │ STEP 1: Query Embedding                                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ pdw.ai.embed("What company do I work for?")                                 │
-│ Output: Float32Array[768] = [0.0123, -0.0456, ...]                           │
+│ Output: Float32Array[3072]                                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -221,10 +223,9 @@ Query: "What company do I work for?"
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ For each result, fetch content from Walrus:                                 │
 │                                                                             │
-│ pdw.storage.download(blobId) ──► MemoryPackage                              │
-│                                                                             │
-│ • Decrypted if encrypted (SEAL)                                             │
-│ • Cached locally for subsequent access                                      │
+│ • Download MemoryPackage from blobId                                        │
+│ • Decrypt if encrypted (SEAL)                                               │
+│ • Cache locally for subsequent access                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -244,6 +245,136 @@ Query: "What company do I work for?"
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Search Methods
+
+```typescript
+// Vector search (semantic)
+const results = await pdw.search.vector('work experience', { limit: 5 });
+
+// Filter by category
+const facts = await pdw.search.byCategory('fact', { limit: 10 });
+
+// Hybrid search (vector + category filter)
+const filtered = await pdw.search.hybrid('work', { category: 'fact' });
+
+// With content fetched
+const withContent = await pdw.search.withContent(results);
+```
+
+---
+
+## Batch Upload (Quilt)
+
+Walrus Quilt enables batch uploads with ~90% gas savings.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Quilt Batch Upload Flow                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Individual Upload:                    Quilt Batch Upload:
+┌─────────────┐                       ┌─────────────┐
+│ Memory 1    │──► Transaction 1      │ Memory 1    │
+└─────────────┘                       │ Memory 2    │──► Single Transaction
+┌─────────────┐                       │ Memory 3    │    (Quilt)
+│ Memory 2    │──► Transaction 2      │ Memory 4    │
+└─────────────┘                       │ Memory 5    │
+┌─────────────┐                       └─────────────┘
+│ Memory 3    │──► Transaction 3
+└─────────────┘                       Gas: 1x base fee
+                                      vs
+Gas: 3x base fee                      Individual: 5x base fee
+                                      Savings: ~90%
+
+Quilt Structure:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ quiltId: "abc123..."                                                        │
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐                 │
+│ │ quiltPatchId: 1 │ │ quiltPatchId: 2 │ │ quiltPatchId: 3 │                 │
+│ │ identifier: m1  │ │ identifier: m2  │ │ identifier: m3  │                 │
+│ │ tags: {...}     │ │ tags: {...}     │ │ tags: {...}     │                 │
+│ │ content: ...    │ │ content: ...    │ │ content: ...    │                 │
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Usage
+
+```typescript
+// Batch create memories (automatically uses Quilt)
+const results = await pdw.memory.createBatch([
+  'First memory content',
+  'Second memory content',
+  'Third memory content'
+]);
+
+// Results include quilt information
+results.forEach(r => {
+  console.log(`ID: ${r.id}, BlobId: ${r.blobId}`);
+});
+```
+
+---
+
+## HNSW Vector Indexing
+
+The SDK auto-detects the environment and uses the optimal HNSW implementation.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Environment-Aware HNSW Factory                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                    createHnswService()
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+        isBrowser()?                 isNode()?
+              │                           │
+              ▼                           ▼
+┌─────────────────────────┐   ┌─────────────────────────┐
+│  BrowserHnswIndexService│   │    NodeHnswService      │
+│  (hnswlib-wasm)         │   │    (hnswlib-node)       │
+│                         │   │                         │
+│  • WebAssembly          │   │  • Native C++ bindings  │
+│  • IndexedDB persistence│   │  • Filesystem persistence│
+│  • ~50% slower than node│   │  • Fastest performance  │
+│  • Universal fallback   │   │  • Requires build tools │
+└─────────────────────────┘   └─────────────────────────┘
+
+Singleton Pattern:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ First call: Creates new instance and initializes                            │
+│ Subsequent calls: Returns existing singleton                                │
+│                                                                             │
+│ Benefits:                                                                   │
+│ • Prevents redundant index loading                                          │
+│ • Shared index across all SDK clients                                       │
+│ • Automatic environment detection                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Index Configuration
+
+```typescript
+// Default configuration
+const indexConfig = {
+  dimension: 3072,        // Embedding dimensions
+  maxElements: 10000,     // Maximum vectors
+  efConstruction: 200,    // Build-time quality
+  m: 16,                  // Connections per layer
+  spaceType: 'cosine'     // Distance metric
+};
+
+// Access via namespace
+const stats = await pdw.index.getStats();
+// { currentCount: 150, dimension: 3072, maxElements: 10000 }
+
+// Manual save/load
+await pdw.index.save();  // Save to Walrus for backup
+await pdw.index.load();  // Load from Walrus backup
+```
+
 ---
 
 ## SEAL Encryption Flow
@@ -259,56 +390,35 @@ Query: "What company do I work for?"
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ STEP 1: Create MemoryCap (On-chain)                                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ pdw.security.context.create('MY_APP')                                       │
+│ Creates on-chain capability object for key derivation                       │
 │                                                                             │
-│ Creates on-chain object:                                                    │
 │ MemoryCap {                                                                 │
-│   id: "0x05ac7bdc83308ea2cea429afc9fd6bbc91838b013f60e07cd24f3518b6d4b09d", │
+│   id: "0x05ac7bdc83308ea2cea429afc9fd6bbc91838b...",                        │
 │   owner: "0xb59f00b2454bef14d538b...",                                      │
-│   app_id: "MY_APP",                                                         │
-│   nonce: [random 32 bytes]  ◄── Used for key derivation                     │
+│   nonce: [random 32 bytes]  ← Used for key derivation                       │
 │ }                                                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 2: Compute Key ID                                                      │
+│ STEP 2: SEAL Encrypt                                                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ key_id = keccak256(owner_address || nonce)                                  │
-│                                                                             │
-│ • Deterministic: same owner + nonce = same key_id                           │
-│ • Only owner can derive this key_id                                         │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 3: SEAL Encrypt                                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ pdw.security.encrypt(data, threshold=2)                                     │
-│                                                                             │
 │ • Identity-Based Encryption (IBE)                                           │
 │ • Threshold: 2 of N key servers must agree                                  │
-│ • Key servers: Mysten Labs operated (testnet)                               │
+│ • Key servers: Mysten Labs operated                                         │
 │                                                                             │
-│ Output: {                                                                   │
-│   encryptedObject: Uint8Array[...],                                         │
-│   keyId: Uint8Array[32],                                                    │
-│   nonce: Uint8Array[32]                                                     │
-│ }                                                                           │
+│ Output: { encryptedObject, keyId, nonce }                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
                           Upload to Walrus
                                   │
-                                  │
                               DECRYPTION
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 4: Request Decryption Key                                              │
+│ STEP 3: Request Decryption Key                                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ pdw.security.decrypt({ encryptedContent, memoryCapId, keyId })              │
-│                                                                             │
 │ 1. Build seal_approve transaction with MemoryCap                            │
 │ 2. Key servers verify:                                                      │
 │    • Caller owns the MemoryCap                                              │
@@ -316,238 +426,38 @@ Query: "What company do I work for?"
 │ 3. If verified, key servers release decryption shares                       │
 │ 4. Combine shares (threshold) to decrypt                                    │
 │                                                                             │
-│ Output: Uint8Array (decrypted data)                                         │
+│ Output: Decrypted content                                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Architecture Overview
+## API Namespaces
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         PDW SDK Architecture                                │
-└─────────────────────────────────────────────────────────────────────────────┘
+### Primary Namespaces
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            SimplePDWClient                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                     Consolidated Namespaces                             ││
-│  │  ┌──────────┐  ┌──────────┐  ┌────────────┐  ┌──────────┐              ││
-│  │  │ pdw.ai   │  │pdw.security│ │pdw.blockchain│ │pdw.storage│            ││
-│  │  │          │  │          │  │            │  │          │              ││
-│  │  │• embed   │  │• encrypt │  │• tx.build  │  │• upload  │              ││
-│  │  │• classify│  │• decrypt │  │• tx.execute│  │• download│              ││
-│  │  │• chat.*  │  │• context │  │• wallet.*  │  │• cache.* │              ││
-│  │  └──────────┘  └──────────┘  └────────────┘  └──────────┘              ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-│  ┌─────────────────────────────────────────────────────────────────────────┐│
-│  │                       Legacy Namespaces                                 ││
-│  │  memory | search | embeddings | classify | graph | encryption | ...    ││
-│  └─────────────────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-                    ▼               ▼               ▼
-┌─────────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
-│   Gemini AI API     │ │  Sui Blockchain │ │   Walrus Storage    │
-│                     │ │                 │ │                     │
-│ • text-embedding-004│ │ • Testnet       │ │ • Publisher API     │
-│ • gemini-1.5-flash  │ │ • Mainnet       │ │ • Aggregator API    │
-│ • 768 dimensions    │ │ • Package ID    │ │ • Blob storage      │
-└─────────────────────┘ └─────────────────┘ └─────────────────────┘
-                                    │
-                                    ▼
-                        ┌─────────────────────┐
-                        │  SEAL Key Servers   │
-                        │                     │
-                        │ • Threshold IBE     │
-                        │ • 2-of-N decryption │
-                        │ • Mysten operated   │
-                        └─────────────────────┘
-```
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `pdw.memory` | create, createBatch, get, delete, list | Memory CRUD operations |
+| `pdw.search` | vector, hybrid, byCategory, semantic | Search operations |
+| `pdw.index` | add, search, save, load, getStats | HNSW index management |
+| `pdw.ai` | embed, classify, shouldSave | AI/embedding operations |
+| `pdw.graph` | extract, query | Knowledge graph |
 
----
+### Supporting Namespaces
 
-## Consolidated Namespaces
-
-The SDK consolidates 18 legacy namespaces into 4 primary namespaces for a cleaner API:
-
-### Namespace Mapping
-
-| Consolidated | Merged From | Primary Methods |
-|--------------|-------------|-----------------|
-| `pdw.ai` | embeddings, classify, chat | embed, embedBatch, classify, shouldSave, chat.send |
-| `pdw.security` | encryption, permissions, context, capability | encrypt, decrypt, context.create, permissions.grant |
-| `pdw.blockchain` | tx, wallet | tx.build, tx.execute, wallet.getAddress, wallet.getBalance |
-| `pdw.storage` | storage, cache | upload, download, cache.get, cache.set |
-
-### Before vs After
-
-```typescript
-// Before (legacy namespaces)
-await pdw.embeddings.generate(text);
-await pdw.classify.category(text);
-await pdw.encryption.encrypt(data);
-await pdw.context.create(appId);
-
-// After (consolidated namespaces)
-await pdw.ai.embed(text);
-await pdw.ai.classify(text);
-await pdw.security.encrypt(data);
-await pdw.security.context.create(appId);
-```
-
----
-
-## Data Flow Summary
-
-```text
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│  User    │───►│   AI     │───►│  Storage │───►│  Chain   │
-│  Input   │    │ Services │    │ (Walrus) │    │  (Sui)   │
-└──────────┘    └──────────┘    └──────────┘    └──────────┘
-     │               │               │               │
-     │          ┌────┴────┐          │               │
-     │          │         │          │               │
-     │      Embedding  Classify      │               │
-     │      Generation  + KG         │               │
-     │          │         │          │               │
-     │          └────┬────┘          │               │
-     │               │               │               │
-     │               ▼               │               │
-     │        ┌──────────┐           │               │
-     │        │  HNSW    │           │               │
-     │        │  Index   │◄──────────┼───────────────┤
-     │        └──────────┘           │               │
-     │               │               │               │
-     └───────────────┴───────────────┴───────────────┘
-                     │
-                     ▼
-              Search Results
-```
-
----
-
-## Index Persistence (Hybrid Pattern)
-
-The SDK uses a hybrid persistence strategy for the HNSW index to balance performance and reliability.
-
-### The Problem
-
-HNSW index exists only in memory (WebAssembly). When the browser tab closes, the index is lost and must be rebuilt - which is slow for large memory sets.
-
-### Hybrid Solution
-
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Hybrid Index Persistence Strategy                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-              App Start
-                  │
-                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: Check localStorage for IndexState                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ IndexState: {                                                               │
-│   blobId: "fdSmZpsA1UzBw2TrtFeHDZsdfbFH1NaqQHT61pmt4ko",                    │
-│   lastSyncTimestamp: 1733628900000,                                         │
-│   vectorCount: 150,                                                         │
-│   version: 3                                                                │
-│ }                                                                           │
-└─────────────────────────────────────────────────────────────────────────────┘
-                  │
-        ┌─────────┴─────────┐
-        │                   │
-   Cache Found         No Cache
-        │                   │
-        ▼                   ▼
-┌───────────────────┐   ┌───────────────────────────────────────────────────┐
-│ OPTION 2: Fast    │   │ OPTION 1: Full Rebuild (Fallback)                 │
-│ Cache Restore     │   ├───────────────────────────────────────────────────┤
-├───────────────────┤   │ 1. Query blockchain for all user memories         │
-│ 1. Download from  │   │ 2. For each memory:                               │
-│    Walrus (~500ms)│   │    - Download from Walrus                         │
-│ 2. Parse JSON     │   │    - Parse embedding                              │
-│ 3. Restore vectors│   │    - Add to HNSW index                            │
-│    to HNSW        │   │ 3. Time: O(n) where n = memory count              │
-└───────────────────┘   └───────────────────────────────────────────────────┘
-        │                   │
-        └─────────┬─────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 3: Incremental Sync                                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Compare lastSyncTimestamp with blockchain data:                             │
-│                                                                             │
-│ for each memory where createdAt > lastSyncTimestamp:                        │
-│   • Download content from Walrus                                            │
-│   • Generate/extract embedding                                              │
-│   • Add to HNSW index                                                       │
-│                                                                             │
-│ Time: O(k) where k = new memories since last sync                           │
-└─────────────────────────────────────────────────────────────────────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 4: Auto-save (Every 5 minutes or on significant changes)               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ SerializedIndexPackage: {                                                   │
-│   formatVersion: "1.0",                                                     │
-│   vectors: [{ vectorId: 1, vector: [...768 floats...] }, ...],             │
-│   metadata: [[1, { category: "fact", ... }], ...],                          │
-│   hnswConfig: { maxElements: 10000, m: 16, efConstruction: 200 }           │
-│ }                                                                           │
-│                                                                             │
-│ ──► Upload to Walrus ──► Update IndexState in localStorage                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Usage
-
-```typescript
-// Initialize with hybrid restore
-const pdw = await createPDWClient({
-  signer: keypair,
-  network: 'testnet',
-  geminiApiKey: process.env.GEMINI_API_KEY,
-  features: { enableLocalIndexing: true }
-});
-
-await pdw.ready();
-
-// Initialize index with progress callback
-const result = await pdw.initializeIndex({
-  onProgress: (stage, progress, message) => {
-    console.log(`[${stage}] ${progress}% - ${message}`);
-  },
-  forceRebuild: false  // Set to true to skip cache
-});
-
-console.log(`Index ready: ${result.vectorCount} vectors (${result.method})`);
-// Output: Index ready: 150 vectors (cache)
-
-// Manually save index
-const blobId = await pdw.saveIndex();
-
-// Get index stats
-const stats = pdw.getIndexStats();
-// { indexState: {...}, vectorCacheSize: 150, isAutoSaveEnabled: true }
-```
-
-### Performance Comparison
-
-| Method | 100 memories | 1000 memories | 10000 memories |
-|--------|-------------|---------------|----------------|
-| Cache Restore | ~500ms | ~800ms | ~2s |
-| Full Rebuild | ~30s | ~5min | ~50min |
+| Namespace | Methods | Description |
+|-----------|---------|-------------|
+| `pdw.encryption` | encrypt, decrypt | SEAL encryption |
+| `pdw.capability` | create, verify | Capability management |
+| `pdw.storage` | upload, download | Walrus storage |
+| `pdw.wallet` | getAddress, getBalance | Wallet operations |
+| `pdw.tx` | build, execute | Transaction building |
 
 ---
 
 ## Related Documentation
 
-- [README.md](./README.md) - Quick start and API reference
-- [BENCHMARKS.md](./BENCHMARKS.md) - Performance metrics and benchmarks
+- [README.md](./README.md) - Quick start guide
+- [BENCHMARKS.md](./BENCHMARKS.md) - Performance metrics
+- [CHANGELOG.md](./CHANGELOG.md) - Version history

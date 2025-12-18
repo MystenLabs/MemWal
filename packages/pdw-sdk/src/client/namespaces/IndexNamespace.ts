@@ -94,13 +94,15 @@ export class IndexNamespace {
 
     if (type === 'memoryIndex') {
       // MemoryIndexService uses batched add internally via HnswWasmService
+      // Option A+: Pass isEncrypted to control content storage
       await service.indexMemory(
         spaceId,
         vectorId.toString(),
         metadata?.blobId || '',
         metadata?.content || '',
         metadata || {},
-        vector
+        vector,
+        { isEncrypted: metadata?.isEncrypted ?? false }
       );
     } else {
       await service.addVector(spaceId, vectorId, vector, metadata);

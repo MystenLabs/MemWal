@@ -205,6 +205,7 @@ export async function rebuildIndex(options: RebuildIndexOptions): Promise<Rebuil
         }
 
         // Add to HNSW index
+        // Option A+: Store content in index for fast local retrieval (no Walrus fetch needed)
         const vectorId = parseInt(memory.id.slice(-8), 16); // Use memory ID as vector ID
         hnswService.addVectorToIndexBatched(
           userAddress,
@@ -216,7 +217,10 @@ export async function rebuildIndex(options: RebuildIndexOptions): Promise<Rebuil
             importance: memory.importance,
             contentType: 'text/plain',
             contentSize: memory.contentSize,
-            createdTimestamp: memory.createdAt
+            createdTimestamp: memory.createdAt,
+            // Option A+: Store content for fast retrieval (avoids Walrus fetch on search)
+            content: memoryData.content,
+            isEncrypted: false // If we decrypted it successfully, store it
           }
         );
 

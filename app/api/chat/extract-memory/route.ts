@@ -6,32 +6,33 @@ export const runtime = 'nodejs'
 
 export async function POST(req: Request) {
   try {
-    const { userMessage, assistantResponse } = await req.json()
+    const { userMessage } = await req.json()
 
-    // Combine the conversation for analysis
-    const conversationText = `User: ${userMessage}\nAssistant: ${assistantResponse}`
+    // Only analyze user message (not AI response)
+    // User messages contain the actual personal information we want to learn
+    const contentToAnalyze = userMessage
 
     // Step 1: Check if this should be saved as a memory
-    const shouldSave = await shouldSaveAsMemory(conversationText)
-    
+    const shouldSave = await shouldSaveAsMemory(contentToAnalyze)
+
     if (!shouldSave) {
       console.log('💭 No meaningful personal data detected - skipping blockchain storage')
-      return Response.json({ 
+      return Response.json({
         memory: null,
         saved: false,
         reason: 'No meaningful personal data detected'
       })
     }
 
-    console.log('🔍 Personal data detected - storing on blockchain...')
+    console.log('🔍 Personal data detected in user message - storing on blockchain...')
 
     // Step 2: Classify the content
-    const classification = await classifyContent(conversationText)
-    
+    const classification = await classifyContent(contentToAnalyze)
+
     // Step 3: Store on blockchain using PDW
     const pdw = await getPDWClient()
-    
-    const memoryData = await pdw.memory.create(conversationText, {
+
+    const memoryData = await pdw.memory.create(contentToAnalyze, {
       category: classification?.category || 'general',
       importance: classification?.importance || 5,
     })
@@ -44,8 +45,8 @@ export async function POST(req: Request) {
 
     // Step 4: Extract knowledge graph (entities and relationships)
     try {
-      const graphExtraction = await pdw.graph.extract(conversationText)
-      
+      const graphExtraction = await pdw.graph.extract(contentToAnalyze)
+
       if (graphExtraction && graphExtraction.entities.length > 0) {
         console.log('🕸️ Knowledge Graph extracted:')
         console.log('  - Entities:', graphExtraction.entities.map((e: any) => e.name).join(', '))
@@ -56,8 +57,8 @@ export async function POST(req: Request) {
       // Continue even if graph extraction fails
     }
 
-    return Response.json({ 
-      memory: conversationText,
+    return Response.json({
+      memory: contentToAnalyze,
       saved: true,
       memoryId: memoryData.id,
       blobId: memoryData.blobId,
@@ -67,8 +68,8 @@ export async function POST(req: Request) {
     })
   } catch (error) {
     console.error('❌ Memory extraction/storage error:', error)
-    return Response.json({ 
-      memory: null, 
+    return Response.json({
+      memory: null,
       saved: false,
       error: error instanceof Error ? error.message : 'Unknown error'
     }, { status: 200 })

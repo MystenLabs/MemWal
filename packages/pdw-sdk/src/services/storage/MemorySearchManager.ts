@@ -116,12 +116,16 @@ export class MemorySearchManager {
       throw new Error('Search capabilities not initialized. Call initializeSearch() first.');
     }
 
+    // Option A+: Pass isEncrypted flag to control content storage in index
+    // When encrypted, content is NOT stored locally (security consideration)
     const indexResult = await this.memoryIndexService.indexMemory(
       userAddress,
       memoryId,
       blobId,
       textContent,
-      metadata
+      metadata,
+      undefined, // embedding - let MemoryIndexService generate it
+      { isEncrypted: metadata.isEncrypted ?? false }
     );
 
     console.log(`✅ Indexed memory ${memoryId} → vector ${indexResult.vectorId}`);

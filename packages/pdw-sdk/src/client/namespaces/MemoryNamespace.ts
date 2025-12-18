@@ -256,23 +256,36 @@ export class MemoryNamespace {
       }
 
       // 6. Index locally (if enabled)
-      // NOTE: We do NOT store content in index metadata to prevent data leakage
-      // when index is saved to Walrus. Content should be retrieved from encrypted
-      // Walrus blob using blobId when needed.
+      // Option A+: Store content in index ONLY when encryption is OFF
+      // When encryption is ON, content is NOT stored (security - prevents data leakage
+      // when index is saved to Walrus)
+      // TODO(refactor): Extract common indexing logic into shared helper when adding new metadata fields.
+      // Related locations: MemoryNamespace.createBatch(), MemoryIndexService.indexMemory(),
+      // ClientMemoryManager.createMemory(), rebuildIndexNode(), rebuildIndex()
+      const isEncrypted = !!encryptedContent;
       if (this.services.vector && embedding) {
         onProgress?.('indexing vector', 80);
         const spaceId = this.services.config.userAddress;
 
-        // Index metadata - NO content field for privacy
-        const indexMetadata = {
+        // Index metadata - content only when NOT encrypted (Option A+)
+        const indexMetadata: Record<string, unknown> = {
           ...metadata,
           blobId: uploadResult.blobId,
           memoryObjectId,
           category,
           importance,
           topic: topic || '',
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          isEncrypted
         };
+
+        // Option A+: Store content for fast local retrieval when encryption is OFF
+        if (!isEncrypted) {
+          indexMetadata.content = content;
+          console.log('   💾 Content stored in local index (encryption OFF)');
+        } else {
+          console.log('   🔒 Content NOT stored in index (encryption ON - security)');
+        }
 
         // Auto-create index if it doesn't exist
         try {
@@ -757,6 +770,10 @@ export class MemoryNamespace {
       }
 
       // Step 6: Index locally (batch add to vector index)
+      // Option A+: Store content in index when encryption is OFF for fast local retrieval
+      // TODO(refactor): Extract common indexing logic into shared helper when adding new metadata fields.
+      // Related locations: MemoryNamespace.create(), MemoryIndexService.indexMemory(),
+      // ClientMemoryManager.createMemory(), rebuildIndexNode(), rebuildIndex()
       onProgress?.('indexing vectors', 90);
       if (this.services.vector && embeddings.length > 0) {
         const spaceId = this.services.config.userAddress;
@@ -765,15 +782,26 @@ export class MemoryNamespace {
           if (!embeddings[i]) continue;
 
           const vectorId = vectorIds[i] || (Date.now() + i) % 4294967295;
-          const indexMetadata = {
+          const isEncrypted = !!encryptedContents[i] && this.services.config.features.enableEncryption;
+
+          const indexMetadata: Record<string, unknown> = {
             ...metadata,
             blobId: quiltResult.files[i]?.blobId,
             memoryObjectId: memoryObjectIds[i],
             category: categories[i],
             importance,
             topic: topic || '',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            isEncrypted
           };
+
+          // Option A+: Store content for fast local retrieval when encryption is OFF
+          if (!isEncrypted) {
+            indexMetadata.content = contents[i];
+            console.log(`   💾 Batch item ${i + 1}: Content stored in local index (encryption OFF)`);
+          } else {
+            console.log(`   🔒 Batch item ${i + 1}: Content NOT stored in index (encryption ON)`);
+          }
 
           try {
             await this.services.vector.addVector(spaceId, vectorId, embeddings[i], indexMetadata);

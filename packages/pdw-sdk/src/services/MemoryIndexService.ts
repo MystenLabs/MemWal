@@ -35,6 +35,8 @@ export interface MemoryIndexOptions {
   m?: number;
   batchSize?: number;
   autoFlushInterval?: number;
+  /** Pre-initialized HNSW service instance (shared singleton) */
+  hnswService?: IHnswService;
 }
 
 export interface MemorySearchQuery {
@@ -107,11 +109,18 @@ export class MemoryIndexService {
     this.storageService = storageService;
     this.options = options;
 
-    // Initialize HNSW service asynchronously using factory
-    this.hnswServicePromise = this.initializeHnswService();
+    // Use pre-initialized HNSW service if provided (shared singleton pattern)
+    if (options.hnswService) {
+      this.hnswService = options.hnswService;
+      console.log('✅ MemoryIndexService using shared HNSW service instance');
+    } else {
+      // Initialize HNSW service asynchronously using factory
+      this.hnswServicePromise = this.initializeHnswService();
 
-    const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
-    console.log(`✅ MemoryIndexService initialized with hybrid HNSW (${envType})`);
+      const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
+      console.log(`✅ MemoryIndexService initializing with hybrid HNSW (${envType})`);
+    }
+
     console.log(`   Max elements: ${options.maxElements || 10000}`);
     console.log(`   Embedding dimension: ${options.dimension || 3072}`);
     console.log(`   HNSW parameters: M=${options.m || 16}, efConstruction=${options.efConstruction || 200}`);
@@ -170,6 +179,15 @@ export class MemoryIndexService {
 
   /**
    * Index a memory with its content, metadata, and vector embedding
+   *
+   * @param userAddress - User's wallet address
+   * @param memoryId - Unique memory identifier
+   * @param blobId - Walrus blob ID for the memory
+   * @param content - Memory content (stored in index only if not encrypted)
+   * @param metadata - Memory metadata
+   * @param embedding - Pre-computed embedding vector (optional)
+   * @param options - Indexing options
+   * @param options.isEncrypted - If true, content will NOT be stored in index (security)
    */
   async indexMemory(
     userAddress: string,
@@ -177,7 +195,8 @@ export class MemoryIndexService {
     blobId: string,
     content: string,
     metadata: MemoryMetadata,
-    embedding?: number[]
+    embedding?: number[],
+    options?: { isEncrypted?: boolean }
   ): Promise<{ vectorId: number; indexed: boolean }> {
     try {
       console.log(`📊 Indexing memory ${memoryId} for user ${userAddress}`);
@@ -197,21 +216,34 @@ export class MemoryIndexService {
       const vectorId = this.nextMemoryId++;
       
       // Add to HNSW index with batching
+      // Option A+: Store content in index ONLY when encryption is OFF (security consideration)
       const hnswService = await this.getHnswService();
+      const isEncrypted = options?.isEncrypted ?? false;
+
+      const vectorMetadata: Record<string, unknown> = {
+        memoryId,
+        blobId,
+        category: metadata.category,
+        topic: metadata.topic,
+        importance: metadata.importance,
+        contentType: metadata.contentType,
+        createdTimestamp: metadata.createdTimestamp,
+        customMetadata: metadata.customMetadata
+      };
+
+      // Only store content if NOT encrypted (privacy-safe)
+      if (!isEncrypted && content) {
+        vectorMetadata.content = content;
+        console.log('   💾 Content stored in local index (encryption OFF)');
+      } else if (isEncrypted) {
+        console.log('   🔒 Content NOT stored in index (encryption ON - security)');
+      }
+
       await hnswService.addVector(
         userAddress,
         vectorId,
         memoryEmbedding,
-        {
-          memoryId,
-          blobId,
-          category: metadata.category,
-          topic: metadata.topic,
-          importance: metadata.importance,
-          contentType: metadata.contentType,
-          createdTimestamp: metadata.createdTimestamp,
-          customMetadata: metadata.customMetadata
-        }
+        vectorMetadata
       );
 
       // Update performance statistics
@@ -300,12 +332,12 @@ export class MemoryIndexService {
         const distance = result.distance;
         // Calculate similarity from distance (cosine distance: similarity = 1 - distance)
         const similarity = result.score;
-        
+
         // Skip results below threshold
         if (query.threshold && similarity < query.threshold) {
           continue;
         }
-        
+
         // Find memory entry by vector ID
         const memoryEntry = Array.from(userMemories.values()).find(entry => entry.vectorId === vectorId);
         if (!memoryEntry) continue;
@@ -325,12 +357,17 @@ export class MemoryIndexService {
           relevanceScore += recencyBoost * 0.1;
         }
 
+        // Option A+: Get content from HNSW metadata if available (avoids Walrus fetch!)
+        // Content is only stored when encryption is OFF (see indexMemory)
+        const indexedContent = result.metadata?.content as string | undefined;
+
         results.push({
           memoryId: memoryEntry.memoryId,
           blobId: memoryEntry.blobId,
           metadata: memoryEntry.metadata,
           similarity,
           relevanceScore,
+          content: indexedContent, // ✅ Return content from local index (no Walrus fetch needed!)
           extractedAt: memoryEntry.indexedAt
         });
       }
@@ -349,9 +386,15 @@ export class MemoryIndexService {
       const searchLatency = performance.now() - startTime;
       this.updateSearchStats(query.userAddress, searchLatency);
 
+      // Count how many results have content from local index (Option A+)
+      const resultsWithLocalContent = finalResults.filter(r => r.content !== undefined).length;
+
       console.log(`✅ Search completed in ${searchLatency.toFixed(2)}ms`);
       console.log(`   Found ${finalResults.length} results (similarity range: ${finalResults.length > 0 ? finalResults[finalResults.length-1].similarity.toFixed(3) : 'N/A'} - ${finalResults.length > 0 ? finalResults[0].similarity.toFixed(3) : 'N/A'}`);
-      
+      if (resultsWithLocalContent > 0) {
+        console.log(`   📦 ${resultsWithLocalContent}/${finalResults.length} results have content from local index (no Walrus fetch needed!)`);
+      }
+
       return finalResults;
       
     } catch (error) {

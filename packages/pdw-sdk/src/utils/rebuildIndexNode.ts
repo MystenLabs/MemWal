@@ -239,6 +239,8 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
         }
 
         // Add to HNSW index
+        // Option A+: Store content in index for fast local retrieval (no Walrus fetch needed)
+        // Note: Only for unencrypted content. If content was encrypted, it won't be parseable anyway.
         await hnswService.addVector(
           userAddress,
           memory.vectorId,
@@ -249,7 +251,10 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
             category: memory.category,
             importance: memory.importance,
             topic: memoryData.metadata?.topic || '',
-            timestamp: memoryData.timestamp
+            timestamp: memoryData.timestamp,
+            // Option A+: Store content for fast retrieval (avoids Walrus fetch on search)
+            content: memoryData.content,
+            isEncrypted: false // If we can parse it, it's not encrypted
           }
         );
 

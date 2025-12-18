@@ -152,10 +152,11 @@ export class SearchNamespace {
         );
       }
 
-      // Convert to SearchResult format (content empty for privacy)
+      // Convert to SearchResult format
+      // Option A+: Content may be available from local index when encryption is OFF
       const searchResults: SearchResult[] = results.map((r: any) => ({
         id: r.memoryId || r.vectorId.toString(),
-        content: '', // Empty - content not stored in index for privacy
+        content: r.metadata?.content || r.content || '', // ✅ Get content from index metadata if available
         score: r.similarity,
         similarity: r.similarity,
         category: r.metadata?.category,
@@ -704,7 +705,22 @@ export class SearchNamespace {
    * @param results - Search results to populate
    */
   private async populateContent(results: SearchResult[]): Promise<void> {
-    const fetchPromises = results.map(async (result) => {
+    // Option A+: Skip Walrus fetch for results that already have content from local index
+    const resultsNeedingFetch = results.filter(r => !r.content && r.blobId);
+    const resultsWithLocalContent = results.length - resultsNeedingFetch.length;
+
+    if (resultsWithLocalContent > 0) {
+      console.log(`📦 ${resultsWithLocalContent}/${results.length} results already have content from local index (skipping Walrus fetch)`);
+    }
+
+    if (resultsNeedingFetch.length === 0) {
+      console.log('✅ All content available locally - no Walrus fetch needed!');
+      return;
+    }
+
+    console.log(`🐳 Fetching content from Walrus for ${resultsNeedingFetch.length} results...`);
+
+    const fetchPromises = resultsNeedingFetch.map(async (result) => {
       try {
         if (result.blobId) {
           const memoryPackage = await this.services.storage.retrieveMemoryPackage(result.blobId);

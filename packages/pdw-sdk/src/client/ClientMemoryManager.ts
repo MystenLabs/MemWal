@@ -54,6 +54,10 @@ export interface ClientMemoryManagerConfig {
   categories?: string[];
   /** Enable local browser indexing for vector search (default: true) */
   enableLocalIndexing?: boolean;
+  /** Pre-initialized HNSW service instance (shared singleton) */
+  hnswService?: IHnswService;
+  /** Enable SEAL encryption for memory content (default: true) */
+  enableEncryption?: boolean;
 }
 
 export interface CreateMemoryOptions {
@@ -120,7 +124,7 @@ export interface RichMetadataAnalysis {
  * Client-side memory manager for React dApps
  */
 export class ClientMemoryManager {
-  private readonly config: Required<ClientMemoryManagerConfig> & { enableLocalIndexing: boolean };
+  private readonly config: Omit<Required<ClientMemoryManagerConfig>, 'hnswService'> & { enableLocalIndexing: boolean; enableEncryption: boolean; hnswService?: IHnswService };
   private readonly defaultCategories = [
     'personal', 'work', 'education', 'health', 'finance',
     'travel', 'family', 'hobbies', 'goals', 'ideas'
@@ -141,7 +145,8 @@ export class ClientMemoryManager {
       ],
       walrusNetwork: config.walrusNetwork || 'testnet',
       categories: config.categories || this.defaultCategories,
-      enableLocalIndexing: config.enableLocalIndexing !== false // Default: true
+      enableLocalIndexing: config.enableLocalIndexing !== false, // Default: true
+      enableEncryption: config.enableEncryption !== false // Default: true (SEAL encryption)
     };
 
     // Initialize AI services if Gemini API key is provided
@@ -161,13 +166,18 @@ export class ClientMemoryManager {
       console.log('✅ AI services initialized (Embedding + Metadata Extraction)');
     }
 
-    // Initialize local indexing service if enabled (async via factory)
+    // Initialize local indexing service if enabled
     if (this.config.enableLocalIndexing) {
-      const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
-      console.log(`✅ ClientMemoryManager initializing local indexing (${envType})`);
-
-      // Start async initialization
-      this.hnswServicePromise = this.initializeHnswService();
+      // Use pre-initialized HNSW service if provided (shared singleton pattern)
+      if (config.hnswService) {
+        this.hnswService = config.hnswService;
+        console.log('✅ ClientMemoryManager using shared HNSW service instance');
+      } else {
+        // Create own HNSW service (async via factory)
+        const envType = isBrowser() ? 'browser (hnswlib-wasm)' : isNode() ? 'Node.js (hnswlib-node)' : 'unknown';
+        console.log(`✅ ClientMemoryManager initializing local indexing (${envType})`);
+        this.hnswServicePromise = this.initializeHnswService();
+      }
     }
   }
 
@@ -323,16 +333,26 @@ export class ClientMemoryManager {
       const dataBytes = new TextEncoder().encode(JSON.stringify(memoryData));
       console.log('✅ Data prepared:', dataBytes.length, 'bytes');
 
-      // Step 4: Encrypt with SEAL
-      console.log('🔒 Step 4: Encrypting with SEAL...');
-      onProgress?.('Encrypting with SEAL...');
-      const encrypted = await this.encryptWithSEAL(dataBytes, account.address, client);
-      console.log('✅ Encrypted:', encrypted.length, 'bytes');
+      // Step 4: Conditionally encrypt with SEAL
+      let uploadData: Uint8Array;
+      const isEncrypted = this.config.enableEncryption;
+
+      if (isEncrypted) {
+        console.log('🔒 Step 4: Encrypting with SEAL...');
+        onProgress?.('Encrypting with SEAL...');
+        uploadData = await this.encryptWithSEAL(dataBytes, account.address, client);
+        console.log('✅ Encrypted:', uploadData.length, 'bytes');
+      } else {
+        console.log('📝 Step 4: Skipping encryption (enableEncryption=false)');
+        onProgress?.('Preparing data (no encryption)...');
+        uploadData = dataBytes;
+        console.log('✅ Data ready (unencrypted):', uploadData.length, 'bytes');
+      }
 
       // Step 5: Upload to Walrus (2 signatures)
       console.log('🐳 Step 5: Uploading to Walrus...');
       onProgress?.('Uploading to Walrus (2 signatures)...');
-      const blobId = await this.uploadToWalrus(encrypted, account, signAndExecute, client);
+      const blobId = await this.uploadToWalrus(uploadData, account, signAndExecute, client);
       console.log('✅ Uploaded to Walrus:', blobId);
 
       // Generate sequential vector ID (fits in 32-bit for WASM)
@@ -379,6 +399,9 @@ export class ClientMemoryManager {
             console.log('  Using vector ID:', vectorId);
 
             // Prepare rich metadata (aligned with on-chain structure)
+            // Option A+: Content storage is controlled by isEncrypted flag.
+            // When encryption is OFF, content is stored in local index for fast retrieval.
+            // When encryption is ON, only metadata is stored (security).
             const metadata = {
               blobId,
               category: analysis.category,
@@ -389,7 +412,10 @@ export class ClientMemoryManager {
               contentType: 'text/plain',
               contentSize: content.length,
               source: 'client_memory_manager',
-              embeddingType: 'metadata'           // ✅ Mark as metadata-based embedding
+              embeddingType: 'metadata',          // ✅ Mark as metadata-based embedding
+              isEncrypted,                        // ✅ Dynamic based on config.enableEncryption
+              // Option A+: Store content in index when NOT encrypted (for fast local search)
+              ...(isEncrypted ? {} : { content })
             };
             console.log('  Rich metadata prepared:', metadata);
 

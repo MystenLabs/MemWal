@@ -1,6 +1,6 @@
 {
-  "name": "personal-data-wallet-sdk",
-  "version": "0.5.2",
+  "name": "@cmdoss/memwal",
+  "version": "0.6.0",
   "description": "TypeScript SDK for Personal Data Wallet - Decentralized memory system with AI embeddings, HNSW vector search, SEAL encryption and Walrus storage",
   "type": "module",
   "main": "dist/index.js",
@@ -36,6 +36,7 @@
     "BENCHMARKS.md"
   ],
   "scripts": {
+    "postinstall": "npm rebuild hnswlib-node || echo hnswlib-node rebuild skipped - using WASM fallback",
     "build": "npm run build:ts && node scripts/fix-esm-imports.cjs",
     "build:full": "npm run codegen && npm run build:ts &&                               ",
     "build:ts": "tsc",
@@ -112,6 +113,7 @@
     "@mysten/sui": ">=1.44.0",
     "@mysten/utils": "^0.2.0",
     "@mysten/walrus": "^0.8.3",
+    "@openrouter/sdk": "^0.3.7",
     "ai": "^5.0.113",
     "eventemitter3": "^5.0.1",
     "hnswlib-wasm": "^0.8.2",

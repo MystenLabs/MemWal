@@ -8,8 +8,11 @@
  * - Uses native hnswlib-node bindings (faster than WASM)
  * - Filesystem persistence
  * - Compatible with Next.js API routes and server-side code
+ * - Walrus cloud backup via @mysten/walrus SDK (with REST API fallback)
  */
 
+import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
+import { walrus } from '@mysten/walrus';
 import type {
   IHnswService,
   HnswServiceConfig,
@@ -47,6 +50,17 @@ export class NodeHnswService implements IHnswService {
   private batchProcessor?: ReturnType<typeof setInterval>;
   private initPromise: Promise<void> | null = null;
   private _isInitialized = false;
+  private walrusClient: ReturnType<typeof this.createWalrusClient> | null = null;
+
+  /**
+   * Create Walrus client using @mysten/walrus SDK
+   */
+  private createWalrusClient(network: 'testnet' | 'mainnet' = 'testnet') {
+    const suiClient = new SuiClient({
+      url: getFullnodeUrl(network)
+    });
+    return suiClient.$extend(walrus({ network }));
+  }
 
   // Batch stats
   private batchStats: IHnswBatchStats = {
@@ -68,6 +82,11 @@ export class NodeHnswService implements IHnswService {
 
     this.indexDirectory = config.indexDirectory || './.pdw-indexes';
     this.walrusConfig = config.walrusBackup;
+
+    // Initialize Walrus SDK client for cloud backup
+    if (this.walrusConfig?.enabled) {
+      this.walrusClient = this.createWalrusClient('testnet');
+    }
   }
 
   /**
@@ -529,7 +548,7 @@ export class NodeHnswService implements IHnswService {
 
       const packageBuffer = Buffer.from(JSON.stringify(packageData));
 
-      // Upload to Walrus
+      // Upload to Walrus via REST API
       const publisherUrl = this.walrusConfig.publisherUrl;
       const epochs = this.walrusConfig.epochs || 3;
 
@@ -576,7 +595,7 @@ export class NodeHnswService implements IHnswService {
   }
 
   /**
-   * Load index from Walrus storage
+   * Load index from Walrus storage using SDK readBlob
    * @returns true if index was loaded successfully
    */
   async loadFromWalrus(userAddress: string, blobId: string): Promise<boolean> {
@@ -588,18 +607,35 @@ export class NodeHnswService implements IHnswService {
     await this.initialize();
 
     try {
-      const aggregatorUrl = this.walrusConfig.aggregatorUrl;
-
       console.log(`[NodeHnswService] Loading index from Walrus: ${blobId}`);
 
-      // Download from Walrus
-      const response = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
+      let packageBuffer: ArrayBuffer;
 
-      if (!response.ok) {
-        throw new Error(`Walrus download failed: ${response.status} ${response.statusText}`);
+      // Use Walrus SDK readBlob when client is available
+      if (this.walrusClient) {
+        try {
+          const blob = await this.walrusClient.walrus.readBlob({ blobId });
+          packageBuffer = blob.buffer as ArrayBuffer;
+        } catch (sdkError) {
+          console.warn('[NodeHnswService] Walrus SDK readBlob failed, falling back to REST API:', sdkError);
+          // Fall through to REST API
+          const aggregatorUrl = this.walrusConfig.aggregatorUrl;
+          const response = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
+          if (!response.ok) {
+            throw new Error(`Walrus download failed: ${response.status} ${response.statusText}`);
+          }
+          packageBuffer = await response.arrayBuffer();
+        }
+      } else {
+        // Fallback to REST API if no SDK client
+        const aggregatorUrl = this.walrusConfig.aggregatorUrl;
+        const response = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
+        if (!response.ok) {
+          throw new Error(`Walrus download failed: ${response.status} ${response.statusText}`);
+        }
+        packageBuffer = await response.arrayBuffer();
       }
 
-      const packageBuffer = await response.arrayBuffer();
       const packageData = JSON.parse(Buffer.from(packageBuffer).toString('utf-8'));
 
       // Validate package
