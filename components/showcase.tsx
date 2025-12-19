@@ -3,18 +3,17 @@
 import { useState, useRef, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Plus, Search, Mic, ArrowUp, Stars, Link, Trash2 } from 'lucide-react'
+import { Plus, Search, Mic, ArrowUp, Stars, Link } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { motion, AnimatePresence } from 'framer-motion'
 import Aurora from './Aurora'
-import { EncryptedText } from '@/components/ui/encrypted-text'
 import {
   Sheet,
   SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
 } from '@/components/ui/sheet'
+import { ConnectWalletButton } from '@/components/ConnectWalletButton'
+import { useCurrentAccount } from '@mysten/dapp-kit'
+import { useMemoryTransaction, PreparedMemory } from '@/hooks/useMemoryTransaction'
 
 type ChatMessage = {
   id: string
@@ -241,6 +240,8 @@ type Memory = {
 }
 
 export default function Showcase() {
+  const currentAccount = useCurrentAccount()
+  const { savePreppedMemory, isPending: isSavingMemory } = useMemoryTransaction()
   const [currentStep, setCurrentStep] = useState(-1)
   const [memories, setMemories] = useState<Memory[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
@@ -254,10 +255,12 @@ export default function Showcase() {
   const [isLoadingMemories, setIsLoadingMemories] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Fetch memories from blockchain on mount
+  // Fetch memories from blockchain when wallet is connected
   useEffect(() => {
-    fetchMemoriesFromBlockchain()
-  }, [])
+    if (currentAccount?.address) {
+      fetchMemoriesFromBlockchain()
+    }
+  }, [currentAccount?.address])
 
   const simulateProcessSteps = () => {
     // Show the steps panel
@@ -288,14 +291,19 @@ export default function Showcase() {
 
   // Fetch memories from blockchain
   const fetchMemoriesFromBlockchain = async () => {
+    if (!currentAccount?.address) {
+      console.log('No wallet connected, skipping memory fetch')
+      return
+    }
+
     try {
       setIsLoadingMemories(true)
-      const response = await fetch('/api/memories/list')
+      const response = await fetch(`/api/memories/list?walletAddress=${currentAccount.address}`)
       const data = await response.json()
-      
+
       if (data.success && data.memories) {
         setMemories(data.memories)
-        console.log(`✅ Loaded ${data.memories.length} memories from blockchain`)
+        console.log(`✅ Loaded ${data.memories.length} memories from blockchain for ${currentAccount.address}`)
       }
     } catch (error) {
       console.error('Failed to fetch memories:', error)
@@ -342,7 +350,8 @@ export default function Showcase() {
           messages: [...messages, userMessage].map(m => ({
             role: m.role,
             content: m.content
-          }))
+          })),
+          walletAddress: currentAccount?.address
         })
       })
 
@@ -395,33 +404,52 @@ export default function Showcase() {
         console.error('Stream error:', streamError)
       }
 
-      // Extract and store memories on blockchain using PDW
-      try {
-        const memoryResponse = await fetch('/api/chat/extract-memory', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userMessage: userMessage.content,
-            assistantResponse: fullText
+      // Extract and prepare memories for blockchain storage
+      if (currentAccount?.address) {
+        try {
+          const memoryResponse = await fetch('/api/chat/extract-memory', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userMessage: userMessage.content,
+              assistantResponse: fullText,
+              walletAddress: currentAccount.address
+            })
           })
-        })
-        
-        const memoryData = await memoryResponse.json()
-        
-        if (memoryData.saved && memoryData.memory) {
-          console.log('🔗 Memory stored on blockchain:', {
-            id: memoryData.memoryId,
-            blobId: memoryData.blobId,
-            category: memoryData.category
-          })
-          
-          // Refresh memories from blockchain
-          await fetchMemoriesFromBlockchain()
-        } else {
-          console.log('💭 No personal data to store:', memoryData.reason || 'No reason given')
+
+          const memoryData = await memoryResponse.json()
+
+          if (memoryData.needsClientSigning && memoryData.prepared) {
+            // Memory prepared - sign and save to blockchain with Slush wallet
+            console.log('📝 Memory prepared for blockchain, initiating Slush wallet signing:', {
+              content: memoryData.prepared.content.substring(0, 50) + '...',
+              blobId: memoryData.prepared.blobId,
+              category: memoryData.prepared.category
+            })
+
+            // Save memory using Slush wallet for transaction signing
+            const preparedData: PreparedMemory = {
+              content: memoryData.prepared.content,
+              blobId: memoryData.prepared.blobId,
+              embedding: memoryData.prepared.embedding,
+              category: memoryData.prepared.category,
+              importance: memoryData.prepared.importance,
+            }
+            const saveResult = await savePreppedMemory(preparedData)
+
+            if (saveResult.success) {
+              console.log('✅ Memory saved to blockchain:', saveResult.memoryId)
+              // Refresh memories list to show the new memory
+              fetchMemoriesFromBlockchain()
+            } else {
+              console.error('❌ Failed to save memory:', saveResult.error)
+            }
+          } else if (!memoryData.saved) {
+            console.log('💭 No personal data to store:', memoryData.reason || 'No reason given')
+          }
+        } catch (memoryError) {
+          console.error('Memory extraction error:', memoryError)
         }
-      } catch (memoryError) {
-        console.error('Memory extraction error:', memoryError)
       }
 
     } catch (error) {
@@ -441,21 +469,27 @@ export default function Showcase() {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden relative">
-      <div className="fixed inset-0 w-full h-full -z-10">
+    <div className="h-screen flex overflow-hidden relative isolate">
+      <div className="fixed inset-0 w-full h-full -z-10 pointer-events-none">
         {/* <div className="absolute inset-0 bg-[rgba(10,10,10,0.35)] bg-[linear-gradient(to_top,rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(to_left,rgba(255,255,255,0.06)_1px,transparent_1px)] [background-size:36px_36px] backdrop-blur-[1px]" /> */}
         <Aurora colorStops={["#333", "#222", "#444"]} amplitude={1.2} blend={0.6} speed={0.8} />
       </div>
+
+      {/* Wallet Button - Fixed top right */}
+      <div className="fixed top-4 right-4 z-[9999] pointer-events-auto">
+        <ConnectWalletButton />
+      </div>
+
       {/* Chat Interface */}
-      <motion.div 
-        animate={{ 
-          width: showStepsPanel ? "75%" : "100%" 
+      <motion.div
+        animate={{
+          width: showStepsPanel ? "75%" : "100%"
         }}
-        transition={{ 
-          duration: 0.8, 
-          ease: "easeInOut" 
+        transition={{
+          duration: 0.8,
+          ease: "easeInOut"
         }}
-        className="flex flex-col items-center justify-center p-8 max-md:p-2 h-screen overflow-y-scroll hide-scroll"
+        className="flex flex-col items-center justify-center p-8 max-md:p-2 h-screen overflow-y-scroll hide-scroll z-10"
       >
         <div className="w-full max-w-2xl ">
           {/* Header */}
@@ -564,6 +598,17 @@ export default function Showcase() {
             
             <AnimatePresence>
               {(isLoading || isProcessing) && <ThinkingIndicator />}
+              {isSavingMemory && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex items-center gap-3 px-5 pb-4 text-yellow-400"
+                >
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-400" />
+                  <span className="font-medium">Saving memory to blockchain...</span>
+                </motion.div>
+              )}
             </AnimatePresence>
             <div ref={messagesEndRef} />
           </div>

@@ -186,8 +186,16 @@ module pdw::memory {
         // Validate importance scale (1-10)
         assert!(importance >= 1 && importance <= 10, EInvalidImportance);
         
-        // Validate embedding dimension (should be 768 for Gemini)
-        assert!(embedding_dimension == 768, EInvalidEmbeddingDimension);
+        // Validate embedding dimension - accept common embedding model dimensions
+        // 256: Nomic-AI, 384: MiniLM, 768: Gemini/BERT, 1536: OpenAI ada-002, 3072: text-embedding-3-large
+        assert!(
+            embedding_dimension == 256 ||
+            embedding_dimension == 384 ||
+            embedding_dimension == 768 ||
+            embedding_dimension == 1536 ||
+            embedding_dimension == 3072,
+            EInvalidEmbeddingDimension
+        );
         
         MemoryMetadata {
             content_type: string::utf8(content_type),

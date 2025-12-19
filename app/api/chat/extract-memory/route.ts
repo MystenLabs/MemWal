@@ -1,4 +1,4 @@
-import { getPDWClient, shouldSaveAsMemory, classifyContent } from '@/lib/pdw-service'
+import { getReadOnlyPDWClient } from '@/lib/pdw-read-only'
 
 // Force dynamic rendering - no static pre-rendering
 export const dynamic = 'force-dynamic'
@@ -6,14 +6,23 @@ export const runtime = 'nodejs'
 
 export async function POST(req: Request) {
   try {
-    const { userMessage } = await req.json()
+    const { userMessage, walletAddress } = await req.json()
+
+    if (!walletAddress) {
+      return Response.json({
+        memory: null,
+        saved: false,
+        error: 'walletAddress is required'
+      }, { status: 400 })
+    }
+
+    const pdw = await getReadOnlyPDWClient(walletAddress)
 
     // Only analyze user message (not AI response)
-    // User messages contain the actual personal information we want to learn
     const contentToAnalyze = userMessage
 
     // Step 1: Check if this should be saved as a memory
-    const shouldSave = await shouldSaveAsMemory(contentToAnalyze)
+    const shouldSave = await pdw.ai.shouldSave(contentToAnalyze)
 
     if (!shouldSave) {
       console.log('💭 No meaningful personal data detected - skipping blockchain storage')
@@ -24,50 +33,47 @@ export async function POST(req: Request) {
       })
     }
 
-    console.log('🔍 Personal data detected in user message - storing on blockchain...')
+    console.log('🔍 Personal data detected in user message - preparing for blockchain storage...')
 
     // Step 2: Classify the content
-    const classification = await classifyContent(contentToAnalyze)
+    const classification = await pdw.classify.content(contentToAnalyze)
 
-    // Step 3: Store on blockchain using PDW
-    const pdw = await getPDWClient()
+    // Step 3: Prepare memory data (client will sign transaction)
+    // Generate embedding
+    const embedding = await pdw.embeddings.generate(contentToAnalyze)
 
-    const memoryData = await pdw.memory.create(contentToAnalyze, {
-      category: classification?.category || 'general',
-      importance: classification?.importance || 5,
-    })
+    // Upload to Walrus (doesn't need signing)
+    const blobResult = await pdw.storage.uploadToWalrus(contentToAnalyze)
 
-    console.log('✅ Memory stored on blockchain!')
-    console.log('📍 Memory ID:', memoryData.id)
-    console.log('🗄️ Blob ID:', memoryData.blobId)
-    console.log('📊 Category:', classification?.category)
-    console.log('⭐ Importance:', classification?.importance)
-
-    // Step 4: Extract knowledge graph (entities and relationships)
+    // Extract knowledge graph
+    let graphData = null
     try {
-      const graphExtraction = await pdw.graph.extract(contentToAnalyze)
-
-      if (graphExtraction && graphExtraction.entities.length > 0) {
+      graphData = await pdw.graph.extract(contentToAnalyze)
+      if (graphData && graphData.entities.length > 0) {
         console.log('🕸️ Knowledge Graph extracted:')
-        console.log('  - Entities:', graphExtraction.entities.map((e: any) => e.name).join(', '))
-        console.log('  - Relationships:', graphExtraction.relationships.length)
+        console.log('  - Entities:', graphData.entities.map((e: any) => e.name).join(', '))
+        console.log('  - Relationships:', graphData.relationships.length)
       }
     } catch (graphError) {
       console.warn('⚠️ Knowledge graph extraction failed:', graphError)
-      // Continue even if graph extraction fails
     }
 
+    // Return prepared data for client-side transaction signing
     return Response.json({
       memory: contentToAnalyze,
-      saved: true,
-      memoryId: memoryData.id,
-      blobId: memoryData.blobId,
-      category: classification?.category,
-      importance: classification?.importance,
-      blockchainTx: true,
+      saved: false, // Not saved yet - client needs to sign
+      needsClientSigning: true,
+      prepared: {
+        content: contentToAnalyze,
+        blobId: blobResult.blobId,
+        embedding: Array.from(embedding),
+        category: classification?.category || 'general',
+        importance: classification?.importance || 5,
+        graph: graphData,
+      }
     })
   } catch (error) {
-    console.error('❌ Memory extraction/storage error:', error)
+    console.error('❌ Memory extraction error:', error)
     return Response.json({
       memory: null,
       saved: false,
@@ -75,9 +81,3 @@ export async function POST(req: Request) {
     }, { status: 200 })
   }
 }
-
-
-
-
-
-

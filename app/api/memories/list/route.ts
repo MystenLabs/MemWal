@@ -1,19 +1,31 @@
-import { getPDWClient } from '@/lib/pdw-service'
-import { NextResponse } from 'next/server'
+import { getReadOnlyPDWClient } from '@/lib/pdw-read-only'
+import { NextRequest, NextResponse } from 'next/server'
 
 // Force dynamic rendering - no static pre-rendering
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const pdw = await getPDWClient()
-    
+    // Get wallet address from query params or headers
+    const walletAddress = request.nextUrl.searchParams.get('walletAddress')
+      || request.headers.get('x-wallet-address')
+
+    if (!walletAddress) {
+      return NextResponse.json({
+        memories: [],
+        count: 0,
+        success: false,
+        error: 'Wallet address is required. Pass walletAddress query param or x-wallet-address header.'
+      }, { status: 400 })
+    }
+
+    const pdw = await getReadOnlyPDWClient(walletAddress)
+
     // Get all memories from the blockchain
-    // Using the search.vector with empty query returns all memories
     const allMemories = await pdw.memory.list?.() || []
-    
-    console.log(`📋 Fetched ${allMemories.length} memories from blockchain`)
+
+    console.log(`📋 Fetched ${allMemories.length} memories for wallet: ${walletAddress}`)
 
     // Format memories for frontend
     const formattedMemories = allMemories.map((memory: any) => ({
@@ -25,16 +37,15 @@ export async function GET() {
       createdAt: memory.createdAt || Date.now(),
     }))
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       memories: formattedMemories,
       count: formattedMemories.length,
       success: true,
     })
   } catch (error) {
     console.error('❌ Failed to fetch memories:', error)
-    
-    // Return empty array instead of error to allow graceful degradation
-    return NextResponse.json({ 
+
+    return NextResponse.json({
       memories: [],
       count: 0,
       success: false,
@@ -44,18 +55,8 @@ export async function GET() {
 }
 
 export async function DELETE() {
-  try {
-    // This endpoint would delete all memories (use with caution!)
-    // For now, we'll just return a message
-    return NextResponse.json({ 
-      message: 'Delete all memories endpoint - not implemented yet',
-      success: false,
-    })
-  } catch (error) {
-    console.error('❌ Failed to delete memories:', error)
-    return NextResponse.json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 })
-  }
+  return NextResponse.json({
+    message: 'Delete all memories endpoint - not implemented yet',
+    success: false,
+  })
 }

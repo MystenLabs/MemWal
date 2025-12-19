@@ -5,6 +5,7 @@ import "./globals.css"
 import { SpeedInsights } from "@vercel/speed-insights/next"
 import { Dancing_Script, Caveat, Pixelify_Sans } from "next/font/google"
 import Npm from "@/components/npm"
+import { SuiProviders } from "@/components/providers/SuiProviders"
 
 const PixelifySans = Pixelify_Sans({
   subsets: ["latin"],
@@ -39,10 +40,12 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className={`font-sans antialiased ${PixelifySans.variable} ${dancingScript.variable} ${caveat.variable}`}>
-        <Suspense fallback={null}>
-          {children}
-          <Npm />
-        </Suspense>
+        <SuiProviders>
+          <Suspense fallback={null}>
+            {children}
+            <Npm />
+          </Suspense>
+        </SuiProviders>
         <SpeedInsights />
       </body>
     </html>
