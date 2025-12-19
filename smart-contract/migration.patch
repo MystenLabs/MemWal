@@ -1,0 +1,25 @@
+--- .\sources\memory.move
++++ .\sources\memory.move
+@@ -8 +8 @@
+-    struct MemoryCreated has copy, drop {
++    public struct MemoryCreated has copy, drop {
+@@ -15 +15 @@
+-    struct MemoryIndexUpdated has copy, drop {
++    public struct MemoryIndexUpdated has copy, drop {
+@@ -24 +24 @@
+-    struct MemoryIndex has key {
++    public struct MemoryIndex has key {
+@@ -33 +33 @@
+-    struct Memory has key {
++    public struct Memory has key {
+--- .\sources\seal_access_control.move
++++ .\sources\seal_access_control.move
+@@ -18 +18 @@
+-    struct AccessRegistry has key {
++    public struct AccessRegistry has key {
+@@ -27 +27 @@
+-    struct AccessPermission has store, drop, copy {
++    public struct AccessPermission has store, drop, copy {
+@@ -35 +35 @@
+-    struct AccessLog has key, store {
++    public struct AccessLog has key, store {

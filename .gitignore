@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Production
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+.env*.local
+.env.production
+.env.test
+*/.env.test
+**/.env.test
+# Keep .env.example for documentation
+!.env.example
+
+# PDW Local Indexes (user-specific, regenerated from blockchain)
+.pdw-indexes/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Debug
+.vscode/launch.json
+
+# Serena
+.serena/
+
+# Claude Code
+.claude/
+
+# Walrus CLI
+walrus.exe
+
+# Benchmark outputs
+benchmark-*.json
+benchmark-*.txt
+
+# Whitepaper LaTeX
+Personal_Data_Wallet___whitepaper*/
+.pnpm-store/
+bun.lockb

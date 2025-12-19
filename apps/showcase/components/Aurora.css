@@ -1,0 +1,10 @@
+.aurora-container {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Remove canvas styling to let WebGL renderer handle sizing */
+.aurora-container canvas {
+  display: block;
+}
