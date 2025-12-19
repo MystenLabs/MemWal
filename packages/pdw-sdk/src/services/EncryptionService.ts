@@ -8,7 +8,7 @@
 import { SessionKey } from '@mysten/seal';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromHex, toHex } from '@mysten/sui/utils';
-import { keccak_256 } from '@noble/hashes/sha3';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { SealService } from '../infrastructure/seal/SealService';
 import { CrossContextPermissionService } from './CrossContextPermissionService';
 import type {

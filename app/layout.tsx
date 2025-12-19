@@ -2,10 +2,9 @@ import type React from "react"
 import type { Metadata } from "next"
 import { Suspense } from "react"
 import "./globals.css"
-import { PageTransition } from "@/components/page-transition"
-import { NavigationTransition } from "@/components/navigation-transition"
 import { SpeedInsights } from "@vercel/speed-insights/next"
 import { Dancing_Script, Caveat, Pixelify_Sans } from "next/font/google"
+import Npm from "@/components/npm"
 
 const PixelifySans = Pixelify_Sans({
   subsets: ["latin"],
@@ -41,8 +40,8 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className={`font-sans antialiased ${PixelifySans.variable} ${dancingScript.variable} ${caveat.variable}`}>
         <Suspense fallback={null}>
-          <NavigationTransition />
-          <PageTransition>{children}</PageTransition>
+          {children}
+          <Npm />
         </Suspense>
         <SpeedInsights />
       </body>

@@ -455,7 +455,7 @@ export default function Showcase() {
           duration: 0.8, 
           ease: "easeInOut" 
         }}
-        className="flex flex-col items-center justify-center p-8 h-screen overflow-y-scroll hide-scroll"
+        className="flex flex-col items-center justify-center p-8 max-md:p-2 h-screen overflow-y-scroll hide-scroll"
       >
         <div className="w-full max-w-2xl ">
           {/* Header */}
@@ -493,7 +493,7 @@ export default function Showcase() {
                     animate={{ y: 0, scale: 1 }}
                     exit={{ scale: 0.3, y: -20 }}
                     transition={{ duration: 0.5, ease: [0.25, 0.1, 0.25, 1] }}
-                    className="text-5xl font-bold text-white mb-3"
+                    className="text-5xl font-bold text-white mb-3 max-md:text-2xl"
                   >
                     Good Morning, User
                   </motion.h1>
@@ -596,8 +596,8 @@ export default function Showcase() {
               </div>
 
               {/* Control Bar */}
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex gap-2">
+              <div className="flex items-center justify-between gap-3 max-md:items-start">
+                <div className="flex gap-2 max-md:flex-wrap">
                 {/* Left side - Add button */}
                 <Button
                   type="button"
@@ -738,13 +738,13 @@ export default function Showcase() {
                     {memory.content}
                   </p>
                   <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
-                    <span className="flex items-center gap-1">
+                    {/* <span className="flex items-center gap-1">
                       <Link className="w-3 h-3" />
                       Blockchain Memory
-                    </span>
+                    </span> */}
                     {memory.blobId && (
                       <span className="font-mono text-[10px] opacity-60">
-                        {memory.blobId.substring(0, 8)}...
+                        {memory.blobId.substring(0, 40)}...
                       </span>
                     )}
                   </div>
@@ -754,7 +754,7 @@ export default function Showcase() {
           </div>
 
           {memories.length > 0 && (
-            <div className="absolute bottom-6 left-6 right-6">
+            <div className="">
               <Button
                 onClick={fetchMemoriesFromBlockchain}
                 variant="outline"

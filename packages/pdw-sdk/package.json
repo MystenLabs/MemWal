@@ -59,7 +59,7 @@
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "prepublishOnly": "npm run build",
-    "prepare": "npm run build"
+    "prepare": "echo 'Skipping build during install'"
   },
   "keywords": [
     "sui",
@@ -103,6 +103,7 @@
   "dependencies": {
     "@ai-sdk/google": "^2.0.46",
     "@ai-sdk/openai": "^2.0.86",
+    "@ai-sdk/provider": "^2.0.0",
     "@google/genai": "^1.20.0",
     "@langchain/core": "^0.3.0",
     "@langchain/google-genai": "^0.1.12",
@@ -113,6 +114,7 @@
     "@mysten/sui": ">=1.44.0",
     "@mysten/utils": "^0.2.0",
     "@mysten/walrus": "^0.8.3",
+    "@noble/hashes": "^2.0.1",
     "@openrouter/sdk": "^0.3.7",
     "ai": "^5.0.113",
     "eventemitter3": "^5.0.1",
