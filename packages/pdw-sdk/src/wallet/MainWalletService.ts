@@ -24,7 +24,7 @@
  * - On-chain wallet registry integration
  */
 
-import { sha3_256 } from '@noble/hashes/sha3.js';
+import { sha3_256 } from '@noble/hashes/sha3';
 import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 // Use Web Crypto API (browser-compatible)

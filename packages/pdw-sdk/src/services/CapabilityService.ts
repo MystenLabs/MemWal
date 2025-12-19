@@ -16,7 +16,7 @@
 
 import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
-import { sha3_256 } from '@noble/hashes/sha3.js';
+import { sha3_256 } from '@noble/hashes/sha3';
 import { bcs } from '@mysten/sui/bcs';
 import type {
   MemoryCap,
