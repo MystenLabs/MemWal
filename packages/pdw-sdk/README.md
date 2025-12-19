@@ -1,6 +1,6 @@
-# @cmdoss/memwal
+# @cmdoss/memwal-sdk
 
-[![npm version](https://img.shields.io/npm/v/@cmdoss/memwal.svg)](https://www.npmjs.com/package/@cmdoss/memwal)
+[![npm version](https://img.shields.io/npm/v/@cmdoss/memwal-sdk.svg)](https://www.npmjs.com/package/@cmdoss/memwal-sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 **MemWal** (Memory + Walrus) - TypeScript SDK for decentralized memory storage on Sui blockchain with Walrus.
@@ -8,13 +8,13 @@
 ## Installation
 
 ```bash
-npm install @cmdoss/memwal @mysten/sui
+npm install @cmdoss/memwal-sdk @mysten/sui
 ```
 
 ## Quick Start
 
 ```typescript
-import { SimplePDWClient } from '@cmdoss/memwal';
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 import { Ed25519Keypair, decodeSuiPrivateKey } from '@mysten/sui/keypairs/ed25519';
 
 // Setup keypair

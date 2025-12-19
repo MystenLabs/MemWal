@@ -1,6 +1,6 @@
 # MemWal SDK Performance Benchmarks
 
-Benchmark results for `@cmdoss/memwal` measured on Sui testnet.
+Benchmark results for `@cmdoss/memwal-sdk` measured on Sui testnet.
 
 ## Quick Summary
 
@@ -186,7 +186,7 @@ npx playwright test benchmark.spec.ts --reporter=list
 ### Custom Benchmarks
 
 ```typescript
-import { SimplePDWClient } from '@cmdoss/memwal';
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 
 const pdw = new SimplePDWClient({
   signer: keypair,

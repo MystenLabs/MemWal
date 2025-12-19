@@ -4,7 +4,7 @@
 
 export async function loadPDWClient() {
   try {
-    const pdwModule = await import('@cmdoss/memwal');
+    const pdwModule = await import('@cmdoss/memwal-sdk');
     const ClientClass = pdwModule.SimplePDWClient;
 
     if (!ClientClass) {

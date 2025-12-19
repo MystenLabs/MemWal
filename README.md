@@ -2,7 +2,7 @@
 
 A decentralized personal data wallet that stores your memories on the Sui blockchain with AI-powered vector search, knowledge graph extraction, and optional SEAL encryption.
 
-**SDK Package**: [@cmdoss/memwal](https://www.npmjs.com/package/@cmdoss/memwal)
+**SDK Package**: [@cmdoss/memwal-sdk](https://www.npmjs.com/package/@cmdoss/memwal-sdk)
 
 ## Features
 
@@ -155,7 +155,7 @@ personal-data-wallet/
 ### Basic Example
 
 ```typescript
-import { SimplePDWClient } from '@cmdoss/memwal';
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 
 // Initialize client

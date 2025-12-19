@@ -1,6 +1,6 @@
 # MemWal SDK Documentation
 
-Complete documentation for MemWal (`@cmdoss/memwal`) - TypeScript SDK for decentralized memory storage on Sui blockchain with Walrus.
+Complete documentation for MemWal (`@cmdoss/memwal-sdk`) - TypeScript SDK for decentralized memory storage on Sui blockchain with Walrus.
 
 ## Table of Contents
 
@@ -25,19 +25,19 @@ Complete documentation for MemWal (`@cmdoss/memwal`) - TypeScript SDK for decent
 ### npm
 
 ```bash
-npm install @cmdoss/memwal @mysten/sui
+npm install @cmdoss/memwal-sdk @mysten/sui
 ```
 
 ### pnpm
 
 ```bash
-pnpm add @cmdoss/memwal @mysten/sui
+pnpm add @cmdoss/memwal-sdk @mysten/sui
 ```
 
 ### yarn
 
 ```bash
-yarn add @cmdoss/memwal @mysten/sui
+yarn add @cmdoss/memwal-sdk @mysten/sui
 ```
 
 ### Node.js Native Performance (Recommended)
@@ -80,7 +80,7 @@ WALRUS_PUBLISHER=https://publisher.walrus-testnet.walrus.space
 ### 2. Initialize Client
 
 ```typescript
-import { SimplePDWClient } from '@cmdoss/memwal';
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 import { Ed25519Keypair, decodeSuiPrivateKey } from '@mysten/sui/keypairs/ed25519';
 
 // Decode private key
@@ -138,7 +138,7 @@ for (const result of results) {
 ### Full Configuration Options
 
 ```typescript
-import { SimplePDWClient, SimplePDWConfig } from '@cmdoss/memwal';
+import { SimplePDWClient, SimplePDWConfig } from '@cmdoss/memwal-sdk';
 
 const config: SimplePDWConfig = {
   // Required: Sui keypair for signing transactions
@@ -659,7 +659,7 @@ const decrypted = await pdw.encryption.decrypt(encryptedData, {
 ### Common Errors
 
 ```typescript
-import { PDWError } from '@cmdoss/memwal';
+import { PDWError } from '@cmdoss/memwal-sdk';
 
 try {
   const memory = await pdw.memory.create(content);
@@ -718,7 +718,7 @@ import type {
   KnowledgeGraph,
   Entity,
   Relationship
-} from '@cmdoss/memwal';
+} from '@cmdoss/memwal-sdk';
 ```
 
 ### Key Interfaces
@@ -855,7 +855,7 @@ async function createAndTrack(content: string) {
 ## Resources
 
 - [GitHub Repository](https://github.com/cmdoss/personal-data-wallet)
-- [npm Package](https://www.npmjs.com/package/@cmdoss/memwal)
+- [npm Package](https://www.npmjs.com/package/@cmdoss/memwal-sdk)
 - [Sui Documentation](https://docs.sui.io)
 - [Walrus Documentation](https://docs.walrus.site)
 - [OpenRouter](https://openrouter.ai/docs)

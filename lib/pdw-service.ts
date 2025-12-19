@@ -33,7 +33,7 @@ export async function getPDWClient(): Promise<any> {
       console.error('❌ Failed to import PDW SDK:', error);
       console.error('❌ SDK Packaging Issue - Please contact the SDK author');
       console.error('❌ Error details:', error);
-      throw new Error('Failed to load @cmdoss/memwal - packaging issue');
+      throw new Error('Failed to load @cmdoss/memwal-sdk - packaging issue');
     }
   }
 
@@ -161,7 +161,7 @@ async function ensureIndexExists(userAddress: string): Promise<void> {
 
   try {
     // Dynamic import to avoid bundling issues
-    const { hasExistingIndexNode, rebuildIndexNode } = await import('@cmdoss/memwal');
+    const { hasExistingIndexNode, rebuildIndexNode } = await import('@cmdoss/memwal-sdk');
 
     const hasIndex = await hasExistingIndexNode(userAddress);
 
@@ -220,7 +220,7 @@ export async function forceRebuildIndex(): Promise<{
     throw new Error('WALLET_ADDRESS not configured');
   }
 
-  const { rebuildIndexNode, clearIndexNode } = await import('@cmdoss/memwal');
+  const { rebuildIndexNode, clearIndexNode } = await import('@cmdoss/memwal-sdk');
 
   // Clear existing index first
   await clearIndexNode(userAddress);

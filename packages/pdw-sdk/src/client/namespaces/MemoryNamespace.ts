@@ -219,13 +219,17 @@ export class MemoryNamespace {
 
       if (this.services.tx) {
         try {
-          console.log('🔨 Building on-chain transaction...');
-          const tx = this.services.tx.buildCreateMemoryRecordLightweight({
+          console.log('🔨 Building on-chain transaction with full metadata...');
+          const tx = this.services.tx.buildCreateMemoryRecord({
             category,
             vectorId,
             blobId: uploadResult.blobId,
-            blobObjectId: '', // Optional: Walrus blob object ID if available
-            importance
+            contentType: 'text/plain',
+            contentSize: new TextEncoder().encode(content).length,
+            contentHash: uploadResult.blobId, // blob_id is content-addressed (blake2b256)
+            topic: topic || '',
+            importance,
+            embeddingBlobId: uploadResult.blobId, // Embedding stored in same blob
           });
 
           // SerialTransactionExecutor handles gas coin management and prevents equivocation
@@ -741,12 +745,16 @@ export class MemoryNamespace {
           vectorIds.push(vectorId);
 
           try {
-            const tx = this.services.tx.buildCreateMemoryRecordLightweight({
+            const tx = this.services.tx.buildCreateMemoryRecord({
               category: categories[i],
               vectorId,
               blobId: file.blobId,
-              blobObjectId: '',
-              importance
+              contentType: 'text/plain',
+              contentSize: new TextEncoder().encode(contents[i]).length,
+              contentHash: file.blobId, // blob_id is content-addressed (blake2b256)
+              topic: options.topic || '',
+              importance,
+              embeddingBlobId: file.blobId, // Embedding stored in same blob
             });
 
             const txResult = await this.services.tx.executeTransaction(

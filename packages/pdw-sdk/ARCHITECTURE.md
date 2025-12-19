@@ -1,6 +1,6 @@
 # MemWal SDK Architecture
 
-Detailed workflow diagrams and architecture documentation for MemWal (`@cmdoss/memwal`).
+Detailed workflow diagrams and architecture documentation for MemWal (`@cmdoss/memwal-sdk`).
 
 ## Table of Contents
 
@@ -156,7 +156,7 @@ User Input: "I am working at CommandOSS as a software engineer"
 ### Usage
 
 ```typescript
-import { SimplePDWClient } from '@cmdoss/memwal';
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 
 const pdw = new SimplePDWClient({
   signer: keypair,
