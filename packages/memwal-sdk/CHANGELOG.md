@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.1
+
+### Patch Changes
+
+- [`d55c998`](https://github.com/CommandOSSLabs/MemWal/commit/d55c9982f29b619d15a88a2d759260a0ce7c82df) Thanks [@Aaron1924](https://github.com/Aaron1924)! - Add DappKitSigner for @mysten/dapp-kit wallet integration
+
+  **New Features:**
+
+  - `DappKitSigner` adapter for browser wallet signing with dapp-kit hooks
+  - `getClient()` method on `UnifiedSigner` interface for SuiClient access
+  - `./browser` export path for browser-safe imports (excludes Node.js dependencies)
+
+  **Bug Fixes:**
+
+  - Fix VectorService metadata priority for correct blob retrieval
+  - Dynamic import for createHnswService to prevent bundling hnswlib-node in browser builds
+
+  **Usage with Slush/Sui wallets:**
+
+  ```typescript
+  import { DappKitSigner, SimplePDWClient } from '@cmdoss/memwal-sdk/browser';
+  import { useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
+
+  const signer = new DappKitSigner({
+    address: account.address,
+    client: suiClient,
+    signAndExecuteTransaction: signAndExecute,
+  });
+
+  const pdw = new SimplePDWClient({ signer, network: 'testnet', ... });
+  await pdw.memory.create('Hello world'); // Wallet popup for signing
+  ```
+
 All notable changes to the MemWal SDK will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -76,7 +109,7 @@ const memories = await pdw.memory.createBatch(
   {
     category: "note",
     importance: 5,
-  },
+  }
 );
 // Gas saved: ~67% (3 items → 1 transaction)
 ```
@@ -306,6 +339,7 @@ const result = await rebuildIndexNode({
 ### 🔄 Breaking Changes
 
 1. **Embedding Dimensions**: Default changed from 768 to 3072
+
    - Existing indexes need rebuilding
    - Walrus blobs with old embeddings remain readable
 
@@ -508,12 +542,14 @@ All hooks include:
 #### Build & Import Fixes
 
 - **Fixed** Windows path separator issues in generated code from @mysten/codegen
+
   - Updated `scripts/fix-codegen-paths.js` to properly handle:
     - Backslash → forward slash conversion
     - Correct relative import paths for `deps/sui/*.ts` files (now `../../../utils/index.js`)
   - Generated files now build correctly on Windows
 
 - **Fixed** TypeScript compilation errors in `HnswWasmService.ts`
+
   - Corrected `HierarchicalNSW` constructor calls (now uses `new` keyword)
   - Fixed `syncFS` calls to include required callback parameter
   - Fixed `searchKnn` to properly handle optional filter parameter
