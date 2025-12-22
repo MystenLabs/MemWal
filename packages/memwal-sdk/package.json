@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
     "./hooks": {
       "types": "./dist/hooks/index.d.ts",
       "import": "./dist/hooks/index.js"
@@ -119,7 +123,8 @@
     "ai": "^5.0.113",
     "eventemitter3": "^5.0.1",
     "hnswlib-wasm": "^0.8.2",
-    "sha3": "^2.1.4"
+    "sha3": "^2.1.4",
+    "zod": "^4.2.1"
   },
   "optionalDependencies": {
     "hnswlib-node": "^3.0.0"

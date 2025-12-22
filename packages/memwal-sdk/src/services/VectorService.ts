@@ -238,14 +238,14 @@ export class VectorService {
 
     const searchTime = performance.now() - startTime;
 
-    // Get metadata from local cache
+    // Get metadata - prefer HNSW service metadata (loaded from disk) over local cache
     return {
       results: searchResults.map((result) => ({
         memoryId: result.vectorId.toString(),
         vectorId: result.vectorId,
         similarity: result.score,
         distance: result.distance,
-        metadata: entry?.metadata.get(result.vectorId) || result.metadata
+        metadata: result.metadata || entry?.metadata.get(result.vectorId)
       })),
       searchStats: {
         searchTime,

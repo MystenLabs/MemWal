@@ -389,6 +389,22 @@ export { ClientMemoryManager } from './client/ClientMemoryManager';
 export { PersonalDataWallet } from './client/PersonalDataWallet';
 export { SimplePDWClient } from './client/SimplePDWClient';
 export type { SimplePDWConfig, ServiceContainer } from './client/SimplePDWClient';
+
+// Signer abstractions for different environments
+export {
+  KeypairSigner,
+  WalletAdapterSigner,
+  DappKitSigner
+} from './client/signers';
+export type {
+  UnifiedSigner,
+  SignAndExecuteResult,
+  SignPersonalMessageResult,
+  WalletAdapter,
+  DappKitSignerConfig,
+  DappKitSignAndExecuteFn,
+  DappKitSignPersonalMessageFn
+} from './client/signers';
 export type {
   ClientMemoryManagerConfig,
   CreateMemoryOptions as ClientCreateMemoryOptions,

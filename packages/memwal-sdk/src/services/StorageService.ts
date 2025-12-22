@@ -15,7 +15,7 @@
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import { WalrusClient, WalrusFile } from '@mysten/walrus';
-import type { Signer } from '@mysten/sui/cryptography';
+import type { UnifiedSigner } from '../client/signers/UnifiedSigner';
 import type { ClientWithExtensions } from '@mysten/sui/experimental';
 import type { SealService } from '../infrastructure/seal/SealService';
 import type { BatchService } from './BatchService';
@@ -71,7 +71,7 @@ export interface WalrusUploadResult {
 }
 
 export interface BlobUploadOptions {
-  signer: Signer;
+  signer: UnifiedSigner;
   epochs?: number;
   deletable?: boolean;
   useUploadRelay?: boolean;
@@ -817,7 +817,7 @@ export class StorageService {
       summary?: string;
     }>,
     options: {
-      signer: Signer;
+      signer: UnifiedSigner;
       epochs?: number;
       userAddress: string;
     }
@@ -856,7 +856,7 @@ export class StorageService {
       tags?: Record<string, string>;
     }>,
     options: {
-      signer: Signer;
+      signer: UnifiedSigner;
       epochs?: number;
       userAddress: string;
     }
@@ -924,7 +924,7 @@ export class StorageService {
   async setBlobAttributes(
     blobObjectId: string,
     attributes: Record<string, string>,
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     return this.blobAttributes.setBlobAttributes(blobObjectId, attributes, signer);
   }
@@ -945,7 +945,7 @@ export class StorageService {
   async updateBlobAttributes(
     blobObjectId: string,
     attributes: Record<string, string>,
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     return this.blobAttributes.updateBlobAttributes(blobObjectId, attributes, signer);
   }
@@ -956,7 +956,7 @@ export class StorageService {
   async removeBlobAttributes(
     blobObjectId: string,
     attributeKeys: string[],
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     return this.blobAttributes.removeBlobAttributes(blobObjectId, attributeKeys, signer);
   }
@@ -1009,7 +1009,7 @@ export class StorageService {
   async attachMetadataToBlob(
     blobId: string,
     metadata: WalrusMemoryMetadata,
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<{ digest: string; effects: any }> {
     const walrusPackageId = this.config.network === 'mainnet'
       ? '0x<mainnet-walrus-package-id>'

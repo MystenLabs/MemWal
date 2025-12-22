@@ -12,6 +12,7 @@
 
 import type { Transaction } from '@mysten/sui/transactions';
 import type { Signer } from '@mysten/sui/cryptography';
+import type { SuiClient } from '@mysten/sui/client';
 
 /**
  * Result of signing and executing a transaction
@@ -96,4 +97,14 @@ export interface UnifiedSigner {
    * @returns Signer instance or throws error if not available
    */
   getSigner(): Signer;
+
+  /**
+   * Get the SuiClient instance (optional)
+   *
+   * Used by managers that need to build transactions or wait for confirmations.
+   * Returns null if not available (e.g., WalletAdapterSigner).
+   *
+   * @returns SuiClient instance or null
+   */
+  getClient?(): SuiClient | null;
 }

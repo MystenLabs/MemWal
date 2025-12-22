@@ -12,8 +12,8 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
-import type { Signer } from '@mysten/sui/cryptography';
 import { Transaction } from '@mysten/sui/transactions';
+import type { UnifiedSigner } from '../../client/signers/UnifiedSigner';
 
 export interface BlobQueryResult {
   blobObjectId: string;
@@ -44,7 +44,7 @@ export class BlobAttributesManager {
   async setBlobAttributes(
     blobObjectId: string,
     attributes: Record<string, string>,
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     try {
       console.log(`🏷️  Setting ${Object.keys(attributes).length} attributes on blob ${blobObjectId.slice(0, 10)}...`);
@@ -69,12 +69,9 @@ export class BlobAttributesManager {
         console.log(`   ✓ ${key}: ${value.slice(0, 50)}${value.length > 50 ? '...' : ''}`);
       }
 
-      tx.setSender(signer.toSuiAddress());
+      tx.setSender(signer.getAddress());
 
-      const result = await signer.signAndExecuteTransaction({
-        transaction: tx,
-        client: this.suiClient,
-      });
+      const result = await signer.signAndExecuteTransaction(tx);
 
       console.log(`✅ Attributes set successfully!`);
       console.log(`   Transaction: ${result.digest}`);
@@ -163,7 +160,7 @@ export class BlobAttributesManager {
   async updateBlobAttributes(
     blobObjectId: string,
     attributes: Record<string, string>,
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     try {
       console.log(`📝 Updating ${Object.keys(attributes).length} attributes on blob ${blobObjectId.slice(0, 10)}...`);
@@ -202,12 +199,9 @@ export class BlobAttributesManager {
         console.log(`   ✓ Updated ${key}: ${value.slice(0, 50)}${value.length > 50 ? '...' : ''}`);
       }
 
-      tx.setSender(signer.toSuiAddress());
+      tx.setSender(signer.getAddress());
 
-      const result = await signer.signAndExecuteTransaction({
-        transaction: tx,
-        client: this.suiClient,
-      });
+      const result = await signer.signAndExecuteTransaction(tx);
 
       console.log(`✅ Attributes updated successfully!`);
       console.log(`   Transaction: ${result.digest}`);
@@ -226,7 +220,7 @@ export class BlobAttributesManager {
   async removeBlobAttributes(
     blobObjectId: string,
     attributeKeys: string[],
-    signer: Signer
+    signer: UnifiedSigner
   ): Promise<string> {
     try {
       console.log(`🗑️  Removing ${attributeKeys.length} attributes from blob ${blobObjectId.slice(0, 10)}...`);
@@ -249,12 +243,9 @@ export class BlobAttributesManager {
         console.log(`   ✓ Removed ${key}`);
       }
 
-      tx.setSender(signer.toSuiAddress());
+      tx.setSender(signer.getAddress());
 
-      const result = await signer.signAndExecuteTransaction({
-        transaction: tx,
-        client: this.suiClient,
-      });
+      const result = await signer.signAndExecuteTransaction(tx);
 
       console.log(`✅ Attributes removed successfully!`);
       console.log(`   Transaction: ${result.digest}`);

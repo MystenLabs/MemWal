@@ -1,35 +1,25 @@
 /**
  * Personal Data Wallet SDK - Browser Entry Point
  *
- * This entry point excludes React hooks and other Node.js-specific exports
- * for use in vanilla browser environments without React.
+ * This entry point provides browser-safe exports that don't require Node.js modules.
+ * Exports that depend on Node.js (fs, hnswlib-node) are excluded.
  *
- * For React applications, use the main 'pdw-sdk' import instead.
+ * For Node.js applications, use the main '@cmdoss/memwal-sdk' import instead.
  */
 
-// Core pipeline - the main entry point
-export { MemoryPipeline, PipelineManager } from './pipeline';
-export type {
-  PipelineConfig,
-  PipelineExecution,
-  PipelineMetrics,
-  PipelineManagerConfig,
-  SystemMetrics
-} from './pipeline';
-
-// ==================== SERVICES ====================
+// ==================== SERVICES (Browser-safe) ====================
 export { StorageService } from './services/StorageService';
 export { EmbeddingService } from './services/EmbeddingService';
 export { GeminiAIService } from './services/GeminiAIService';
 export { QueryService } from './services/QueryService';
 export { ClassifierService } from './services/ClassifierService';
-export { MemoryIndexService } from './services/MemoryIndexService';
+// Note: MemoryIndexService excluded - depends on createHnswService which imports hnswlib-node
 export { ViewService } from './services/ViewService';
 export { TransactionService } from './services/TransactionService';
 export { BatchService } from './services/BatchService';
 export { CrossContextPermissionService } from './services/CrossContextPermissionService';
 export { MemoryService } from './services/MemoryService';
-export { VectorService } from './services/VectorService';
+// Note: VectorService excluded - depends on HNSW which imports hnswlib-node
 export { CapabilityService } from './services/CapabilityService';
 
 // ==================== INFRASTRUCTURE ====================
@@ -41,8 +31,9 @@ export { EncryptionService } from './infrastructure/seal';
 // ==================== CORE ====================
 export * from './core/interfaces';
 
-// ==================== UTILITIES ====================
-export { VectorManager, createHnswService, isBrowser, isNode } from './vector';
+// ==================== UTILITIES (Browser-safe) ====================
+// Note: createHnswService excluded - imports hnswlib-node which requires fs
+export { VectorManager, isBrowser, isNode } from './vector';
 export type { IHnswService, IHnswSearchResultItem, IHnswSearchOptions, IHnswBatchStats } from './vector';
 export { BrowserHnswIndexService } from './vector/BrowserHnswIndexService';
 export { BatchManager, BatchingService, MemoryProcessingCache } from './batch';
@@ -135,10 +126,11 @@ export { MainWalletService } from './wallet/MainWalletService';
 export { ContextWalletService } from './wallet/ContextWalletService';
 export { PermissionService } from './access/PermissionService';
 export type { ConsentRepository } from './permissions/ConsentRepository';
+// Note: Only browser-safe consent repositories exported (InMemory and IndexedDB)
+// FileSystemConsentRepository is excluded - requires fs/promises
 export {
   InMemoryConsentRepository,
-  IndexedDBConsentRepository,
-  createConsentRepository
+  IndexedDBConsentRepository
 } from './permissions/ConsentRepository';
 export { AggregationService } from './aggregation/AggregationService';
 export type {
@@ -186,6 +178,13 @@ export type { PDWVectorStoreConfig, PDWAddDocumentOptions } from './langchain/PD
 // SimplePDWClient - main browser client with high-level API
 export { SimplePDWClient } from './client/SimplePDWClient';
 export type { SimplePDWConfig } from './client/SimplePDWClient';
+
+// ==================== SIGNERS ====================
+// DappKitSigner - adapter for @mysten/dapp-kit wallet signing
+export { DappKitSigner } from './client/signers/DappKitSigner';
+export type { DappKitSignerConfig, DappKitSignAndExecuteFn, DappKitSignPersonalMessageFn } from './client/signers/DappKitSigner';
+export { WalletAdapterSigner } from './client/signers/WalletAdapterSigner';
+export type { UnifiedSigner, SignAndExecuteResult, SignPersonalMessageResult } from './client/signers/UnifiedSigner';
 
 // Re-export common types from core for convenience
 export type {

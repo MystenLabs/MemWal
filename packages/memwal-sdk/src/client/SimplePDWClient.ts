@@ -69,7 +69,8 @@ import { ViewService } from '../services/ViewService';
 import { CapabilityService } from '../services/CapabilityService';
 import { MemoryIndexService } from '../services/MemoryIndexService';
 import { IndexManager, type IndexManagerOptions, type IndexProgressCallback } from '../services/IndexManager';
-import { createHnswService } from '../vector/createHnswService';
+// Note: createHnswService is dynamically imported only when enableLocalIndexing is true
+// This prevents bundling Node.js dependencies (hnswlib-node) in browser builds
 import type { IHnswService } from '../vector/IHnswService';
 
 /**
@@ -472,19 +473,22 @@ export class SimplePDWClient {
     // Note: This starts async initialization - services will wait for it when needed
     let sharedHnswService: IHnswService | undefined;
     if (config.features.enableLocalIndexing) {
-      // Start HNSW initialization early, store promise for later await
-      this.sharedHnswServicePromise = createHnswService({
-        indexConfig: {
-          dimension: embeddingConfig.dimensions,
-          maxElements: 10000,
-          efConstruction: 200,
-          m: 16
-        },
-        batchConfig: {
-          maxBatchSize: 100,
-          batchDelayMs: 5000
-        }
-      });
+      // Dynamic import to avoid bundling Node.js dependencies (hnswlib-node) in browser builds
+      // When enableLocalIndexing is false, this code never runs and webpack won't bundle it
+      this.sharedHnswServicePromise = import('../vector/createHnswService').then(
+        ({ createHnswService }) => createHnswService({
+          indexConfig: {
+            dimension: embeddingConfig.dimensions,
+            maxElements: 10000,
+            efConstruction: 200,
+            m: 16
+          },
+          batchConfig: {
+            maxBatchSize: 100,
+            batchDelayMs: 5000
+          }
+        })
+      );
       console.log('✅ Shared HNSW service initialization started (singleton for all vector services)');
     }
 

@@ -12,8 +12,8 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
-import type { Signer } from '@mysten/sui/cryptography';
 import { Transaction } from '@mysten/sui/transactions';
+import type { UnifiedSigner } from '../../client/signers/UnifiedSigner';
 
 export interface WalrusMemoryMetadata {
   // Content identification
@@ -154,7 +154,7 @@ export class WalrusMetadataManager {
   async attachMetadataToBlob(
     blobId: string,
     metadata: WalrusMemoryMetadata,
-    signer: Signer,
+    signer: UnifiedSigner,
     walrusPackageId: string
   ): Promise<{ digest: string; effects: any }> {
     try {
@@ -179,12 +179,9 @@ export class WalrusMetadataManager {
         ],
       });
 
-      tx.setSender(signer.toSuiAddress());
+      tx.setSender(signer.getAddress());
 
-      const result = await signer.signAndExecuteTransaction({
-        transaction: tx,
-        client: this.suiClient,
-      });
+      const result = await signer.signAndExecuteTransaction(tx);
 
       console.log(`✅ Metadata attached successfully. Digest: ${result.digest}`);
 

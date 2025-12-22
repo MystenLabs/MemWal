@@ -15,8 +15,8 @@
 
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { WalrusClient } from '@mysten/walrus';
-import type { Signer } from '@mysten/sui/cryptography';
 import type { ClientWithExtensions } from '@mysten/sui/experimental';
+import type { UnifiedSigner } from '../../client/signers/UnifiedSigner';
 
 export interface WalrusStorageConfig {
   suiClient?: SuiClient;
@@ -28,7 +28,7 @@ export interface WalrusStorageConfig {
 }
 
 export interface BlobUploadOptions {
-  signer: Signer;
+  signer: UnifiedSigner;
   epochs?: number;
   deletable?: boolean;
   useUploadRelay?: boolean;
@@ -160,29 +160,26 @@ export class WalrusStorageManager {
       // Step 1: Encode blob
       await flow.encode();
 
+      // Get signer address
+      const signerAddress = options.signer.getAddress();
+
       // Step 2: Register blob on-chain
       const registerTx = flow.register({
         epochs: options.epochs || this.config.epochs || 3,
         deletable: options.deletable ?? true,
-        owner: options.signer.toSuiAddress(),
+        owner: signerAddress,
       });
 
-      registerTx.setSender(options.signer.toSuiAddress());
-      const { digest: registerDigest } = await options.signer.signAndExecuteTransaction({
-        transaction: registerTx,
-        client: this.suiClient,
-      });
+      registerTx.setSender(signerAddress);
+      const { digest: registerDigest } = await options.signer.signAndExecuteTransaction(registerTx);
 
       // Step 3: Upload to storage
       await flow.upload({ digest: registerDigest });
 
       // Step 4: Certify blob on-chain
       const certifyTx = flow.certify();
-      certifyTx.setSender(options.signer.toSuiAddress());
-      await options.signer.signAndExecuteTransaction({
-        transaction: certifyTx,
-        client: this.suiClient,
-      });
+      certifyTx.setSender(signerAddress);
+      await options.signer.signAndExecuteTransaction(certifyTx);
 
       // Get blob info
       const blob = await flow.getBlob();

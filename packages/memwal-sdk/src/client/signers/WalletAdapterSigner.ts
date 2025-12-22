@@ -146,4 +146,14 @@ export class WalletAdapterSigner implements UnifiedSigner {
       'Use KeypairSigner for backend/Node.js environments.'
     );
   }
+
+  /**
+   * Get SuiClient instance
+   *
+   * Note: WalletAdapter doesn't provide SuiClient.
+   * Use DappKitSigner if you need client access.
+   */
+  getClient(): null {
+    return null;
+  }
 }

@@ -149,7 +149,7 @@ export class BatchNamespace {
                 identity: this.services.config.userAddress
               },
               {
-                signer: this.services.config.signer.getSigner(),
+                signer: this.services.config.signer,
                 epochs: 3,
                 deletable: true
               }
@@ -282,7 +282,7 @@ export class BatchNamespace {
     const result = await this.services.storage.uploadMemoryBatch(
       memories,
       {
-        signer: this.services.config.signer.getSigner(),
+        signer: this.services.config.signer,
         epochs: 3,
         userAddress: this.services.config.userAddress
       }

@@ -200,7 +200,7 @@ export class MemoryNamespace {
           identity: this.services.config.userAddress
         },
         {
-          signer: this.services.config.signer.getSigner(),
+          signer: this.services.config.signer,
           epochs: 3,
           deletable: true,
           metadata: {
@@ -439,7 +439,7 @@ export class MemoryNamespace {
             identity: this.services.config.userAddress
           },
           {
-            signer: this.services.config.signer.getSigner(),
+            signer: this.services.config.signer,
             epochs: 3,
             deletable: true
           }
@@ -723,7 +723,7 @@ export class MemoryNamespace {
       const quiltResult = await this.services.storage.uploadMemoryBatch(
         batchMemories,
         {
-          signer: this.services.config.signer.getSigner(),
+          signer: this.services.config.signer,
           epochs: 3,
           userAddress: this.services.config.userAddress
         }

@@ -98,4 +98,11 @@ export class KeypairSigner implements UnifiedSigner {
   getSigner(): Signer {
     return this.keypair;
   }
+
+  /**
+   * Get SuiClient instance
+   */
+  getClient(): SuiClient {
+    return this.client;
+  }
 }

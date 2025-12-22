@@ -246,7 +246,7 @@ export class StorageNamespace {
 
     // Upload to Walrus using uploadBlob method
     const result = await this.services.storage.uploadBlob(bytes, {
-      signer: this.services.config.signer.getSigner(),
+      signer: this.services.config.signer,
       epochs: options.epochs,
       deletable: true
     });
@@ -353,7 +353,7 @@ export class StorageNamespace {
         identity: this.services.config.userAddress
       },
       {
-        signer: this.services.config.signer.getSigner(),
+        signer: this.services.config.signer,
         epochs: 3,
         deletable: true
       }

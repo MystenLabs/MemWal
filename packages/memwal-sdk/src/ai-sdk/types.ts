@@ -12,7 +12,7 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
-import type { Signer } from '@mysten/sui/cryptography';
+import type { UnifiedSigner } from '../client/signers/UnifiedSigner';
 import type { SealService } from '../infrastructure/seal/SealService';
 
 /**
@@ -44,7 +44,7 @@ export interface PDWVectorStoreConfig {
   /**
    * User identity and signing
    */
-  signer: Signer;
+  signer: UnifiedSigner;
   userAddress: string;
 
   /**

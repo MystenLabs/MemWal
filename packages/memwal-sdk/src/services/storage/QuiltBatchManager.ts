@@ -8,7 +8,7 @@
  * - Batch upload with ~90% gas savings (single transaction for multiple files)
  * - Tag-based filtering at the Walrus level
  * - Multi-file retrieval via quiltPatchId
- * - Browser-compatible using writeFilesFlow
+ * - Browser-compatible using writeFilesFlow (2 user signatures)
  *
  * Quilt Structure:
  * - quiltId: ID of the entire batch (blob containing all files)
@@ -16,13 +16,19 @@
  * - identifier: Human-readable name for each file
  * - tags: Metadata for filtering (category, importance, etc.)
  *
+ * Upload Flow (writeFilesFlow - works with DappKitSigner):
+ * 1. encode() - Encode files into blob format (no signature)
+ * 2. register() - Register blob on-chain (USER SIGNS - Transaction 1)
+ * 3. upload() - Upload to Walrus storage nodes (no signature)
+ * 4. certify() - Certify upload on-chain (USER SIGNS - Transaction 2)
+ *
  * @see https://sdk.mystenlabs.com/walrus/index
  */
 
 import { WalrusClient, WalrusFile } from '@mysten/walrus';
-import type { Signer } from '@mysten/sui/cryptography';
 import type { ClientWithExtensions } from '@mysten/sui/experimental';
 import type { SuiClient } from '@mysten/sui/client';
+import type { UnifiedSigner } from '../../client/signers/UnifiedSigner';
 
 // ============================================================================
 // Types
@@ -40,7 +46,7 @@ export interface BatchMemory {
 }
 
 export interface QuiltUploadOptions {
-  signer: Signer;
+  signer: UnifiedSigner;
   epochs?: number;
   userAddress: string;
   deletable?: boolean;
@@ -119,7 +125,13 @@ export class QuiltBatchManager {
   // ==========================================================================
 
   /**
-   * Upload batch of memories as a Quilt
+   * Upload batch of memories as a Quilt using writeFilesFlow
+   *
+   * Uses the writeFilesFlow pattern which works with DappKitSigner:
+   * 1. encode() - Encode files (no signature)
+   * 2. register() - Register blob on-chain (USER SIGNS)
+   * 3. upload() - Upload to storage nodes (no signature)
+   * 4. certify() - Certify upload on-chain (USER SIGNS)
    *
    * Each memory becomes a WalrusFile with:
    * - Identifier: unique file name (memory-{timestamp}-{index}-{random}.json)
@@ -137,7 +149,7 @@ export class QuiltBatchManager {
     const startTime = performance.now();
     let totalSize = 0;
 
-    console.log(`📦 Uploading batch of ${memories.length} memories as Quilt...`);
+    console.log(`📦 Uploading batch of ${memories.length} memories as Quilt (writeFilesFlow)...`);
 
     try {
       // Create WalrusFile for each memory with plaintext tags
@@ -181,17 +193,46 @@ export class QuiltBatchManager {
       console.log(`   Total size: ${(totalSize / 1024).toFixed(2)} KB`);
       console.log(`   Using upload relay: ${this.useUploadRelay}`);
 
-      // Upload as Quilt using writeFiles
+      // Use writeFilesFlow pattern (works with DappKitSigner)
       const walrusClient = this.useUploadRelay
         ? this.walrusWithRelay
         : this.walrusWithoutRelay;
 
-      const results = await walrusClient.writeFiles({
-        files,
+      // Step 1: Create flow and encode files (no signature needed)
+      console.log(`   Step 1/4: Encoding files...`);
+      const flow = walrusClient.writeFilesFlow({ files });
+      await flow.encode();
+      console.log(`   ✓ Files encoded`);
+
+      // Step 2: Register blob on-chain (USER SIGNS - Transaction 1)
+      console.log(`   Step 2/4: Registering blob (requires signature)...`);
+      const registerTx = flow.register({
         epochs: options.epochs || this.epochs,
-        deletable: options.deletable ?? true,
-        signer: options.signer
+        owner: options.userAddress,
+        deletable: options.deletable ?? true
       });
+
+      const registerResult = await options.signer.signAndExecuteTransaction(registerTx);
+      console.log(`   ✓ Blob registered, digest: ${registerResult.digest}`);
+
+      // Step 3: Upload to Walrus storage nodes (no signature needed)
+      console.log(`   Step 3/4: Uploading to storage nodes...`);
+      await flow.upload({ digest: registerResult.digest });
+      console.log(`   ✓ Uploaded to storage nodes`);
+
+      // Step 4: Certify upload on-chain (USER SIGNS - Transaction 2)
+      console.log(`   Step 4/4: Certifying upload (requires signature)...`);
+      const certifyTx = flow.certify();
+
+      if (certifyTx) {
+        const certifyResult = await options.signer.signAndExecuteTransaction(certifyTx);
+        console.log(`   ✓ Upload certified, digest: ${certifyResult.digest}`);
+      } else {
+        console.log(`   ✓ No certification needed (already certified)`);
+      }
+
+      // Get uploaded files info from flow
+      const uploadedFilesInfo = await flow.listFiles();
 
       const uploadTimeMs = performance.now() - startTime;
       const gasSaved = memories.length > 1
@@ -199,24 +240,23 @@ export class QuiltBatchManager {
         : '0%';
 
       console.log(`✅ Quilt upload successful!`);
-      console.log(`   Quilt ID: ${results[0]?.id || 'N/A'}`);
-      console.log(`   Blob ID: ${results[0]?.blobId || 'N/A'}`);
-      console.log(`   Files uploaded: ${results.length}`);
+      console.log(`   Files uploaded: ${uploadedFilesInfo.length}`);
       console.log(`   Upload time: ${uploadTimeMs.toFixed(1)}ms`);
       console.log(`   Gas saved: ${gasSaved} vs individual uploads`);
 
-      // Build file results with identifiers (use original files array, not WalrusFile objects)
+      // Build file results using original WalrusFile objects for metadata
+      // and uploadedFilesInfo for blobId
       const fileResults: QuiltFileResult[] = await Promise.all(
-        results.map(async (r, i) => {
-          // Get identifier from original WalrusFile object
-          const file = files[i];
-          const identifier = await file?.getIdentifier() || `file-${i}`;
-          const tags = await file?.getTags() || {};
+        files.map(async (originalFile, i) => {
+          const identifier = await originalFile.getIdentifier() || `file-${i}`;
+          const tags = await originalFile.getTags() || {};
+          // Get blobId from uploadedFilesInfo if available
+          const blobId = uploadedFilesInfo[i]?.blobId || '';
 
           return {
             identifier,
-            blobId: r.blobId,
-            quiltPatchId: undefined, // Not available from writeFiles result
+            blobId,
+            quiltPatchId: undefined,
             tags: Object.fromEntries(
               Object.entries(tags).map(([k, v]) => [k, String(v)])
             ),
@@ -225,9 +265,12 @@ export class QuiltBatchManager {
         })
       );
 
+      // Get quiltId from first uploaded file
+      const quiltId = uploadedFilesInfo[0]?.blobId || '';
+
       return {
-        quiltId: results[0]?.id || results[0]?.blobId,
-        blobObjectId: results[0]?.blobObject?.id?.id,
+        quiltId,
+        blobObjectId: undefined, // Not available from flow
         files: fileResults,
         uploadTimeMs,
         totalSize,
@@ -241,7 +284,13 @@ export class QuiltBatchManager {
   }
 
   /**
-   * Upload raw files as a Quilt (non-memory data)
+   * Upload raw files as a Quilt using writeFilesFlow
+   *
+   * Uses the writeFilesFlow pattern which works with DappKitSigner:
+   * 1. encode() - Encode files (no signature)
+   * 2. register() - Register blob on-chain (USER SIGNS)
+   * 3. upload() - Upload to storage nodes (no signature)
+   * 4. certify() - Certify upload on-chain (USER SIGNS)
    *
    * @param files - Array of { identifier, data, tags }
    * @param options - Upload options
@@ -258,7 +307,7 @@ export class QuiltBatchManager {
     const startTime = performance.now();
     let totalSize = 0;
 
-    console.log(`📁 Uploading ${files.length} files as Quilt...`);
+    console.log(`📁 Uploading ${files.length} files as Quilt (writeFilesFlow)...`);
 
     try {
       const walrusFiles = files.map(file => {
@@ -276,28 +325,81 @@ export class QuiltBatchManager {
         });
       });
 
+      // Use writeFilesFlow pattern (works with DappKitSigner)
       const walrusClient = this.useUploadRelay
         ? this.walrusWithRelay
         : this.walrusWithoutRelay;
 
-      const results = await walrusClient.writeFiles({
-        files: walrusFiles,
+      // Step 1: Create flow and encode files (no signature needed)
+      console.log(`   Step 1/4: Encoding files...`);
+      const flow = walrusClient.writeFilesFlow({ files: walrusFiles });
+      await flow.encode();
+      console.log(`   ✓ Files encoded`);
+
+      // Step 2: Register blob on-chain (USER SIGNS - Transaction 1)
+      console.log(`   Step 2/4: Registering blob (requires signature)...`);
+      const registerTx = flow.register({
         epochs: options.epochs || this.epochs,
-        deletable: options.deletable ?? true,
-        signer: options.signer
+        owner: options.userAddress,
+        deletable: options.deletable ?? true
       });
+
+      const registerResult = await options.signer.signAndExecuteTransaction(registerTx);
+      console.log(`   ✓ Blob registered, digest: ${registerResult.digest}`);
+
+      // Step 3: Upload to Walrus storage nodes (no signature needed)
+      console.log(`   Step 3/4: Uploading to storage nodes...`);
+      await flow.upload({ digest: registerResult.digest });
+      console.log(`   ✓ Uploaded to storage nodes`);
+
+      // Step 4: Certify upload on-chain (USER SIGNS - Transaction 2)
+      console.log(`   Step 4/4: Certifying upload (requires signature)...`);
+      const certifyTx = flow.certify();
+
+      if (certifyTx) {
+        const certifyResult = await options.signer.signAndExecuteTransaction(certifyTx);
+        console.log(`   ✓ Upload certified, digest: ${certifyResult.digest}`);
+      } else {
+        console.log(`   ✓ No certification needed (already certified)`);
+      }
+
+      // Get uploaded files info from flow
+      const uploadedFilesInfo = await flow.listFiles();
 
       const uploadTimeMs = performance.now() - startTime;
 
+      console.log(`✅ Files batch upload successful!`);
+      console.log(`   Files uploaded: ${uploadedFilesInfo.length}`);
+      console.log(`   Upload time: ${uploadTimeMs.toFixed(1)}ms`);
+
+      // Build file results using original WalrusFile objects for metadata
+      // and uploadedFilesInfo for blobId
+      const fileResults: QuiltFileResult[] = await Promise.all(
+        walrusFiles.map(async (originalFile, i) => {
+          const identifier = await originalFile.getIdentifier() || files[i]?.identifier || `file-${i}`;
+          const tags = await originalFile.getTags() || {};
+          // Get blobId from uploadedFilesInfo if available
+          const blobId = uploadedFilesInfo[i]?.blobId || '';
+
+          return {
+            identifier,
+            blobId,
+            quiltPatchId: undefined,
+            tags: Object.fromEntries(
+              Object.entries(tags).map(([k, v]) => [k, String(v)])
+            ),
+            size: files[i]?.data.length || 0
+          };
+        })
+      );
+
+      // Get quiltId from first uploaded file
+      const quiltId = uploadedFilesInfo[0]?.blobId || '';
+
       return {
-        quiltId: results[0]?.id || results[0]?.blobId,
-        blobObjectId: results[0]?.blobObject?.id?.id,
-        files: results.map((r, i) => ({
-          identifier: files[i].identifier,
-          blobId: r.blobId,
-          tags: files[i].tags || {},
-          size: files[i].data.length
-        })),
+        quiltId,
+        blobObjectId: undefined, // Not available from flow
+        files: fileResults,
         uploadTimeMs,
         totalSize,
         gasSaved: files.length > 1 ? `~${((1 - 1 / files.length) * 100).toFixed(0)}%` : '0%'

@@ -93,7 +93,7 @@ export class StorageNamespace {
       const result = await this.services.storage.uploadBlob(
         data,
         {
-          signer: this.services.config.signer.getSigner(),
+          signer: this.services.config.signer,
           epochs: 3,
           deletable: true,
           metadata: metadata as any
@@ -158,7 +158,7 @@ export class StorageNamespace {
           deleted_at: new Date().toISOString(),
           deleted_by: this.services.config.userAddress
         },
-        this.services.config.signer.getSigner()
+        this.services.config.signer
       );
 
       console.log(`Blob ${blobId} marked as deleted`);
@@ -189,7 +189,7 @@ export class StorageNamespace {
       const result = await this.services.storage.uploadMemoryBatch(
         memories,
         {
-          signer: this.services.config.signer.getSigner(),
+          signer: this.services.config.signer,
           epochs: 3,
           userAddress: this.services.config.userAddress
         }
@@ -302,7 +302,7 @@ export class StorageNamespace {
       await this.services.storage.attachMetadataToBlob(
         blobId,
         metadata as any,
-        this.services.config.signer.getSigner()
+        this.services.config.signer
       );
     } catch (error) {
       throw new Error(`Set metadata failed: ${error instanceof Error ? error.message : String(error)}`);
