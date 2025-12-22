@@ -456,6 +456,90 @@ await pdw.index.load();  // Load from Walrus backup
 
 ---
 
+## Signer Architecture
+
+The SDK supports multiple signing methods through the `UnifiedSigner` interface.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Signer Architecture                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                         UnifiedSigner (Interface)
+                                    │
+                    ┌───────────────┼───────────────┐
+                    │               │               │
+                    ▼               ▼               ▼
+          ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
+          │  KeypairSigner  │ │ WalletAdapter   │ │   DappKitSigner     │
+          │                 │ │    Signer       │ │                     │
+          │ • Node.js       │ │ • Deprecated    │ │ • Browser (React)   │
+          │ • Ed25519Keypair│ │ • Legacy wallet │ │ • @mysten/dapp-kit  │
+          │ • CLI/Scripts   │ │   standard      │ │ • Slush, Sui Wallet │
+          │ • Testing       │ │                 │ │ • Popup signing     │
+          └─────────────────┘ └─────────────────┘ └─────────────────────┘
+
+UnifiedSigner Interface:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ interface UnifiedSigner {                                                   │
+│   getAddress(): string;                                                     │
+│   getSigner(): Keypair | WalletAdapter | undefined;                         │
+│   getClient(): SuiClient | null;  // New in v0.6.1                          │
+│   signPersonalMessage(params): Promise<SignPersonalMessageResult>;          │
+│   signAndExecuteTransaction(params): Promise<SignAndExecuteResult>;         │
+│ }                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Usage Examples
+
+**Node.js with Keypair:**
+```typescript
+import { SimplePDWClient } from '@cmdoss/memwal-sdk';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+
+const keypair = Ed25519Keypair.fromSecretKey(secretKey);
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  // ...
+});
+```
+
+**Browser with DappKitSigner:**
+```typescript
+import { DappKitSigner, SimplePDWClient } from '@cmdoss/memwal-sdk/browser';
+import { useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
+
+const signer = new DappKitSigner({
+  address: account.address,
+  client: suiClient,
+  signAndExecuteTransaction: async ({ transaction }) => {
+    const result = await signAndExecute({ transaction });
+    return { digest: result.digest, effects: result.effects };
+  },
+});
+
+const pdw = new SimplePDWClient({
+  signer,
+  network: 'testnet',
+  userAddress: account.address,
+  features: { enableLocalIndexing: false }, // For browser
+});
+
+// All SDK operations now trigger wallet popup for signing
+await pdw.memory.create('Hello'); // → Wallet popup appears
+```
+
+### Entry Points
+
+| Entry Point | Use Case | Node.js Deps |
+|-------------|----------|--------------|
+| `@cmdoss/memwal-sdk` | Node.js applications | Yes (hnswlib-node) |
+| `@cmdoss/memwal-sdk/browser` | Browser applications | No |
+
+---
+
 ## Related Documentation
 
 - [README.md](./README.md) - Quick start guide

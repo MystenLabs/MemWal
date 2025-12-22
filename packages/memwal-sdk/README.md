@@ -13,6 +13,8 @@ npm install @cmdoss/memwal-sdk @mysten/sui
 
 ## Quick Start
 
+### Node.js (with Keypair)
+
 ```typescript
 import { SimplePDWClient } from '@cmdoss/memwal-sdk';
 import { Ed25519Keypair, decodeSuiPrivateKey } from '@mysten/sui/keypairs/ed25519';
@@ -40,6 +42,43 @@ console.log('Memory ID:', memory.id);
 
 // Search memories
 const results = await pdw.search.vector('work experience', { limit: 5 });
+```
+
+### Browser (with dapp-kit + Slush/Sui Wallet)
+
+```typescript
+import { DappKitSigner, SimplePDWClient } from '@cmdoss/memwal-sdk/browser';
+import { useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
+
+function MyComponent() {
+  const account = useCurrentAccount();
+  const suiClient = useSuiClient();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+
+  const handleSave = async () => {
+    // Create signer from dapp-kit hooks
+    const signer = new DappKitSigner({
+      address: account.address,
+      client: suiClient,
+      signAndExecuteTransaction: async ({ transaction }) => {
+        const result = await signAndExecute({ transaction });
+        return { digest: result.digest, effects: result.effects };
+      },
+    });
+
+    // Initialize client
+    const pdw = new SimplePDWClient({
+      signer,
+      network: 'testnet',
+      userAddress: account.address,
+      sui: { packageId: process.env.NEXT_PUBLIC_PACKAGE_ID! },
+      features: { enableLocalIndexing: false }, // Disable for browser
+    });
+
+    // Create memory - wallet popup appears for signing
+    const memory = await pdw.memory.create('Hello from browser!');
+  };
+}
 ```
 
 ## Features
