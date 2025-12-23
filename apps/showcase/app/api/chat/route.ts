@@ -33,13 +33,33 @@ export async function POST(req: Request) {
     // Search for relevant memories from blockchain using PDW
     if (latestUserMessage?.content) {
       try {
-        console.log(`🔍 Processing message for wallet ${walletAddress}: "${latestUserMessage.content.substring(0, 50)}..."`)
+        console.log(`\n${'='.repeat(70)}`)
+        console.log(`🔍 [/api/chat] MEMORY SEARCH & RETRIEVAL`)
+        console.log(`${'='.repeat(70)}`)
+        console.log(`📍 Wallet: ${walletAddress}`)
+        console.log(`📍 Query: "${latestUserMessage.content.substring(0, 100)}..."`)
+
+        console.log(`\n🔧 Step 1: Getting PDW client...`)
         const pdw = await getReadOnlyPDWClient(walletAddress)
+        console.log(`   ✅ PDW client ready`)
+
+        // Check services
+        const services = (pdw as any).getServices?.() || (pdw as any).services || {}
+        console.log(`   Services: memoryIndex=${!!services.memoryIndex}, vector=${!!services.vector}`)
+
+        // Check index stats
+        try {
+          const stats = pdw.index.getStats(walletAddress)
+          console.log(`   📊 Index stats: ${JSON.stringify(stats)}`)
+        } catch (e) {
+          console.log(`   ⚠️ Could not get index stats: ${e}`)
+        }
 
         // Step 1: Check for explicit memory commands (supports multiple memories in one prompt)
+        console.log(`\n🔧 Step 2: Checking for memory commands...`)
         const memoryContents = pdw.ai.extractMultipleMemories(latestUserMessage.content)
         if (memoryContents.length > 0) {
-          console.log(`💾 Memory command detected: ${memoryContents.length} memories to save`)
+          console.log(`   💾 Memory command detected: ${memoryContents.length} memories to save`)
           memoryContents.forEach((m: string, i: number) => console.log(`   ${i + 1}. "${m}"`))
 
           // Instead of saving server-side, return memories to save to client
@@ -47,19 +67,28 @@ export async function POST(req: Request) {
           memoriesToSave = memoryContents
           memorySaved = true // Flag for prompt
           savedMemoryContent = memoryContents.join('; ')
+        } else {
+          console.log(`   No memory commands detected`)
         }
 
-        console.log(`🔍 PDW search.vector available: ${typeof pdw.search?.vector}`)
+        console.log(`\n🔧 Step 3: Performing vector search...`)
+        console.log(`   search.vector available: ${typeof pdw.search?.vector}`)
+        const searchStartTime = Date.now()
         const searchResults = await pdw.search.vector(latestUserMessage.content, {
           limit: 10,
           threshold: 0.5,
           fetchContent: true
         })
+        const searchDuration = Date.now() - searchStartTime
 
-        console.log(`🔍 Search results: ${JSON.stringify(searchResults?.length ?? 'null')} items`)
+        console.log(`   Search completed in ${searchDuration}ms`)
+        console.log(`   Results: ${searchResults?.length ?? 0} items`)
 
         if (searchResults && searchResults.length > 0) {
-          console.log(`🔍 First result:`, JSON.stringify(searchResults[0], null, 2))
+          console.log(`\n📋 Search Results:`)
+          searchResults.forEach((result: any, idx: number) => {
+            console.log(`   ${idx + 1}. score=${(result.score * 100).toFixed(1)}%, content="${(result.content || '').substring(0, 50)}..."`)
+          })
           relevantMemories = '\n\n📚 **Relevant Memories from Blockchain:**\n' +
             searchResults
               .map((result: any, idx: number) =>
@@ -67,12 +96,16 @@ export async function POST(req: Request) {
               )
               .join('\n')
 
-          console.log(`✅ Found ${searchResults.length} relevant memories for RAG`)
+          console.log(`\n✅ Found ${searchResults.length} relevant memories for RAG`)
         } else {
-          console.log(`⚠️ No relevant memories found for query`)
+          console.log(`\n⚠️ No relevant memories found for query`)
         }
+        console.log(`${'='.repeat(70)}\n`)
       } catch (memoryError) {
-        console.error('⚠️ Memory search failed (continuing without memories):', memoryError)
+        console.error('❌ Memory search failed (continuing without memories):', memoryError)
+        if (memoryError instanceof Error) {
+          console.error('   Stack:', memoryError.stack)
+        }
       }
     }
 

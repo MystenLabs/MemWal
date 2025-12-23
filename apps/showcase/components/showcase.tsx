@@ -256,11 +256,43 @@ export default function Showcase() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Fetch memories from blockchain when wallet is connected
+  // Also check if local index needs rebuild
   useEffect(() => {
     if (currentAccount?.address) {
       fetchMemoriesFromBlockchain()
+
+      // Check if local index needs rebuild (async)
+      checkAndRebuildIndex(currentAccount.address)
     }
   }, [currentAccount?.address])
+
+  // Check if local index is out of sync with blockchain and rebuild if needed
+  const checkAndRebuildIndex = async (walletAddress: string) => {
+    try {
+      // Get blockchain memory count
+      const response = await fetch(`/api/memories/list?walletAddress=${walletAddress}`)
+      const data = await response.json()
+      const blockchainCount = data.memories?.length || 0
+
+      if (blockchainCount === 0) return // No memories to index
+
+      // Check local index via chat API (it logs index stats)
+      // If mismatch, trigger rebuild
+      const rebuildResponse = await fetch('/api/index/rebuild', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress })
+      })
+      const rebuildResult = await rebuildResponse.json()
+
+      if (rebuildResult.success) {
+        console.log(`🔄 Index synced: ${rebuildResult.data?.indexedMemories}/${rebuildResult.data?.totalMemories} memories`)
+      }
+    } catch (error) {
+      console.warn('⚠️ Index sync check failed:', error)
+      // Non-critical - don't break the app
+    }
+  }
 
   const simulateProcessSteps = () => {
     // Show the steps panel
@@ -418,6 +450,12 @@ export default function Showcase() {
           })
 
           const memoryData = await memoryResponse.json()
+          console.log('🔍 Memory extraction response:', {
+            needsClientSigning: memoryData.needsClientSigning,
+            hasPrepared: !!memoryData.prepared,
+            saved: memoryData.saved,
+            reason: memoryData.reason
+          })
 
           if (memoryData.needsClientSigning && memoryData.prepared) {
             // Memory prepared - sign and save to blockchain with Slush wallet
@@ -435,7 +473,15 @@ export default function Showcase() {
               category: memoryData.prepared.category,
               importance: memoryData.prepared.importance,
             }
+            console.log('🚀 Calling savePreppedMemory with:', {
+              content: preparedData.content.substring(0, 50),
+              hasEmbedding: !!preparedData.embedding,
+              embeddingLength: preparedData.embedding?.length,
+              category: preparedData.category,
+              importance: preparedData.importance
+            })
             const saveResult = await savePreppedMemory(preparedData)
+            console.log('💾 Save result:', saveResult)
 
             if (saveResult.success) {
               console.log('✅ Memory saved to blockchain:', saveResult.memoryId)
@@ -597,9 +643,10 @@ export default function Showcase() {
             </AnimatePresence>
             
             <AnimatePresence>
-              {(isLoading || isProcessing) && <ThinkingIndicator />}
+              {(isLoading || isProcessing) && <ThinkingIndicator key="thinking" />}
               {isSavingMemory && (
                 <motion.div
+                  key="saving-memory"
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
@@ -671,6 +718,7 @@ export default function Showcase() {
                 <AnimatePresence>
               {memories.length > 0 && (
                          <Button
+                         key="memories-button"
                          type="button"
                          onClick={() => setIsMemorySheetOpen(true)}
                          className={cn(

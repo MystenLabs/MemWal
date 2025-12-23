@@ -16,6 +16,8 @@ export const runtime = 'nodejs';
  * - Manual refresh needed
  */
 export async function POST(req: NextRequest) {
+  const startTime = Date.now();
+
   try {
     const { walletAddress } = await req.json();
 
@@ -29,15 +31,25 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    console.log(`🔄 Starting index rebuild for wallet: ${walletAddress}...`);
+    console.log(`\n${'='.repeat(70)}`);
+    console.log(`🔄 [/api/index/rebuild] REBUILDING INDEX FROM BLOCKCHAIN`);
+    console.log(`${'='.repeat(70)}`);
+    console.log(`📍 Working directory: ${process.cwd()}`);
+    console.log(`📍 Wallet: ${walletAddress}`);
 
     const { rebuildIndexNode, clearIndexNode } = await import('@cmdoss/memwal-sdk');
 
     // Clear existing index first
+    console.log(`\n🗑️ Clearing existing index...`);
     await clearIndexNode(walletAddress);
+    console.log(`   ✅ Index cleared`);
 
     const network = (process.env.SUI_NETWORK as 'testnet' | 'mainnet') || 'testnet';
     const client = new SuiClient({ url: getFullnodeUrl(network) });
+
+    console.log(`\n🔄 Starting rebuild...`);
+    console.log(`   Network: ${network}`);
+    console.log(`   Package ID: ${process.env.PACKAGE_ID}`);
 
     const result = await rebuildIndexNode({
       userAddress: walletAddress,
@@ -46,9 +58,32 @@ export async function POST(req: NextRequest) {
       walrusAggregator: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
       force: true,
       onProgress: (current, total, status) => {
-        console.log(`[Index Rebuild] ${current}/${total}: ${status}`);
+        console.log(`   [${current}/${total}] ${status}`);
       }
     });
+
+    // Check index files after rebuild
+    console.log(`\n📁 Verifying index files...`);
+    const fs = await import('fs/promises');
+    const indexDir = './.pdw-indexes';
+    try {
+      const files = await fs.readdir(indexDir);
+      console.log(`   Index directory contents: ${files.length > 0 ? files.join(', ') : '(empty)'}`);
+
+      const safeAddress = walletAddress.replace(/[^a-zA-Z0-9]/g, '_');
+      const expectedFile = `${safeAddress}.hnsw`;
+      if (files.includes(expectedFile)) {
+        const stats = await fs.stat(`${indexDir}/${expectedFile}`);
+        console.log(`   📄 ${expectedFile}: ${stats.size} bytes, modified ${stats.mtime}`);
+      }
+    } catch (e) {
+      console.log(`   ⚠️ Could not verify index files: ${e}`);
+    }
+
+    const totalDuration = Date.now() - startTime;
+    console.log(`\n✅ Rebuild complete in ${(totalDuration / 1000).toFixed(2)}s`);
+    console.log(`   Total: ${result.totalMemories}, Indexed: ${result.indexedMemories}, Failed: ${result.failedMemories}`);
+    console.log(`${'='.repeat(70)}\n`);
 
     return new Response(JSON.stringify({
       success: result.success,

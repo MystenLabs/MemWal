@@ -32,9 +32,10 @@ export { EncryptionService } from './infrastructure/seal';
 export * from './core/interfaces';
 
 // ==================== UTILITIES (Browser-safe) ====================
-// Note: createHnswService excluded - imports hnswlib-node which requires fs
-export { VectorManager, isBrowser, isNode } from './vector';
-export type { IHnswService, IHnswSearchResultItem, IHnswSearchOptions, IHnswBatchStats } from './vector';
+// Note: VectorManager excluded - depends on createHnswService which imports hnswlib-node
+// Import directly from specific files to avoid loading Node.js dependencies
+export { isBrowser, isNode } from './vector/IHnswService';
+export type { IHnswService, IHnswSearchResultItem, IHnswSearchOptions, IHnswBatchStats } from './vector/IHnswService';
 export { BrowserHnswIndexService } from './vector/BrowserHnswIndexService';
 export { BatchManager, BatchingService, MemoryProcessingCache } from './batch';
 export { GraphService, KnowledgeGraphManager } from './graph';
@@ -65,10 +66,11 @@ export type {
   EmbeddingConfig
 } from './embedding/types';
 
+// Import from embedding/types directly to avoid loading vector/index.ts
 export type {
   VectorSearchResult,
   HNSWIndexConfig
-} from './vector';
+} from './embedding/types';
 
 export type {
   CacheConfig,
@@ -108,8 +110,11 @@ export const SDK_VERSION = '1.0.0';
 export const SDK_NAME = 'Personal Data Wallet SDK (Browser)';
 
 // Client-side memory management (without React)
-export { ClientMemoryManager } from './client/ClientMemoryManager';
+// NOTE: ClientMemoryManager excluded from browser entry - it uses createHnswService
+// which imports Node.js modules. Use SimplePDWClient for browser apps instead.
+// export { ClientMemoryManager } from './client/ClientMemoryManager';
 export { PersonalDataWallet } from './client/PersonalDataWallet';
+// Types can still be exported (no runtime code)
 export type {
   ClientMemoryManagerConfig,
   CreateMemoryOptions as ClientCreateMemoryOptions,
@@ -125,13 +130,13 @@ export { MainWalletService } from './wallet/MainWalletService';
 /** @deprecated Use ContextNamespace instead */
 export { ContextWalletService } from './wallet/ContextWalletService';
 export { PermissionService } from './access/PermissionService';
-export type { ConsentRepository } from './permissions/ConsentRepository';
-// Note: Only browser-safe consent repositories exported (InMemory and IndexedDB)
-// FileSystemConsentRepository is excluded - requires fs/promises
+// Import from browser-safe file to avoid loading FileSystemConsentRepository with fs/promises
+export type { ConsentRepository } from './permissions/ConsentRepository.browser';
 export {
   InMemoryConsentRepository,
-  IndexedDBConsentRepository
-} from './permissions/ConsentRepository';
+  IndexedDBConsentRepository,
+  createBrowserConsentRepository
+} from './permissions/ConsentRepository.browser';
 export { AggregationService } from './aggregation/AggregationService';
 export type {
   MainWallet,

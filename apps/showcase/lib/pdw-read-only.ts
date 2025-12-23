@@ -117,6 +117,14 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
         enableLocalIndexing: true,
         enableKnowledgeGraph: true,
       },
+      // Enable Walrus backup for local index (cloud sync)
+      indexBackup: {
+        enabled: true,
+        aggregatorUrl: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
+        publisherUrl: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',
+        autoSync: false, // Don't auto-sync on every save (manual sync preferred)
+        epochs: 3,
+      },
     });
 
     await client.ready();

@@ -27,7 +27,8 @@
 
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { StorageService } from '../services/StorageService';
-import { createHnswService, isBrowser, isNode } from '../vector/createHnswService';
+// Import environment detection from browser-safe file (no Node.js deps)
+import { isBrowser, isNode } from '../vector/IHnswService';
 import type { IHnswService } from '../vector/IHnswService';
 import { GraphService } from '../graph/GraphService';
 import { EmbeddingService } from '../services/EmbeddingService';
@@ -146,8 +147,10 @@ export class PDWVectorStore {
       console.log('🚀 Initializing PDW Vector Store...');
 
       // Initialize HNSW service using factory (auto-detects environment)
+      // Dynamic import to avoid webpack bundling Node.js modules at build time
       const distanceMetric = this.config.distanceMetric === 'euclidean' ? 'l2' : (this.config.distanceMetric || 'cosine');
 
+      const { createHnswService } = await import('../vector/createHnswService');
       this.vectorServicePromise = createHnswService({
         indexConfig: {
           dimension: this.config.dimensions,

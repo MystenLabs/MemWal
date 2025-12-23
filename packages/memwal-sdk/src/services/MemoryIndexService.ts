@@ -568,23 +568,105 @@ export class MemoryIndexService {
   }
 
   /**
-   * Load index from storage
+   * Load index from storage (local or Walrus)
+   *
+   * @param userAddress - User's wallet address
+   * @param indexBlobId - Optional Walrus blob ID to load from cloud
    */
   async loadIndex(userAddress: string, indexBlobId?: string): Promise<void> {
     const hnswService = await this.getHnswService();
+
+    // If blobId provided, try to load from Walrus first
+    if (indexBlobId && 'loadFromWalrus' in hnswService) {
+      console.log(`📥 Attempting to load index from Walrus: ${indexBlobId}`);
+      const walrusLoaded = await (hnswService as any).loadFromWalrus(userAddress, indexBlobId);
+      if (walrusLoaded) {
+        console.log(`✅ Memory index loaded from Walrus for user ${userAddress}`);
+        return;
+      }
+      console.log(`⚠️ Walrus load failed, falling back to local storage`);
+    }
+
+    // Fallback to local storage
     const loaded = await hnswService.loadIndex(userAddress);
     if (loaded) {
-      console.log(`✅ Memory index loaded for user ${userAddress}`);
+      console.log(`✅ Memory index loaded from local storage for user ${userAddress}`);
     }
   }
 
   /**
-   * Save index to storage
+   * Save index to local storage
    */
   async saveIndex(userAddress: string): Promise<void> {
     const hnswService = await this.getHnswService();
     await hnswService.saveIndex(userAddress);
     console.log(`✅ Memory index saved for user ${userAddress}`);
+  }
+
+  /**
+   * Sync index to Walrus cloud storage
+   *
+   * @param userAddress - User's wallet address
+   * @returns Walrus blob ID if successful, null if Walrus is disabled
+   */
+  async syncToWalrus(userAddress: string): Promise<string | null> {
+    const hnswService = await this.getHnswService();
+
+    if (!('syncToWalrus' in hnswService)) {
+      console.warn('⚠️ HNSW service does not support Walrus sync');
+      return null;
+    }
+
+    const blobId = await (hnswService as any).syncToWalrus(userAddress);
+    if (blobId) {
+      console.log(`☁️ Memory index synced to Walrus: ${blobId}`);
+    }
+    return blobId;
+  }
+
+  /**
+   * Load index directly from Walrus cloud storage
+   *
+   * @param userAddress - User's wallet address
+   * @param blobId - Walrus blob ID
+   * @returns true if successfully loaded
+   */
+  async loadFromWalrus(userAddress: string, blobId: string): Promise<boolean> {
+    const hnswService = await this.getHnswService();
+
+    if (!('loadFromWalrus' in hnswService)) {
+      console.warn('⚠️ HNSW service does not support Walrus load');
+      return false;
+    }
+
+    const loaded = await (hnswService as any).loadFromWalrus(userAddress, blobId);
+    if (loaded) {
+      console.log(`☁️ Memory index loaded from Walrus: ${blobId}`);
+    }
+    return loaded;
+  }
+
+  /**
+   * Get the Walrus blob ID for a user's index (if backed up)
+   *
+   * @param userAddress - User's wallet address
+   * @returns Blob ID or null if not backed up
+   */
+  getWalrusBlobId(userAddress: string): string | null {
+    if (this.hnswService && 'getWalrusBlobId' in this.hnswService) {
+      return (this.hnswService as any).getWalrusBlobId(userAddress);
+    }
+    return null;
+  }
+
+  /**
+   * Check if Walrus backup is enabled
+   */
+  isWalrusEnabled(): boolean {
+    if (this.hnswService && 'isWalrusEnabled' in this.hnswService) {
+      return (this.hnswService as any).isWalrusEnabled();
+    }
+    return false;
   }
 
   /**

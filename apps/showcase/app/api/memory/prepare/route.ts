@@ -4,16 +4,18 @@ export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 /**
- * POST /api/memory/save
+ * POST /api/memory/prepare
  * Prepare memory data for client-side saving (READ-ONLY operations)
  *
- * NOTE: This route is now READ-ONLY and does NOT upload to Walrus.
- * The client must use PDW SDK with DappKitSigner to:
- * 1. Upload to Walrus (user signs, pays storage fee)
- * 2. Register on blockchain (user signs, pays gas fee)
+ * This endpoint does NOT upload to Walrus or sign any transactions.
+ * It only performs AI operations that require the server's API key:
+ * - Generate embedding
+ * - Classify content (category, importance)
+ * - Extract knowledge graph
  *
- * For backward compatibility, this route is kept but redirects logic
- * to the same as /api/memory/prepare.
+ * The client will then:
+ * 1. Upload to Walrus (user signs with Slush wallet)
+ * 2. Register on blockchain (user signs with Slush wallet)
  *
  * Body: { content: string, category?: string, walletAddress: string }
  */
@@ -37,7 +39,7 @@ export async function POST(req: Request) {
 
     console.log(`📝 Preparing memory for wallet ${walletAddress}: "${content.substring(0, 50)}..."`)
 
-    // Use read-only PDW client (no signing capability needed for these operations)
+    // Use read-only PDW client (no signing capability needed)
     const pdw = await getReadOnlyPDWClient(walletAddress)
 
     // Generate embedding for the content
@@ -49,9 +51,21 @@ export async function POST(req: Request) {
     const classifiedImportance = await pdw.classify.importance(content)
     console.log(`📝 Classification: category=${classifiedCategory}, importance=${classifiedImportance}`)
 
-    // NOTE: Walrus upload REMOVED - client will handle this with DappKitSigner
-    // User pays for storage fee by signing with Slush wallet
+    // Extract knowledge graph (optional, may fail)
+    let graphData = null
+    try {
+      graphData = await pdw.graph.extract(content)
+      if (graphData && graphData.entities.length > 0) {
+        console.log('🕸️ Knowledge Graph extracted:')
+        console.log('  - Entities:', graphData.entities.map((e: any) => e.name).join(', '))
+        console.log('  - Relationships:', graphData.relationships.length)
+      }
+    } catch (graphError) {
+      console.warn('⚠️ Knowledge graph extraction failed:', graphError)
+      // Continue without graph - it's optional
+    }
 
+    // Return prepared data (NO blobId - client will upload to Walrus)
     return Response.json({
       success: true,
       prepared: {
@@ -59,14 +73,13 @@ export async function POST(req: Request) {
         embedding: Array.from(embedding),
         category: classifiedCategory || 'general',
         importance: classifiedImportance || 5,
+        graph: graphData,
         metadata: {
           createdAt: Date.now(),
           walletAddress,
         }
-        // NOTE: No blobId - client will upload to Walrus and get blobId
       },
-      message: 'Memory prepared. Use client-side SDK with Slush wallet to upload to Walrus and register on blockchain.',
-      needsClientSigning: true,
+      message: 'Memory prepared. Use client-side SDK to upload to Walrus and register on blockchain.'
     })
 
   } catch (error) {

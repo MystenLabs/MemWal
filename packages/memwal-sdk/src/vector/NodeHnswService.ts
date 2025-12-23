@@ -248,6 +248,7 @@ export class NodeHnswService implements IHnswService {
     vector: number[],
     metadata?: Record<string, any>
   ): Promise<void> {
+    console.log(`[NodeHnswService] addVector: userAddress=${userAddress.slice(0, 10)}..., vectorId=${vectorId}, dims=${vector.length}`);
     await this.getOrCreateIndex(userAddress);
 
     const entry = this.indexCache.get(userAddress);
@@ -262,9 +263,11 @@ export class NodeHnswService implements IHnswService {
     }
     entry.isDirty = true;
     this.batchStats.pendingJobs++;
+    console.log(`[NodeHnswService] addVector: Added to pending batch. Pending: ${entry.pendingVectors.size}, isDirty: ${entry.isDirty}`);
 
     // Flush if batch is large enough
     if (entry.pendingVectors.size >= 50) {
+      console.log(`[NodeHnswService] addVector: Batch size >= 50, auto-flushing...`);
       await this.flushBatch(userAddress);
     }
   }
@@ -338,8 +341,12 @@ export class NodeHnswService implements IHnswService {
 
   async flushBatch(userAddress: string): Promise<void> {
     const entry = this.indexCache.get(userAddress);
-    if (!entry || entry.pendingVectors.size === 0) return;
+    if (!entry || entry.pendingVectors.size === 0) {
+      console.log(`[NodeHnswService] flushBatch: No pending vectors for ${userAddress.slice(0, 10)}..., skipping`);
+      return;
+    }
 
+    console.log(`[NodeHnswService] flushBatch: Flushing ${entry.pendingVectors.size} vectors for ${userAddress.slice(0, 10)}...`);
     const startTime = Date.now();
     let processed = 0;
 
@@ -348,6 +355,7 @@ export class NodeHnswService implements IHnswService {
         entry.index.addPoint(vector, vectorId);
         processed++;
       }
+      console.log(`[NodeHnswService] flushBatch: Added ${processed} points to index`);
 
       entry.pendingVectors.clear();
       entry.isDirty = true;
@@ -361,21 +369,28 @@ export class NodeHnswService implements IHnswService {
         (this.batchStats.averageProcessingTime + processingTime) / 2;
 
       // Auto-save
+      console.log(`[NodeHnswService] flushBatch: Calling saveIndex()...`);
       await this.saveIndex(userAddress);
+      console.log(`[NodeHnswService] flushBatch: Complete in ${processingTime}ms`);
     } catch (error) {
       this.batchStats.failedJobs++;
-      console.error('[NodeHnswService] Flush batch error:', error);
+      console.error('[NodeHnswService] flushBatch error:', error);
       throw error;
     }
   }
 
   async saveIndex(userAddress: string): Promise<void> {
     const entry = this.indexCache.get(userAddress);
-    if (!entry) return;
+    if (!entry) {
+      console.log(`[NodeHnswService] saveIndex: No cache entry for ${userAddress}, skipping`);
+      return;
+    }
 
     try {
       const indexPath = this.getIndexPath(userAddress);
+      console.log(`[NodeHnswService] saveIndex: Writing to ${indexPath}`);
       entry.index.writeIndex(indexPath);
+      console.log(`[NodeHnswService] saveIndex: writeIndex() complete`);
 
       // Save metadata separately
       const fs = await import('fs/promises');

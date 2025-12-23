@@ -190,6 +190,23 @@ export interface SimplePDWConfig {
     /** Progress callback for index operations */
     onProgress?: IndexProgressCallback;
   };
+
+  /**
+   * Optional: Index backup to Walrus cloud storage
+   * Enables syncing local HNSW index to Walrus for cross-device restoration
+   */
+  indexBackup?: {
+    /** Enable Walrus backup for local index */
+    enabled: boolean;
+    /** Walrus aggregator URL for downloading */
+    aggregatorUrl?: string;
+    /** Walrus publisher URL for uploading */
+    publisherUrl?: string;
+    /** Auto-sync index to Walrus on every save (default: false) */
+    autoSync?: boolean;
+    /** Storage duration in epochs (default: 3) */
+    epochs?: number;
+  };
 }
 
 /**
@@ -238,6 +255,13 @@ interface ResolvedConfig {
     autoSaveInterval?: number;
     enableAutoSave?: boolean;
     onProgress?: IndexProgressCallback;
+  };
+  indexBackup?: {
+    enabled: boolean;
+    aggregatorUrl?: string;
+    publisherUrl?: string;
+    autoSync?: boolean;
+    epochs?: number;
   };
 }
 
@@ -360,7 +384,8 @@ export class SimplePDWClient {
         enableLocalIndexing: config.features?.enableLocalIndexing ?? true,
         enableKnowledgeGraph: config.features?.enableKnowledgeGraph ?? true
       },
-      indexManager: config.indexManager
+      indexManager: config.indexManager,
+      indexBackup: config.indexBackup
     };
   }
 
@@ -473,6 +498,15 @@ export class SimplePDWClient {
     // Note: This starts async initialization - services will wait for it when needed
     let sharedHnswService: IHnswService | undefined;
     if (config.features.enableLocalIndexing) {
+      // Prepare Walrus backup config if enabled
+      const walrusBackupConfig = config.indexBackup?.enabled ? {
+        enabled: true,
+        aggregatorUrl: config.indexBackup.aggregatorUrl || config.walrus.aggregator,
+        publisherUrl: config.indexBackup.publisherUrl || config.walrus.publisher,
+        autoSync: config.indexBackup.autoSync ?? false,
+        epochs: config.indexBackup.epochs ?? 3
+      } : undefined;
+
       // Dynamic import to avoid bundling Node.js dependencies (hnswlib-node) in browser builds
       // When enableLocalIndexing is false, this code never runs and webpack won't bundle it
       this.sharedHnswServicePromise = import('../vector/createHnswService').then(
@@ -486,10 +520,14 @@ export class SimplePDWClient {
           batchConfig: {
             maxBatchSize: 100,
             batchDelayMs: 5000
-          }
+          },
+          walrusBackup: walrusBackupConfig
         })
       );
       console.log('✅ Shared HNSW service initialization started (singleton for all vector services)');
+      if (walrusBackupConfig?.enabled) {
+        console.log('   ☁️ Walrus backup enabled for local index');
+      }
     }
 
     // 9a. Vector Service (if local indexing enabled)

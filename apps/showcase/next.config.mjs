@@ -17,6 +17,18 @@ const nextConfig = {
     ],
   },
   webpack: (config, { isServer }) => {
+    // Client-side: Provide empty modules for Node.js APIs
+    // This fixes "Module not found: Can't resolve 'fs'" errors from SDK
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        'fs/promises': false,
+        path: false,
+        crypto: false,
+      }
+    }
+
     if (isServer) {
       // Externalize problematic packages (native modules, WASM)
       config.externals = config.externals || []

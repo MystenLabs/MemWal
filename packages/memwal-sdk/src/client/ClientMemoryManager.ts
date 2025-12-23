@@ -39,7 +39,8 @@ import { WalrusClient } from '@mysten/walrus';
 import { Transaction } from '@mysten/sui/transactions';
 import { fromHex } from '@mysten/sui/utils';
 import type { SuiClient } from '@mysten/sui/client';
-import { createHnswService, isBrowser, isNode } from '../vector/createHnswService';
+// Import environment detection from browser-safe file (no Node.js deps)
+import { isBrowser, isNode } from '../vector/IHnswService';
 import type { IHnswService } from '../vector/IHnswService';
 import { EmbeddingService } from '../services/EmbeddingService';
 import { GeminiAIService } from '../services/GeminiAIService';
@@ -183,9 +184,13 @@ export class ClientMemoryManager {
 
   /**
    * Initialize HNSW service using factory (async)
+   * Uses dynamic import to avoid bundling Node.js modules in browser
    */
   private async initializeHnswService(): Promise<IHnswService> {
     try {
+      // Dynamic import to avoid webpack bundling Node.js modules at build time
+      const { createHnswService } = await import('../vector/createHnswService');
+
       const service = await createHnswService({
         indexConfig: {
           dimension: 3072,

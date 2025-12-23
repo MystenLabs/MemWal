@@ -135,12 +135,66 @@ class TxSubNamespace {
    * ```
    */
   async execute(tx: Transaction): Promise<TransactionResult> {
+    const signer = this.services.config.signer;
+
+    // Check if signer supports signAndExecuteTransaction (browser wallets like DappKitSigner)
+    // Browser wallets cannot expose raw Signer for security reasons
+    if ('signAndExecuteTransaction' in signer && typeof signer.signAndExecuteTransaction === 'function') {
+      try {
+        // Use the signer's signAndExecuteTransaction directly
+        const result = await signer.signAndExecuteTransaction(tx);
+
+        // Get full transaction details to extract created objects
+        let createdObjects: Array<{ objectId: string; objectType: string }> | undefined;
+        let mutatedObjects: Array<{ objectId: string; objectType: string }> | undefined;
+
+        if (result.objectChanges && Array.isArray(result.objectChanges)) {
+          createdObjects = result.objectChanges
+            .filter((change: any) => change.type === 'created')
+            .map((change: any) => ({
+              objectId: change.objectId,
+              objectType: change.objectType || 'unknown',
+            }));
+
+          mutatedObjects = result.objectChanges
+            .filter((change: any) => change.type === 'mutated')
+            .map((change: any) => ({
+              objectId: change.objectId,
+              objectType: change.objectType || 'unknown',
+            }));
+        }
+
+        // Determine status from effects
+        const status = result.effects?.status?.status === 'success' ? 'success' : 'failure';
+
+        return {
+          digest: result.digest,
+          status,
+          effects: result.effects,
+          createdObjects,
+          mutatedObjects,
+          gasUsed: result.effects?.gasUsed?.computationCost
+            ? Number(result.effects.gasUsed.computationCost)
+            : undefined,
+          error: status === 'failure' ? result.effects?.status?.error : undefined,
+        };
+      } catch (error) {
+        console.error('Transaction execution failed:', error);
+        return {
+          digest: '',
+          status: 'failure',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    // Fallback: Use TransactionService with raw Signer (Node.js/backend)
     if (!this.services.tx) {
       throw new Error('Transaction service not configured.');
     }
     return await this.services.tx.executeTransaction(
       tx,
-      this.services.config.signer.getSigner()
+      signer.getSigner()
     );
   }
 

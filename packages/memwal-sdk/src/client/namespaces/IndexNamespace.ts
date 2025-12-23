@@ -189,13 +189,11 @@ export class IndexNamespace {
   }
 
   /**
-   * Save index to Walrus storage
+   * Save index to local storage
    *
-   * Persists the HNSW index binary to Walrus for durability.
-   * Uses HnswWasmService.saveIndex() which properly serializes the index.
+   * Persists the HNSW index binary to local filesystem.
    *
    * @param spaceId - Index space identifier (userAddress)
-   * @returns Blob ID of saved index on Walrus, or null if no index exists
    */
   async save(spaceId: string): Promise<void> {
     const { type, service } = this.getService();
@@ -211,24 +209,104 @@ export class IndexNamespace {
   }
 
   /**
-   * Load index from Walrus storage
+   * Load index from storage (local or Walrus)
    *
-   * Loads a previously saved HNSW index from Walrus.
-   * Uses HnswWasmService.loadIndex() which properly deserializes the binary.
+   * If blobId is provided, attempts to load from Walrus first.
+   * Falls back to local storage if Walrus load fails.
    *
    * @param spaceId - Index space identifier (userAddress)
-   * @param blobId - Blob ID of the saved index on Walrus
+   * @param blobId - Optional Walrus blob ID to load from cloud
    */
-  async load(spaceId: string, blobId: string): Promise<void> {
+  async load(spaceId: string, blobId?: string): Promise<void> {
     const { type, service } = this.getService();
 
     if (type === 'memoryIndex') {
-      // MemoryIndexService.loadIndex(userAddress, indexBlobId?)
       await service.loadIndex(spaceId, blobId);
-      console.log(`Index loaded from Walrus: ${blobId}`);
+      if (blobId) {
+        console.log(`Index loaded from Walrus: ${blobId}`);
+      } else {
+        console.log(`Index loaded from local storage: ${spaceId}`);
+      }
     } else {
       await service.loadIndex(spaceId, blobId);
     }
+  }
+
+  /**
+   * Sync index to Walrus cloud storage
+   *
+   * Uploads the HNSW index binary + metadata to Walrus for durability.
+   * This enables cross-device index restoration.
+   *
+   * @param spaceId - Index space identifier (userAddress)
+   * @returns Walrus blob ID if successful, null if Walrus is disabled
+   */
+  async syncToWalrus(spaceId: string): Promise<string | null> {
+    const { type, service } = this.getService();
+
+    if (type === 'memoryIndex' && 'syncToWalrus' in service) {
+      const blobId = await service.syncToWalrus(spaceId);
+      if (blobId) {
+        console.log(`Index synced to Walrus: ${blobId}`);
+      }
+      return blobId;
+    }
+
+    console.warn('Walrus sync not available for this service type');
+    return null;
+  }
+
+  /**
+   * Load index from Walrus cloud storage
+   *
+   * Downloads and restores a previously synced index from Walrus.
+   *
+   * @param spaceId - Index space identifier (userAddress)
+   * @param blobId - Walrus blob ID of the saved index
+   * @returns true if successfully loaded
+   */
+  async loadFromWalrus(spaceId: string, blobId: string): Promise<boolean> {
+    const { type, service } = this.getService();
+
+    if (type === 'memoryIndex' && 'loadFromWalrus' in service) {
+      const loaded = await service.loadFromWalrus(spaceId, blobId);
+      if (loaded) {
+        console.log(`Index loaded from Walrus: ${blobId}`);
+      }
+      return loaded;
+    }
+
+    console.warn('Walrus load not available for this service type');
+    return false;
+  }
+
+  /**
+   * Get the Walrus blob ID for a user's index (if backed up)
+   *
+   * @param spaceId - Index space identifier (userAddress)
+   * @returns Blob ID or null if not backed up
+   */
+  getWalrusBlobId(spaceId: string): string | null {
+    const { type, service } = this.getService();
+
+    if (type === 'memoryIndex' && 'getWalrusBlobId' in service) {
+      return service.getWalrusBlobId(spaceId);
+    }
+
+    return null;
+  }
+
+  /**
+   * Check if Walrus backup is enabled
+   */
+  isWalrusEnabled(): boolean {
+    const { type, service } = this.getService();
+
+    if (type === 'memoryIndex' && 'isWalrusEnabled' in service) {
+      return service.isWalrusEnabled();
+    }
+
+    return false;
   }
 
   /**
