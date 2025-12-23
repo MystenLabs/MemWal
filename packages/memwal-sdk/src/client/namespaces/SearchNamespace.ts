@@ -154,18 +154,26 @@ export class SearchNamespace {
 
       // Convert to SearchResult format
       // Option A+: Content may be available from local index when encryption is OFF
-      const searchResults: SearchResult[] = results.map((r: any) => ({
-        id: r.memoryId || r.vectorId.toString(),
-        content: r.metadata?.content || r.content || '', // ✅ Get content from index metadata if available
-        score: r.similarity,
-        similarity: r.similarity,
-        category: r.metadata?.category,
-        importance: r.metadata?.importance || 5,
-        topic: r.metadata?.topic,
-        blobId: r.metadata?.blobId || r.memoryId || r.vectorId.toString(),
-        metadata: r.metadata || {},
-        timestamp: r.metadata?.timestamp || Date.now()
-      }));
+      const searchResults: SearchResult[] = results.map((r: any) => {
+        // blobId must be a valid Walrus blob ID, not a vectorId
+        // Only use metadata.blobId if it's a non-empty string that looks like a Walrus blobId
+        const rawBlobId = r.metadata?.blobId;
+        const isValidBlobId = rawBlobId && typeof rawBlobId === 'string' && rawBlobId.length > 10 && !/^\d+$/.test(rawBlobId);
+        const blobId = isValidBlobId ? rawBlobId : (r.metadata?.memoryObjectId || '');
+
+        return {
+          id: r.memoryId || r.vectorId.toString(),
+          content: r.metadata?.content || r.content || '', // ✅ Get content from index metadata if available
+          score: r.similarity,
+          similarity: r.similarity,
+          category: r.metadata?.category,
+          importance: r.metadata?.importance || 5,
+          topic: r.metadata?.topic,
+          blobId,
+          metadata: r.metadata || {},
+          timestamp: r.metadata?.timestamp || Date.now()
+        };
+      });
 
       // Optionally fetch content from Walrus
       if (fetchContent) {
@@ -329,7 +337,12 @@ export class SearchNamespace {
           const localResults = this.services.vector.getVectorsByCategory(spaceId, category);
 
           for (const { vectorId, metadata } of localResults) {
-            const id = metadata?.blobId || metadata?.memoryId || vectorId?.toString();
+            // blobId must be a valid Walrus blob ID, not a vectorId
+            const rawBlobId = metadata?.blobId;
+            const isValidBlobId = rawBlobId && typeof rawBlobId === 'string' && rawBlobId.length > 10 && !/^\d+$/.test(rawBlobId);
+            const blobId = isValidBlobId ? rawBlobId : (metadata?.memoryObjectId || '');
+            const id = blobId || metadata?.memoryId || vectorId?.toString();
+
             if (id && !seenIds.has(id)) {
               seenIds.add(id);
               results.push({
@@ -340,7 +353,7 @@ export class SearchNamespace {
                 category: metadata?.category,
                 importance: metadata?.importance || 5,
                 topic: metadata?.topic,
-                blobId: id,
+                blobId,
                 metadata: metadata || {},
                 timestamp: metadata?.timestamp || Date.now()
               });

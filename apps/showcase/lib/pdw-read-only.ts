@@ -3,6 +3,9 @@ import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
 let readOnlyClients: Map<string, any> = new Map();
 let SimplePDWClient: any = null;
 
+// Lock to prevent multiple concurrent rebuilds for the same user
+const rebuildInProgress: Map<string, Promise<void>> = new Map();
+
 /**
  * Get embedding configuration from environment
  */
@@ -99,15 +102,25 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
   }
 
   try {
+    // Get AI API key for Knowledge Graph (OpenRouter)
+    const aiApiKey = process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY;
+
     const client = new ClientClass({
       signer: createReadOnlySigner(walletAddress),
       userAddress: walletAddress,
       network,
+      // geminiApiKey is used for Knowledge Graph entity extraction (supports OpenRouter)
+      geminiApiKey: aiApiKey,
       sui: {
         packageId,
         network,
       },
       embedding: getEmbeddingConfig(),
+      // AI config for chat/analysis
+      ai: {
+        apiKey: aiApiKey,
+        chatModel: process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+      },
       walrus: {
         aggregatorUrl: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
         publisherUrl: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',
@@ -115,7 +128,7 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
       features: {
         enableEncryption: false,
         enableLocalIndexing: true,
-        enableKnowledgeGraph: true,
+        enableKnowledgeGraph: !!aiApiKey, // Only enable if API key is available
       },
       // Enable Walrus backup for local index (cloud sync)
       indexBackup: {
@@ -145,8 +158,16 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
 
 /**
  * Ensure HNSW index exists for the user
+ * Uses a lock to prevent multiple concurrent rebuilds
  */
 async function ensureIndexExists(userAddress: string): Promise<void> {
+  // Check if rebuild is already in progress for this user
+  if (rebuildInProgress.has(userAddress)) {
+    console.log('⏳ Index rebuild already in progress, waiting...');
+    await rebuildInProgress.get(userAddress);
+    return;
+  }
+
   try {
     const { hasExistingIndexNode, rebuildIndexNode } = await import('@cmdoss/memwal-sdk');
     const hasIndex = await hasExistingIndexNode(userAddress);
@@ -161,7 +182,8 @@ async function ensureIndexExists(userAddress: string): Promise<void> {
     const network = (process.env.SUI_NETWORK as 'testnet' | 'mainnet') || 'testnet';
     const client = new SuiClient({ url: getFullnodeUrl(network) });
 
-    rebuildIndexNode({
+    // Create rebuild promise and store in lock map
+    const rebuildPromise = rebuildIndexNode({
       userAddress,
       client,
       packageId: process.env.PACKAGE_ID!,
@@ -175,9 +197,17 @@ async function ensureIndexExists(userAddress: string): Promise<void> {
       }
     }).catch((error) => {
       console.error('❌ Index rebuild failed:', error);
+    }).finally(() => {
+      // Remove lock when done
+      rebuildInProgress.delete(userAddress);
     });
+
+    // Store the promise so other requests can wait for it
+    rebuildInProgress.set(userAddress, rebuildPromise);
+
   } catch (error) {
     console.error('❌ Error checking/rebuilding index:', error);
+    rebuildInProgress.delete(userAddress);
   }
 }
 

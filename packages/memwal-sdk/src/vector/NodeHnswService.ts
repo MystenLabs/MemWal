@@ -400,19 +400,26 @@ export class NodeHnswService implements IHnswService {
         metadataObj[k] = v;
       }
 
-      // Preserve existing walrus blob ID if present
-      const existingMeta: Record<string, any> = {};
+      // Preserve existing metadata and merge with in-memory metadata
+      // This prevents data loss when cache is cleared between requests
+      let existingMeta: Record<string, any> = {};
       try {
         const existingContent = await fs.readFile(metadataPath, 'utf-8');
-        Object.assign(existingMeta, JSON.parse(existingContent));
+        existingMeta = JSON.parse(existingContent);
       } catch {
         // No existing metadata file
       }
 
+      // Merge: existing metadata + in-memory metadata (in-memory takes priority for same keys)
+      const mergedMetadata = {
+        ...(existingMeta.metadata || {}),
+        ...metadataObj
+      };
+
       await fs.writeFile(metadataPath, JSON.stringify({
         version: entry.version,
         dimensions: entry.dimensions,
-        metadata: metadataObj,
+        metadata: mergedMetadata,
         walrusBlobId: existingMeta.walrusBlobId,
         walrusSyncTime: existingMeta.walrusSyncTime
       }));

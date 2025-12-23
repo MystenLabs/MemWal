@@ -254,39 +254,51 @@ export default function Showcase() {
   const [showStepsPanel, setShowStepsPanel] = useState(false)
   const [isLoadingMemories, setIsLoadingMemories] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  // Ref to prevent duplicate sync calls (React Strict Mode calls useEffect twice)
+  const syncCalledRef = useRef(false)
 
   // Fetch memories from blockchain when wallet is connected
-  // Also check if local index needs rebuild
+  // Also sync local index with any new memories
   useEffect(() => {
     if (currentAccount?.address) {
       fetchMemoriesFromBlockchain()
 
-      // Check if local index needs rebuild (async)
-      checkAndRebuildIndex(currentAccount.address)
+      // Sync local index with blockchain (async, incremental)
+      // Use ref to prevent duplicate calls from React Strict Mode
+      if (!syncCalledRef.current) {
+        syncCalledRef.current = true
+        checkAndSyncIndex(currentAccount.address)
+      }
+    }
+
+    // Reset ref when address changes
+    return () => {
+      syncCalledRef.current = false
     }
   }, [currentAccount?.address])
 
-  // Check if local index is out of sync with blockchain and rebuild if needed
-  const checkAndRebuildIndex = async (walletAddress: string) => {
+  // Sync missing memories from blockchain to local index (incremental, fast)
+  const checkAndSyncIndex = async (walletAddress: string) => {
     try {
-      // Get blockchain memory count
-      const response = await fetch(`/api/memories/list?walletAddress=${walletAddress}`)
-      const data = await response.json()
-      const blockchainCount = data.memories?.length || 0
-
-      if (blockchainCount === 0) return // No memories to index
-
-      // Check local index via chat API (it logs index stats)
-      // If mismatch, trigger rebuild
-      const rebuildResponse = await fetch('/api/index/rebuild', {
+      // Use incremental sync - only fetches NEW memories by blobId check
+      // Much faster than full rebuild (~20s vs ~270s)
+      console.log('🔄 Syncing index with blockchain...')
+      const syncResponse = await fetch('/api/index/sync-missing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ walletAddress })
       })
-      const rebuildResult = await rebuildResponse.json()
+      const syncResult = await syncResponse.json()
 
-      if (rebuildResult.success) {
-        console.log(`🔄 Index synced: ${rebuildResult.data?.indexedMemories}/${rebuildResult.data?.totalMemories} memories`)
+      if (syncResult.success) {
+        const { alreadyIndexed, newlyIndexed, failed } = syncResult.data || {}
+        if (newlyIndexed > 0) {
+          console.log(`✅ Synced ${newlyIndexed} new memories (${alreadyIndexed} already indexed, ${failed} failed)`)
+        } else {
+          console.log(`✅ Index up to date (${alreadyIndexed} memories)`)
+        }
+      } else {
+        console.warn('⚠️ Index sync failed:', syncResult.error)
       }
     } catch (error) {
       console.warn('⚠️ Index sync check failed:', error)
