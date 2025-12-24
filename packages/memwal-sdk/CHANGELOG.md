@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+### Patch Changes
+
+**Quilt blobId Fix:**
+- QuiltBatchManager: use shared `quiltId` instead of `quiltPatchId` as blobId for correct file retrieval
+- QuiltBatchManager: update all retrieval methods (`getQuiltFiles`, `getFileByIdentifier`, `listQuiltPatches`, `getQuiltFilesByTags`) to use `getBlob().files()` pattern
+- rebuildIndexNode: use `getBlob().files()` for proper Quilt parsing during index recovery
+- sync-missing API: use `getBlob().files()` for Quilt file retrieval
+
+**Improvements:**
+- Immediate local index creation when saving memories (no need to wait for sync)
+- Enhanced GeminiAIService with improved embedding generation
+- StorageNamespace: added batch upload methods
+
 ## 0.6.1
 
 ### Patch Changes
