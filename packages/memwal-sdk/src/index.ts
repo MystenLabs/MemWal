@@ -454,6 +454,25 @@ export type { RebuildIndexOptions, RebuildIndexResult } from './utils/rebuildInd
 export { rebuildIndexNode, hasExistingIndexNode, clearIndexNode } from './utils/rebuildIndexNode';
 export type { RebuildIndexNodeOptions, RebuildIndexNodeResult } from './utils/rebuildIndexNode';
 
+// MemoryIndex on-chain utilities
+export {
+  getMemoryIndex,
+  updateMemoryIndexOnChain,
+  createMemoryIndexOnChain,
+  syncIndexAndUpdateOnChain,
+  uploadPlaceholderToWalrus
+} from './utils/memoryIndexOnChain';
+export type {
+  OnChainMemoryIndex,
+  GetMemoryIndexOptions,
+  UpdateMemoryIndexOnChainOptions,
+  CreateMemoryIndexOnChainOptions,
+  UpdateMemoryIndexResult,
+  CreateMemoryIndexResult,
+  SyncAndUpdateOptions,
+  SyncAndUpdateResult
+} from './utils/memoryIndexOnChain';
+
 // ==================== AI SDK INTEGRATION ====================
 // AI SDK tools and vector store for Vercel AI SDK integration
 export { pdwTools } from './ai-sdk/tools';
