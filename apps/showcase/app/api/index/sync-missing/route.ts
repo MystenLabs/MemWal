@@ -1,5 +1,5 @@
 import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
-import { WalrusClient } from '@mysten/walrus';
+import { WalrusClient, WalrusFile } from '@mysten/walrus';
 import { NextRequest } from 'next/server';
 import { getReadOnlyPDWClient } from '@/lib/pdw-read-only';
 
@@ -8,6 +8,9 @@ export const runtime = 'nodejs';
 
 // Lock to prevent concurrent syncs for the same user
 const syncInProgress: Map<string, Promise<Response>> = new Map();
+
+// Cache for Quilt files to avoid re-fetching
+const quiltFileCache: Map<string, WalrusFile[]> = new Map();
 
 interface MemoryContent {
   content: string;
@@ -202,52 +205,159 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
 
   console.log(`\n📥 Fetching ${newMemories.length} new memories from Walrus...`);
 
-  for (let i = 0; i < newMemories.length; i++) {
-    const memory = newMemories[i];
-    console.log(`   [${i + 1}/${newMemories.length}] ${memory.blobId.substring(0, 20)}...`);
+  // Group memories by blobId to handle Quilts efficiently
+  // In a Quilt, multiple memories share the same blobId
+  const memoriesByBlobId = new Map<string, typeof newMemories>();
+  for (const memory of newMemories) {
+    const list = memoriesByBlobId.get(memory.blobId) || [];
+    list.push(memory);
+    memoriesByBlobId.set(memory.blobId, list);
+  }
+
+  console.log(`   📦 Unique blobIds: ${memoriesByBlobId.size} (${memoriesByBlobId.size < newMemories.length ? 'Quilt detected' : 'individual blobs'})`);
+
+  let processedCount = 0;
+
+  for (const [blobId, memoriesInBlob] of memoriesByBlobId) {
+    console.log(`\n   🔍 Processing blobId ${blobId.substring(0, 20)}... (${memoriesInBlob.length} memories)`);
 
     try {
-      // Download content from Walrus
-      const blobContent = await walrusClient.walrus.readBlob({ blobId: memory.blobId });
+      // Use getBlob().files() to correctly parse Quilt structure
+      // For regular blob: returns [singleFile]
+      // For Quilt: returns [file1, file2, ...] - all files in the quilt
+      let files: WalrusFile[];
 
-      // Parse JSON content
-      const textDecoder = new TextDecoder();
-      const jsonString = textDecoder.decode(blobContent);
-      const memoryData: MemoryContent = JSON.parse(jsonString);
-
-      // Extract embedding
-      const embedding = memoryData.embedding;
-      if (!embedding || embedding.length !== 3072) {
-        throw new Error(`Invalid embedding: length=${embedding?.length || 0}`);
+      if (quiltFileCache.has(blobId)) {
+        files = quiltFileCache.get(blobId)!;
+        console.log(`      ♻️ Using cached files (${files.length} files)`);
+      } else {
+        const blob = await walrusClient.walrus.getBlob({ blobId });
+        files = await blob.files();
+        quiltFileCache.set(blobId, files);
+        console.log(`      📥 Fetched ${files.length} file(s) from Walrus`);
       }
 
-      // Add to HNSW index via PDW client's index namespace
-      await pdw.index.add(
-        walletAddress,
-        memory.vectorId,
-        embedding,
-        {
-          blobId: memory.blobId,
-          memoryObjectId: memory.id,
-          category: memory.category,
-          importance: memory.importance,
-          topic: memoryData.metadata?.topic || '',
-          timestamp: memoryData.timestamp,
-          content: memoryData.content,
-          isEncrypted: false
-        }
-      );
+      // For each memory in this blobId
+      for (let i = 0; i < memoriesInBlob.length; i++) {
+        const memory = memoriesInBlob[i];
+        processedCount++;
+        console.log(`      [${processedCount}/${newMemories.length}] Processing vectorId=${memory.vectorId}...`);
 
-      indexedCount++;
-      console.log(`      ✓ Indexed: "${memoryData.content.substring(0, 30)}..."`);
+        try {
+          let content: string;
+          let embedding: number[];
+          let metadata: { category?: string; importance?: number; topic?: string } = {};
+          let timestamp = Date.now();
+
+          // Determine which file to use
+          // For Quilt: match by index or find by content
+          // For single blob: use the only file
+          const fileIndex = files.length === 1 ? 0 : Math.min(i, files.length - 1);
+          const file = files[fileIndex];
+
+          if (!file) {
+            throw new Error(`No file found at index ${fileIndex}`);
+          }
+
+          // Get file content
+          const rawBytes = await file.bytes();
+          const rawText = new TextDecoder().decode(rawBytes);
+          const trimmedText = rawText.trim();
+
+          // Get file identifier and tags if available (for Quilts)
+          const identifier = await file.getIdentifier();
+          const tags = await file.getTags();
+
+          if (identifier) {
+            console.log(`         📎 File identifier: ${identifier}`);
+          }
+
+          if (trimmedText.startsWith('{') && trimmedText.endsWith('}')) {
+            // JSON package format (correct format)
+            try {
+              const memoryData: MemoryContent = JSON.parse(trimmedText);
+              content = memoryData.content;
+              embedding = memoryData.embedding;
+              metadata = memoryData.metadata || {};
+              timestamp = memoryData.timestamp || Date.now();
+
+              if (!embedding || embedding.length !== 3072) {
+                throw new Error(`Invalid embedding in JSON: length=${embedding?.length || 0}`);
+              }
+
+              console.log(`         📦 Format: JSON package`);
+            } catch (jsonError) {
+              throw new Error(`Invalid JSON structure: ${(jsonError as Error).message}`);
+            }
+          } else if (trimmedText.length > 0 && !trimmedText.includes('\x00') && trimmedText.length < 10000) {
+            // Plain text format (legacy format)
+            const isPrintable = /^[\x20-\x7E\n\r\t\u00A0-\uFFFF]+$/.test(trimmedText);
+
+            if (isPrintable) {
+              console.log(`         📝 Format: Plain text (generating embedding...)`);
+              content = trimmedText;
+
+              // Generate embedding for plain text
+              try {
+                const embeddingResult = await pdw.embeddings.generate(content);
+                embedding = Array.from(embeddingResult);
+
+                if (embedding.length !== 3072) {
+                  throw new Error(`Generated embedding wrong dimension: ${embedding.length}`);
+                }
+              } catch (embError) {
+                throw new Error(`Failed to generate embedding: ${(embError as Error).message}`);
+              }
+            } else {
+              throw new Error('Binary or encrypted content - cannot index');
+            }
+          } else {
+            throw new Error('Binary, encrypted, or empty content - cannot index');
+          }
+
+          // Add to HNSW index
+          await pdw.index.add(
+            walletAddress,
+            memory.vectorId,
+            embedding,
+            {
+              blobId: memory.blobId,
+              memoryObjectId: memory.id,
+              category: metadata.category || memory.category || tags?.['category'],
+              importance: metadata.importance || memory.importance || parseInt(tags?.['importance'] || '5'),
+              topic: metadata.topic || tags?.['topic'] || '',
+              timestamp,
+              content,
+              isEncrypted: false
+            }
+          );
+
+          indexedCount++;
+          console.log(`         ✓ Indexed: "${content.substring(0, 30)}..."`);
+
+        } catch (error: any) {
+          failedCount++;
+          const errorMsg = error.message || String(error);
+          errors.push({ blobId: memory.blobId, error: errorMsg });
+          console.log(`         ✗ Failed: ${errorMsg.substring(0, 50)}...`);
+        }
+      }
 
     } catch (error: any) {
-      failedCount++;
+      // Failed to fetch files for this blobId
       const errorMsg = error.message || String(error);
-      errors.push({ blobId: memory.blobId, error: errorMsg });
-      console.log(`      ✗ Failed: ${errorMsg.substring(0, 50)}...`);
+      console.log(`      ✗ Failed to fetch blobId: ${errorMsg.substring(0, 50)}...`);
+
+      for (const memory of memoriesInBlob) {
+        processedCount++;
+        failedCount++;
+        errors.push({ blobId: memory.blobId, error: `Failed to fetch blob: ${errorMsg}` });
+      }
     }
   }
+
+  // Clear cache after processing
+  quiltFileCache.clear();
 
   // Step 6: Flush index to disk
   console.log(`\n💾 Saving index...`);

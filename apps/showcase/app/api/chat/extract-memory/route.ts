@@ -43,44 +43,58 @@ export async function POST(req: Request) {
       console.log(`🔍 Explicit memory command detected: ${explicitMemories.length} memories`)
       explicitMemories.forEach((m: string, i: number) => console.log(`   ${i + 1}. "${m}"`))
 
-      // For explicit commands, use the first extracted memory as content
-      // (For batch saves, the client should handle the full array via chat's X-Memories-To-Save header)
-      const memoryContent = explicitMemories[0]
+      // Process ALL memories in batch
+      const preparedMemories = []
 
-      // Step 2: Classify the content
-      const category = await pdw.classify.category(memoryContent)
-      const importance = await pdw.classify.importance(memoryContent)
-      console.log(`📝 Classification: category=${category}, importance=${importance}`)
+      for (let i = 0; i < explicitMemories.length; i++) {
+        const memoryContent = explicitMemories[i]
+        console.log(`\n📝 Processing memory ${i + 1}/${explicitMemories.length}: "${memoryContent.substring(0, 50)}..."`)
 
-      // Step 3: Generate embedding
-      const embedding = await pdw.embeddings.generate(memoryContent)
-      console.log(`✅ Embedding generated: ${embedding.length} dimensions`)
+        try {
+          // Classify the content
+          const category = await pdw.classify.category(memoryContent)
+          const importance = await pdw.classify.importance(memoryContent)
+          console.log(`   Classification: category=${category}, importance=${importance}`)
 
-      // Step 4: Extract knowledge graph (optional)
-      let graphData = null
-      try {
-        graphData = await pdw.graph.extract(memoryContent)
-        if (graphData && graphData.entities.length > 0) {
-          console.log('🕸️ Knowledge Graph extracted:')
-          console.log('  - Entities:', graphData.entities.map((e: any) => e.name).join(', '))
-          console.log('  - Relationships:', graphData.relationships.length)
+          // Generate embedding
+          const embedding = await pdw.embeddings.generate(memoryContent)
+          console.log(`   ✅ Embedding generated: ${embedding.length} dimensions`)
+
+          // Extract knowledge graph (optional)
+          let graphData = null
+          try {
+            graphData = await pdw.graph.extract(memoryContent)
+            if (graphData && graphData.entities.length > 0) {
+              console.log(`   🕸️ Knowledge Graph: ${graphData.entities.length} entities, ${graphData.relationships.length} relationships`)
+            }
+          } catch (graphError) {
+            console.warn(`   ⚠️ Knowledge graph extraction failed:`, graphError)
+          }
+
+          preparedMemories.push({
+            content: memoryContent,
+            embedding: Array.from(embedding),
+            category: category || 'general',
+            importance: importance || 5,
+            graph: graphData,
+          })
+        } catch (memError) {
+          console.error(`   ❌ Failed to process memory ${i + 1}:`, memError)
         }
-      } catch (graphError) {
-        console.warn('⚠️ Knowledge graph extraction failed:', graphError)
       }
 
-      // Return prepared data for client-side signing
+      console.log(`\n✅ Prepared ${preparedMemories.length}/${explicitMemories.length} memories for saving`)
+
+      // Return ALL prepared memories for client-side signing
       return Response.json({
-        memory: memoryContent,
+        memories: preparedMemories.map(p => p.content),
         saved: false,
         needsClientSigning: true,
-        prepared: {
-          content: memoryContent,
-          embedding: Array.from(embedding),
-          category: category || 'general',
-          importance: importance || 5,
-          graph: graphData,
-        }
+        // For backwards compatibility, also include first memory as 'prepared'
+        prepared: preparedMemories[0] || null,
+        // New field: array of all prepared memories
+        preparedBatch: preparedMemories,
+        batchSize: preparedMemories.length
       })
     }
 

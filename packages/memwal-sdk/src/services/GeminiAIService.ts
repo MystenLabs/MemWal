@@ -223,35 +223,291 @@ JSON:`;
     const contextSection = context ? `\nCONTEXT: ${context}\n` : '';
 
     return `
-Extract meaningful entities and relationships from the following text. Focus on:
-- People (names, roles, professions)
-- Organizations (companies, institutions, groups)
-- Locations (cities, countries, places)
-- Concepts (technologies, ideas, skills)
-- Events (meetings, projects, activities)
-- Objects (products, tools, resources)
+You are a knowledge graph extraction system for a Personal Data Wallet application. Your task is to extract meaningful entities and relationships from personal memories, notes, and user statements.
 
-Return a valid JSON response with "entities" and "relationships" arrays.
+## CRITICAL RULE: User Entity
+ALWAYS include a "user" entity to represent the person who wrote this memory:
+{
+  "id": "user",
+  "label": "User",
+  "type": "person",
+  "confidence": 1.0
+}
+This "user" entity should be the source or target of relationships describing personal preferences, attributes, or experiences.
 
-For entities:
-- "id": unique identifier using snake_case (e.g., "john_doe", "machine_learning")
-- "label": human-readable name (e.g., "John Doe", "Machine Learning")
-- "type": entity category (person, organization, location, concept, event, object)
-- "confidence": confidence score 0.0-1.0
-- "properties": optional additional attributes
+## Entity Types (Comprehensive List)
 
-For relationships:
-- "source": source entity id
-- "target": target entity id
-- "label": relationship description (e.g., "works_at", "located_in", "uses")
-- "confidence": confidence score 0.0-1.0
-- "type": optional relationship category
+### People & Social
+- **person**: Individual people, including the user themselves
+  - Examples: "user", "john_doe", "my_mother", "boss"
+  - Properties: name, role, relationship_to_user
 
-Only include entities with confidence >= 0.6 and clear, meaningful relationships.
+### Organizations & Groups
+- **organization**: Companies, institutions, teams, communities
+  - Examples: "google", "harvard_university", "local_gym"
+  - Properties: industry, size, location
+
+### Locations & Places
+- **location**: Geographic places, addresses, venues
+  - Examples: "ho_chi_minh_city", "vietnam", "my_office", "central_park"
+  - Properties: type (city/country/venue), coordinates
+
+### Food & Dining
+- **food**: Foods, dishes, cuisines, beverages, ingredients
+  - Examples: "spaghetti", "vietnamese_cuisine", "coffee", "chocolate"
+  - Properties: cuisine_type, meal_type, dietary_info
+- **restaurant**: Eating establishments
+  - Examples: "starbucks", "local_pho_shop"
+  - Properties: cuisine, price_range
+
+### Preferences & Interests
+- **preference**: General likes, dislikes, favorites
+  - Examples: "blue_color", "morning_routine", "minimalist_style"
+  - Properties: sentiment (positive/negative/neutral), intensity (1-10)
+- **hobby**: Recreational activities, pastimes
+  - Examples: "playing_guitar", "photography", "hiking", "gaming"
+  - Properties: frequency, skill_level
+- **interest**: Topics of curiosity or passion
+  - Examples: "artificial_intelligence", "history", "cooking"
+  - Properties: depth (casual/moderate/deep)
+
+### Skills & Abilities
+- **skill**: Technical or soft skills, expertise areas
+  - Examples: "python_programming", "public_speaking", "cooking"
+  - Properties: proficiency (beginner/intermediate/expert)
+- **language**: Languages known or being learned
+  - Examples: "english", "vietnamese", "japanese"
+  - Properties: proficiency, native (true/false)
+
+### Objects & Possessions
+- **object**: Physical items, products, tools
+  - Examples: "macbook_pro", "my_car", "guitar"
+  - Properties: brand, model, acquisition_date
+- **digital_product**: Software, apps, digital services
+  - Examples: "spotify", "notion", "chatgpt"
+  - Properties: category, usage_frequency
+
+### Time & Events
+- **event**: Occasions, milestones, meetings
+  - Examples: "birthday_2024", "job_interview", "vacation_trip"
+  - Properties: date, duration, importance
+- **routine**: Regular activities or habits
+  - Examples: "morning_workout", "weekly_meeting", "daily_meditation"
+  - Properties: frequency, time_of_day
+
+### Abstract & Conceptual
+- **concept**: Ideas, topics, abstract things
+  - Examples: "work_life_balance", "productivity", "happiness"
+- **goal**: Objectives, aspirations, plans
+  - Examples: "learn_japanese", "run_marathon", "save_money"
+  - Properties: deadline, priority, status
+- **emotion**: Feelings, moods, emotional states
+  - Examples: "happiness", "stress", "excitement"
+  - Properties: intensity, trigger
+
+### Health & Wellness
+- **health_condition**: Medical conditions, allergies
+  - Examples: "lactose_intolerance", "migraine", "allergy_to_peanuts"
+- **medication**: Medicines, supplements
+  - Examples: "vitamin_d", "aspirin"
+- **exercise**: Physical activities for health
+  - Examples: "running", "yoga", "weight_training"
+
+### Media & Entertainment
+- **music**: Songs, artists, genres, albums
+  - Examples: "jazz_music", "beatles", "classical_piano"
+- **movie**: Films, TV shows, documentaries
+  - Examples: "inception", "game_of_thrones"
+- **book**: Books, authors, genres
+  - Examples: "atomic_habits", "fiction_genre"
+- **game**: Video games, board games
+  - Examples: "chess", "minecraft"
+
+## Relationship Types (Comprehensive List)
+
+### Preference Relationships (source: usually "user")
+- **loves**: Strong positive preference (intensity 9-10)
+- **likes**: Moderate positive preference (intensity 6-8)
+- **enjoys**: Positive experience with something
+- **prefers**: Comparative preference
+- **favorite**: Top choice in a category
+- **interested_in**: Curiosity or engagement
+- **dislikes**: Moderate negative preference
+- **hates**: Strong negative preference (intensity 9-10)
+- **avoids**: Intentionally stays away from
+- **allergic_to**: Medical/physical aversion
+
+### Affiliation Relationships
+- **works_at**: Employment relationship
+- **studies_at**: Educational institution
+- **member_of**: Group membership
+- **belongs_to**: General affiliation
+- **founded**: Created an organization
+- **leads**: Leadership role
+
+### Location Relationships
+- **lives_in**: Current residence
+- **from**: Origin/hometown
+- **located_in**: Physical location
+- **visited**: Past travel
+- **wants_to_visit**: Travel aspiration
+
+### Social Relationships
+- **knows**: Acquaintance
+- **friends_with**: Friendship
+- **family_of**: Family relationship (specify: parent, sibling, child, spouse)
+- **works_with**: Professional relationship
+- **mentored_by**: Learning relationship
+
+### Skill & Knowledge Relationships
+- **has_skill**: Possesses ability
+- **expert_in**: High proficiency
+- **learning**: Currently acquiring
+- **wants_to_learn**: Aspiration to learn
+- **teaches**: Instructing others
+- **certified_in**: Formal qualification
+
+### Possession & Usage
+- **owns**: Ownership
+- **uses**: Regular usage
+- **wants**: Desire to acquire
+- **recommends**: Positive endorsement
+
+### Temporal Relationships
+- **started_on**: Beginning date
+- **ended_on**: Ending date
+- **scheduled_for**: Future event
+- **happens_during**: Temporal context
+
+### Causal & Descriptive
+- **causes**: Causal relationship
+- **related_to**: General association
+- **part_of**: Component relationship
+- **similar_to**: Similarity
+- **opposite_of**: Contrast
+
+## Output Format
+
+Return ONLY valid JSON with this structure:
+{
+  "entities": [
+    {
+      "id": "snake_case_identifier",
+      "label": "Human Readable Name",
+      "type": "entity_type_from_list_above",
+      "confidence": 0.0-1.0,
+      "properties": { "optional": "attributes" }
+    }
+  ],
+  "relationships": [
+    {
+      "source": "source_entity_id",
+      "target": "target_entity_id",
+      "label": "relationship_type_from_list_above",
+      "confidence": 0.0-1.0,
+      "type": "optional_category"
+    }
+  ]
+}
+
+## Examples
+
+### Example 1: Food Preference
+Input: "i love spaghetti"
+Output:
+{
+  "entities": [
+    {"id": "user", "label": "User", "type": "person", "confidence": 1.0},
+    {"id": "spaghetti", "label": "Spaghetti", "type": "food", "confidence": 0.95, "properties": {"cuisine": "italian", "meal_type": "main_course"}}
+  ],
+  "relationships": [
+    {"source": "user", "target": "spaghetti", "label": "loves", "confidence": 0.95, "type": "preference"}
+  ]
+}
+
+### Example 2: Multiple Preferences
+Input: "i like hamburgers but hate vegetables"
+Output:
+{
+  "entities": [
+    {"id": "user", "label": "User", "type": "person", "confidence": 1.0},
+    {"id": "hamburgers", "label": "Hamburgers", "type": "food", "confidence": 0.95},
+    {"id": "vegetables", "label": "Vegetables", "type": "food", "confidence": 0.95}
+  ],
+  "relationships": [
+    {"source": "user", "target": "hamburgers", "label": "likes", "confidence": 0.9, "type": "preference"},
+    {"source": "user", "target": "vegetables", "label": "dislikes", "confidence": 0.9, "type": "preference"}
+  ]
+}
+
+### Example 3: Work Information
+Input: "i work at Google as a software engineer in Mountain View"
+Output:
+{
+  "entities": [
+    {"id": "user", "label": "User", "type": "person", "confidence": 1.0, "properties": {"role": "software_engineer"}},
+    {"id": "google", "label": "Google", "type": "organization", "confidence": 0.98, "properties": {"industry": "technology"}},
+    {"id": "software_engineer", "label": "Software Engineer", "type": "skill", "confidence": 0.9},
+    {"id": "mountain_view", "label": "Mountain View", "type": "location", "confidence": 0.95, "properties": {"type": "city"}}
+  ],
+  "relationships": [
+    {"source": "user", "target": "google", "label": "works_at", "confidence": 0.98, "type": "affiliation"},
+    {"source": "user", "target": "software_engineer", "label": "has_skill", "confidence": 0.9, "type": "skill"},
+    {"source": "google", "target": "mountain_view", "label": "located_in", "confidence": 0.85, "type": "location"}
+  ]
+}
+
+### Example 4: Personal Life
+Input: "my name is Aaron and I live in Ho Chi Minh City with my wife"
+Output:
+{
+  "entities": [
+    {"id": "user", "label": "Aaron", "type": "person", "confidence": 1.0, "properties": {"name": "Aaron"}},
+    {"id": "ho_chi_minh_city", "label": "Ho Chi Minh City", "type": "location", "confidence": 0.98, "properties": {"type": "city", "country": "Vietnam"}},
+    {"id": "wife", "label": "Wife", "type": "person", "confidence": 0.9, "properties": {"relationship": "spouse"}}
+  ],
+  "relationships": [
+    {"source": "user", "target": "ho_chi_minh_city", "label": "lives_in", "confidence": 0.98, "type": "location"},
+    {"source": "user", "target": "wife", "label": "family_of", "confidence": 0.95, "type": "social", "properties": {"relationship_type": "spouse"}}
+  ]
+}
+
+### Example 5: Hobbies and Interests
+Input: "i enjoy playing guitar and listening to jazz music on weekends"
+Output:
+{
+  "entities": [
+    {"id": "user", "label": "User", "type": "person", "confidence": 1.0},
+    {"id": "playing_guitar", "label": "Playing Guitar", "type": "hobby", "confidence": 0.95},
+    {"id": "guitar", "label": "Guitar", "type": "object", "confidence": 0.9, "properties": {"category": "musical_instrument"}},
+    {"id": "jazz_music", "label": "Jazz Music", "type": "music", "confidence": 0.95, "properties": {"genre": "jazz"}},
+    {"id": "weekends", "label": "Weekends", "type": "routine", "confidence": 0.8, "properties": {"frequency": "weekly"}}
+  ],
+  "relationships": [
+    {"source": "user", "target": "playing_guitar", "label": "enjoys", "confidence": 0.95, "type": "hobby"},
+    {"source": "playing_guitar", "target": "guitar", "label": "uses", "confidence": 0.9, "type": "activity"},
+    {"source": "user", "target": "jazz_music", "label": "enjoys", "confidence": 0.9, "type": "preference"},
+    {"source": "playing_guitar", "target": "weekends", "label": "happens_during", "confidence": 0.8, "type": "temporal"}
+  ]
+}
+
+## Guidelines
+
+1. **Always include "user" entity** for personal statements (first-person: "I", "my", "me")
+2. **Extract implicit information**: "i'm a doctor" implies medical skill
+3. **Handle negations properly**: "don't like" = dislikes relationship
+4. **Capture intensity**: "love" vs "like" vs "enjoy" = different confidence/intensity
+5. **Include relevant properties**: cuisine type for food, location type for places
+6. **Create bidirectional relationships when applicable**: if A works_at B, B employs A
+7. **Minimum confidence threshold**: 0.5 for entities, 0.5 for relationships
+8. **Be comprehensive**: Extract ALL meaningful entities, even from short texts
+9. **Handle multilingual content**: Vietnamese, English, etc.
+10. **Infer entity types from context**: "spaghetti" = food, "Python" = skill/language based on context
 ${contextSection}
-TEXT: ${content}
+## TEXT TO ANALYZE:
+${content}
 
-JSON:`;
+## JSON OUTPUT:`;
   }
 
   private parseExtractionResponse(response: string): { entities: any[]; relationships: any[] } {

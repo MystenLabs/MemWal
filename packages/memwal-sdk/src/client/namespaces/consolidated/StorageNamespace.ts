@@ -437,4 +437,61 @@ export class StorageNamespace {
       };
     }
   }
+
+  // ==========================================================================
+  // Batch Operations (Quilt)
+  // ==========================================================================
+
+  /**
+   * Upload multiple memories as a Quilt (batch upload)
+   *
+   * Uses Walrus Quilt for ~90% gas savings compared to individual uploads.
+   * Requires 2 user signatures:
+   * - Transaction 1: Register blob on-chain
+   * - Transaction 2: Certify upload on-chain
+   *
+   * @param memories - Array of memories to upload
+   * @param options - Upload options including signer
+   * @returns Quilt result with file mappings
+   *
+   * @example
+   * ```typescript
+   * const result = await pdw.storage.uploadMemoryBatch(
+   *   memories,
+   *   {
+   *     signer: pdw.getConfig().signer,
+   *     epochs: 3,
+   *     userAddress: pdw.getConfig().userAddress
+   *   }
+   * );
+   * console.log(`Uploaded ${result.files.length} files`);
+   * ```
+   */
+  async uploadMemoryBatch(
+    memories: Array<{
+      content: string;
+      category: string;
+      importance: number;
+      topic: string;
+      embedding: number[];
+      encryptedContent: Uint8Array;
+      summary?: string;
+      id?: string;
+    }>,
+    options: {
+      signer: any; // UnifiedSigner
+      epochs?: number;
+      userAddress: string;
+    }
+  ): Promise<{
+    quiltId: string;
+    files: Array<{ identifier: string; blobId: string }>;
+    uploadTimeMs: number;
+  }> {
+    if (!this.services.storage) {
+      throw new Error('Storage service not configured.');
+    }
+
+    return this.services.storage.uploadMemoryBatch(memories, options);
+  }
 }

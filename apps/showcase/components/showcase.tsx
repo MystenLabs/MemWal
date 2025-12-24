@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/sheet'
 import { ConnectWalletButton } from '@/components/ConnectWalletButton'
 import { useCurrentAccount } from '@mysten/dapp-kit'
-import { useMemoryTransaction, PreparedMemory } from '@/hooks/useMemoryTransaction'
+import { useMemoryTransaction, useBatchMemoryTransaction, PreparedMemory } from '@/hooks/useMemoryTransaction'
 
 type ChatMessage = {
   id: string
@@ -242,6 +242,7 @@ type Memory = {
 export default function Showcase() {
   const currentAccount = useCurrentAccount()
   const { savePreppedMemory, isPending: isSavingMemory } = useMemoryTransaction()
+  const { savePreppedMemoriesBatch } = useBatchMemoryTransaction()
   const [currentStep, setCurrentStep] = useState(-1)
   const [memories, setMemories] = useState<Memory[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
@@ -465,19 +466,45 @@ export default function Showcase() {
           console.log('🔍 Memory extraction response:', {
             needsClientSigning: memoryData.needsClientSigning,
             hasPrepared: !!memoryData.prepared,
+            hasBatch: !!memoryData.preparedBatch,
+            batchSize: memoryData.batchSize || 0,
             saved: memoryData.saved,
             reason: memoryData.reason
           })
 
-          if (memoryData.needsClientSigning && memoryData.prepared) {
-            // Memory prepared - sign and save to blockchain with Slush wallet
-            console.log('📝 Memory prepared for blockchain, initiating Slush wallet signing:', {
+          if (memoryData.needsClientSigning && memoryData.preparedBatch && memoryData.preparedBatch.length > 0) {
+            // Batch memories - save ALL using Walrus Quilt (single transaction for all blobs!)
+            console.log(`📦 Batch memories prepared: ${memoryData.preparedBatch.length} memories to save via Quilt`)
+
+            // Convert to PreparedMemory array
+            const preparedMemories: PreparedMemory[] = memoryData.preparedBatch.map((prepared: any) => ({
+              content: prepared.content,
+              blobId: prepared.blobId,
+              embedding: prepared.embedding,
+              category: prepared.category,
+              importance: prepared.importance,
+            }))
+
+            // Use Quilt batch upload (single transaction for all blobs, ~90% gas savings)
+            const batchResult = await savePreppedMemoriesBatch(preparedMemories)
+
+            console.log(`\n📊 Batch save complete: ${batchResult.successCount} succeeded, ${batchResult.failCount} failed`)
+
+            if (batchResult.successCount > 0) {
+              // Refresh memories list to show new memories
+              fetchMemoriesFromBlockchain()
+            }
+
+            if (batchResult.error) {
+              console.error('⚠️ Batch save had errors:', batchResult.error)
+            }
+          } else if (memoryData.needsClientSigning && memoryData.prepared) {
+            // Single memory (backwards compatibility)
+            console.log('📝 Single memory prepared for blockchain:', {
               content: memoryData.prepared.content.substring(0, 50) + '...',
-              blobId: memoryData.prepared.blobId,
               category: memoryData.prepared.category
             })
 
-            // Save memory using Slush wallet for transaction signing
             const preparedData: PreparedMemory = {
               content: memoryData.prepared.content,
               blobId: memoryData.prepared.blobId,
@@ -485,19 +512,12 @@ export default function Showcase() {
               category: memoryData.prepared.category,
               importance: memoryData.prepared.importance,
             }
-            console.log('🚀 Calling savePreppedMemory with:', {
-              content: preparedData.content.substring(0, 50),
-              hasEmbedding: !!preparedData.embedding,
-              embeddingLength: preparedData.embedding?.length,
-              category: preparedData.category,
-              importance: preparedData.importance
-            })
+
             const saveResult = await savePreppedMemory(preparedData)
             console.log('💾 Save result:', saveResult)
 
             if (saveResult.success) {
               console.log('✅ Memory saved to blockchain:', saveResult.memoryId)
-              // Refresh memories list to show the new memory
               fetchMemoriesFromBlockchain()
             } else {
               console.error('❌ Failed to save memory:', saveResult.error)

@@ -98,7 +98,7 @@ export class GraphService {
   ) {
     this.config = {
       extractionModel: config.extractionModel || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
-      confidenceThreshold: config.confidenceThreshold || 0.7,
+      confidenceThreshold: config.confidenceThreshold || 0.5,
       maxHops: config.maxHops || 3,
       enableEmbeddings: config.enableEmbeddings !== false,
       deduplicationThreshold: config.deduplicationThreshold || 0.85,

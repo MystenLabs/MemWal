@@ -27,7 +27,7 @@
  */
 
 import type { SuiClient } from '@mysten/sui/client';
-import { WalrusClient } from '@mysten/walrus';
+import { WalrusClient, WalrusFile } from '@mysten/walrus';
 
 export interface RebuildIndexNodeOptions {
   /** User's blockchain address */
@@ -212,60 +212,143 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
       };
     }
 
-    // Process each memory
+    // Process memories grouped by blobId (for Quilt support)
+    // In a Quilt, multiple memories share the same blobId
+    const memoriesByBlobId = new Map<string, typeof memories>();
+    for (const memory of memories) {
+      const list = memoriesByBlobId.get(memory.blobId) || [];
+      list.push(memory);
+      memoriesByBlobId.set(memory.blobId, list);
+    }
+
+    console.log(`[rebuildIndexNode] Unique blobIds: ${memoriesByBlobId.size} (${memoriesByBlobId.size < totalMemories ? 'Quilt detected' : 'individual blobs'})`);
+
     let indexedCount = 0;
     let failedCount = 0;
+    let processedCount = 0;
 
-    for (let i = 0; i < memories.length; i++) {
-      const memory = memories[i];
-      const progress = `Memory ${i + 1}/${totalMemories}`;
+    // Cache for Quilt files to avoid re-fetching
+    const quiltFileCache = new Map<string, WalrusFile[]>();
 
-      console.log(`[rebuildIndexNode] Processing ${progress}: ${memory.blobId.substring(0, 20)}...`);
-      onProgress?.(i + 1, totalMemories, `Processing ${progress}...`);
+    for (const [blobId, memoriesInBlob] of memoriesByBlobId) {
+      console.log(`[rebuildIndexNode] Processing blobId ${blobId.substring(0, 20)}... (${memoriesInBlob.length} memories)`);
 
       try {
-        // Download content from Walrus using SDK
-        const blobContent = await walrusClient.walrus.readBlob({ blobId: memory.blobId });
+        // Use getBlob().files() to correctly parse Quilt structure
+        // For regular blob: returns [singleFile]
+        // For Quilt: returns [file1, file2, ...] - all files in the quilt
+        let files: WalrusFile[];
 
-        // Parse JSON content
-        const textDecoder = new TextDecoder();
-        const jsonString = textDecoder.decode(blobContent);
-        const memoryData: MemoryContent = JSON.parse(jsonString);
-
-        // Extract embedding
-        const embedding = memoryData.embedding;
-        if (!embedding || embedding.length !== 3072) {
-          throw new Error(`Invalid embedding: length=${embedding?.length || 0}`);
+        if (quiltFileCache.has(blobId)) {
+          files = quiltFileCache.get(blobId)!;
+          console.log(`[rebuildIndexNode]   ♻️ Using cached files (${files.length} files)`);
+        } else {
+          const blob = await walrusClient.walrus.getBlob({ blobId });
+          files = await blob.files();
+          quiltFileCache.set(blobId, files);
+          console.log(`[rebuildIndexNode]   📥 Fetched ${files.length} file(s) from Walrus`);
         }
 
-        // Add to HNSW index
-        // Option A+: Store content in index for fast local retrieval (no Walrus fetch needed)
-        // Note: Only for unencrypted content. If content was encrypted, it won't be parseable anyway.
-        await hnswService.addVector(
-          userAddress,
-          memory.vectorId,
-          embedding,
-          {
-            blobId: memory.blobId,
-            memoryObjectId: memory.id,
-            category: memory.category,
-            importance: memory.importance,
-            topic: memoryData.metadata?.topic || '',
-            timestamp: memoryData.timestamp,
-            // Option A+: Store content for fast retrieval (avoids Walrus fetch on search)
-            content: memoryData.content,
-            isEncrypted: false // If we can parse it, it's not encrypted
-          }
-        );
+        // For each memory in this blobId
+        for (let i = 0; i < memoriesInBlob.length; i++) {
+          const memory = memoriesInBlob[i];
+          processedCount++;
+          const progress = `Memory ${processedCount}/${totalMemories}`;
 
-        indexedCount++;
-        console.log(`[rebuildIndexNode]   ✓ Indexed: ${memory.blobId.substring(0, 20)}...`);
+          console.log(`[rebuildIndexNode] Processing ${progress}: vectorId=${memory.vectorId}`);
+          onProgress?.(processedCount, totalMemories, `Processing ${progress}...`);
+
+          try {
+            // Determine which file to use
+            // For Quilt: match by index
+            // For single blob: use the only file
+            const fileIndex = files.length === 1 ? 0 : Math.min(i, files.length - 1);
+            const file = files[fileIndex];
+
+            if (!file) {
+              throw new Error(`No file found at index ${fileIndex}`);
+            }
+
+            // Get file content
+            const rawBytes = await file.bytes();
+            const rawText = new TextDecoder().decode(rawBytes);
+            const trimmedText = rawText.trim();
+
+            // Get file identifier and tags if available (for Quilts)
+            const identifier = await file.getIdentifier();
+            const tags = await file.getTags();
+
+            if (identifier) {
+              console.log(`[rebuildIndexNode]   📎 File identifier: ${identifier}`);
+            }
+
+            let content: string;
+            let embedding: number[];
+            let metadata: { category?: string; importance?: number; topic?: string } = {};
+            let timestamp = Date.now();
+
+            if (trimmedText.startsWith('{') && trimmedText.endsWith('}')) {
+              // JSON package format (correct format)
+              try {
+                const memoryData: MemoryContent = JSON.parse(trimmedText);
+                content = memoryData.content;
+                embedding = memoryData.embedding;
+                metadata = memoryData.metadata || {};
+                timestamp = memoryData.timestamp || Date.now();
+
+                if (!embedding || embedding.length !== 3072) {
+                  throw new Error(`Invalid embedding in JSON: length=${embedding?.length || 0}`);
+                }
+
+                console.log(`[rebuildIndexNode]   📦 Format: JSON package`);
+              } catch (jsonError) {
+                throw new Error(`Invalid JSON structure: ${(jsonError as Error).message}`);
+              }
+            } else if (trimmedText.length > 0 && !trimmedText.includes('\x00') && trimmedText.length < 10000) {
+              // Plain text format - cannot index without embedding
+              throw new Error('Plain text format detected but no embedding available - skip');
+            } else {
+              throw new Error('Binary, encrypted, or empty content - cannot index');
+            }
+
+            // Add to HNSW index
+            await hnswService.addVector(
+              userAddress,
+              memory.vectorId,
+              embedding,
+              {
+                blobId: memory.blobId,
+                memoryObjectId: memory.id,
+                category: metadata.category || memory.category || tags?.['category'],
+                importance: metadata.importance || memory.importance || parseInt(tags?.['importance'] || '5'),
+                topic: metadata.topic || tags?.['topic'] || '',
+                timestamp,
+                content,
+                isEncrypted: false
+              }
+            );
+
+            indexedCount++;
+            console.log(`[rebuildIndexNode]   ✓ Indexed: "${content.substring(0, 30)}..."`);
+
+          } catch (error: any) {
+            failedCount++;
+            const errorMsg = error.message || String(error);
+            errors.push({ blobId: memory.blobId, error: errorMsg });
+            console.error(`[rebuildIndexNode]   ✗ Failed: ${errorMsg}`);
+          }
+        }
 
       } catch (error: any) {
-        failedCount++;
+        // Failed to fetch files for this blobId
         const errorMsg = error.message || String(error);
-        errors.push({ blobId: memory.blobId, error: errorMsg });
-        console.error(`[rebuildIndexNode]   ✗ Failed: ${errorMsg}`);
+        console.error(`[rebuildIndexNode]   ✗ Failed to fetch blobId: ${errorMsg}`);
+
+        for (const memory of memoriesInBlob) {
+          processedCount++;
+          failedCount++;
+          errors.push({ blobId: memory.blobId, error: `Failed to fetch blob: ${errorMsg}` });
+        }
       }
     }
 

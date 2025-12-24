@@ -245,18 +245,26 @@ export class QuiltBatchManager {
       console.log(`   Gas saved: ${gasSaved} vs individual uploads`);
 
       // Build file results using original WalrusFile objects for metadata
-      // and uploadedFilesInfo for blobId
+      // Use shared quiltId as blobId - SDK can only read via getBlob(quiltId).files()
+      // Match files by identifier when reading
+      const quiltId = uploadedFilesInfo[0]?.blobId || '';
+
       const fileResults: QuiltFileResult[] = await Promise.all(
         files.map(async (originalFile, i) => {
           const identifier = await originalFile.getIdentifier() || `file-${i}`;
           const tags = await originalFile.getTags() || {};
-          // Get blobId from uploadedFilesInfo if available
-          const blobId = uploadedFilesInfo[i]?.blobId || '';
+          const fileInfo = uploadedFilesInfo[i];
+
+          // quiltPatchId is stored for reference but not used for retrieval
+          const quiltPatchId = fileInfo?.id || '';
+
+          console.log(`   File ${i}: identifier=${identifier}, quiltId=${quiltId.substring(0, 20)}...`);
 
           return {
             identifier,
-            blobId,
-            quiltPatchId: undefined,
+            // Use shared quiltId as blobId - read via getBlob(quiltId).files()
+            blobId: quiltId,
+            quiltPatchId,
             tags: Object.fromEntries(
               Object.entries(tags).map(([k, v]) => [k, String(v)])
             ),
@@ -264,9 +272,6 @@ export class QuiltBatchManager {
           };
         })
       );
-
-      // Get quiltId from first uploaded file
-      const quiltId = uploadedFilesInfo[0]?.blobId || '';
 
       return {
         quiltId,
@@ -373,18 +378,26 @@ export class QuiltBatchManager {
       console.log(`   Upload time: ${uploadTimeMs.toFixed(1)}ms`);
 
       // Build file results using original WalrusFile objects for metadata
-      // and uploadedFilesInfo for blobId
+      // Use shared quiltId as blobId - SDK can only read via getBlob(quiltId).files()
+      // Match files by identifier when reading
+      const quiltId = uploadedFilesInfo[0]?.blobId || '';
+
       const fileResults: QuiltFileResult[] = await Promise.all(
         walrusFiles.map(async (originalFile, i) => {
           const identifier = await originalFile.getIdentifier() || files[i]?.identifier || `file-${i}`;
           const tags = await originalFile.getTags() || {};
-          // Get blobId from uploadedFilesInfo if available
-          const blobId = uploadedFilesInfo[i]?.blobId || '';
+          const fileInfo = uploadedFilesInfo[i];
+
+          // quiltPatchId is stored for reference but not used for retrieval
+          const quiltPatchId = fileInfo?.id || '';
+
+          console.log(`   File ${i}: identifier=${identifier}, quiltId=${quiltId.substring(0, 20)}...`);
 
           return {
             identifier,
-            blobId,
-            quiltPatchId: undefined,
+            // Use shared quiltId as blobId - read via getBlob(quiltId).files()
+            blobId: quiltId,
+            quiltPatchId,
             tags: Object.fromEntries(
               Object.entries(tags).map(([k, v]) => [k, String(v)])
             ),
@@ -392,9 +405,6 @@ export class QuiltBatchManager {
           };
         })
       );
-
-      // Get quiltId from first uploaded file
-      const quiltId = uploadedFilesInfo[0]?.blobId || '';
 
       return {
         quiltId,
@@ -418,14 +428,19 @@ export class QuiltBatchManager {
   /**
    * Retrieve all files from a Quilt
    *
-   * @param quiltId - The Quilt blob ID
+   * Uses getBlob().files() pattern which correctly parses Quilt structure
+   * and returns individual files with their identifiers and tags.
+   *
+   * @param quiltId - The Quilt blob ID (shared blobId)
    * @returns Array of WalrusFile objects
    */
   async getQuiltFiles(quiltId: string): Promise<Array<WalrusFile>> {
     try {
       console.log(`📂 Retrieving files from Quilt ${quiltId}...`);
 
-      const files = await this.suiClient.walrus.getFiles({ ids: [quiltId] });
+      // Use getBlob().files() to correctly parse Quilt and get individual files
+      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
+      const files = await blob.files();
 
       console.log(`✅ Retrieved ${files.length} files from Quilt`);
 
@@ -440,7 +455,9 @@ export class QuiltBatchManager {
   /**
    * Retrieve a specific file by identifier from a Quilt
    *
-   * @param quiltId - The Quilt blob ID
+   * Uses getBlob().files() to get all files then matches by identifier.
+   *
+   * @param quiltId - The Quilt blob ID (shared blobId)
    * @param identifier - The file identifier within the quilt
    * @returns QuiltRetrieveResult with content and metadata
    */
@@ -453,21 +470,26 @@ export class QuiltBatchManager {
     try {
       console.log(`📄 Retrieving file "${identifier}" from Quilt ${quiltId}...`);
 
-      // Get all files from quilt
-      const files = await this.suiClient.walrus.getFiles({ ids: [quiltId] });
+      // Get all files from quilt using getBlob().files()
+      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
+      const files = await blob.files();
 
       // Find file by identifier
-      const file = files.find(async f => {
+      let matchingFile: WalrusFile | undefined;
+      for (const f of files) {
         const fileIdentifier = await f.getIdentifier();
-        return fileIdentifier === identifier;
-      });
+        if (fileIdentifier === identifier) {
+          matchingFile = f;
+          break;
+        }
+      }
 
-      if (!file) {
+      if (!matchingFile) {
         throw new Error(`File "${identifier}" not found in Quilt`);
       }
 
-      const content = await file.bytes();
-      const tags = await file.getTags();
+      const content = await matchingFile.bytes();
+      const tags = await matchingFile.getTags();
       const retrievalTimeMs = performance.now() - startTime;
 
       console.log(`✅ Retrieved file "${identifier}" (${content.length} bytes)`);
@@ -488,14 +510,18 @@ export class QuiltBatchManager {
   /**
    * List all patches in a Quilt with their metadata
    *
-   * @param quiltId - The Quilt blob ID
+   * Uses getBlob().files() to correctly parse Quilt structure.
+   *
+   * @param quiltId - The Quilt blob ID (shared blobId)
    * @returns Array of QuiltListResult with identifiers and tags
    */
   async listQuiltPatches(quiltId: string): Promise<QuiltListResult[]> {
     try {
       console.log(`📋 Listing patches in Quilt ${quiltId}...`);
 
-      const files = await this.suiClient.walrus.getFiles({ ids: [quiltId] });
+      // Use getBlob().files() to correctly parse Quilt
+      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
+      const files = await blob.files();
 
       const results: QuiltListResult[] = await Promise.all(
         files.map(async (file) => {
