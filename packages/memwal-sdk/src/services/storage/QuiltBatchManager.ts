@@ -438,11 +438,19 @@ export class QuiltBatchManager {
     try {
       console.log(`📂 Retrieving files from Quilt ${quiltId}...`);
 
-      // Use getBlob().files() to correctly parse Quilt and get individual files
-      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
-      const files = await blob.files();
-
-      console.log(`✅ Retrieved ${files.length} files from Quilt`);
+      // Try to parse as Quilt first (getBlob().files() returns ALL files in Quilt)
+      // Fall back to getFiles() for regular blobs
+      let files: WalrusFile[];
+      try {
+        const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
+        files = await blob.files();
+        console.log(`✅ Retrieved ${files.length} files from Quilt`);
+      } catch (quiltError: any) {
+        // Not a Quilt - try as regular blob
+        console.log(`📄 Not a Quilt format, fetching as regular blob...`);
+        files = await this.suiClient.walrus.getFiles({ ids: [quiltId] });
+        console.log(`✅ Retrieved ${files.length} file(s) as regular blob`);
+      }
 
       return files;
 
@@ -470,9 +478,8 @@ export class QuiltBatchManager {
     try {
       console.log(`📄 Retrieving file "${identifier}" from Quilt ${quiltId}...`);
 
-      // Get all files from quilt using getBlob().files()
-      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
-      const files = await blob.files();
+      // Get all files from the blob (Quilt or regular)
+      const files = await this.getQuiltFiles(quiltId);
 
       // Find file by identifier
       let matchingFile: WalrusFile | undefined;
@@ -519,9 +526,8 @@ export class QuiltBatchManager {
     try {
       console.log(`📋 Listing patches in Quilt ${quiltId}...`);
 
-      // Use getBlob().files() to correctly parse Quilt
-      const blob = await this.suiClient.walrus.getBlob({ blobId: quiltId });
-      const files = await blob.files();
+      // Get all files from the blob (Quilt or regular)
+      const files = await this.getQuiltFiles(quiltId);
 
       const results: QuiltListResult[] = await Promise.all(
         files.map(async (file) => {

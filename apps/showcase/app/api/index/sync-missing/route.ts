@@ -24,6 +24,37 @@ interface MemoryContent {
 }
 
 /**
+ * Extract base Quilt ID from a blobId that may have a suffix
+ * Walrus blobIds are base64url encoded 32 bytes = 43 characters
+ * Quilt file IDs have a suffix appended (like 'BAgBmAA', 'BZgDKAA')
+ *
+ * Examples:
+ * - 'xRntOonjqnLFUe37FE2vFVMJFiZtFiCLWCqFUUN1lEE' → base (43 chars)
+ * - 'xRntOonjqnLFUe37FE2vFVMJFiZtFiCLWCqFUUN1lEEBAgBmAA' → base + suffix
+ */
+function extractBaseQuiltId(blobId: string): string {
+  // Standard Walrus blobId is 43 characters (base64url of 32 bytes)
+  const BASE_BLOB_ID_LENGTH = 43;
+
+  if (blobId.length > BASE_BLOB_ID_LENGTH) {
+    return blobId.substring(0, BASE_BLOB_ID_LENGTH);
+  }
+  return blobId;
+}
+
+/**
+ * Extract suffix from blobId (the quilt file identifier part)
+ */
+function extractQuiltSuffix(blobId: string): string | null {
+  const BASE_BLOB_ID_LENGTH = 43;
+
+  if (blobId.length > BASE_BLOB_ID_LENGTH) {
+    return blobId.substring(BASE_BLOB_ID_LENGTH);
+  }
+  return null;
+}
+
+/**
  * POST /api/index/sync-missing
  * Incrementally sync only NEW memories from blockchain to local index
  * Much faster than full rebuild - only fetches missing memories
@@ -205,43 +236,73 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
 
   console.log(`\n📥 Fetching ${newMemories.length} new memories from Walrus...`);
 
-  // Group memories by blobId to handle Quilts efficiently
-  // In a Quilt, multiple memories share the same blobId
-  const memoriesByBlobId = new Map<string, typeof newMemories>();
+  // Group memories by BASE quiltId to handle Quilts efficiently
+  // In a Quilt, multiple memories share the same base quiltId but have different suffixes
+  // e.g., 'xRntOonjq...N1lEEBAgBmAA' and 'xRntOonjq...N1lEEBZgDKAA' share base 'xRntOonjq...N1lEE'
+  const memoriesByBaseQuiltId = new Map<string, typeof newMemories>();
   for (const memory of newMemories) {
-    const list = memoriesByBlobId.get(memory.blobId) || [];
+    const baseQuiltId = extractBaseQuiltId(memory.blobId);
+    const list = memoriesByBaseQuiltId.get(baseQuiltId) || [];
     list.push(memory);
-    memoriesByBlobId.set(memory.blobId, list);
+    memoriesByBaseQuiltId.set(baseQuiltId, list);
   }
 
-  console.log(`   📦 Unique blobIds: ${memoriesByBlobId.size} (${memoriesByBlobId.size < newMemories.length ? 'Quilt detected' : 'individual blobs'})`);
+  const hasQuilts = memoriesByBaseQuiltId.size < newMemories.length;
+  console.log(`   📦 Unique base quiltIds: ${memoriesByBaseQuiltId.size} (${hasQuilts ? 'Quilt batch detected' : 'individual blobs'})`);
 
   let processedCount = 0;
 
-  for (const [blobId, memoriesInBlob] of memoriesByBlobId) {
-    console.log(`\n   🔍 Processing blobId ${blobId.substring(0, 20)}... (${memoriesInBlob.length} memories)`);
+  for (const [baseQuiltId, memoriesInQuilt] of memoriesByBaseQuiltId) {
+    const hasSuffixes = memoriesInQuilt.some(m => extractQuiltSuffix(m.blobId) !== null);
+    console.log(`\n   🔍 Processing ${hasSuffixes ? 'Quilt' : 'blob'} ${baseQuiltId.substring(0, 20)}... (${memoriesInQuilt.length} memories)`);
 
     try {
       // Use getBlob().files() to correctly parse Quilt structure
       // For regular blob: returns [singleFile]
       // For Quilt: returns [file1, file2, ...] - all files in the quilt
+      // IMPORTANT: Use baseQuiltId (without suffix) for fetching
       let files: WalrusFile[];
 
-      if (quiltFileCache.has(blobId)) {
-        files = quiltFileCache.get(blobId)!;
+      if (quiltFileCache.has(baseQuiltId)) {
+        files = quiltFileCache.get(baseQuiltId)!;
         console.log(`      ♻️ Using cached files (${files.length} files)`);
       } else {
-        const blob = await walrusClient.walrus.getBlob({ blobId });
-        files = await blob.files();
-        quiltFileCache.set(blobId, files);
-        console.log(`      📥 Fetched ${files.length} file(s) from Walrus`);
+        // Try to parse as Quilt first (getBlob().files() returns ALL files in Quilt)
+        // Fall back to getFiles() for regular blobs
+        try {
+          const blob = await walrusClient.walrus.getBlob({ blobId: baseQuiltId });
+          files = await blob.files();
+          console.log(`      📥 Fetched Quilt: ${files.length} file(s)`);
+        } catch (quiltError: any) {
+          // Not a Quilt or parse error - try as regular blob
+          const errorMsg = quiltError.message || '';
+          if (errorMsg.includes('Unsupported quilt version') || errorMsg.includes('quilt')) {
+            console.log(`      📄 Not a Quilt format, fetching as regular blob...`);
+          } else {
+            console.log(`      ⚠️ Quilt parse failed (${errorMsg.substring(0, 30)}), trying regular blob...`);
+          }
+          // getFiles returns single file for regular blob
+          files = await walrusClient.walrus.getFiles({ ids: [baseQuiltId] });
+          console.log(`      📥 Fetched regular blob: ${files.length} file(s)`);
+        }
+        quiltFileCache.set(baseQuiltId, files);
       }
 
-      // For each memory in this blobId
-      for (let i = 0; i < memoriesInBlob.length; i++) {
-        const memory = memoriesInBlob[i];
+      // Build a map of file identifier -> file for matching Quilt files
+      const filesByIdentifier = new Map<string, WalrusFile>();
+      for (const file of files) {
+        const identifier = await file.getIdentifier();
+        if (identifier) {
+          filesByIdentifier.set(identifier, file);
+        }
+      }
+
+      // For each memory in this Quilt/blob
+      for (let i = 0; i < memoriesInQuilt.length; i++) {
+        const memory = memoriesInQuilt[i];
         processedCount++;
-        console.log(`      [${processedCount}/${newMemories.length}] Processing vectorId=${memory.vectorId}...`);
+        const suffix = extractQuiltSuffix(memory.blobId);
+        console.log(`      [${processedCount}/${newMemories.length}] Processing vectorId=${memory.vectorId}${suffix ? ` (suffix: ${suffix})` : ''}...`);
 
         try {
           let content: string;
@@ -250,13 +311,24 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
           let timestamp = Date.now();
 
           // Determine which file to use
-          // For Quilt: match by index or find by content
+          // For Quilt with multiple files: try to match by index (files are ordered same as batch upload)
           // For single blob: use the only file
-          const fileIndex = files.length === 1 ? 0 : Math.min(i, files.length - 1);
-          const file = files[fileIndex];
+          let file: WalrusFile | undefined;
+
+          if (files.length === 1) {
+            // Single file - use it directly
+            file = files[0];
+          } else if (files.length > 1) {
+            // Multiple files in Quilt - match by index
+            // Files are ordered same as memories in batch upload
+            file = files[i];
+            if (!file && i < files.length) {
+              file = files[i];
+            }
+          }
 
           if (!file) {
-            throw new Error(`No file found at index ${fileIndex}`);
+            throw new Error(`No file found for memory index ${i} (Quilt has ${files.length} files)`);
           }
 
           // Get file content
@@ -344,11 +416,11 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
       }
 
     } catch (error: any) {
-      // Failed to fetch files for this blobId
+      // Failed to fetch files for this Quilt/blobId
       const errorMsg = error.message || String(error);
-      console.log(`      ✗ Failed to fetch blobId: ${errorMsg.substring(0, 50)}...`);
+      console.log(`      ✗ Failed to fetch Quilt/blob: ${errorMsg.substring(0, 50)}...`);
 
-      for (const memory of memoriesInBlob) {
+      for (const memory of memoriesInQuilt) {
         processedCount++;
         failedCount++;
         errors.push({ blobId: memory.blobId, error: `Failed to fetch blob: ${errorMsg}` });

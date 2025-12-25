@@ -243,10 +243,25 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
           files = quiltFileCache.get(blobId)!;
           console.log(`[rebuildIndexNode]   ♻️ Using cached files (${files.length} files)`);
         } else {
-          const blob = await walrusClient.walrus.getBlob({ blobId });
-          files = await blob.files();
+          // Try to parse as Quilt first (getBlob().files() returns ALL files in Quilt)
+          // Fall back to getFiles() for regular blobs
+          try {
+            const blob = await walrusClient.walrus.getBlob({ blobId });
+            files = await blob.files();
+            console.log(`[rebuildIndexNode]   📥 Fetched Quilt: ${files.length} file(s)`);
+          } catch (quiltError: any) {
+            // Not a Quilt or parse error - try as regular blob
+            const errorMsg = quiltError.message || '';
+            if (errorMsg.includes('Unsupported quilt version') || errorMsg.includes('quilt')) {
+              console.log(`[rebuildIndexNode]   📄 Not a Quilt format, fetching as regular blob...`);
+            } else {
+              console.log(`[rebuildIndexNode]   ⚠️ Quilt parse failed (${errorMsg.substring(0, 30)}), trying regular blob...`);
+            }
+            // getFiles returns single file for regular blob
+            files = await walrusClient.walrus.getFiles({ ids: [blobId] });
+            console.log(`[rebuildIndexNode]   📥 Fetched regular blob: ${files.length} file(s)`);
+          }
           quiltFileCache.set(blobId, files);
-          console.log(`[rebuildIndexNode]   📥 Fetched ${files.length} file(s) from Walrus`);
         }
 
         // For each memory in this blobId
