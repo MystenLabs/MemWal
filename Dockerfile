@@ -44,10 +44,10 @@ COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/apps/showcase ./apps/showcase
 
 # Set environment
-ENV NODE_ENV=production
+ENV NODE_ENV=development
 ENV PORT=3000
 
 EXPOSE 3000
 
-# Start the application
-CMD ["bun", "run", "start"]
+# Start the application in development mode
+CMD ["bun", "run", "dev"]
