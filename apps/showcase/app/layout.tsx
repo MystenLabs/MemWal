@@ -26,9 +26,9 @@ const caveat = Caveat({
 })
 
 export const metadata: Metadata = {
-  title: "Cliste - AI Automation for Enterprise",
+  title: "MemWal - your decentralized memory ",
   description:
-    "Transform your business with intelligent AI automation solutions. Empower your organization to operate at the speed of thought.",
+    "Decentralized your personal data on Walrus",
   generator: "v0.app",
 }
 
