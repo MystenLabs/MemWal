@@ -916,6 +916,21 @@ export class StorageService {
     return this.quiltBatch.listQuiltPatches(quiltId);
   }
 
+  /**
+   * Get all memory packages from a Quilt as JSON
+   * Used for indexing Quilt memories into local HNSW index
+   */
+  async getAllMemoryPackages(quiltId: string) {
+    return this.quiltBatch.getAllMemoryPackages(quiltId);
+  }
+
+  /**
+   * Get the QuiltBatchManager instance for advanced operations
+   */
+  get quiltBatchManager(): QuiltBatchManager {
+    return this.quiltBatch;
+  }
+
   // ==================== BLOB ATTRIBUTES (Delegate to BlobAttributesManager) ====================
 
   /**

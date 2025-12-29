@@ -1132,4 +1132,141 @@ export class MemoryNamespace {
       throw new Error(`Failed to export memories: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  /**
+   * Index memories from a Quilt into the local HNSW index
+   *
+   * This allows Quilt batch-uploaded memories to be searchable via vector search.
+   * The method fetches memory packages from the Quilt and indexes each one.
+   *
+   * @param quiltId - The Quilt blob ID containing memory packages
+   * @param options - Indexing options
+   * @returns Result with number of memories indexed
+   *
+   * @example
+   * ```typescript
+   * // After uploading a batch via Quilt
+   * const result = await pdw.memory.indexFromQuilt('GTNhNTdWecbUVg3cZuC_VKlRSzJE3iQfBkojWUuwoh0');
+   * console.log(`Indexed ${result.indexed} memories from Quilt`);
+   * ```
+   */
+  async indexFromQuilt(
+    quiltId: string,
+    options?: { forceReindex?: boolean }
+  ): Promise<{
+    success: boolean;
+    total: number;
+    indexed: number;
+    skipped: number;
+    failed: number;
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+    let indexed = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    try {
+      console.log(`📦 Indexing memories from Quilt ${quiltId}...`);
+
+      // Check if index service is available
+      if (!this.services.memoryIndex) {
+        throw new Error('Memory index service not available');
+      }
+
+      // Check if quilt manager is available
+      if (!this.services.storage?.quiltBatchManager) {
+        throw new Error('Quilt batch manager not available');
+      }
+
+      // Fetch all memory packages from the Quilt
+      const packages = await this.services.storage.quiltBatchManager.getAllMemoryPackages(quiltId);
+      console.log(`   Found ${packages.length} memory packages in Quilt`);
+
+      // Index each memory
+      for (const pkg of packages) {
+        try {
+          const { identifier, memoryPackage, tags } = pkg;
+
+          // Skip if no embedding
+          if (!memoryPackage.embedding || memoryPackage.embedding.length === 0) {
+            console.warn(`   ⚠️ Skipping ${identifier}: no embedding`);
+            skipped++;
+            continue;
+          }
+
+          // Create a unique memory ID from identifier or use memoryId from metadata
+          const memoryId = memoryPackage.metadata?.memoryId as string ||
+            identifier.replace('.json', '').replace('memory-', '');
+
+          // Build metadata for indexing (satisfy MemoryMetadata interface)
+          const metadata = {
+            category: memoryPackage.metadata?.category || 'general',
+            importance: memoryPackage.metadata?.importance || 3,
+            topic: memoryPackage.metadata?.topic || '',
+            contentType: 'text',
+            contentSize: memoryPackage.content?.length || 0,
+            contentHash: '', // Not available from Quilt package
+            embeddingDimension: memoryPackage.embedding?.length || 0,
+            createdTimestamp: memoryPackage.timestamp,
+            customMetadata: {
+              quiltId,
+              identifier,
+              ...Object.fromEntries(
+                Object.entries(memoryPackage.metadata || {}).map(([k, v]) => [k, String(v)])
+              )
+            }
+          };
+
+          // Content is empty if encrypted, use placeholder
+          const content = memoryPackage.content || '[encrypted]';
+          const isEncrypted = memoryPackage.encrypted === true;
+
+          // Index the memory
+          await this.services.memoryIndex.indexMemory(
+            this.services.config.userAddress,
+            memoryId,
+            quiltId, // Use quiltId as blobId for retrieval reference
+            content,
+            metadata,
+            memoryPackage.embedding,
+            { isEncrypted }
+          );
+
+          indexed++;
+          console.log(`   ✅ Indexed ${identifier} (${indexed}/${packages.length})`);
+
+        } catch (pkgError) {
+          const errMsg = pkgError instanceof Error ? pkgError.message : String(pkgError);
+          errors.push(`${pkg.identifier}: ${errMsg}`);
+          failed++;
+          console.error(`   ❌ Failed to index ${pkg.identifier}:`, errMsg);
+        }
+      }
+
+      console.log(`\n📊 Quilt indexing complete:`);
+      console.log(`   Total: ${packages.length}, Indexed: ${indexed}, Skipped: ${skipped}, Failed: ${failed}`);
+
+      return {
+        success: failed === 0,
+        total: packages.length,
+        indexed,
+        skipped,
+        failed,
+        errors
+      };
+
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Failed to index from Quilt: ${errMsg}`);
+      return {
+        success: false,
+        total: 0,
+        indexed,
+        skipped,
+        failed,
+        errors: [errMsg, ...errors]
+      };
+    }
+  }
 }

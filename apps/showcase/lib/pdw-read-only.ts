@@ -126,7 +126,7 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
         publisherUrl: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',
       },
       features: {
-        enableEncryption: false,
+        enableEncryption: true,
         enableLocalIndexing: true,
         enableKnowledgeGraph: !!aiApiKey, // Only enable if API key is available
       },
