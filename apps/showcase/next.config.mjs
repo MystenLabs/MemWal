@@ -1,7 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   typescript: {
-    ignoreBuildErrors: true,
+    // Build errors are now checked - fix TypeScript errors instead of ignoring them
+    ignoreBuildErrors: false,
   },
   images: {
     unoptimized: true,
