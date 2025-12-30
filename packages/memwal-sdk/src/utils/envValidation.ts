@@ -81,11 +81,18 @@ export function validateEnv<T extends z.ZodSchema>(
     };
   } catch (error) {
     if (error instanceof z.ZodError) {
-      const errors: ValidationError[] = error.errors.map((err) => ({
-        field: err.path.join('.'),
-        message: err.message,
-        value: err.code === 'invalid_type' ? undefined : env[err.path[0]],
-      }));
+      const errors: ValidationError[] = error.errors.map((err) => {
+        // Safely handle path which might be empty or deeply nested
+        const field = err.path.length > 0 ? err.path.join('.') : 'unknown';
+        const pathKey = err.path[0];
+        const envValue = typeof pathKey === 'string' ? env[pathKey] : undefined;
+        
+        return {
+          field,
+          message: err.message,
+          value: err.code === 'invalid_type' ? undefined : envValue,
+        };
+      });
       
       return {
         success: false,
@@ -114,7 +121,8 @@ export function validateEnvOrThrow<T extends z.ZodSchema>(
   const result = validateEnv(schema, env);
   
   if (!result.success) {
-    const errorMessages = result.errors!.map(
+    const errors = result.errors || [];
+    const errorMessages = errors.map(
       (err) => `  - ${err.field}: ${err.message}`
     ).join('\n');
     

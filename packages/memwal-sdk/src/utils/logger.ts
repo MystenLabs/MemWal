@@ -29,7 +29,7 @@ export interface LogEntry {
   context: string;
   message: string;
   timestamp: Date;
-  data?: any;
+  data?: unknown;
   error?: Error;
 }
 
@@ -63,8 +63,8 @@ class LoggerManager {
   private config: Required<LoggerConfig>;
 
   private constructor() {
-    // Default configuration - compute level first before using config
-    const defaultLevel = this.getDefaultLevelStatic();
+    // Compute default level using static helper to avoid accessing 'this.config' before initialization
+    const defaultLevel = LoggerManager.getDefaultLevelStatic();
     
     this.config = {
       level: defaultLevel,
@@ -81,7 +81,11 @@ class LoggerManager {
     return LoggerManager.instance;
   }
 
-  private getDefaultLevelStatic(): LogLevel {
+  /**
+   * Static method to determine default log level based on environment
+   * Used during initialization to avoid accessing instance before it's ready
+   */
+  private static getDefaultLevelStatic(): LogLevel {
     const isProduction = typeof process !== 'undefined' && process.env?.NODE_ENV === 'production';
     const isBrowser = typeof window !== 'undefined';
     
@@ -97,6 +101,8 @@ class LoggerManager {
   }
 
   private getDefaultLevel(): LogLevel {
+    return LoggerManager.getDefaultLevelStatic();
+  }
     const isProduction = typeof process !== 'undefined' && process.env?.NODE_ENV === 'production';
     const isBrowser = typeof window !== 'undefined';
     
@@ -146,28 +152,28 @@ export class Logger {
   /**
    * Log debug information (development only)
    */
-  debug(message: string, data?: any): void {
+  debug(message: string, data?: unknown): void {
     this.log(LogLevel.DEBUG, message, data);
   }
 
   /**
    * Log informational messages
    */
-  info(message: string, data?: any): void {
+  info(message: string, data?: unknown): void {
     this.log(LogLevel.INFO, message, data);
   }
 
   /**
    * Log warning messages
    */
-  warn(message: string, data?: any): void {
+  warn(message: string, data?: unknown): void {
     this.log(LogLevel.WARN, message, data);
   }
 
   /**
    * Log error messages
    */
-  error(message: string, error?: Error | any, data?: any): void {
+  error(message: string, error?: Error | unknown, data?: unknown): void {
     const errorObj = error instanceof Error ? error : undefined;
     const errorData = error instanceof Error ? data : error;
     this.log(LogLevel.ERROR, message, errorData, errorObj);
@@ -176,7 +182,7 @@ export class Logger {
   /**
    * Internal logging method
    */
-  private log(level: LogLevel, message: string, data?: any, error?: Error): void {
+  private log(level: LogLevel, message: string, data?: unknown, error?: Error): void {
     if (!this.manager.shouldLog(level)) {
       return;
     }
