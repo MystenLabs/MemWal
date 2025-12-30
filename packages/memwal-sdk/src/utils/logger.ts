@@ -103,19 +103,6 @@ class LoggerManager {
   private getDefaultLevel(): LogLevel {
     return LoggerManager.getDefaultLevelStatic();
   }
-    const isProduction = typeof process !== 'undefined' && process.env?.NODE_ENV === 'production';
-    const isBrowser = typeof window !== 'undefined';
-    
-    if (isProduction && !this.config?.enableInProduction) {
-      return LogLevel.WARN; // Only warn and error in production by default
-    }
-    
-    if (isBrowser) {
-      return LogLevel.INFO; // More verbose in browser for debugging
-    }
-    
-    return LogLevel.DEBUG; // Most verbose in Node.js development
-  }
 
   configure(config: LoggerConfig): void {
     this.config = {

@@ -85,7 +85,8 @@ export function validateEnv<T extends z.ZodSchema>(
         // Safely handle path which might be empty or deeply nested
         const field = err.path.length > 0 ? err.path.join('.') : 'unknown';
         const pathKey = err.path[0];
-        const envValue = typeof pathKey === 'string' ? env[pathKey] : undefined;
+        // Only access env if pathKey exists and is a string
+        const envValue = typeof pathKey === 'string' && pathKey in env ? env[pathKey] : undefined;
         
         return {
           field,
