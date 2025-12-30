@@ -2,8 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SealClient, EncryptedObject, SessionKey } from '@mysten/seal';
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
-import { Transaction } from '@mysten:';
-import { toHEX, fromHEX } from '@mysten/bcs';
+import { Transaction } from '@mysten/sui/transactions';
 import { SessionKeyService } from './session-key.service';
 
 /**
@@ -12,6 +11,13 @@ import { SessionKeyService } from './session-key.service';
  */
 @Injectable()
 export class SealService {
+<<<<<<< HEAD
+  private readonly sealClient: SealClient;
+  private readonly suiClient: SuiClient;
+  private readonly logger = new Logger(SealService.name);
+  private readonly packageId: string;
+  private readonly threshold: number = 2;
+=======
   protected sealClient: SealClient;
   protected suiClient: SuiClient;
   protected logger = new Logger(SealService.name);
@@ -22,11 +28,30 @@ export class SealService {
   public network: 'mainnet' | 'testnet' | 'devnet';
   protected sessionKeys: Map<string, SessionKey> = new Map();
   protected isOpenMode: boolean;
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
 
   constructor(
     private readonly configService: ConfigService,
     private readonly sessionKeyService: SessionKeyService
   ) {
+<<<<<<< HEAD
+    // Initialize configuration
+    const network = this.configService.get<'mainnet' | 'testnet' | 'devnet'>('SEAL_NETWORK', 'testnet');
+    this.packageId = this.configService.get<string>('SEAL_PACKAGE_ID', '0xa2b73c54b9f354050462547787463e79f33b48fc6c1fea35673f12e3a535ec60');
+
+    // Initialize Sui client
+    this.suiClient = new SuiClient({
+      url: this.configService.get<string>('SUI_RPC_URL', getFullnodeUrl(network))
+    });
+
+    // Initialize SEAL client with configured key servers
+    const keyServerIds = this.configService.get<string[]>('SEAL_KEY_SERVER_IDS', [
+      // Default testnet key servers from the official example
+      '0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75',
+      '0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8'
+    ]);
+    const serverConfigs = keyServerIds.map(id => ({ objectId: id, weight: 1 }));
+=======
     // Initialize configuration - Use our published package by default
     this.network = this.configService.get<'mainnet' | 'testnet' | 'devnet'>('SEAL_NETWORK', 'testnet');
     this.packageId = this.configService.get<string>('SEAL_PACKAGE_ID', '0x04f20b1582388004e954117041135391b1d52e0bb39a9af4aa92157735b7c6a3');
@@ -48,11 +73,19 @@ export class SealService {
           { objectId: "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75", weight: 1 },
           { objectId: "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8", weight: 1 }
         ];
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
 
     // Initialize SealClient following example app patterns
     this.sealClient = new SealClient({
       suiClient: this.suiClient as any, // Type assertion to bypass compatibility issue
       serverConfigs,
+<<<<<<< HEAD
+      verifyKeyServers: false,
+    });
+
+    this.logger.log(`SEAL service initialized with ${serverConfigs.length} key servers on ${network}`);
+    this.logger.log(`Package ID: ${this.packageId || 'Not configured'}`);
+=======
       verifyKeyServers: true, // Always verify key servers in standard mode
     });
 
@@ -60,6 +93,7 @@ export class SealService {
     this.logger.log(`Operating in STANDARD mode (open mode disabled)`);
     this.logger.log(`Using published package ID: ${this.packageId}`);
     this.logger.log(`Using module name: ${this.moduleName}`);
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
   }
 
   /**
@@ -67,6 +101,18 @@ export class SealService {
    * Following the pattern from official examples
    */
   async encrypt(
+<<<<<<< HEAD
+    data: Uint8Array,
+    policyObjectId: string,
+    nonce: string = Math.random().toString(36)
+  ): Promise<{ encrypted: Uint8Array; identityId: string }> {
+    try {
+      // Create identity by combining policy object ID with nonce
+      // This follows the pattern from the official examples
+      const identityId = `${policyObjectId}:${nonce}`;
+
+      const result = await this.sealClient.encrypt({
+=======
     content: string, 
     userAddress: string
   ): Promise<{ encrypted: string; backupKey: string }> {
@@ -87,12 +133,15 @@ export class SealService {
       
       // Encrypt using SEAL Client following SDK documentation
       const { encryptedObject, key: backupKey } = await this.sealClient.encrypt({
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
         threshold: this.threshold,
         packageId: this.packageId,
         id: identityId,
         data,
       });
 
+<<<<<<< HEAD
+=======
       // Convert encrypted bytes to base64 for storage
       const encrypted = Buffer.from(encryptedObject).toString('base64');
       const backupKeyHex = toHEX(backupKey);
@@ -100,11 +149,16 @@ export class SealService {
       this.logger.debug(`Successfully encrypted content for user ${userAddress}`);
       this.logger.debug(`Encrypted size: ${encryptedObject.length} bytes`);
       
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
       return {
         encrypted: result.encryptedObject,
         identityId,
       };
     } catch (error) {
+<<<<<<< HEAD
+      this.logger.error('Failed to encrypt data', error);
+      throw new Error(`Encryption failed: ${error.message}`);
+=======
       this.logger.error(`SEAL encryption failed: ${error.message}`);
       
       // Handle specific SEAL errors based on SDK documentation
@@ -117,6 +171,7 @@ export class SealService {
       } else {
         throw new Error(`SEAL encryption error: ${error.message}`);
       }
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
     }
   }
 
@@ -125,6 +180,34 @@ export class SealService {
    * Following the pattern from official examples
    */
   async decrypt(
+<<<<<<< HEAD
+    encryptedData: Uint8Array,
+    moveCallConstructor: (tx: Transaction, id: string) => void,
+    userAddress: string
+  ): Promise<Uint8Array> {
+    try {
+      // Parse the encrypted object to get the identity ID
+      const encryptedObject = EncryptedObject.parse(encryptedData);
+      const identityId = encryptedObject.id;
+
+      this.logger.debug(`Decrypting data with identity: ${identityId} for user: ${userAddress}`);
+
+      // Get or create session key for the user
+      let sessionKey = await this.sessionKeyService.getSessionKey(userAddress, this.packageId);
+
+      if (!sessionKey) {
+        throw new Error('No valid session key found. Please create a session first.');
+      }
+
+      // Build transaction with the appropriate seal_approve call
+      const tx = new Transaction();
+      moveCallConstructor(tx, identityId);
+      const txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
+
+      // First, fetch keys from key servers
+      await this.sealClient.fetchKeys({
+        ids: [identityId],
+=======
     encryptedContent: string, 
     userAddress: string,
     signature?: string
@@ -404,6 +487,7 @@ export class SealService {
       // Fetch keys from SEAL
       const keys = await this.sealClient.fetchKeys({
         ids: ids,
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
         txBytes,
         sessionKey,
         threshold: this.threshold,
@@ -426,6 +510,86 @@ export class SealService {
   }
 
   /**
+<<<<<<< HEAD
+   * Create a transaction builder for self access
+   */
+  createSelfAccessTransaction(userAddress: string) {
+    return (tx: Transaction, id: string) => {
+      tx.moveCall({
+        target: `${this.packageId}::seal_access_control::seal_approve`,
+        arguments: [
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(id))),
+        ],
+      });
+    };
+  }
+
+  /**
+   * Create a transaction builder for app access
+   */
+  createAppAccessTransaction(allowlistId: string) {
+    return (tx: Transaction, id: string) => {
+      tx.moveCall({
+        target: `${this.packageId}::seal_access_control::seal_approve_app`,
+        arguments: [
+          tx.object(allowlistId),
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(id))),
+        ],
+      });
+    };
+  }
+
+  /**
+   * Create a transaction builder for timelock access
+   */
+  createTimelockAccessTransaction(timelockId: string) {
+    return (tx: Transaction, id: string) => {
+      tx.moveCall({
+        target: `${this.packageId}::seal_access_control::seal_approve_timelock`,
+        arguments: [
+          tx.object(timelockId),
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(id))),
+        ],
+      });
+    };
+  }
+
+  /**
+   * Encrypt data with time-lock access control
+   */
+  async encryptWithTimelock(
+    data: Uint8Array,
+    unlockTimestamp: number,
+    nonce: string = Math.random().toString(36),
+  ): Promise<{
+    encrypted: Uint8Array;
+    identityId: string;
+    unlockTime: number;
+  }> {
+    try {
+      // Create identity with timestamp for time-lock
+      const identityId = `timelock_${unlockTimestamp}_${nonce}`;
+
+      const result = await this.sealClient.encrypt({
+        threshold: this.threshold,
+        packageId: this.packageId,
+        id: identityId,
+        data,
+      });
+
+      this.logger.debug(
+        `Encrypted data with time-lock identity: ${identityId}`,
+      );
+
+      return {
+        encrypted: result.encryptedObject,
+        identityId,
+        unlockTime: unlockTimestamp,
+      };
+    } catch (error) {
+      this.logger.error('Failed to encrypt data with time-lock', error);
+      throw new Error(`Time-lock encryption failed: ${(error as Error).message}`);
+=======
    * Create allowlist for sharing encrypted data with other addresses
    * @param name The name of the allowlist
    * @param userAddress The owner's address
@@ -505,10 +669,64 @@ export class SealService {
     } catch (error) {
       this.logger.error(`Allowlist encryption failed: ${error.message}`);
       throw new Error(`SEAL allowlist encryption error: ${error.message}`);
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
     }
   }
 
   /**
+<<<<<<< HEAD
+   * Decrypt time-locked data
+   */
+  async decryptTimelock(
+    encryptedData: Uint8Array,
+    userAddress: string
+  ): Promise<Uint8Array> {
+    try {
+      // Parse the encrypted object to get the identity ID
+      const encryptedObject = EncryptedObject.parse(encryptedData);
+      const identityId = encryptedObject.id;
+
+      this.logger.debug(`Decrypting time-locked data with identity: ${identityId} for user: ${userAddress}`);
+
+      // Extract timestamp from identity to validate unlock time
+      const timestampMatch = identityId.match(/timelock_(\d+)_/);
+      if (!timestampMatch) {
+        throw new Error('Invalid time-lock identity format');
+      }
+
+      const unlockTimestamp = parseInt(timestampMatch[1]);
+      const currentTimestamp = Date.now();
+
+      if (currentTimestamp < unlockTimestamp) {
+        throw new Error(`Time-lock not yet expired. Unlocks at: ${new Date(unlockTimestamp).toISOString()}`);
+      }
+
+      // Get or create session key for the user
+      let sessionKey = await this.sessionKeyService.getSessionKey(userAddress, this.packageId);
+
+      if (!sessionKey) {
+        throw new Error('No valid session key found. Please create a session first.');
+      }
+
+      // Build transaction with time-lock seal_approve call
+      const tx = new Transaction();
+      // For timelock, we use the SUI clock object
+      const moveCallConstructor = this.createTimelockAccessTransaction('0x6'); // SUI_CLOCK_OBJECT_ID
+      moveCallConstructor(tx, identityId);
+      const txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
+
+      // First, fetch keys from key servers
+      await this.sealClient.fetchKeys({
+        ids: [identityId],
+        txBytes,
+        sessionKey,
+        threshold: this.threshold,
+      });
+
+      // Then decrypt the data locally
+      const decrypted = await this.sealClient.decrypt({
+        data: encryptedData,
+=======
    * Decrypt allowlist-encrypted content
    * @param encryptedContent The encrypted content (base64)
    * @param allowlistId The allowlist ID used for encryption
@@ -556,10 +774,68 @@ export class SealService {
       // Decrypt using SEAL Client
       const decryptedBytes = await this.sealClient.decrypt({
         data: encryptedBytes,
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
         sessionKey,
         txBytes,
       });
 
+<<<<<<< HEAD
+      this.logger.debug(`Successfully decrypted time-locked data for user: ${userAddress}`);
+      return decrypted;
+
+    } catch (error) {
+      this.logger.error('Failed to decrypt time-locked data', error);
+      throw new Error(`Time-lock decryption failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Create a transaction builder for role access
+   */
+  createRoleAccessTransaction(roleRegistryId: string, userAddress: string, role: string) {
+    return (tx: Transaction, id: string) => {
+      tx.moveCall({
+        target: `${this.packageId}::seal_access_control::seal_approve_role`,
+        arguments: [
+          tx.object(roleRegistryId),
+          tx.pure.address(userAddress),
+          tx.pure.string(role),
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(id))),
+        ],
+      });
+    };
+  }
+
+  /**
+   * Get the Sui client instance
+   */
+  getSuiClient(): SuiClient {
+    return this.suiClient;
+  }
+
+  /**
+   * Get the SEAL client instance
+   */
+  getSealClient(): SealClient {
+    return this.sealClient;
+  }
+
+  /**
+   * Create a transaction builder for allowlist access
+   */
+  createAllowlistAccessTransaction(userAddress: string, allowedAddresses: string[]) {
+    return (tx: Transaction, id: string) => {
+      tx.moveCall({
+        target: `${this.packageId}::seal_access_control::seal_approve_allowlist`,
+        arguments: [
+          tx.pure.vector('u8', Array.from(new TextEncoder().encode(id))),
+          tx.pure.address(userAddress),
+          tx.pure.vector('address', allowedAddresses),
+        ],
+      });
+    };
+  }
+=======
       // Convert decrypted bytes to string
       const decrypted = new TextDecoder().decode(decryptedBytes);
       
@@ -579,4 +855,5 @@ export class SealService {
       }
     }
   }
+>>>>>>> 175a8dbc02e99cdf82f694d8be93c895b23ba1e0
 }

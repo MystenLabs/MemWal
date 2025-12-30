@@ -3,9 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { 
   SuiClient, 
   getFullnodeUrl
-} from '@mysten/sui.js/client';
-import { TransactionBlock } from '@mysten/sui.js/transactions';
-import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+} from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { ChatMessage, ChatSession } from '../../types/chat.types';
 
 @Injectable()
@@ -140,7 +140,7 @@ export class SuiService {
    */
   async createChatSession(userAddress: string, modelName: string): Promise<string> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::chat_sessions::create_session`,
@@ -169,7 +169,7 @@ export class SuiService {
     content: string
   ): Promise<boolean> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       // Get the chat session object
       tx.moveCall({
@@ -198,7 +198,7 @@ export class SuiService {
     summary: string
   ): Promise<boolean> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::chat_sessions::save_session_summary`,
@@ -262,7 +262,7 @@ export class SuiService {
       }
       
       // Create transaction to delete the session
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       // In a real implementation, you would call a delete function
       // Here we're transferring ownership to a burn address as an example
@@ -315,7 +315,7 @@ export class SuiService {
     blobId: string
   ): Promise<string> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::memory::create_memory_record`,
@@ -345,7 +345,7 @@ export class SuiService {
     graphBlobId: string
   ): Promise<string> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::memory::create_memory_index`,
@@ -376,7 +376,7 @@ export class SuiService {
     newGraphBlobId: string
   ): Promise<boolean> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::memory::update_memory_index`,
@@ -440,7 +440,7 @@ export class SuiService {
   }[]> {
     try {
       // Query memories owned by this user
-      const response = await this.client.queryTransactionBlocks({
+      const response = await this.client.queryTransactions({
         filter: {
           MoveFunction: {
             package: this.packageId,
@@ -645,7 +645,7 @@ export class SuiService {
       }
       
       // Create transaction to delete the memory
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       // In a real implementation, you would call a delete function
       // Here we're transferring ownership to a burn address as an example
@@ -674,7 +674,7 @@ export class SuiService {
     expiresAt: number
   ): Promise<string> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       // Convert data IDs to vector<vector<u8>>
       const dataIdBytes = dataIds.map(id => Array.from(new TextEncoder().encode(id)));
@@ -709,7 +709,7 @@ export class SuiService {
     userAddress: string
   ): Promise<boolean> {
     try {
-      const tx = new TransactionBlock();
+      const tx = new Transaction();
       
       tx.moveCall({
         target: `${this.packageId}::seal_access_control::revoke_app_permission`,
@@ -827,7 +827,7 @@ export class SuiService {
   }
 
   // Helper methods
-  private async executeTransaction(tx: TransactionBlock, sender: string) {
+  private async executeTransaction(tx: Transaction, sender: string) {
     // Set the sender to the actual user address
     tx.setSender(sender);
     
@@ -836,7 +836,7 @@ export class SuiService {
     // For demonstration purposes in development, we can use the admin keypair
     // But we use the user's address as sender
     try {
-      return await this.client.signAndExecuteTransactionBlock({
+      return await this.client.signAndExecuteTransaction({
         transactionBlock: tx,
         signer: this.adminKeypair,
         options: {
