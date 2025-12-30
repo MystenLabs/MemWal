@@ -63,9 +63,11 @@ class LoggerManager {
   private config: Required<LoggerConfig>;
 
   private constructor() {
-    // Default configuration
+    // Default configuration - compute level first before using config
+    const defaultLevel = this.getDefaultLevelStatic();
+    
     this.config = {
-      level: this.getDefaultLevel(),
+      level: defaultLevel,
       timestamps: true,
       formatter: defaultFormatter,
       enableInProduction: false,
@@ -77,6 +79,21 @@ class LoggerManager {
       LoggerManager.instance = new LoggerManager();
     }
     return LoggerManager.instance;
+  }
+
+  private getDefaultLevelStatic(): LogLevel {
+    const isProduction = typeof process !== 'undefined' && process.env?.NODE_ENV === 'production';
+    const isBrowser = typeof window !== 'undefined';
+    
+    if (isProduction) {
+      return LogLevel.WARN; // Only warn and error in production by default
+    }
+    
+    if (isBrowser) {
+      return LogLevel.INFO; // More verbose in browser for debugging
+    }
+    
+    return LogLevel.DEBUG; // Most verbose in Node.js development
   }
 
   private getDefaultLevel(): LogLevel {

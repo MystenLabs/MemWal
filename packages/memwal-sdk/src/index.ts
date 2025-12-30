@@ -454,6 +454,36 @@ export type { RebuildIndexOptions, RebuildIndexResult } from './utils/rebuildInd
 export { rebuildIndexNode, hasExistingIndexNode, clearIndexNode } from './utils/rebuildIndexNode';
 export type { RebuildIndexNodeOptions, RebuildIndexNodeResult } from './utils/rebuildIndexNode';
 
+// Structured logging utility
+export {
+  Logger,
+  LogLevel,
+  configureLogger,
+  createLogger,
+  logger,
+  LogFormatters
+} from './utils/logger';
+export type { LoggerConfig, LogEntry, LogFormatter } from './utils/logger';
+
+// Environment validation utility
+export {
+  validateEnv,
+  validateEnvOrThrow,
+  checkFeatureRequirements,
+  getFeatureRequirementError,
+  validateMinimumRequirements,
+  getEnvVar,
+  getRequiredEnvVar,
+  SDKEnvSchema,
+  NextPublicEnvSchema,
+  FeatureRequirements
+} from './utils/envValidation';
+export type {
+  ValidationResult,
+  ValidationError as EnvValidationError,
+  FeatureRequirements as FeatureRequirementsType
+} from './utils/envValidation';
+
 // MemoryIndex on-chain utilities
 export {
   getMemoryIndex,

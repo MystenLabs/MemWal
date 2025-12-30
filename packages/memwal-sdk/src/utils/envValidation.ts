@@ -63,7 +63,7 @@ export interface ValidationResult<T> {
 export interface ValidationError {
   field: string;
   message: string;
-  value?: any;
+  value?: unknown;
 }
 
 /**
@@ -71,7 +71,7 @@ export interface ValidationError {
  */
 export function validateEnv<T extends z.ZodSchema>(
   schema: T,
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): ValidationResult<z.infer<T>> {
   try {
     const data = schema.parse(env);
@@ -108,7 +108,7 @@ export function validateEnv<T extends z.ZodSchema>(
  */
 export function validateEnvOrThrow<T extends z.ZodSchema>(
   schema: T,
-  env: Record<string, any> = process.env,
+  env: Record<string, string | undefined> = process.env,
   context?: string
 ): z.infer<T> {
   const result = validateEnv(schema, env);
@@ -137,7 +137,7 @@ export interface FeatureRequirements {
 
 export function checkFeatureRequirements(
   requirements: FeatureRequirements,
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): {
   available: boolean;
   missing: string[];
@@ -166,7 +166,7 @@ export function checkFeatureRequirements(
  */
 export function getFeatureRequirementError(
   requirements: FeatureRequirements,
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): string | null {
   const check = checkFeatureRequirements(requirements, env);
   
@@ -217,7 +217,7 @@ export const FeatureRequirements = {
  * Validate minimum requirements for SDK usage
  */
 export function validateMinimumRequirements(
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): {
   valid: boolean;
   errors: string[];
@@ -263,7 +263,7 @@ export function validateMinimumRequirements(
 export function getEnvVar(
   key: string,
   fallback?: string,
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): string | undefined {
   return env[key] || fallback;
 }
@@ -273,7 +273,7 @@ export function getEnvVar(
  */
 export function getRequiredEnvVar(
   key: string,
-  env: Record<string, any> = process.env
+  env: Record<string, string | undefined> = process.env
 ): string {
   const value = env[key];
   if (!value) {
