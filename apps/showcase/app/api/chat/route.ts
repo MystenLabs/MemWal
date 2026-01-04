@@ -11,6 +11,50 @@ const openrouter = createOpenRouter({
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
+/**
+ * Check if message is a PURE memory save command (no question, no context needed)
+ * Pure commands: "remember: X", "remember X, Y", "store in memory: X"
+ * NOT pure (mixed): "remember that I like pizza and what's my name?"
+ */
+function isPureMemorySaveCommand(message: string): boolean {
+  const lowerMessage = message.toLowerCase().trim()
+
+  // Memory command patterns that indicate PURE save intent
+  const purePatterns = [
+    /^remember[:\s]/i,           // "remember: X" or "remember X"
+    /^store\s+(in\s+)?memory[:\s]/i,  // "store in memory: X"
+    /^save[:\s]/i,               // "save: X"
+    /^note[:\s]/i,               // "note: X"
+    /^don'?t\s+forget[:\s]/i,    // "don't forget: X"
+    /^memo[:\s]/i,               // "memo: X"
+  ]
+
+  // Check if starts with a memory command pattern
+  const startsWithMemoryCommand = purePatterns.some(pattern => pattern.test(lowerMessage))
+  if (!startsWithMemoryCommand) {
+    return false
+  }
+
+  // Check for question indicators that would need search/RAG
+  const questionIndicators = [
+    /\?/,                        // Contains question mark
+    /what('s|\s+is)/i,           // "what's" or "what is"
+    /who('s|\s+is)/i,            // "who's" or "who is"
+    /where('s|\s+is)/i,          // "where's" or "where is"
+    /when('s|\s+is)/i,           // "when's" or "when is"
+    /how('s|\s+is|\s+do)/i,      // "how's", "how is", "how do"
+    /why('s|\s+is|\s+do)/i,      // "why's", "why is", "why do"
+    /\band\s+(?:what|who|where|when|how|why|can|do|is|are)/i,  // "and what/who/etc"
+    /\btell\s+me\b/i,            // "tell me"
+    /\bdo\s+you\s+know\b/i,      // "do you know"
+  ]
+
+  // If contains question indicators, it's NOT a pure memory command
+  const hasQuestion = questionIndicators.some(pattern => pattern.test(lowerMessage))
+
+  return !hasQuestion
+}
+
 export async function POST(req: Request) {
   try {
     const { messages, walletAddress } = await req.json()
@@ -58,8 +102,14 @@ export async function POST(req: Request) {
         // Step 1: Check for explicit memory commands (supports multiple memories in one prompt)
         console.log(`\n🔧 Step 2: Checking for memory commands...`)
         const memoryContents = pdw.ai.extractMultipleMemories(latestUserMessage.content)
+
+        // Check if this is a PURE memory command (only saving, no question)
+        // Pure memory commands start with remember/store/note/don't forget and contain ONLY memory content
+        const isPureMemoryCommand = memoryContents.length > 0 && isPureMemorySaveCommand(latestUserMessage.content)
+
         if (memoryContents.length > 0) {
           console.log(`   💾 Memory command detected: ${memoryContents.length} memories to save`)
+          console.log(`   📝 Pure memory command: ${isPureMemoryCommand ? 'YES (skipping search)' : 'NO (will search for context)'}`)
           memoryContents.forEach((m: string, i: number) => console.log(`   ${i + 1}. "${m}"`))
 
           // Instead of saving server-side, return memories to save to client
@@ -71,34 +121,41 @@ export async function POST(req: Request) {
           console.log(`   No memory commands detected`)
         }
 
-        console.log(`\n🔧 Step 3: Performing vector search...`)
-        console.log(`   search.vector available: ${typeof pdw.search?.vector}`)
-        const searchStartTime = Date.now()
-        const searchResults = await pdw.search.vector(latestUserMessage.content, {
-          limit: 10,
-          threshold: 0.5,
-          fetchContent: true
-        })
-        const searchDuration = Date.now() - searchStartTime
-
-        console.log(`   Search completed in ${searchDuration}ms`)
-        console.log(`   Results: ${searchResults?.length ?? 0} items`)
-
-        if (searchResults && searchResults.length > 0) {
-          console.log(`\n📋 Search Results:`)
-          searchResults.forEach((result: any, idx: number) => {
-            console.log(`   ${idx + 1}. score=${(result.score * 100).toFixed(1)}%, content="${(result.content || '').substring(0, 50)}..."`)
+        // Skip search for pure memory commands to improve performance
+        // Pure memory commands don't need RAG context - user just wants to save data
+        if (!isPureMemoryCommand) {
+          console.log(`\n🔧 Step 3: Performing vector search...`)
+          console.log(`   search.vector available: ${typeof pdw.search?.vector}`)
+          const searchStartTime = Date.now()
+          const searchResults = await pdw.search.vector(latestUserMessage.content, {
+            limit: 10,
+            threshold: 0.5,
+            fetchContent: true
           })
-          relevantMemories = '\n\n📚 **Relevant Memories from Blockchain:**\n' +
-            searchResults
-              .map((result: any, idx: number) =>
-                `${idx + 1}. ${result.content} (relevance: ${(result.score * 100).toFixed(1)}%)`
-              )
-              .join('\n')
+          const searchDuration = Date.now() - searchStartTime
 
-          console.log(`\n✅ Found ${searchResults.length} relevant memories for RAG`)
+          console.log(`   Search completed in ${searchDuration}ms`)
+          console.log(`   Results: ${searchResults?.length ?? 0} items`)
+
+          if (searchResults && searchResults.length > 0) {
+            console.log(`\n📋 Search Results:`)
+            searchResults.forEach((result: any, idx: number) => {
+              console.log(`   ${idx + 1}. score=${(result.score * 100).toFixed(1)}%, content="${(result.content || '').substring(0, 50)}..."`)
+            })
+            relevantMemories = '\n\n📚 **Relevant Memories from Blockchain:**\n' +
+              searchResults
+                .map((result: any, idx: number) =>
+                  `${idx + 1}. ${result.content} (relevance: ${(result.score * 100).toFixed(1)}%)`
+                )
+                .join('\n')
+
+            console.log(`\n✅ Found ${searchResults.length} relevant memories for RAG`)
+          } else {
+            console.log(`\n⚠️ No relevant memories found for query`)
+          }
         } else {
-          console.log(`\n⚠️ No relevant memories found for query`)
+          console.log(`\n🔧 Step 3: Skipping search (pure memory command)`)
+          console.log(`   ⚡ Optimization: No RAG needed for save-only commands`)
         }
         console.log(`${'='.repeat(70)}\n`)
       } catch (memoryError) {
