@@ -36,7 +36,22 @@ export interface UsePDWClientReturn {
 export function usePDWClient(): UsePDWClientReturn {
   const account = useCurrentAccount()
   const suiClient = useSuiClient()
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+
+  // Configure useSignAndExecuteTransaction with custom execute to get full effects
+  // By default, dapp-kit only returns digest. We need effects for status checking.
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction({
+    execute: async ({ bytes, signature }) =>
+      await suiClient.executeTransactionBlock({
+        transactionBlock: bytes,
+        signature,
+        options: {
+          showRawEffects: true,
+          showEffects: true,
+          showObjectChanges: true,
+          showEvents: true,
+        },
+      }),
+  })
 
   const [client, setClient] = useState<any | null>(null)
   const [signer, setSigner] = useState<any | null>(null)

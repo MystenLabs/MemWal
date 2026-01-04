@@ -357,7 +357,12 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
                 throw new Error(`Invalid embedding in JSON: length=${embedding?.length || 0}`);
               }
 
-              console.log(`         📦 Format: JSON package`);
+              // Debug: Log content status
+              if (content && content.length > 0) {
+                console.log(`         📦 Format: JSON package (content: ${content.length} chars)`);
+              } else {
+                console.log(`         📦 Format: JSON package (⚠️ content EMPTY - QuiltBatchManager bug)`);
+              }
             } catch (jsonError) {
               throw new Error(`Invalid JSON structure: ${(jsonError as Error).message}`);
             }

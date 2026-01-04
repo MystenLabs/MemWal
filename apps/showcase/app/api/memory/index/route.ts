@@ -58,6 +58,7 @@ export async function POST(req: Request) {
     console.log(`   blobId: ${blobId}`)
     console.log(`   category: ${category}`)
     console.log(`   importance: ${importance}`)
+    console.log(`   content: "${content?.slice(0, 100) || '(empty)'}${content?.length > 100 ? '...' : ''}" (${content?.length || 0} chars)`)
 
     // Get PDW client (this will use/create the singleton HNSW service)
     console.log(`\n🔧 Step 1: Getting PDW client...`)

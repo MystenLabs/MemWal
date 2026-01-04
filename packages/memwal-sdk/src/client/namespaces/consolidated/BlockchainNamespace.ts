@@ -165,7 +165,25 @@ class TxSubNamespace {
         }
 
         // Determine status from effects
-        const status = result.effects?.status?.status === 'success' ? 'success' : 'failure';
+        // dapp-kit may not return full effects structure unless custom execute is configured
+        // We check multiple indicators:
+        // 1. If effects.status.status explicitly says 'failure', it failed
+        // 2. If effects.status.status says 'success', it succeeded
+        // 3. If we have a digest but no effects status, assume success (tx was submitted and confirmed)
+        let status: 'success' | 'failure';
+        const effectsStatus = result.effects?.status?.status;
+
+        if (effectsStatus === 'failure') {
+          status = 'failure';
+        } else if (effectsStatus === 'success') {
+          status = 'success';
+        } else if (result.digest) {
+          // Has digest but no explicit status - DappKitSigner waits for confirmation
+          // If we reach here without error, the transaction was successful
+          status = 'success';
+        } else {
+          status = 'failure';
+        }
 
         return {
           digest: result.digest,
@@ -176,7 +194,7 @@ class TxSubNamespace {
           gasUsed: result.effects?.gasUsed?.computationCost
             ? Number(result.effects.gasUsed.computationCost)
             : undefined,
-          error: status === 'failure' ? result.effects?.status?.error : undefined,
+          error: status === 'failure' ? (result.effects?.status?.error || 'Transaction failed without digest') : undefined,
         };
       } catch (error) {
         console.error('Transaction execution failed:', error);
