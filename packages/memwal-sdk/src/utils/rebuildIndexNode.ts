@@ -53,6 +53,13 @@ export interface RebuildIndexNodeOptions {
 
   /** Whether to force re-index even if index exists */
   force?: boolean;
+
+  /**
+   * Quilt IDs to include in the rebuild.
+   * Quilts contain batch-uploaded memories that may not have on-chain Memory objects.
+   * Pass Quilt IDs here to include them in the index rebuild.
+   */
+  quiltIds?: string[];
 }
 
 export interface RebuildIndexNodeResult {
@@ -87,7 +94,8 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
     walrusAggregator,
     indexDirectory = './.pdw-indexes',
     onProgress,
-    force = false
+    force = false,
+    quiltIds = []
   } = options;
 
   const startTime = Date.now();
@@ -367,21 +375,117 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
       }
     }
 
+    // ==================== QUILT MEMORIES ====================
+    // Process additional Quilts that may not have on-chain Memory objects
+    let quiltMemoriesTotal = 0;
+    let quiltMemoriesIndexed = 0;
+
+    if (quiltIds.length > 0) {
+      console.log(`\n[rebuildIndexNode] Processing ${quiltIds.length} additional Quilt(s)...`);
+      onProgress?.(processedCount, totalMemories + quiltIds.length, 'Processing Quilts...');
+
+      for (const quiltId of quiltIds) {
+        console.log(`[rebuildIndexNode] Processing Quilt: ${quiltId.substring(0, 30)}...`);
+
+        try {
+          // Fetch Quilt files
+          const blob = await walrusClient.walrus.getBlob({ blobId: quiltId });
+          const files = await blob.files();
+          console.log(`[rebuildIndexNode]   📥 Fetched Quilt: ${files.length} file(s)`);
+
+          // Process each file in the Quilt
+          for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
+            const file = files[fileIdx];
+            quiltMemoriesTotal++;
+
+            try {
+              const identifier = await file.getIdentifier() || `quilt-file-${fileIdx}`;
+              const tags = await file.getTags();
+
+              // Parse JSON content
+              const rawBytes = await file.bytes();
+              let rawText = new TextDecoder().decode(rawBytes);
+
+              // Trim trailing null bytes (Quilt corruption workaround)
+              let lastValidIndex = rawText.length - 1;
+              while (lastValidIndex >= 0 && rawText.charCodeAt(lastValidIndex) === 0) {
+                lastValidIndex--;
+              }
+              rawText = rawText.slice(0, lastValidIndex + 1);
+
+              if (!rawText.startsWith('{') || !rawText.endsWith('}')) {
+                throw new Error('Not a JSON file');
+              }
+
+              const memoryData: MemoryContent = JSON.parse(rawText);
+
+              if (!memoryData.embedding || memoryData.embedding.length === 0) {
+                throw new Error('No embedding in package');
+              }
+
+              // Generate unique vector ID for Quilt memory
+              const vectorId = Date.now() % 4294967295 + fileIdx;
+              const memoryId = (memoryData as any).metadata?.memoryId || identifier.replace('.json', '');
+
+              // Add to HNSW index
+              await hnswService.addVector(
+                userAddress,
+                vectorId,
+                memoryData.embedding,
+                {
+                  blobId: quiltId,
+                  memoryObjectId: memoryId,
+                  category: memoryData.metadata?.category || tags?.['category'] || 'general',
+                  importance: memoryData.metadata?.importance || parseInt(tags?.['importance'] || '3'),
+                  topic: memoryData.metadata?.topic || tags?.['topic'] || '',
+                  timestamp: memoryData.timestamp || Date.now(),
+                  content: memoryData.content || '[encrypted]',
+                  isEncrypted: (memoryData as any).encrypted === true,
+                  quiltId,
+                  identifier
+                }
+              );
+
+              quiltMemoriesIndexed++;
+              console.log(`[rebuildIndexNode]   ✓ Indexed Quilt file: ${identifier}`);
+
+            } catch (fileError: any) {
+              const errorMsg = fileError.message || String(fileError);
+              errors.push({ blobId: quiltId, error: `File ${fileIdx}: ${errorMsg}` });
+              console.error(`[rebuildIndexNode]   ✗ Failed file ${fileIdx}: ${errorMsg}`);
+            }
+          }
+
+        } catch (quiltError: any) {
+          const errorMsg = quiltError.message || String(quiltError);
+          errors.push({ blobId: quiltId, error: `Quilt fetch failed: ${errorMsg}` });
+          console.error(`[rebuildIndexNode]   ✗ Failed to fetch Quilt: ${errorMsg}`);
+        }
+      }
+
+      console.log(`[rebuildIndexNode] Quilt indexing complete: ${quiltMemoriesIndexed}/${quiltMemoriesTotal}`);
+    }
+
+    // Update totals
+    const finalTotal = totalMemories + quiltMemoriesTotal;
+    const finalIndexed = indexedCount + quiltMemoriesIndexed;
+    const finalFailed = failedCount + (quiltMemoriesTotal - quiltMemoriesIndexed);
+
     // Force save index
     console.log('[rebuildIndexNode] Saving index to disk...');
-    onProgress?.(totalMemories, totalMemories, 'Saving index...');
+    onProgress?.(finalTotal, finalTotal, 'Saving index...');
     await hnswService.flushBatch(userAddress);
 
     const duration = Date.now() - startTime;
     console.log('[rebuildIndexNode] Index rebuild complete!');
-    console.log(`[rebuildIndexNode] Total: ${totalMemories}, Indexed: ${indexedCount}, Failed: ${failedCount}`);
+    console.log(`[rebuildIndexNode] On-chain: ${totalMemories}, Quilts: ${quiltMemoriesTotal}, Total indexed: ${finalIndexed}, Failed: ${finalFailed}`);
     console.log(`[rebuildIndexNode] Duration: ${(duration / 1000).toFixed(2)}s`);
 
     return {
       success: true,
-      totalMemories,
-      indexedMemories: indexedCount,
-      failedMemories: failedCount,
+      totalMemories: finalTotal,
+      indexedMemories: finalIndexed,
+      failedMemories: finalFailed,
       errors,
       duration
     };

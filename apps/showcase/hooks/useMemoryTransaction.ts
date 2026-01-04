@@ -469,30 +469,18 @@ export function useBatchMemoryTransaction() {
       console.log(`📦 Batch uploading ${preparedMemories.length} memories using Walrus Quilt...`)
 
       // Prepare batch memories for QuiltBatchManager
-      // IMPORTANT: Format as JSON package (same as single upload via storeMemoryPackage)
-      // This ensures sync-missing can parse the content correctly
+      // Let QuiltBatchManager create the JSON package with content included
+      // DO NOT set encryptedContent - it makes QuiltBatchManager think content is encrypted
+      // and it will store empty content in the JSON package
       const batchMemories = preparedMemories.map((prepared, i) => {
-        // Create JSON package matching StorageService.uploadMemoryPackage format
-        const memoryPackage = {
-          content: prepared.content,
-          embedding: prepared.embedding,
-          metadata: {
-            category: prepared.category,
-            importance: prepared.importance,
-            topic: '',
-          },
-          timestamp: Date.now(),
-          version: '1.0'
-        }
-        const packageJson = JSON.stringify(memoryPackage)
-
         return {
           content: prepared.content,
           category: prepared.category as 'general' | 'preference' | 'fact' | 'todo' | 'note',
           importance: prepared.importance,
           topic: '',
           embedding: prepared.embedding,
-          encryptedContent: new TextEncoder().encode(packageJson),  // JSON package, not raw text!
+          // NOTE: Do NOT set encryptedContent here!
+          // QuiltBatchManager will create JSON package with content automatically
           id: `memory-${Date.now()}-${i}`
         }
       })

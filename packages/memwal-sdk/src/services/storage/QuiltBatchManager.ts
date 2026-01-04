@@ -34,15 +34,37 @@ import type { UnifiedSigner } from '../../client/signers/UnifiedSigner';
 // Types
 // ============================================================================
 
+/**
+ * Input for batch memory upload
+ */
 export interface BatchMemory {
   content: string;
   category: string;
   importance: number;
   topic: string;
   embedding: number[];
-  encryptedContent: Uint8Array;
+  encryptedContent?: Uint8Array; // Optional - only when encryption is enabled
   summary?: string;
   id?: string; // Optional client-side ID for tracking
+}
+
+/**
+ * Memory package stored in Quilt as JSON
+ * This format is consistent with regular memory storage
+ */
+export interface QuiltMemoryPackage {
+  content: string;              // Plaintext content (empty if encrypted)
+  embedding: number[];          // Vector embedding
+  metadata: {
+    category: string;
+    importance: number;
+    topic: string;
+    [key: string]: unknown;
+  };
+  timestamp: number;
+  version: string;              // Package format version
+  encrypted?: boolean;          // Whether content is encrypted
+  encryptedContent?: string;    // Base64-encoded encrypted content (if encrypted)
 }
 
 export interface QuiltUploadOptions {
@@ -72,6 +94,16 @@ export interface QuiltUploadResult {
 export interface QuiltRetrieveResult {
   identifier: string;
   content: Uint8Array;
+  tags: Record<string, string>;
+  retrievalTimeMs: number;
+}
+
+/**
+ * Result when retrieving a memory package from Quilt
+ */
+export interface QuiltMemoryRetrieveResult {
+  identifier: string;
+  memoryPackage: QuiltMemoryPackage;
   tags: Record<string, string>;
   retrievalTimeMs: number;
 }
@@ -152,35 +184,72 @@ export class QuiltBatchManager {
     console.log(`📦 Uploading batch of ${memories.length} memories as Quilt (writeFilesFlow)...`);
 
     try {
-      // Create WalrusFile for each memory with plaintext tags
+      // Create WalrusFile for each memory as JSON package
+      // This format is consistent with regular memory storage
       const files = memories.map((memory, index) => {
         const identifier = memory.id
           ? `memory-${memory.id}.json`
           : `memory-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 9)}.json`;
 
-        totalSize += memory.encryptedContent.length;
+        const isEncrypted = !!memory.encryptedContent && memory.encryptedContent.length > 0;
+        const timestamp = Date.now();
+
+        // Create memory package (JSON format - consistent with regular storage)
+        const memoryPackage: QuiltMemoryPackage = {
+          // Content: plaintext if not encrypted, empty if encrypted
+          content: isEncrypted ? '' : memory.content,
+          embedding: memory.embedding,
+          metadata: {
+            category: memory.category,
+            importance: memory.importance,
+            topic: memory.topic,
+            ...(memory.summary ? { summary: memory.summary } : {}),
+            ...(memory.id ? { memoryId: memory.id } : {})
+          },
+          timestamp,
+          version: '2.0.0', // Quilt JSON package version
+          encrypted: isEncrypted,
+          // Store encrypted content as base64 for JSON compatibility
+          ...(isEncrypted && memory.encryptedContent ? {
+            encryptedContent: this.uint8ArrayToBase64(memory.encryptedContent)
+          } : {})
+        };
+
+        // Serialize to JSON and encode as bytes
+        const jsonString = JSON.stringify(memoryPackage);
+        const contents = new TextEncoder().encode(jsonString);
+        totalSize += contents.length;
+
+        // Diagnostic logging for debugging Quilt corruption issues
+        console.log(`   📝 File ${index}: identifier=${identifier}`);
+        console.log(`      JSON string length: ${jsonString.length} chars`);
+        console.log(`      Encoded bytes: ${contents.length} bytes`);
+        console.log(`      Last 50 chars of JSON: ...${jsonString.slice(-50)}`);
+        console.log(`      Last 10 bytes (hex): ${Array.from(contents.slice(-10)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
 
         return WalrusFile.from({
-          contents: memory.encryptedContent,
+          contents,
           identifier,
           tags: {
-            // Core metadata (plaintext for filtering)
+            // Core metadata (plaintext for filtering without decryption)
+            'content-type': 'application/json',
             'category': memory.category,
             'importance': memory.importance.toString(),
             'topic': memory.topic,
-            'timestamp': new Date().toISOString(),
-            'created_at': new Date().toISOString(),
+            'timestamp': new Date(timestamp).toISOString(),
+            'created_at': new Date(timestamp).toISOString(),
 
             // Encryption info
-            'encrypted': 'true',
-            'encryption_type': 'seal',
+            'encrypted': isEncrypted ? 'true' : 'false',
+            ...(isEncrypted ? { 'encryption_type': 'seal' } : {}),
 
             // Owner
             'owner': options.userAddress,
 
             // Content info
-            'content_size': memory.encryptedContent.length.toString(),
+            'content_size': contents.length.toString(),
             'embedding_dimensions': memory.embedding.length.toString(),
+            'package_version': '2.0.0',
 
             // Optional rich metadata
             ...(memory.summary ? { 'summary': memory.summary } : {}),
@@ -268,7 +337,7 @@ export class QuiltBatchManager {
             tags: Object.fromEntries(
               Object.entries(tags).map(([k, v]) => [k, String(v)])
             ),
-            size: memories[i]?.encryptedContent.length || 0
+            size: memories[i]?.encryptedContent?.length || memories[i]?.content?.length || 0
           };
         })
       );
@@ -642,8 +711,283 @@ export class QuiltBatchManager {
   }
 
   // ==========================================================================
+  // JSON Memory Package Retrieval
+  // ==========================================================================
+
+  /**
+   * Retrieve a memory package as JSON from a Quilt
+   *
+   * Uses file.json() for efficient parsing (SDK handles it)
+   *
+   * @param quiltId - The Quilt blob ID
+   * @param identifier - The file identifier within the quilt
+   * @returns QuiltMemoryRetrieveResult with parsed memory package
+   */
+  async getMemoryPackage(
+    quiltId: string,
+    identifier: string
+  ): Promise<QuiltMemoryRetrieveResult> {
+    const startTime = performance.now();
+
+    try {
+      console.log(`📄 Retrieving memory package "${identifier}" from Quilt ${quiltId}...`);
+
+      // Get all files from the blob
+      const files = await this.getQuiltFiles(quiltId);
+
+      // Find file by identifier
+      let matchingFile: WalrusFile | undefined;
+      for (const f of files) {
+        const fileIdentifier = await f.getIdentifier();
+        if (fileIdentifier === identifier) {
+          matchingFile = f;
+          break;
+        }
+      }
+
+      if (!matchingFile) {
+        throw new Error(`File "${identifier}" not found in Quilt`);
+      }
+
+      const tags = await matchingFile.getTags();
+      let memoryPackage: QuiltMemoryPackage;
+
+      try {
+        // Parse directly as JSON (SDK handles it!)
+        memoryPackage = await matchingFile.json() as QuiltMemoryPackage;
+      } catch (parseError) {
+        // Try partial recovery for truncated JSON
+        console.warn(`⚠️ JSON parse failed for "${identifier}", attempting recovery...`);
+        const bytes = await matchingFile.bytes();
+        const recovered = this.tryRecoverTruncatedPackage(bytes);
+        if (recovered) {
+          console.log(`🔧 Partially recovered "${identifier}" (encryptedContent may be corrupted)`);
+          memoryPackage = recovered;
+        } else {
+          throw parseError;
+        }
+      }
+
+      const retrievalTimeMs = performance.now() - startTime;
+
+      console.log(`✅ Retrieved memory package "${identifier}" (${retrievalTimeMs.toFixed(1)}ms)`);
+
+      return {
+        identifier,
+        memoryPackage,
+        tags,
+        retrievalTimeMs
+      };
+
+    } catch (error) {
+      console.error(`❌ Failed to retrieve memory package:`, error);
+      throw new Error(`Failed to retrieve memory package "${identifier}": ${error}`);
+    }
+  }
+
+  /**
+   * Retrieve all memory packages from a Quilt as JSON
+   *
+   * @param quiltId - The Quilt blob ID
+   * @returns Array of memory packages with metadata
+   */
+  async getAllMemoryPackages(quiltId: string): Promise<QuiltMemoryRetrieveResult[]> {
+    const startTime = performance.now();
+
+    try {
+      console.log(`📂 Retrieving all memory packages from Quilt ${quiltId}...`);
+
+      const files = await this.getQuiltFiles(quiltId);
+      const results: QuiltMemoryRetrieveResult[] = [];
+
+      for (const file of files) {
+        const identifier = await file.getIdentifier() || 'unknown';
+        const tags = await file.getTags();
+
+        try {
+          // Parse as JSON
+          const memoryPackage = await file.json() as QuiltMemoryPackage;
+          results.push({
+            identifier,
+            memoryPackage,
+            tags,
+            retrievalTimeMs: 0 // Individual timing not tracked in batch
+          });
+        } catch (parseError) {
+          console.warn(`⚠️ Failed to parse "${identifier}" as JSON:`, parseError);
+
+          // Try partial recovery for truncated JSON
+          try {
+            const bytes = await file.bytes();
+            const recoveredPackage = this.tryRecoverTruncatedPackage(bytes);
+            if (recoveredPackage) {
+              console.log(`🔧 Partially recovered "${identifier}" (encryptedContent truncated)`);
+              results.push({
+                identifier,
+                memoryPackage: recoveredPackage,
+                tags,
+                retrievalTimeMs: 0
+              });
+            }
+          } catch {
+            // Skip files that can't be recovered
+            console.warn(`❌ Could not recover "${identifier}"`);
+          }
+        }
+      }
+
+      const totalTimeMs = performance.now() - startTime;
+      console.log(`✅ Retrieved ${results.length} memory packages (${totalTimeMs.toFixed(1)}ms)`);
+
+      return results;
+
+    } catch (error) {
+      console.error(`❌ Failed to retrieve memory packages:`, error);
+      throw new Error(`Failed to retrieve memory packages from Quilt ${quiltId}: ${error}`);
+    }
+  }
+
+  /**
+   * Get memory content from a Quilt file
+   *
+   * Handles both encrypted and unencrypted content:
+   * - Unencrypted: Returns content directly from package
+   * - Encrypted: Returns decrypted content if sessionKey provided, otherwise throws
+   *
+   * @param quiltId - The Quilt blob ID
+   * @param identifier - The file identifier
+   * @param sessionKey - Optional session key for encrypted content
+   * @returns Memory content as string
+   */
+  async getMemoryContent(
+    quiltId: string,
+    identifier: string,
+    decryptFn?: (encryptedBase64: string) => Promise<string>
+  ): Promise<string> {
+    const result = await this.getMemoryPackage(quiltId, identifier);
+    const pkg = result.memoryPackage;
+
+    if (!pkg.encrypted) {
+      // Not encrypted - return content directly
+      return pkg.content;
+    }
+
+    if (!pkg.encryptedContent) {
+      throw new Error('Memory is marked as encrypted but no encrypted content found');
+    }
+
+    if (!decryptFn) {
+      throw new Error('Memory is encrypted. Provide decryptFn to decrypt content.');
+    }
+
+    // Decrypt using provided function
+    return await decryptFn(pkg.encryptedContent);
+  }
+
+  // ==========================================================================
   // Utility Methods
   // ==========================================================================
+
+  /**
+   * Try to recover a partially truncated memory package
+   *
+   * Handles cases where JSON was truncated (e.g., in the middle of encryptedContent)
+   * by extracting metadata and marking the encrypted content as corrupted.
+   *
+   * @param bytes - Raw bytes of the file
+   * @returns Recovered QuiltMemoryPackage or null if recovery fails
+   */
+  private tryRecoverTruncatedPackage(bytes: Uint8Array): QuiltMemoryPackage | null {
+    try {
+      const rawString = new TextDecoder().decode(bytes);
+
+      // Find and trim trailing null bytes
+      let lastValidIndex = rawString.length - 1;
+      while (lastValidIndex >= 0 && rawString.charCodeAt(lastValidIndex) === 0) {
+        lastValidIndex--;
+      }
+
+      const trimmedString = rawString.slice(0, lastValidIndex + 1);
+
+      // First try to parse as-is (maybe nulls were the only issue)
+      try {
+        return JSON.parse(trimmedString) as QuiltMemoryPackage;
+      } catch {
+        // Continue to partial recovery
+      }
+
+      // Look for encryptedContent field - data likely truncated there
+      const encryptedIdx = trimmedString.indexOf('"encryptedContent":"');
+      if (encryptedIdx > 0) {
+        // Extract everything before encryptedContent
+        const beforeEncrypted = trimmedString.slice(0, encryptedIdx);
+        // Remove trailing comma and close the object
+        const cleanedJson = beforeEncrypted.replace(/,\s*$/, '') + '}';
+
+        try {
+          const partialPackage = JSON.parse(cleanedJson);
+          return {
+            ...partialPackage,
+            encrypted: true,
+            encryptedContent: '[CORRUPTED - data truncated during storage]'
+          } as QuiltMemoryPackage;
+        } catch {
+          // Partial extraction failed
+        }
+      }
+
+      // Try to find the last complete JSON object by looking for closing brace
+      // This handles cases where truncation happened elsewhere
+      for (let i = trimmedString.length - 1; i >= 0; i--) {
+        if (trimmedString[i] === '}') {
+          try {
+            const candidate = trimmedString.slice(0, i + 1);
+            return JSON.parse(candidate) as QuiltMemoryPackage;
+          } catch {
+            // This position doesn't form valid JSON, try earlier
+            continue;
+          }
+        }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Convert Uint8Array to base64 string
+   */
+  private uint8ArrayToBase64(bytes: Uint8Array): string {
+    // Use Buffer in Node.js, btoa in browser
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(bytes).toString('base64');
+    }
+    // Browser fallback
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * Convert base64 string to Uint8Array
+   */
+  private base64ToUint8Array(base64: string): Uint8Array {
+    // Use Buffer in Node.js, atob in browser
+    if (typeof Buffer !== 'undefined') {
+      return new Uint8Array(Buffer.from(base64, 'base64'));
+    }
+    // Browser fallback
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
 
   /**
    * Get statistics
@@ -662,5 +1006,15 @@ export class QuiltBatchManager {
     return (useRelay ?? this.useUploadRelay)
       ? this.walrusWithRelay
       : this.walrusWithoutRelay;
+  }
+
+  /**
+   * Get base64 converter (for external use)
+   */
+  getBase64Utils() {
+    return {
+      encode: this.uint8ArrayToBase64.bind(this),
+      decode: this.base64ToUint8Array.bind(this)
+    };
   }
 }

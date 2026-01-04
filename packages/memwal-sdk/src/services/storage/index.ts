@@ -42,8 +42,13 @@ export type {
 export { QuiltBatchManager } from './QuiltBatchManager';
 export type {
   BatchMemory,
+  QuiltMemoryPackage,
   QuiltUploadOptions,
-  QuiltUploadResult
+  QuiltUploadResult,
+  QuiltFileResult,
+  QuiltRetrieveResult,
+  QuiltMemoryRetrieveResult,
+  QuiltListResult
 } from './QuiltBatchManager';
 
 export { BlobAttributesManager } from './BlobAttributesManager';
