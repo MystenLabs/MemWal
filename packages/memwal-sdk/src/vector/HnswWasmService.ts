@@ -11,6 +11,7 @@
  * - ✅ Walrus storage integration
  * - ✅ Near-native performance via WASM
  * - ✅ Safe for Node.js/SSR (uses dynamic import)
+ * - ✅ LRU cache with memory limits to prevent OOM
  */
 
 // Dynamic import for hnswlib-wasm to avoid bundling issues in Node.js
@@ -35,6 +36,7 @@ import {
   BatchStats,
   VectorError
 } from '../embedding/types';
+import { LRUCache, estimateIndexCacheSize } from '../utils/LRUCache';
 
 interface IndexCacheEntry {
   index: HierarchicalNSW;
@@ -44,6 +46,8 @@ interface IndexCacheEntry {
   version: number;
   metadata: Map<number, any>; // vectorId -> metadata
   dimensions: number;
+  /** Cached vectors for serialization - only store if needed */
+  vectors: Map<number, number[]>;
 }
 
 interface IndexMetadata {
@@ -57,24 +61,45 @@ interface IndexMetadata {
   lastUpdated: Date;
 }
 
+// Memory management constants
+const DEFAULT_MAX_CACHED_INDEXES = 5; // Max number of user indexes to keep in memory
+const DEFAULT_INDEX_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL for idle indexes
+const DEFAULT_MAX_MEMORY_MB = 512; // 512MB max memory for index cache
+const DEFAULT_CLEANUP_INTERVAL_MS = 60 * 1000; // Check every 1 minute
+
 /**
  * Browser-compatible HNSW vector indexing service using WebAssembly
  * Drop-in replacement for HnswIndexService with identical API
+ *
+ * Memory Management:
+ * - LRU cache limits number of indexes in memory (default: 5)
+ * - TTL-based expiration for idle indexes (default: 10 minutes)
+ * - Optional memory limit (default: 512MB)
+ * - Automatic cleanup of expired/evicted indexes
  */
 export class HnswWasmService {
   private hnswlib: HnswlibModule | null = null;
-  private readonly indexCache = new Map<string, IndexCacheEntry>();
+  private readonly indexCache: LRUCache<IndexCacheEntry>;
   private readonly batchJobs = new Map<string, BatchJob>();
   private readonly config: Required<BatchConfig>;
   private readonly indexConfig: Required<HNSWIndexConfig>;
   private batchProcessor?: ReturnType<typeof setInterval>;
-  private cacheCleanup?: ReturnType<typeof setInterval>;
   private initPromise: Promise<void> | null = null;
+
+  // Memory management settings
+  private readonly maxCachedIndexes: number;
+  private readonly indexTtlMs: number;
+  private readonly maxMemoryBytes: number;
 
   constructor(
     private storageService: StorageService,
     indexConfig: Partial<HNSWIndexConfig> = {},
-    batchConfig: Partial<BatchConfig> = {}
+    batchConfig: Partial<BatchConfig> = {},
+    memoryConfig?: {
+      maxCachedIndexes?: number;
+      indexTtlMs?: number;
+      maxMemoryMB?: number;
+    }
   ) {
     // Default HNSW configuration (matching HnswIndexService)
     this.indexConfig = {
@@ -94,6 +119,42 @@ export class HnswWasmService {
       cacheTtlMs: batchConfig.cacheTtlMs || 30 * 60 * 1000 // 30 minutes
     };
 
+    // Memory management configuration
+    this.maxCachedIndexes = memoryConfig?.maxCachedIndexes ?? DEFAULT_MAX_CACHED_INDEXES;
+    this.indexTtlMs = memoryConfig?.indexTtlMs ?? DEFAULT_INDEX_TTL_MS;
+    this.maxMemoryBytes = (memoryConfig?.maxMemoryMB ?? DEFAULT_MAX_MEMORY_MB) * 1024 * 1024;
+
+    // Initialize LRU cache with memory limits
+    this.indexCache = new LRUCache<IndexCacheEntry>({
+      maxSize: this.maxCachedIndexes,
+      ttlMs: this.indexTtlMs,
+      cleanupIntervalMs: DEFAULT_CLEANUP_INTERVAL_MS,
+      maxMemoryBytes: this.maxMemoryBytes,
+      sizeEstimator: (entry) => estimateIndexCacheSize({
+        vectors: entry.vectors || new Map(),
+        metadata: entry.metadata,
+        pendingVectors: entry.pendingVectors,
+      }),
+      onEvict: (userAddress, entry, reason) => {
+        console.log(`🧹 [HnswWasmService] Evicting index for ${userAddress} (reason: ${reason})`);
+        // Dispose WASM resources
+        if (entry.index) {
+          try {
+            if (typeof entry.index.free === 'function') {
+              entry.index.free();
+            }
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }
+        // Remove associated batch job
+        this.batchJobs.delete(userAddress);
+      },
+    });
+
+    console.log(`✅ HnswWasmService initialized with memory limits:`);
+    console.log(`   Max indexes: ${this.maxCachedIndexes}, TTL: ${this.indexTtlMs / 1000}s, Max memory: ${this.maxMemoryBytes / 1024 / 1024}MB`);
+
     // Initialize WASM library asynchronously
     this.initPromise = this.initialize();
   }
@@ -107,9 +168,8 @@ export class HnswWasmService {
       this.hnswlib = await loadHnswlibDynamic();
       console.log('✅ hnswlib-wasm loaded successfully');
 
-      // Start background processors
+      // Start batch processor (cache cleanup is handled by LRUCache)
       this.startBatchProcessor();
-      this.startCacheCleanup();
     } catch (error) {
       console.error('❌ Failed to load hnswlib-wasm:', error);
       throw error;
@@ -142,12 +202,13 @@ export class HnswWasmService {
 
       console.log(`🔨 Creating new HNSW index for user ${userAddress}`);
       console.log(`   Dimensions: ${config.dimension}, M: ${config.m}, efConstruction: ${config.efConstruction}`);
+      console.log(`   Cache stats: ${this.indexCache.size}/${this.maxCachedIndexes} indexes, ${(this.indexCache.memoryBytes / 1024 / 1024).toFixed(1)}MB`);
 
       // Create a new index using WASM (constructor takes: spaceName, numDimensions, autoSaveFilename)
       const index = new this.hnswlib!.HierarchicalNSW(config.spaceType, config.dimension, '');
       index.initIndex(config.maxElements, config.m, config.efConstruction, config.randomSeed);
 
-      // Create cache entry
+      // Create cache entry (LRU cache handles eviction automatically)
       this.indexCache.set(userAddress, {
         index,
         lastModified: new Date(),
@@ -155,7 +216,8 @@ export class HnswWasmService {
         isDirty: false,
         version: 1,
         metadata: new Map(),
-        dimensions: config.dimension
+        dimensions: config.dimension,
+        vectors: new Map(),
       });
 
       // Serialize the empty index
@@ -189,7 +251,7 @@ export class HnswWasmService {
       // Validate input
       this.validateVector(vector);
 
-      // Get or create cache entry
+      // Get or create cache entry (LRU cache will evict old entries if needed)
       let cacheEntry = this.indexCache.get(userAddress);
       if (!cacheEntry) {
         console.warn(`No cached index found for user ${userAddress}, will create on first flush`);
@@ -201,7 +263,8 @@ export class HnswWasmService {
           isDirty: true,
           version: 1,
           metadata: new Map(),
-          dimensions: vector.length
+          dimensions: vector.length,
+          vectors: new Map(),
         };
         this.indexCache.set(userAddress, cacheEntry);
       }
@@ -216,6 +279,8 @@ export class HnswWasmService {
       if (metadata) {
         cacheEntry.metadata.set(vectorId, metadata);
       }
+      // Also cache the vector for serialization
+      cacheEntry.vectors.set(vectorId, vector);
       cacheEntry.isDirty = true;
       cacheEntry.lastModified = new Date();
 
@@ -344,7 +409,8 @@ export class HnswWasmService {
         isDirty: false,
         version: 1,
         metadata: new Map(),
-        dimensions: this.indexConfig.dimension
+        dimensions: this.indexConfig.dimension,
+        vectors: new Map(),
       });
 
       console.log(`✅ Index loaded successfully for ${userAddress}`);
@@ -384,22 +450,18 @@ export class HnswWasmService {
   /**
    * Get cache statistics
    */
-  getCacheStats(): BatchStats {
-    const cacheEntries: any[] = [];
+  getCacheStats(): BatchStats & {
+    memoryUsageMB: number;
+    maxMemoryMB: number;
+    maxCachedIndexes: number;
+  } {
     let totalPendingVectors = 0;
 
-    for (const [userAddress, entry] of this.indexCache.entries()) {
-      const pendingCount = entry.pendingVectors.size;
-      totalPendingVectors += pendingCount;
-
-      cacheEntries.push({
-        userAddress,
-        pendingVectors: pendingCount,
-        lastModified: entry.lastModified,
-        isDirty: entry.isDirty,
-        indexDimensions: entry.dimensions
-      });
+    for (const [, entry] of this.indexCache.entries()) {
+      totalPendingVectors += entry.pendingVectors.size;
     }
+
+    const lruStats = this.indexCache.getStats();
 
     return {
       totalUsers: this.indexCache.size,
@@ -407,7 +469,10 @@ export class HnswWasmService {
       activeBatchJobs: this.batchJobs.size,
       cacheHitRate: 0, // TODO: Implement hit rate tracking
       averageBatchSize: totalPendingVectors / Math.max(1, this.indexCache.size),
-      averageProcessingTime: 0 // TODO: Implement timing tracking
+      averageProcessingTime: 0, // TODO: Implement timing tracking
+      memoryUsageMB: lruStats.memoryBytes / 1024 / 1024,
+      maxMemoryMB: this.maxMemoryBytes / 1024 / 1024,
+      maxCachedIndexes: this.maxCachedIndexes,
     };
   }
 
@@ -451,10 +516,8 @@ export class HnswWasmService {
     if (this.batchProcessor) {
       clearInterval(this.batchProcessor);
     }
-    if (this.cacheCleanup) {
-      clearInterval(this.cacheCleanup);
-    }
-    this.indexCache.clear();
+    // LRU cache cleanup is handled internally, but we should destroy it
+    this.indexCache.destroy();
     this.batchJobs.clear();
     console.log('🛑 HnswWasmService destroyed');
   }
@@ -474,7 +537,8 @@ export class HnswWasmService {
       isDirty: false,
       version: 1,
       metadata: new Map(),
-      dimensions
+      dimensions,
+      vectors: new Map(),
     };
   }
 
@@ -498,11 +562,7 @@ export class HnswWasmService {
     }, this.config.batchDelayMs);
   }
 
-  private startCacheCleanup(): void {
-    this.cacheCleanup = setInterval(() => {
-      this.cleanupCache();
-    }, 5 * 60 * 1000); // Every 5 minutes
-  }
+  // Note: Cache cleanup is now handled by LRUCache internally
 
   private async processBatchJobs(): Promise<void> {
     const now = Date.now();
@@ -644,15 +704,7 @@ export class HnswWasmService {
     return { ids: filteredIds, distances: filteredDistances };
   }
 
-  private cleanupCache(): void {
-    const now = Date.now();
-    for (const [userAddress, entry] of this.indexCache.entries()) {
-      if (now - entry.lastModified.getTime() > this.config.cacheTtlMs) {
-        console.debug(`🧹 Removing stale cache entry for user ${userAddress}`);
-        this.indexCache.delete(userAddress);
-      }
-    }
-  }
+  // Note: cleanupCache is now handled by LRUCache internally
 
   private validateVector(vector: number[]): void {
     if (!Array.isArray(vector) || vector.length === 0) {

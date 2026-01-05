@@ -60,6 +60,14 @@ export {
   type RebuildIndexNodeResult,
 } from './rebuildIndexNode';
 
+// LRU Cache utility with memory limits
+export {
+  LRUCache,
+  estimateSize,
+  estimateIndexCacheSize,
+  type LRUCacheOptions,
+} from './LRUCache';
+
 // Future utility exports will go here
 // export * from './crypto';
 // export * from './encoding';

@@ -108,6 +108,10 @@ export interface IndexManagerOptions {
  * 2. If failed, rebuild from blockchain + Walrus (slow but complete)
  * 3. Sync any new memories since last save
  * 4. Auto-save periodically
+ *
+ * Memory Optimization:
+ * - Removed duplicate vectorCache - now uses VectorService.getAllCachedVectors()
+ * - Vectors are only stored once in VectorService's HnswWasmService LRU cache
  */
 export class IndexManager {
   private vectorService: VectorService;
@@ -120,7 +124,7 @@ export class IndexManager {
   };
   private autoSaveTimer?: ReturnType<typeof setInterval>;
   private indexStates: Map<string, IndexState> = new Map();
-  private vectorCache: Map<string, Map<number, number[]>> = new Map();
+  // Note: vectorCache removed - now using VectorService.getAllCachedVectors() to avoid duplication
 
   // Storage adapter (can be replaced for non-browser environments)
   private storage: {
@@ -417,16 +421,11 @@ export class IndexManager {
       efConstruction: pkg.hnswConfig.efConstruction,
     });
 
-    // Initialize vector cache for this space
-    const vectorMap = new Map<number, number[]>();
-    this.vectorCache.set(spaceId, vectorMap);
-
-    // Restore vectors and metadata
+    // Restore vectors and metadata (VectorService caches vectors internally)
     const metadataMap = new Map<number, any>(pkg.metadata);
 
     for (const { vectorId, vector } of pkg.vectors) {
       await this.vectorService.addVector(spaceId, vectorId, vector, metadataMap.get(vectorId));
-      vectorMap.set(vectorId, vector);
     }
 
     // Update index state
@@ -482,11 +481,7 @@ export class IndexManager {
       efConstruction: 200,
     });
 
-    // Initialize vector cache
-    const vectorMap = new Map<number, number[]>();
-    this.vectorCache.set(spaceId, vectorMap);
-
-    // Process each memory
+    // Process each memory (VectorService caches vectors internally)
     let processed = 0;
     const batchSize = 10;
 
@@ -514,7 +509,7 @@ export class IndexManager {
 
             const vectorId = memory.vectorId ?? Date.now() % 4294967295;
 
-            // Add to index
+            // Add to index (VectorService caches vector internally)
             await this.vectorService.addVector(spaceId, vectorId, embedding, {
               blobId: memory.blobId,
               memoryId: memory.id,
@@ -523,9 +518,6 @@ export class IndexManager {
               topic: memory.topic,
               timestamp: memory.createdAt || Date.now(),
             });
-
-            // Cache vector for serialization
-            vectorMap.set(vectorId, embedding);
 
             processed++;
           } catch (error) {
@@ -579,13 +571,6 @@ export class IndexManager {
 
     console.log(`🔄 Syncing ${newMemories.length} new memories...`);
 
-    // Get or create vector cache
-    let vectorMap = this.vectorCache.get(spaceId);
-    if (!vectorMap) {
-      vectorMap = new Map();
-      this.vectorCache.set(spaceId, vectorMap);
-    }
-
     let synced = 0;
 
     for (const memory of newMemories) {
@@ -601,6 +586,7 @@ export class IndexManager {
 
         const vectorId = memory.vectorId ?? Date.now() % 4294967295;
 
+        // Add to index (VectorService caches vector internally)
         await this.vectorService.addVector(spaceId, vectorId, embedding, {
           blobId: memory.blobId,
           memoryId: memory.id,
@@ -610,7 +596,6 @@ export class IndexManager {
           timestamp: memory.createdAt || Date.now(),
         });
 
-        vectorMap.set(vectorId, embedding);
         synced++;
       } catch (error) {
         console.warn(`Failed to sync memory ${memory.id}:`, error);
@@ -633,11 +618,8 @@ export class IndexManager {
     // Get all vectors and metadata
     const allVectors = this.vectorService.getAllVectors(spaceId);
 
-    // Try to get vectors from VectorService cache first, then fallback to local cache
-    let vectorMap = this.vectorService.getAllCachedVectors(spaceId);
-    if (vectorMap.size === 0) {
-      vectorMap = this.vectorCache.get(spaceId) || new Map();
-    }
+    // Get vectors from VectorService cache (single source of truth)
+    const vectorMap = this.vectorService.getAllCachedVectors(spaceId);
 
     if (vectorMap.size === 0) {
       console.warn('Vector cache is empty, cannot save index');
@@ -727,11 +709,8 @@ export class IndexManager {
 
     const allVectors = this.vectorService.getAllVectors(spaceId);
 
-    // Try to get vectors from VectorService cache first, then fallback to local cache
-    let vectorMap = this.vectorService.getAllCachedVectors(spaceId);
-    if (vectorMap.size === 0) {
-      vectorMap = this.vectorCache.get(spaceId) || new Map();
-    }
+    // Get vectors from VectorService cache (single source of truth)
+    const vectorMap = this.vectorService.getAllCachedVectors(spaceId);
 
     if (vectorMap.size === 0) {
       console.warn('Vector cache is empty, cannot save index');
@@ -855,6 +834,7 @@ export class IndexManager {
 
   /**
    * Add vector and cache it for serialization
+   * Note: VectorService now handles caching internally, this method is kept for API compatibility
    */
   async addVectorWithCache(
     spaceId: string,
@@ -862,15 +842,8 @@ export class IndexManager {
     vector: number[],
     metadata?: any
   ): Promise<void> {
+    // VectorService.addVector now caches vectors internally
     await this.vectorService.addVector(spaceId, vectorId, vector, metadata);
-
-    // Cache vector for later serialization
-    let vectorMap = this.vectorCache.get(spaceId);
-    if (!vectorMap) {
-      vectorMap = new Map();
-      this.vectorCache.set(spaceId, vectorMap);
-    }
-    vectorMap.set(vectorId, vector);
   }
 
   /**
@@ -940,7 +913,7 @@ export class IndexManager {
     const key = `${this.options.storageKeyPrefix}${spaceId}`;
     this.storage.removeItem(key);
     this.indexStates.delete(spaceId);
-    this.vectorCache.delete(spaceId);
+    // Note: VectorService cache is managed by HnswWasmService LRU cache
     console.log(`Cleared index state for ${spaceId}`);
   }
 
@@ -988,7 +961,7 @@ export class IndexManager {
   } {
     return {
       indexState: this.getIndexState(spaceId),
-      vectorCacheSize: this.vectorCache.get(spaceId)?.size || 0,
+      vectorCacheSize: this.vectorService.getAllCachedVectors(spaceId).size,
       isAutoSaveEnabled: !!this.autoSaveTimer,
     };
   }
@@ -999,6 +972,6 @@ export class IndexManager {
   async cleanup(): Promise<void> {
     this.stopAutoSave();
     this.indexStates.clear();
-    this.vectorCache.clear();
+    // Note: VectorService cleanup is handled by its own cleanup() method
   }
 }
