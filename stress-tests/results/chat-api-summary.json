@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-01-05T03:51:17.963Z",
+  "test": "chat-api",
+  "scenario": "smoke",
+  "metrics": {
+    "requests": {
+      "total": 13,
+      "rate": 0.41351621913036213
+    },
+    "duration": {
+      "avg": 470.0633692307692,
+      "p95": 2562.655379999998,
+      "p99": 0
+    },
+    "errors": {
+      "rate": 0.9230769230769231,
+      "count": 12
+    },
+    "chat": {
+      "avgResponseTime": 470.53846153846155,
+      "p95ResponseTime": 2564.7999999999975,
+      "successRate": 0.07692307692307693
+    }
+  }
+}

@@ -1,10 +1,112 @@
 import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
 
-let readOnlyClients: Map<string, any> = new Map();
+// ============================================================================
+// LRU Cache with TTL for PDW Clients - Prevents Memory Leaks
+// ============================================================================
+
+interface CachedClient {
+  client: any;
+  lastAccessed: number;
+  createdAt: number;
+}
+
+// Configuration
+const MAX_CACHED_CLIENTS = 5; // Maximum number of clients to keep in memory
+const CLIENT_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
+const CLEANUP_INTERVAL_MS = 60 * 1000; // Check for expired clients every 1 minute
+
+let readOnlyClients: Map<string, CachedClient> = new Map();
 let SimplePDWClient: any = null;
 
 // Lock to prevent multiple concurrent rebuilds for the same user
 const rebuildInProgress: Map<string, Promise<void>> = new Map();
+
+// Cleanup interval reference
+let cleanupInterval: NodeJS.Timeout | null = null;
+
+/**
+ * Start the cleanup interval if not already running
+ */
+function startCleanupInterval() {
+  if (cleanupInterval) return;
+
+  cleanupInterval = setInterval(() => {
+    cleanupExpiredClients();
+  }, CLEANUP_INTERVAL_MS);
+
+  // Don't keep the process alive just for cleanup
+  if (cleanupInterval.unref) {
+    cleanupInterval.unref();
+  }
+}
+
+/**
+ * Clean up expired clients based on TTL
+ */
+function cleanupExpiredClients() {
+  const now = Date.now();
+  const expiredKeys: string[] = [];
+
+  for (const [key, cached] of readOnlyClients.entries()) {
+    if (now - cached.lastAccessed > CLIENT_TTL_MS) {
+      expiredKeys.push(key);
+    }
+  }
+
+  for (const key of expiredKeys) {
+    console.log(`🧹 [Cache] Removing expired client for: ${key.substring(0, 10)}...`);
+    disposeClient(key);
+  }
+
+  if (expiredKeys.length > 0) {
+    console.log(`🧹 [Cache] Cleaned up ${expiredKeys.length} expired clients. Active: ${readOnlyClients.size}`);
+  }
+}
+
+/**
+ * Evict least recently used client if cache is full
+ */
+function evictLRUIfNeeded() {
+  if (readOnlyClients.size < MAX_CACHED_CLIENTS) return;
+
+  let oldestKey: string | null = null;
+  let oldestTime = Infinity;
+
+  for (const [key, cached] of readOnlyClients.entries()) {
+    if (cached.lastAccessed < oldestTime) {
+      oldestTime = cached.lastAccessed;
+      oldestKey = key;
+    }
+  }
+
+  if (oldestKey) {
+    console.log(`🧹 [Cache] Evicting LRU client for: ${oldestKey.substring(0, 10)}...`);
+    disposeClient(oldestKey);
+  }
+}
+
+/**
+ * Dispose a client and remove from cache
+ */
+function disposeClient(walletAddress: string) {
+  const cached = readOnlyClients.get(walletAddress);
+  if (cached) {
+    try {
+      // Try to call dispose/cleanup if available on the client
+      if (typeof cached.client?.dispose === 'function') {
+        cached.client.dispose();
+      }
+      if (typeof cached.client?.cleanup === 'function') {
+        cached.client.cleanup();
+      }
+    } catch (e) {
+      // Ignore disposal errors
+    }
+    readOnlyClients.delete(walletAddress);
+  }
+  // Also clean up any pending rebuild promises
+  rebuildInProgress.delete(walletAddress);
+}
 
 /**
  * Get embedding configuration from environment
@@ -88,10 +190,19 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
     throw new Error('walletAddress is required');
   }
 
-  // Return cached client if exists
-  if (readOnlyClients.has(walletAddress)) {
-    return readOnlyClients.get(walletAddress);
+  // Start cleanup interval on first access
+  startCleanupInterval();
+
+  // Return cached client if exists and update last accessed time
+  const cached = readOnlyClients.get(walletAddress);
+  if (cached) {
+    cached.lastAccessed = Date.now();
+    console.log(`📦 [Cache] Hit for: ${walletAddress.substring(0, 10)}... (${readOnlyClients.size} cached)`);
+    return cached.client;
   }
+
+  // Evict LRU client if cache is full before creating new one
+  evictLRUIfNeeded();
 
   const ClientClass = await loadPDWClientClass();
   const network = (process.env.SUI_NETWORK as 'testnet' | 'mainnet') || 'testnet';
@@ -141,10 +252,16 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
     });
 
     await client.ready();
+    const now = Date.now();
     console.log(`✅ Read-only PDW Client initialized for: ${walletAddress}`);
 
-    // Cache the client
-    readOnlyClients.set(walletAddress, client);
+    // Cache the client with metadata
+    readOnlyClients.set(walletAddress, {
+      client,
+      lastAccessed: now,
+      createdAt: now,
+    });
+    console.log(`📦 [Cache] Added client for: ${walletAddress.substring(0, 10)}... (${readOnlyClients.size}/${MAX_CACHED_CLIENTS} cached)`);
 
     // Check and rebuild index in background
     ensureIndexExists(walletAddress);
@@ -215,12 +332,31 @@ async function ensureIndexExists(userAddress: string): Promise<void> {
  * Clear cached client for a wallet address
  */
 export function clearReadOnlyClient(walletAddress: string) {
-  readOnlyClients.delete(walletAddress);
+  disposeClient(walletAddress);
 }
 
 /**
  * Clear all cached clients
  */
 export function clearAllReadOnlyClients() {
-  readOnlyClients.clear();
+  console.log(`🧹 [Cache] Clearing all ${readOnlyClients.size} cached clients`);
+  for (const key of readOnlyClients.keys()) {
+    disposeClient(key);
+  }
+}
+
+/**
+ * Get cache statistics (for debugging)
+ */
+export function getCacheStats() {
+  return {
+    size: readOnlyClients.size,
+    maxSize: MAX_CACHED_CLIENTS,
+    ttlMs: CLIENT_TTL_MS,
+    clients: Array.from(readOnlyClients.entries()).map(([key, cached]) => ({
+      address: key.substring(0, 10) + '...',
+      age: Date.now() - cached.createdAt,
+      lastAccessed: Date.now() - cached.lastAccessed,
+    })),
+  };
 }

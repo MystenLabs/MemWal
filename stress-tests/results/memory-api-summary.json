@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-01-05T03:24:05.857Z",
+  "test": "memory-api",
+  "scenario": "smoke",
+  "metrics": {
+    "requests": {
+      "total": 6,
+      "rate": 0.17043888783432984
+    },
+    "duration": {
+      "avg": 4155.7758,
+      "p95": 8077.9678,
+      "p99": 0
+    },
+    "errors": {
+      "rate": 0,
+      "count": 0
+    },
+    "memory": {
+      "avgPrepareTime": 5899,
+      "p95PrepareTime": 8746.5,
+      "successRate": 1
+    }
+  }
+}

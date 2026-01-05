@@ -33,7 +33,12 @@ import type { PipelineConfig, PipelineManagerConfig } from './pipeline';
 // ==================== SERVICES ====================
 // Business logic services
 export { StorageService } from './services/StorageService';
-export { EmbeddingService } from './services/EmbeddingService';
+export {
+  EmbeddingService,
+  getSharedEmbeddingService,
+  clearSharedEmbeddingServices,
+  getSharedEmbeddingStats,
+} from './services/EmbeddingService';
 export { GeminiAIService } from './services/GeminiAIService';
 export { QueryService } from './services/QueryService';
 export { ClassifierService } from './services/ClassifierService';
