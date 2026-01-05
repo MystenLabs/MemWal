@@ -75,7 +75,7 @@ export class BrowserHnswIndexService {
   ) {
     // Default HNSW configuration
     this.indexConfig = {
-      dimension: indexConfig.dimension || 3072,
+      dimension: indexConfig.dimension || 768,
       maxElements: indexConfig.maxElements || 10000,
       efConstruction: indexConfig.efConstruction || 200,
       m: indexConfig.m || 16,

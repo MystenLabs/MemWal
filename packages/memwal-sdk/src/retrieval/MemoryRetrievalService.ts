@@ -202,7 +202,7 @@ export class MemoryRetrievalService {
     this.storageManager = config?.storageManager ?? new StorageManager();
     this.vectorManager = config?.vectorManager ?? new VectorManager({
       embedding: { apiKey: '' },
-      index: { dimension: 3072 },
+      index: { dimension: 768 },
       batch: { maxBatchSize: 10 }
     });
     this.graphManager = config?.graphManager ?? new KnowledgeGraphManager();

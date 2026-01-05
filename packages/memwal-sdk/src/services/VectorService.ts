@@ -115,7 +115,7 @@ export class VectorService {
     // Create own HNSW service only if not provided externally
     this.hnswServicePromise = createHnswService({
       indexConfig: {
-        dimension: this.config.index?.dimension || 3072,
+        dimension: this.config.index?.dimension || 768,
         maxElements: this.config.index?.maxElements || 10000,
         efConstruction: this.config.index?.efConstruction || 200,
         m: this.config.index?.m || 16

@@ -203,6 +203,15 @@ export interface HnswServiceConfig {
   indexDirectory?: string;
   /** Walrus backup configuration (optional) */
   walrusBackup?: WalrusBackupConfig;
+  /** Memory management configuration for LRU cache */
+  memoryConfig?: {
+    /** Maximum number of cached indexes (default: 5) */
+    maxCachedIndexes?: number;
+    /** TTL for cached indexes in ms (default: 10 minutes) */
+    indexTtlMs?: number;
+    /** Maximum memory in MB (default: 512MB) */
+    maxMemoryMB?: number;
+  };
 }
 
 // ==================== Environment Detection ====================

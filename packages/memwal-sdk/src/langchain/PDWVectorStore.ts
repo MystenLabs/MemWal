@@ -159,7 +159,7 @@ export class PDWVectorStore extends VectorStore {
       this.storageService,
       {
         maxElements: this.config.maxElements || 10000,
-        dimension: this.config.embeddingDimensions || 3072,
+        dimension: this.config.embeddingDimensions || 768,
         efConstruction: this.config.efConstruction || 200,
         m: this.config.m || 16,
       }

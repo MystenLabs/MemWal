@@ -193,7 +193,7 @@ export class ClientMemoryManager {
 
       const service = await createHnswService({
         indexConfig: {
-          dimension: 3072,
+          dimension: 768,
           maxElements: 10000,
           m: 16,
           efConstruction: 200

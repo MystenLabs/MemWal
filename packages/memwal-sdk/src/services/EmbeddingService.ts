@@ -175,7 +175,7 @@ export class EmbeddingService {
       // New behavior: Direct EmbeddingModel from ai-sdk
       this.embeddingModel = config.model;
       this.modelName = 'custom';
-      this.dimensions = config.dimensions || 3072;
+      this.dimensions = config.dimensions || 768;
       this.provider = 'custom';
       console.log('✅ EmbeddingService initialized with custom ai-sdk model');
       return;

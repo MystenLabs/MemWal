@@ -64,10 +64,10 @@ export class IndexNamespace {
    * This method is provided for explicit initialization or VectorService compatibility.
    *
    * @param spaceId - Index space identifier (e.g., userAddress)
-   * @param dimension - Vector dimension (default: 3072)
+   * @param dimension - Vector dimension (default: 768)
    * @param config - Optional HNSW config (used by VectorService)
    */
-  async create(spaceId: string, dimension: number = 3072, config?: IndexConfig): Promise<void> {
+  async create(spaceId: string, dimension: number = 768, config?: IndexConfig): Promise<void> {
     const { type, service } = this.getService();
 
     if (type === 'memoryIndex') {
@@ -167,7 +167,7 @@ export class IndexNamespace {
       // MemoryIndexService.getIndexStats returns: { totalMemories, categoryCounts, indexSize, ... }
       return {
         totalVectors: stats.totalMemories || 0,
-        dimension: 3072, // Default dimension (set at service construction)
+        dimension: 768, // Default dimension (set at service construction)
         spaceType: 'cosine',
         maxElements: 10000, // Default max (set at service construction)
         currentCount: stats.indexSize || stats.totalMemories || 0
@@ -180,7 +180,7 @@ export class IndexNamespace {
       const currentCount = entry.index.getCurrentCount?.() || 0;
       return {
         totalVectors: currentCount,
-        dimension: 3072,
+        dimension: 768,
         spaceType: 'cosine',
         maxElements: 10000,
         currentCount

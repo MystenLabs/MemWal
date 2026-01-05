@@ -22,6 +22,12 @@ import type {
   IHnswBatchStats,
   WalrusBackupConfig
 } from './IHnswService';
+import { LRUCache, estimateIndexCacheSize } from '../utils/LRUCache';
+
+// Memory management constants
+const DEFAULT_MAX_CACHED_INDEXES = 5;
+const DEFAULT_INDEX_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const DEFAULT_MAX_MEMORY_MB = 512;
 
 // Dynamic import types for hnswlib-node
 type HierarchicalNSW = any;
@@ -43,7 +49,7 @@ interface IndexCacheEntry {
  */
 export class NodeHnswService implements IHnswService {
   private hnswlib: any = null;
-  private readonly indexCache = new Map<string, IndexCacheEntry>();
+  private readonly indexCache: LRUCache<IndexCacheEntry>;
   private readonly indexConfig: Required<IHnswIndexConfig>;
   private readonly indexDirectory: string;
   private readonly walrusConfig?: WalrusBackupConfig;
@@ -51,6 +57,11 @@ export class NodeHnswService implements IHnswService {
   private initPromise: Promise<void> | null = null;
   private _isInitialized = false;
   private walrusClient: ReturnType<typeof this.createWalrusClient> | null = null;
+
+  // Memory management config
+  private readonly maxCachedIndexes: number;
+  private readonly indexTtlMs: number;
+  private readonly maxMemoryMB: number;
 
   /**
    * Create Walrus client using @mysten/walrus SDK
@@ -72,7 +83,7 @@ export class NodeHnswService implements IHnswService {
 
   constructor(config: HnswServiceConfig = {}) {
     this.indexConfig = {
-      dimension: config.indexConfig?.dimension || 3072,
+      dimension: config.indexConfig?.dimension || 768,
       maxElements: config.indexConfig?.maxElements || 10000,
       efConstruction: config.indexConfig?.efConstruction || 200,
       m: config.indexConfig?.m || 16,
@@ -83,10 +94,84 @@ export class NodeHnswService implements IHnswService {
     this.indexDirectory = config.indexDirectory || './.pdw-indexes';
     this.walrusConfig = config.walrusBackup;
 
+    // Memory management configuration
+    this.maxCachedIndexes = config.memoryConfig?.maxCachedIndexes || DEFAULT_MAX_CACHED_INDEXES;
+    this.indexTtlMs = config.memoryConfig?.indexTtlMs || DEFAULT_INDEX_TTL_MS;
+    this.maxMemoryMB = config.memoryConfig?.maxMemoryMB || DEFAULT_MAX_MEMORY_MB;
+
+    // Initialize LRU cache with eviction callback
+    this.indexCache = new LRUCache<IndexCacheEntry>({
+      maxSize: this.maxCachedIndexes,
+      ttlMs: this.indexTtlMs,
+      maxMemoryBytes: this.maxMemoryMB * 1024 * 1024,
+      sizeEstimator: (entry) => estimateIndexCacheSize({
+        vectors: new Map(), // Vectors are stored in the native index, not JS
+        metadata: entry.metadata,
+        pendingVectors: entry.pendingVectors
+      }),
+      onEvict: (userAddress, entry, reason) => {
+        console.log(`[NodeHnswService] Evicting index for ${userAddress.slice(0, 10)}... (reason: ${reason})`);
+        // Save dirty index before eviction
+        if (entry.isDirty) {
+          this.saveIndexSync(userAddress, entry).catch(err => {
+            console.error(`[NodeHnswService] Failed to save evicted index: ${err}`);
+          });
+        }
+      }
+    });
+
+    console.log(`[NodeHnswService] Initialized with LRU cache: maxIndexes=${this.maxCachedIndexes}, ttl=${this.indexTtlMs}ms, maxMemory=${this.maxMemoryMB}MB`);
+
     // Initialize Walrus SDK client for cloud backup
     if (this.walrusConfig?.enabled) {
       this.walrusClient = this.createWalrusClient('testnet');
     }
+  }
+
+  /**
+   * Save index synchronously (for eviction callback)
+   */
+  private async saveIndexSync(userAddress: string, entry: IndexCacheEntry): Promise<void> {
+    try {
+      const indexPath = this.getIndexPath(userAddress);
+      entry.index.writeIndex(indexPath);
+
+      const fs = await import('fs/promises');
+      const metadataPath = indexPath + '.meta.json';
+      const metadataObj: Record<number, any> = {};
+      for (const [k, v] of entry.metadata) {
+        metadataObj[k] = v;
+      }
+
+      await fs.writeFile(metadataPath, JSON.stringify({
+        version: entry.version,
+        dimensions: entry.dimensions,
+        metadata: metadataObj,
+        walrusBlobId: entry.walrusBlobId,
+      }));
+
+      console.log(`[NodeHnswService] Saved evicted index for ${userAddress.slice(0, 10)}...`);
+    } catch (error) {
+      console.error(`[NodeHnswService] Error saving evicted index:`, error);
+    }
+  }
+
+  /**
+   * Get cache statistics for monitoring
+   */
+  getCacheStats(): {
+    totalUsers: number;
+    maxCachedIndexes: number;
+    memoryUsageMB: number;
+    maxMemoryMB: number;
+  } {
+    const stats = this.indexCache.getStats();
+    return {
+      totalUsers: stats.size,
+      maxCachedIndexes: this.maxCachedIndexes,
+      memoryUsageMB: stats.memoryBytes / (1024 * 1024),
+      maxMemoryMB: this.maxMemoryMB,
+    };
   }
 
   /**
@@ -145,7 +230,7 @@ export class NodeHnswService implements IHnswService {
   }
 
   private async processPendingBatches(): Promise<void> {
-    for (const [userAddress, entry] of this.indexCache) {
+    for (const [userAddress, entry] of this.indexCache.entries()) {
       if (entry.isDirty && entry.pendingVectors.size > 0) {
         try {
           await this.flushBatch(userAddress);
@@ -728,7 +813,8 @@ export class NodeHnswService implements IHnswService {
       this.batchProcessor = undefined;
     }
 
-    this.indexCache.clear();
+    // Destroy LRU cache (triggers cleanup and stops internal timers)
+    this.indexCache.destroy();
     this._isInitialized = false;
     console.log('[NodeHnswService] Service destroyed');
   }
