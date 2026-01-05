@@ -704,3 +704,68 @@ export class EmbeddingService {
 }
 
 export default EmbeddingService;
+
+// ==================== Singleton Pattern ====================
+
+/**
+ * Generate config key for singleton cache
+ */
+function getConfigKey(config: EmbeddingConfig): string {
+  const provider = config.provider || 'google';
+  const modelName = typeof config.model === 'string'
+    ? config.model
+    : (config.modelName || 'default');
+  const dimensions = config.dimensions || 'default';
+  return `${provider}:${modelName}:${dimensions}`;
+}
+
+/** Singleton cache */
+const sharedInstances = new Map<string, EmbeddingService>();
+
+/**
+ * Get or create a shared EmbeddingService instance (Singleton)
+ *
+ * All clients with same provider/model/dimensions share one instance.
+ * Reduces memory usage and connection overhead.
+ *
+ * @example
+ * ```typescript
+ * // Instead of: new EmbeddingService({ apiKey, modelName })
+ * const embedding = getSharedEmbeddingService({ apiKey, modelName });
+ * ```
+ */
+export function getSharedEmbeddingService(config: EmbeddingConfig): EmbeddingService {
+  const key = getConfigKey(config);
+
+  let instance = sharedInstances.get(key);
+  if (!instance) {
+    console.log(`🔧 [Singleton] Creating shared EmbeddingService: ${key}`);
+    instance = new EmbeddingService(config);
+    sharedInstances.set(key, instance);
+  }
+
+  return instance;
+}
+
+/**
+ * Clear all shared instances (for testing)
+ */
+export function clearSharedEmbeddingServices(): void {
+  sharedInstances.clear();
+}
+
+/**
+ * Get singleton stats
+ */
+export function getSharedEmbeddingStats(): {
+  instanceCount: number;
+  instances: Array<{ key: string; stats: ReturnType<EmbeddingService['getStats']> }>;
+} {
+  return {
+    instanceCount: sharedInstances.size,
+    instances: Array.from(sharedInstances.entries()).map(([key, svc]) => ({
+      key,
+      stats: svc.getStats(),
+    })),
+  };
+}

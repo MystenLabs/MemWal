@@ -31,7 +31,7 @@ import type { Keypair } from '@mysten/sui/cryptography';
 import type { UnifiedSigner, WalletAdapter } from './signers';
 import { KeypairSigner, WalletAdapterSigner } from './signers';
 import { StorageService } from '../services/StorageService';
-import { EmbeddingService } from '../services/EmbeddingService';
+import { EmbeddingService, getSharedEmbeddingService } from '../services/EmbeddingService';
 import { MemoryService } from '../services/MemoryService';
 import { QueryService } from '../services/QueryService';
 import { ClassifierService } from '../services/ClassifierService';
@@ -458,17 +458,19 @@ export class SimplePDWClient {
       useUploadRelay: true
     });
 
-    // 2. Embedding Service (if API key provided)
+    // 2. Embedding Service (if API key provided) - uses singleton pattern
     let embedding: EmbeddingService | undefined;
     if (embeddingConfig.apiKey) {
-      embedding = new EmbeddingService({
+      // Use singleton to share EmbeddingService across all clients
+      // Reduces memory usage and connection overhead for multi-user scenarios
+      embedding = getSharedEmbeddingService({
         provider: embeddingConfig.provider,
         apiKey: embeddingConfig.apiKey,
         modelName: embeddingConfig.modelName,
         dimensions: embeddingConfig.dimensions
       });
 
-      console.log(`✅ Embedding Service initialized: ${embeddingConfig.provider}/${embeddingConfig.modelName} (${embeddingConfig.dimensions}d)`);
+      console.log(`✅ Embedding Service (singleton): ${embeddingConfig.provider}/${embeddingConfig.modelName} (${embeddingConfig.dimensions}d)`);
 
       // Connect to storage for search
       storage.initializeSearch(embedding);
