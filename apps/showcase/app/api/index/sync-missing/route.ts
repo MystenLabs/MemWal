@@ -19,8 +19,77 @@ interface MemoryContent {
     category: string;
     importance: number;
     topic: string;
+    memoryId?: string;
   };
   timestamp: number;
+}
+
+/**
+ * Find a matching file in a Quilt using multiple strategies
+ * Mirrors the logic in SDK's QuiltBatchManager.findMemoryInQuilt()
+ *
+ * Strategies (in order):
+ * 1. Match by tags['memory_id'] === vectorId
+ * 2. Match by identifier === `memory-${vectorId}.json`
+ * 3. Match by JSON metadata.memoryId === vectorId
+ * 4. Fallback to index-based matching
+ */
+async function findMatchingFile(
+  files: WalrusFile[],
+  vectorId: number,
+  fallbackIndex: number
+): Promise<{ file: WalrusFile | undefined; matchStrategy: string }> {
+  let matchedFile: WalrusFile | undefined;
+  let matchStrategy = '';
+
+  // Strategy 1: Match by tags['memory_id']
+  for (const f of files) {
+    const tags = await f.getTags();
+    if (tags?.['memory_id'] === String(vectorId)) {
+      matchedFile = f;
+      const identifier = await f.getIdentifier();
+      matchStrategy = `memory_id tag: ${tags['memory_id']} (${identifier})`;
+      break;
+    }
+  }
+
+  // Strategy 2: Match by identifier pattern "memory-{vectorId}.json"
+  if (!matchedFile) {
+    for (const f of files) {
+      const identifier = await f.getIdentifier();
+      if (identifier === `memory-${vectorId}.json`) {
+        matchedFile = f;
+        matchStrategy = `identifier: ${identifier}`;
+        break;
+      }
+    }
+  }
+
+  // Strategy 3: Parse JSON to find matching metadata.memoryId
+  if (!matchedFile) {
+    for (const f of files) {
+      try {
+        const json = await f.json() as MemoryContent;
+        if (json?.metadata?.memoryId === String(vectorId)) {
+          matchedFile = f;
+          const identifier = await f.getIdentifier();
+          matchStrategy = `JSON metadata.memoryId: ${json.metadata.memoryId} (${identifier})`;
+          break;
+        }
+      } catch {
+        // Not valid JSON, continue
+      }
+    }
+  }
+
+  // Strategy 4: Fallback to index-based matching
+  if (!matchedFile && fallbackIndex < files.length) {
+    matchedFile = files[fallbackIndex];
+    const identifier = await matchedFile.getIdentifier();
+    matchStrategy = `index fallback (${fallbackIndex}): ${identifier || 'no identifier'}`;
+  }
+
+  return { file: matchedFile, matchStrategy };
 }
 
 /**
@@ -288,15 +357,6 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
         quiltFileCache.set(baseQuiltId, files);
       }
 
-      // Build a map of file identifier -> file for matching Quilt files
-      const filesByIdentifier = new Map<string, WalrusFile>();
-      for (const file of files) {
-        const identifier = await file.getIdentifier();
-        if (identifier) {
-          filesByIdentifier.set(identifier, file);
-        }
-      }
-
       // For each memory in this Quilt/blob
       for (let i = 0; i < memoriesInQuilt.length; i++) {
         const memory = memoriesInQuilt[i];
@@ -310,25 +370,23 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
           let metadata: { category?: string; importance?: number; topic?: string } = {};
           let timestamp = Date.now();
 
-          // Determine which file to use
-          // For Quilt with multiple files: try to match by index (files are ordered same as batch upload)
-          // For single blob: use the only file
+          // Find matching file using helper function (mirrors SDK's QuiltBatchManager.findMemoryInQuilt)
           let file: WalrusFile | undefined;
 
           if (files.length === 1) {
             // Single file - use it directly
             file = files[0];
           } else if (files.length > 1) {
-            // Multiple files in Quilt - match by index
-            // Files are ordered same as memories in batch upload
-            file = files[i];
-            if (!file && i < files.length) {
-              file = files[i];
+            // Multiple files in Quilt - use matching strategies
+            const { file: matchedFile, matchStrategy } = await findMatchingFile(files, memory.vectorId, i);
+            file = matchedFile;
+            if (matchStrategy) {
+              console.log(`         🎯 Matched by ${matchStrategy}`);
             }
           }
 
           if (!file) {
-            throw new Error(`No file found for memory index ${i} (Quilt has ${files.length} files)`);
+            throw new Error(`No file found for memory vectorId=${memory.vectorId} (Quilt has ${files.length} files)`);
           }
 
           // Get file content

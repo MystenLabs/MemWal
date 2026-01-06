@@ -848,6 +848,116 @@ export class QuiltBatchManager {
   }
 
   /**
+   * Find a specific memory in a Quilt using multiple matching strategies
+   *
+   * Strategies (in order of priority):
+   * 1. Match by tags['memory_id'] === memoryId
+   * 2. Match by identifier === `memory-${memoryId}.json`
+   * 3. Match by JSON metadata.memoryId === memoryId
+   * 4. Fallback to index-based matching (if fileIndex provided)
+   *
+   * @param quiltId - The Quilt blob ID
+   * @param memoryId - The memory ID (usually vectorId) to find
+   * @param fileIndex - Optional fallback index if other strategies fail
+   * @returns The matching memory package result, or null if not found
+   */
+  async findMemoryInQuilt(
+    quiltId: string,
+    memoryId: string,
+    fileIndex?: number
+  ): Promise<QuiltMemoryRetrieveResult | null> {
+    const startTime = performance.now();
+
+    try {
+      console.log(`🔍 Finding memory "${memoryId}" in Quilt ${quiltId.substring(0, 20)}...`);
+
+      const files = await this.getQuiltFiles(quiltId);
+      let matchedFile: WalrusFile | undefined;
+      let matchStrategy: string = '';
+
+      // Strategy 1: Match by tags['memory_id']
+      for (const f of files) {
+        const tags = await f.getTags();
+        if (tags?.['memory_id'] === memoryId) {
+          matchedFile = f;
+          matchStrategy = 'memory_id tag';
+          break;
+        }
+      }
+
+      // Strategy 2: Match by identifier pattern "memory-{memoryId}.json"
+      if (!matchedFile) {
+        for (const f of files) {
+          const identifier = await f.getIdentifier();
+          if (identifier === `memory-${memoryId}.json`) {
+            matchedFile = f;
+            matchStrategy = 'identifier pattern';
+            break;
+          }
+        }
+      }
+
+      // Strategy 3: Parse JSON to find matching metadata.memoryId
+      if (!matchedFile) {
+        for (const f of files) {
+          try {
+            const json = await f.json() as QuiltMemoryPackage;
+            if (json?.metadata?.memoryId === memoryId) {
+              matchedFile = f;
+              matchStrategy = 'JSON metadata.memoryId';
+              break;
+            }
+          } catch {
+            // Not valid JSON, continue
+          }
+        }
+      }
+
+      // Strategy 4: Fallback to index-based matching
+      if (!matchedFile && fileIndex !== undefined && fileIndex < files.length) {
+        matchedFile = files[fileIndex];
+        matchStrategy = `index fallback (${fileIndex})`;
+      }
+
+      if (!matchedFile) {
+        console.log(`❌ Memory "${memoryId}" not found in Quilt (${files.length} files)`);
+        return null;
+      }
+
+      const identifier = await matchedFile.getIdentifier() || 'unknown';
+      const tags = await matchedFile.getTags();
+
+      let memoryPackage: QuiltMemoryPackage;
+      try {
+        memoryPackage = await matchedFile.json() as QuiltMemoryPackage;
+      } catch (parseError) {
+        // Try recovery for truncated JSON
+        const bytes = await matchedFile.bytes();
+        const recovered = this.tryRecoverTruncatedPackage(bytes);
+        if (recovered) {
+          memoryPackage = recovered;
+        } else {
+          throw parseError;
+        }
+      }
+
+      const retrievalTimeMs = performance.now() - startTime;
+      console.log(`✅ Found memory "${memoryId}" via ${matchStrategy} (${identifier}) in ${retrievalTimeMs.toFixed(1)}ms`);
+
+      return {
+        identifier,
+        memoryPackage,
+        tags,
+        retrievalTimeMs
+      };
+
+    } catch (error) {
+      console.error(`❌ Failed to find memory in Quilt:`, error);
+      throw new Error(`Failed to find memory "${memoryId}" in Quilt ${quiltId}: ${error}`);
+    }
+  }
+
+  /**
    * Get memory content from a Quilt file
    *
    * Handles both encrypted and unencrypted content:

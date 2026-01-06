@@ -426,8 +426,20 @@ export class NodeHnswService implements IHnswService {
 
   async flushBatch(userAddress: string): Promise<void> {
     const entry = this.indexCache.get(userAddress);
-    if (!entry || entry.pendingVectors.size === 0) {
-      console.log(`[NodeHnswService] flushBatch: No pending vectors for ${userAddress.slice(0, 10)}..., skipping`);
+    if (!entry) {
+      console.log(`[NodeHnswService] flushBatch: No cache entry for ${userAddress.slice(0, 10)}..., skipping`);
+      return;
+    }
+
+    // Even if no pending vectors, we may need to save metadata that was added
+    if (entry.pendingVectors.size === 0) {
+      // Still save index to persist any metadata that was added
+      if (entry.isDirty || entry.metadata.size > 0) {
+        console.log(`[NodeHnswService] flushBatch: No pending vectors but isDirty=${entry.isDirty}, metadata.size=${entry.metadata.size}, saving index...`);
+        await this.saveIndex(userAddress);
+      } else {
+        console.log(`[NodeHnswService] flushBatch: No pending vectors and nothing to save for ${userAddress.slice(0, 10)}...`);
+      }
       return;
     }
 
