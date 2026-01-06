@@ -30,7 +30,7 @@ let instanceCount = 0;
  * @example
  * ```typescript
  * const hnswService = await createHnswService({
- *   indexConfig: { dimension: 768 }
+ *   indexConfig: { dimension: 3072 }
  * });
  *
  * await hnswService.addVector(userAddress, vectorId, embedding);

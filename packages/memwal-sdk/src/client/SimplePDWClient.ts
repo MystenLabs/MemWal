@@ -130,7 +130,7 @@ export interface SimplePDWConfig {
     modelName?: string;
     /**
      * Embedding dimensions
-     * @default 768 (for google/openrouter), 1536 (for openai)
+     * @default 3072 (for google/openrouter), 1536 (for openai)
      */
     dimensions?: number;
   };

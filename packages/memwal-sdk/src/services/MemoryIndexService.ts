@@ -122,7 +122,7 @@ export class MemoryIndexService {
     }
 
     console.log(`   Max elements: ${options.maxElements || 10000}`);
-    console.log(`   Embedding dimension: ${options.dimension || 768}`);
+    console.log(`   Embedding dimension: ${options.dimension || 3072}`);
     console.log(`   HNSW parameters: M=${options.m || 16}, efConstruction=${options.efConstruction || 200}`);
   }
 
@@ -133,7 +133,7 @@ export class MemoryIndexService {
     try {
       const service = await createHnswService({
         indexConfig: {
-          dimension: this.options.dimension || 768,
+          dimension: this.options.dimension || 3072,
           maxElements: this.options.maxElements || 10000,
           efConstruction: this.options.efConstruction || 200,
           m: this.options.m || 16

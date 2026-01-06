@@ -77,7 +77,7 @@ export class VectorManager {
     try {
       const service = await createHnswService({
         indexConfig: {
-          dimension: this.config.index?.dimension || 768,
+          dimension: this.config.index?.dimension || 3072,
           maxElements: this.config.index?.maxElements || 10000,
           efConstruction: this.config.index?.efConstruction || 200,
           m: this.config.index?.m || 16

@@ -245,7 +245,7 @@ export class IndexManager {
           lastSyncTimestamp: 0, // Will sync all memories
           vectorCount: 0,
           version: onChainVersion,
-          dimension: 768,
+          dimension: 3072,
           onChainIndexId: onChainIndex.id,
         };
       }
@@ -472,7 +472,7 @@ export class IndexManager {
     this.options.onProgress('rebuilding', 20, `Found ${memories.length} memories, rebuilding index...`);
 
     // Determine dimension from first memory with embedding
-    let dimension = 768; // Default
+    let dimension = 3072; // Default
 
     // Create index
     await this.vectorService.createIndex(spaceId, dimension, {
@@ -632,7 +632,7 @@ export class IndexManager {
       formatVersion: '1.0',
       spaceId,
       version: (currentState?.version || 0) + 1,
-      dimension: currentState?.dimension || 768,
+      dimension: currentState?.dimension || 3072,
       timestamp: Date.now(),
       vectors: allVectors
         .filter(({ vectorId }) => vectorMap.has(vectorId))
@@ -724,7 +724,7 @@ export class IndexManager {
       formatVersion: '1.0',
       spaceId,
       version: newVersion,
-      dimension: currentState?.dimension || 768,
+      dimension: currentState?.dimension || 3072,
       timestamp: Date.now(),
       vectors: allVectors
         .filter(({ vectorId }) => vectorMap.has(vectorId))

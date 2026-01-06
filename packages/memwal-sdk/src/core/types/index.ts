@@ -232,7 +232,7 @@ export interface VectorEmbedding {
 
 export interface EmbeddingOptions {
   model?: string;
-  dimension?: number; // Default 768 for Gemini
+  dimension?: number; // Default 3072 for Gemini
   normalize?: boolean;
   batchSize?: number; // For batch processing
 }

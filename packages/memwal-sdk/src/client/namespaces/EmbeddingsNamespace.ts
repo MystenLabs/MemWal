@@ -24,7 +24,7 @@ export class EmbeddingsNamespace {
    *
    * @param text - Text to embed
    * @param options - Embedding options
-   * @returns Embedding vector (768 dimensions for Gemini)
+   * @returns Embedding vector (3072 dimensions for Gemini)
    */
   async generate(text: string, options?: { type?: 'query' | 'document' }): Promise<number[]> {
     if (!this.services.embedding) {

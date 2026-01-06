@@ -76,12 +76,12 @@ export class AINamespace {
    *
    * @param text - Text to embed
    * @param options - Embedding options
-   * @returns Embedding vector (768 dimensions for Gemini)
+   * @returns Embedding vector (3072 dimensions for Gemini)
    *
    * @example
    * ```typescript
    * const vector = await pdw.ai.embed('My favorite color is blue');
-   * console.log(vector.length); // 768
+   * console.log(vector.length); // 3072
    * ```
    */
   async embed(text: string, options?: EmbedOptions): Promise<number[]> {

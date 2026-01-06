@@ -83,7 +83,7 @@ export interface EmbeddingConfig {
 
   /**
    * Embedding dimensions (optional, provider-dependent)
-   * - Google: Up to 768
+   * - Google: Up to 3072
    * - OpenAI: 256, 512, 1024, 1536, 3072 (depending on model)
    * - OpenRouter: Depends on the underlying model
    * - Cohere: Model-specific
@@ -175,7 +175,7 @@ export class EmbeddingService {
       // New behavior: Direct EmbeddingModel from ai-sdk
       this.embeddingModel = config.model;
       this.modelName = 'custom';
-      this.dimensions = config.dimensions || 768;
+      this.dimensions = config.dimensions || 3072;
       this.provider = 'custom';
       console.log('✅ EmbeddingService initialized with custom ai-sdk model');
       return;

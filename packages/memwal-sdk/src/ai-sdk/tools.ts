@@ -17,7 +17,7 @@
  *     sui: { network: 'testnet', packageId: '...' },
  *     signer,
  *     userAddress,
- *     dimensions: 768 // Gemini embedding dimensions
+ *     dimensions: 3072 // Gemini embedding dimensions
  *   }
  * });
  *
@@ -330,7 +330,7 @@ class PDWToolsManager {
  *     sui: { network: 'testnet', packageId: process.env.PACKAGE_ID! },
  *     signer: keypair,
  *     userAddress: keypair.toSuiAddress(),
- *     dimensions: 768 // Gemini text-embedding-004 dimensions
+ *     dimensions: 3072 // Gemini text-embedding-004 dimensions
  *   }
  * });
  *

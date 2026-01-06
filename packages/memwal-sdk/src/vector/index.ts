@@ -8,7 +8,7 @@
  * ```typescript
  * // Auto-detect environment and create appropriate service
  * import { createHnswService } from 'personal-data-wallet-sdk/vector';
- * const service = await createHnswService({ indexConfig: { dimension: 768 } });
+ * const service = await createHnswService({ indexConfig: { dimension: 3072 } });
  * ```
  */
 

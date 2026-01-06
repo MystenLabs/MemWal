@@ -100,12 +100,12 @@ export async function rebuildIndex(options: RebuildIndexOptions): Promise<Rebuil
     const embeddingService = new EmbeddingService({
       apiKey: geminiApiKey,
       model: 'text-embedding-004',
-      dimensions: 768
+      dimensions: 3072
     });
 
     const hnswService = new BrowserHnswIndexService(
       {
-        dimension: 768,
+        dimension: 3072,
         maxElements: 10000,
         m: 16,
         efConstruction: 200

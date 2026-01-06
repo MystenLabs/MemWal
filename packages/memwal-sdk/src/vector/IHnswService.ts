@@ -14,7 +14,7 @@
  * Configuration for HNSW index
  */
 export interface IHnswIndexConfig {
-  /** Vector dimension (e.g., 768 for text-embedding-004) */
+  /** Vector dimension (e.g., 3072 for text-embedding-004) */
   dimension: number;
   /** Maximum number of elements in the index */
   maxElements?: number;

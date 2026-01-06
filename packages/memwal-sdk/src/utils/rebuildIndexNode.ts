@@ -123,7 +123,7 @@ export async function rebuildIndexNode(options: RebuildIndexNodeOptions): Promis
     const hnswService = new NodeHnswService({
       indexDirectory,
       indexConfig: {
-        dimension: 768,
+        dimension: 3072,
         maxElements: 10000,
         m: 16,
         efConstruction: 200

@@ -71,7 +71,7 @@ export class PDWEmbeddings extends Embeddings {
     }
 
     this.model = params.model || 'text-embedding-004';
-    this.dimensions = params.dimensions || 768;
+    this.dimensions = params.dimensions || 3072;
 
     // Initialize PDW's EmbeddingService
     const config: EmbeddingConfig = {
