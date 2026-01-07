@@ -102,7 +102,7 @@ export class GraphService {
       maxHops: config.maxHops || 3,
       enableEmbeddings: config.enableEmbeddings !== false,
       deduplicationThreshold: config.deduplicationThreshold || 0.85,
-      geminiApiKey: config.geminiApiKey || process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || '',
+      geminiApiKey: config.geminiApiKey || process.env.OPENROUTER_API_KEY || process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || '',
       geminiConfig: config.geminiConfig || {},
       useMockAI: config.useMockAI || false
     };

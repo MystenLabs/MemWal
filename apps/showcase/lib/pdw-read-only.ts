@@ -2,6 +2,7 @@ import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
 
 // ============================================================================
 // LRU Cache with TTL for PDW Clients - Prevents Memory Leaks
+// Uses globalThis for cross-route caching in Next.js
 // ============================================================================
 
 interface CachedClient {
@@ -10,34 +11,74 @@ interface CachedClient {
   createdAt: number;
 }
 
+interface GlobalPDWCache {
+  readOnlyClients: Map<string, CachedClient>;
+  SimplePDWClient: any;
+  rebuildInProgress: Map<string, Promise<void>>;
+  initializationInProgress: Map<string, Promise<any>>;
+  cleanupInterval: NodeJS.Timeout | null;
+}
+
 // Configuration
 const MAX_CACHED_CLIENTS = 5; // Maximum number of clients to keep in memory
 const CLIENT_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
 const CLEANUP_INTERVAL_MS = 60 * 1000; // Check for expired clients every 1 minute
 
-let readOnlyClients: Map<string, CachedClient> = new Map();
-let SimplePDWClient: any = null;
+// Use globalThis to share cache across all Next.js API routes
+// This prevents module isolation from creating separate caches per route
+const GLOBAL_CACHE_KEY = '__PDW_CLIENT_CACHE__';
 
-// Lock to prevent multiple concurrent rebuilds for the same user
-const rebuildInProgress: Map<string, Promise<void>> = new Map();
+function getGlobalCache(): GlobalPDWCache {
+  if (!(globalThis as any)[GLOBAL_CACHE_KEY]) {
+    (globalThis as any)[GLOBAL_CACHE_KEY] = {
+      readOnlyClients: new Map<string, CachedClient>(),
+      SimplePDWClient: null,
+      rebuildInProgress: new Map<string, Promise<void>>(),
+      initializationInProgress: new Map<string, Promise<any>>(),
+      cleanupInterval: null,
+    };
+    console.log('🔧 [Cache] Initialized global PDW client cache');
+  }
+  return (globalThis as any)[GLOBAL_CACHE_KEY];
+}
 
-// Cleanup interval reference
-let cleanupInterval: NodeJS.Timeout | null = null;
+// Accessor functions for global cache
+const getReadOnlyClients = () => getGlobalCache().readOnlyClients;
+const getRebuildInProgress = () => getGlobalCache().rebuildInProgress;
+const getInitializationInProgress = () => getGlobalCache().initializationInProgress;
+
+function getSimplePDWClient() {
+  return getGlobalCache().SimplePDWClient;
+}
+
+function setSimplePDWClient(client: any) {
+  getGlobalCache().SimplePDWClient = client;
+}
+
+function getCleanupInterval() {
+  return getGlobalCache().cleanupInterval;
+}
+
+function setCleanupInterval(interval: NodeJS.Timeout | null) {
+  getGlobalCache().cleanupInterval = interval;
+}
 
 /**
  * Start the cleanup interval if not already running
  */
 function startCleanupInterval() {
-  if (cleanupInterval) return;
+  if (getCleanupInterval()) return;
 
-  cleanupInterval = setInterval(() => {
+  const interval = setInterval(() => {
     cleanupExpiredClients();
   }, CLEANUP_INTERVAL_MS);
 
   // Don't keep the process alive just for cleanup
-  if (cleanupInterval.unref) {
-    cleanupInterval.unref();
+  if (interval.unref) {
+    interval.unref();
   }
+
+  setCleanupInterval(interval);
 }
 
 /**
@@ -46,8 +87,9 @@ function startCleanupInterval() {
 function cleanupExpiredClients() {
   const now = Date.now();
   const expiredKeys: string[] = [];
+  const clients = getReadOnlyClients();
 
-  for (const [key, cached] of readOnlyClients.entries()) {
+  for (const [key, cached] of clients.entries()) {
     if (now - cached.lastAccessed > CLIENT_TTL_MS) {
       expiredKeys.push(key);
     }
@@ -59,7 +101,7 @@ function cleanupExpiredClients() {
   }
 
   if (expiredKeys.length > 0) {
-    console.log(`🧹 [Cache] Cleaned up ${expiredKeys.length} expired clients. Active: ${readOnlyClients.size}`);
+    console.log(`🧹 [Cache] Cleaned up ${expiredKeys.length} expired clients. Active: ${clients.size}`);
   }
 }
 
@@ -67,12 +109,13 @@ function cleanupExpiredClients() {
  * Evict least recently used client if cache is full
  */
 function evictLRUIfNeeded() {
-  if (readOnlyClients.size < MAX_CACHED_CLIENTS) return;
+  const clients = getReadOnlyClients();
+  if (clients.size < MAX_CACHED_CLIENTS) return;
 
   let oldestKey: string | null = null;
   let oldestTime = Infinity;
 
-  for (const [key, cached] of readOnlyClients.entries()) {
+  for (const [key, cached] of clients.entries()) {
     if (cached.lastAccessed < oldestTime) {
       oldestTime = cached.lastAccessed;
       oldestKey = key;
@@ -89,7 +132,8 @@ function evictLRUIfNeeded() {
  * Dispose a client and remove from cache
  */
 function disposeClient(walletAddress: string) {
-  const cached = readOnlyClients.get(walletAddress);
+  const clients = getReadOnlyClients();
+  const cached = clients.get(walletAddress);
   if (cached) {
     try {
       // Try to call dispose/cleanup if available on the client
@@ -102,10 +146,10 @@ function disposeClient(walletAddress: string) {
     } catch (e) {
       // Ignore disposal errors
     }
-    readOnlyClients.delete(walletAddress);
+    clients.delete(walletAddress);
   }
   // Also clean up any pending rebuild promises
-  rebuildInProgress.delete(walletAddress);
+  getRebuildInProgress().delete(walletAddress);
 }
 
 /**
@@ -161,15 +205,17 @@ function createReadOnlySigner(userAddress: string) {
  * Load the SimplePDWClient class
  */
 async function loadPDWClientClass() {
-  if (SimplePDWClient) return SimplePDWClient;
+  const cachedClass = getSimplePDWClient();
+  if (cachedClass) return cachedClass;
 
   try {
     const pdwModule = await import('@cmdoss/memwal-sdk');
-    SimplePDWClient = pdwModule.SimplePDWClient;
-    if (!SimplePDWClient) {
+    const ClientClass = pdwModule.SimplePDWClient;
+    if (!ClientClass) {
       throw new Error('SimplePDWClient not found in SDK export');
     }
-    return SimplePDWClient;
+    setSimplePDWClient(ClientClass);
+    return ClientClass;
   } catch (error: any) {
     console.error('❌ Failed to load PDW SDK:', error?.message);
     throw error;
@@ -193,14 +239,41 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
   // Start cleanup interval on first access
   startCleanupInterval();
 
+  const clients = getReadOnlyClients();
+  const initInProgress = getInitializationInProgress();
+
   // Return cached client if exists and update last accessed time
-  const cached = readOnlyClients.get(walletAddress);
+  const cached = clients.get(walletAddress);
   if (cached) {
     cached.lastAccessed = Date.now();
-    console.log(`📦 [Cache] Hit for: ${walletAddress.substring(0, 10)}... (${readOnlyClients.size} cached)`);
+    console.log(`📦 [Cache] Hit for: ${walletAddress.substring(0, 10)}... (${clients.size} cached)`);
     return cached.client;
   }
 
+  // Check if initialization is already in progress for this wallet
+  // This prevents race condition where multiple concurrent requests create multiple clients
+  const existingInit = initInProgress.get(walletAddress);
+  if (existingInit) {
+    console.log(`⏳ [Cache] Waiting for initialization in progress for: ${walletAddress.substring(0, 10)}...`);
+    return existingInit;
+  }
+
+  // Create initialization promise and store it
+  const initPromise = createAndCacheClient(walletAddress);
+  initInProgress.set(walletAddress, initPromise);
+
+  try {
+    return await initPromise;
+  } finally {
+    // Clean up initialization lock
+    initInProgress.delete(walletAddress);
+  }
+}
+
+/**
+ * Internal function to create and cache a new PDW client
+ */
+async function createAndCacheClient(walletAddress: string): Promise<any> {
   // Evict LRU client if cache is full before creating new one
   evictLRUIfNeeded();
 
@@ -256,12 +329,13 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
     console.log(`✅ Read-only PDW Client initialized for: ${walletAddress}`);
 
     // Cache the client with metadata
-    readOnlyClients.set(walletAddress, {
+    const clients = getReadOnlyClients();
+    clients.set(walletAddress, {
       client,
       lastAccessed: now,
       createdAt: now,
     });
-    console.log(`📦 [Cache] Added client for: ${walletAddress.substring(0, 10)}... (${readOnlyClients.size}/${MAX_CACHED_CLIENTS} cached)`);
+    console.log(`📦 [Cache] Added client for: ${walletAddress.substring(0, 10)}... (${clients.size}/${MAX_CACHED_CLIENTS} cached)`);
 
     // Check and rebuild index in background
     ensureIndexExists(walletAddress);
@@ -278,10 +352,12 @@ export async function getReadOnlyPDWClient(walletAddress: string): Promise<any> 
  * Uses a lock to prevent multiple concurrent rebuilds
  */
 async function ensureIndexExists(userAddress: string): Promise<void> {
+  const rebuildLocks = getRebuildInProgress();
+
   // Check if rebuild is already in progress for this user
-  if (rebuildInProgress.has(userAddress)) {
+  if (rebuildLocks.has(userAddress)) {
     console.log('⏳ Index rebuild already in progress, waiting...');
-    await rebuildInProgress.get(userAddress);
+    await rebuildLocks.get(userAddress);
     return;
   }
 
@@ -316,15 +392,15 @@ async function ensureIndexExists(userAddress: string): Promise<void> {
       console.error('❌ Index rebuild failed:', error);
     }).finally(() => {
       // Remove lock when done
-      rebuildInProgress.delete(userAddress);
+      getRebuildInProgress().delete(userAddress);
     });
 
     // Store the promise so other requests can wait for it
-    rebuildInProgress.set(userAddress, rebuildPromise);
+    rebuildLocks.set(userAddress, rebuildPromise);
 
   } catch (error) {
     console.error('❌ Error checking/rebuilding index:', error);
-    rebuildInProgress.delete(userAddress);
+    getRebuildInProgress().delete(userAddress);
   }
 }
 
@@ -339,8 +415,9 @@ export function clearReadOnlyClient(walletAddress: string) {
  * Clear all cached clients
  */
 export function clearAllReadOnlyClients() {
-  console.log(`🧹 [Cache] Clearing all ${readOnlyClients.size} cached clients`);
-  for (const key of readOnlyClients.keys()) {
+  const clients = getReadOnlyClients();
+  console.log(`🧹 [Cache] Clearing all ${clients.size} cached clients`);
+  for (const key of clients.keys()) {
     disposeClient(key);
   }
 }
@@ -349,11 +426,12 @@ export function clearAllReadOnlyClients() {
  * Get cache statistics (for debugging)
  */
 export function getCacheStats() {
+  const clients = getReadOnlyClients();
   return {
-    size: readOnlyClients.size,
+    size: clients.size,
     maxSize: MAX_CACHED_CLIENTS,
     ttlMs: CLIENT_TTL_MS,
-    clients: Array.from(readOnlyClients.entries()).map(([key, cached]) => ({
+    clients: Array.from(clients.entries()).map(([key, cached]) => ({
       address: key.substring(0, 10) + '...',
       age: Date.now() - cached.createdAt,
       lastAccessed: Date.now() - cached.lastAccessed,

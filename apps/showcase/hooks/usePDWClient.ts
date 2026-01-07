@@ -4,16 +4,39 @@ import { useMemo, useState, useCallback } from 'react'
 import { useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 
 // Dynamic import to avoid SSR issues with browser-only SDK
-let DappKitSigner: any = null
-let SimplePDWClient: any = null
+// Use singleton promise pattern for efficient SDK loading
+let sdkPromise: Promise<{ DappKitSigner: any; SimplePDWClient: any }> | null = null
+let cachedSDK: { DappKitSigner: any; SimplePDWClient: any } | null = null
 
 async function loadSDK() {
-  if (!DappKitSigner || !SimplePDWClient) {
-    const sdk = await import('@cmdoss/memwal-sdk/browser')
-    DappKitSigner = sdk.DappKitSigner
-    SimplePDWClient = sdk.SimplePDWClient
+  // Return cached SDK immediately if available
+  if (cachedSDK) {
+    return cachedSDK
   }
-  return { DappKitSigner, SimplePDWClient }
+
+  // Use singleton promise to prevent multiple concurrent imports
+  if (!sdkPromise) {
+    sdkPromise = import('@cmdoss/memwal-sdk/browser').then((sdk) => {
+      cachedSDK = {
+        DappKitSigner: sdk.DappKitSigner,
+        SimplePDWClient: sdk.SimplePDWClient,
+      }
+      return cachedSDK
+    })
+  }
+
+  return sdkPromise
+}
+
+// Pre-load SDK in background when module loads (browser only)
+if (typeof window !== 'undefined') {
+  // Use requestIdleCallback for non-blocking preload
+  if ('requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(() => loadSDK())
+  } else {
+    // Fallback: load after a short delay
+    setTimeout(() => loadSDK(), 100)
+  }
 }
 
 export interface UsePDWClientReturn {
@@ -57,6 +80,7 @@ export function usePDWClient(): UsePDWClientReturn {
   const [signer, setSigner] = useState<any | null>(null)
   const [isReady, setIsReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [isInitializing, setIsInitializing] = useState(false)
 
   // Initialize the PDW client with DappKitSigner
   const initClient = useCallback(async () => {
@@ -65,10 +89,35 @@ export function usePDWClient(): UsePDWClientReturn {
       return null
     }
 
+    // Return existing client if already initialized for this address
+    if (client && isReady) {
+      return client
+    }
+
+    // Prevent concurrent initialization
+    if (isInitializing) {
+      // Wait for current initialization to complete
+      return new Promise((resolve) => {
+        const checkReady = setInterval(() => {
+          if (!isInitializing) {
+            clearInterval(checkReady)
+            resolve(client)
+          }
+        }, 100)
+        // Timeout after 10s
+        setTimeout(() => {
+          clearInterval(checkReady)
+          resolve(null)
+        }, 10000)
+      })
+    }
+
+    setIsInitializing(true)
+
     try {
       setError(null)
 
-      // Load SDK dynamically
+      // Load SDK dynamically (uses cached version if already loaded)
       const { DappKitSigner: SignerClass, SimplePDWClient: ClientClass } = await loadSDK()
 
       // Create DappKitSigner
@@ -123,8 +172,10 @@ export function usePDWClient(): UsePDWClientReturn {
       setError(errorMessage)
       setIsReady(false)
       return null
+    } finally {
+      setIsInitializing(false)
     }
-  }, [account?.address, suiClient, signAndExecute])
+  }, [account?.address, suiClient, signAndExecute, client, isReady, isInitializing])
 
   return {
     client,

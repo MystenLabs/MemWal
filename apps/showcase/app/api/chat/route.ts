@@ -204,8 +204,12 @@ Be helpful, conversational, and combine personal memories with general knowledge
     const response = result.toTextStreamResponse()
 
     // Add memories to save as custom header for client to handle
+    // Use Base64 encoding to handle Unicode characters in memory content
     if (memoriesToSave.length > 0) {
-      response.headers.set('X-Memories-To-Save', JSON.stringify(memoriesToSave))
+      const jsonStr = JSON.stringify(memoriesToSave)
+      // Encode to Base64 to handle Unicode characters (HTTP headers only support ASCII)
+      const base64Encoded = Buffer.from(jsonStr, 'utf-8').toString('base64')
+      response.headers.set('X-Memories-To-Save', base64Encoded)
     }
 
     return response

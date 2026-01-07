@@ -260,15 +260,29 @@ export default function Showcase() {
 
   // Fetch memories from blockchain when wallet is connected
   // Also sync local index with any new memories
+  // Use requestIdleCallback to defer heavy operations and not block initial render
   useEffect(() => {
     if (currentAccount?.address) {
-      fetchMemoriesFromBlockchain()
+      const address = currentAccount.address
+
+      // Defer memory fetch to not block UI rendering
+      const scheduleTask = (task: () => void) => {
+        if ('requestIdleCallback' in window) {
+          (window as any).requestIdleCallback(task, { timeout: 2000 })
+        } else {
+          setTimeout(task, 100)
+        }
+      }
+
+      // Fetch memories in background (lower priority)
+      scheduleTask(() => fetchMemoriesFromBlockchain())
 
       // Sync local index with blockchain (async, incremental)
       // Use ref to prevent duplicate calls from React Strict Mode
       if (!syncCalledRef.current) {
         syncCalledRef.current = true
-        checkAndSyncIndex(currentAccount.address)
+        // Delay sync slightly more to prioritize UI responsiveness
+        scheduleTask(() => checkAndSyncIndex(address))
       }
     }
 

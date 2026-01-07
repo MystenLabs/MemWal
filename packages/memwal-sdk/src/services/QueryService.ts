@@ -136,7 +136,7 @@ export class QueryService {
       console.log(`     Model: ${stats.model}, Dimensions: ${stats.dimensions}`);
     }
     console.log(`   Storage: ${!!storageService ? 'available' : 'not available'}`);
-    console.log(`   Knowledge Graph: ${!!graphService ? 'available' : 'not available'}`);
+    console.log(`   Knowledge Graph: ${!!graphService ? 'available' : 'pending initialization...'}`);
   }
 
   /**

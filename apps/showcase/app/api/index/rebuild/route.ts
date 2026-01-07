@@ -97,6 +97,7 @@ async function performRebuild(walletAddress: string, startTime: number): Promise
     packageId: process.env.PACKAGE_ID!,
     walrusAggregator: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
     force: true,
+    fetchConcurrency: 10, // Optimized based on benchmark (1.64x faster than sequential)
     onProgress: (current, total, status) => {
       console.log(`   [${current}/${total}] ${status}`);
     }
@@ -135,7 +136,8 @@ async function performRebuild(walletAddress: string, startTime: number): Promise
       indexedMemories: result.indexedMemories,
       failedMemories: result.failedMemories,
       duration: result.duration,
-      durationFormatted: `${(result.duration / 1000).toFixed(2)}s`
+      durationFormatted: `${(result.duration / 1000).toFixed(2)}s`,
+      timing: result.timing
     }
   }), {
     status: 200,

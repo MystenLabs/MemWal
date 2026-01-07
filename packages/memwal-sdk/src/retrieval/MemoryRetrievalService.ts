@@ -182,10 +182,15 @@ export class MemoryRetrievalService {
   private contentCache = new Map<string, { content: string; metadata: any; timestamp: number }>();
   private analyticsCache = new Map<string, { analytics: any; timestamp: number }>();
   
-  // Cache TTL settings
-  private readonly QUERY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-  private readonly CONTENT_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-  private readonly ANALYTICS_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+  // Cache TTL settings (configurable)
+  private readonly QUERY_CACHE_TTL: number;
+  private readonly CONTENT_CACHE_TTL: number;
+  private readonly ANALYTICS_CACHE_TTL: number;
+
+  // Cache size limits to prevent memory leaks (configurable)
+  private readonly MAX_QUERY_CACHE_SIZE: number;
+  private readonly MAX_CONTENT_CACHE_SIZE: number;
+  private readonly MAX_ANALYTICS_CACHE_SIZE: number;
 
   constructor(config?: {
     embeddingService?: EmbeddingService;
@@ -196,7 +201,29 @@ export class MemoryRetrievalService {
     encryptionService?: EncryptionService;
     batchManager?: BatchManager;
     decryptionConfig?: DecryptionConfig;
+    /** Cache configuration for memory management */
+    cacheConfig?: {
+      /** Query cache TTL in ms (default: 5 minutes) */
+      queryCacheTtlMs?: number;
+      /** Content cache TTL in ms (default: 30 minutes) */
+      contentCacheTtlMs?: number;
+      /** Analytics cache TTL in ms (default: 1 hour) */
+      analyticsCacheTtlMs?: number;
+      /** Max query cache entries (default: 100) */
+      maxQueryCacheSize?: number;
+      /** Max content cache entries (default: 50) */
+      maxContentCacheSize?: number;
+      /** Max analytics cache entries (default: 100) */
+      maxAnalyticsCacheSize?: number;
+    };
   }) {
+    // Initialize cache settings with configurable defaults
+    this.QUERY_CACHE_TTL = config?.cacheConfig?.queryCacheTtlMs ?? 5 * 60 * 1000; // 5 minutes
+    this.CONTENT_CACHE_TTL = config?.cacheConfig?.contentCacheTtlMs ?? 30 * 60 * 1000; // 30 minutes
+    this.ANALYTICS_CACHE_TTL = config?.cacheConfig?.analyticsCacheTtlMs ?? 60 * 60 * 1000; // 1 hour
+    this.MAX_QUERY_CACHE_SIZE = config?.cacheConfig?.maxQueryCacheSize ?? 100;
+    this.MAX_CONTENT_CACHE_SIZE = config?.cacheConfig?.maxContentCacheSize ?? 50; // Content can be large
+    this.MAX_ANALYTICS_CACHE_SIZE = config?.cacheConfig?.maxAnalyticsCacheSize ?? 100;
     // Initialize services (can be injected or created with default configs)
     this.embeddingService = config?.embeddingService ?? new EmbeddingService();
     this.storageManager = config?.storageManager ?? new StorageManager();
@@ -684,7 +711,54 @@ export class MemoryRetrievalService {
   }
 
   private cacheQuery(key: string, result: RetrievalContext): void {
+    this.enforceCacheLimit(this.queryCache, this.MAX_QUERY_CACHE_SIZE, this.QUERY_CACHE_TTL);
     this.queryCache.set(key, { result, timestamp: Date.now() });
+  }
+
+  /**
+   * Cache content with size limit enforcement
+   */
+  private cacheContent(key: string, content: string, metadata: any): void {
+    this.enforceCacheLimit(this.contentCache, this.MAX_CONTENT_CACHE_SIZE, this.CONTENT_CACHE_TTL);
+    this.contentCache.set(key, { content, metadata, timestamp: Date.now() });
+  }
+
+  /**
+   * Cache analytics with size limit enforcement
+   */
+  private cacheAnalytics(key: string, analytics: any): void {
+    this.enforceCacheLimit(this.analyticsCache, this.MAX_ANALYTICS_CACHE_SIZE, this.ANALYTICS_CACHE_TTL);
+    this.analyticsCache.set(key, { analytics, timestamp: Date.now() });
+  }
+
+  /**
+   * Enforce cache size limit using LRU eviction (oldest entries first)
+   * Also removes expired entries based on TTL
+   */
+  private enforceCacheLimit<T extends { timestamp: number }>(
+    cache: Map<string, T>,
+    maxSize: number,
+    ttl: number
+  ): void {
+    // First, clean up expired entries
+    const now = Date.now();
+
+    for (const [key, value] of cache.entries()) {
+      if (now - value.timestamp > ttl) {
+        cache.delete(key);
+      }
+    }
+
+    // If still over limit, remove oldest entries (LRU)
+    if (cache.size >= maxSize) {
+      const entries = Array.from(cache.entries())
+        .sort((a, b) => a[1].timestamp - b[1].timestamp);
+
+      const toRemove = cache.size - maxSize + 1; // +1 to make room for new entry
+      for (let i = 0; i < toRemove && i < entries.length; i++) {
+        cache.delete(entries[i][0]);
+      }
+    }
   }
 
   // ==================== UTILITY METHODS ====================

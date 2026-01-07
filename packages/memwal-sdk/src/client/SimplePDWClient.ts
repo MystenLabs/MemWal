@@ -762,11 +762,24 @@ export class SimplePDWClient {
       }
 
       // Initialize knowledge graph if enabled
-      if (this.config.features.enableKnowledgeGraph && this.services.embedding) {
-        await this.services.storage.initializeKnowledgeGraph({
+      // Use apiKey (OpenRouter) as primary, fallback to geminiApiKey for backward compatibility
+      const graphApiKey = this.config.ai.apiKey || this.config.ai.geminiApiKey;
+      if (this.config.features.enableKnowledgeGraph && this.services.embedding && graphApiKey) {
+        const graphService = await this.services.storage.initializeKnowledgeGraph({
           embeddingService: this.services.embedding,
-          geminiApiKey: this.config.ai.geminiApiKey
+          geminiApiKey: graphApiKey
         });
+
+        // Update QueryService with the initialized GraphService
+        if (graphService && this.services.query && this.services.memoryIndex && this.services.embedding) {
+          this.services.query.initialize(
+            this.services.memoryIndex,
+            this.services.embedding,
+            this.services.storage,
+            graphService
+          );
+          console.log('✅ QueryService updated with Knowledge Graph');
+        }
       }
 
       this.initialized = true;
