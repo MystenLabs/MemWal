@@ -1,6 +1,6 @@
 {
   "name": "@cmdoss/memwal-sdk",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "TypeScript SDK for Personal Data Wallet - Decentralized memory system with AI embeddings, HNSW vector search, SEAL encryption and Walrus storage",
   "type": "module",
   "main": "dist/index.js",

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+**Performance Optimizations:**
+- Global singleton cache and wallet integration optimization
+- Add LRU cache to NodeHnswService with configurable capacity (default: 1000 entries)
+- Add LRU cache to HnswWasmService for memory management
+- Add singleton pattern for EmbeddingService to prevent multiple instances
+- Reduce default embedding dimension from 3072 to 768 for better performance
+- Memory cache eviction to prevent memory leaks
+
+**New Features:**
+- `findMemoryInQuilt()` method for improved quilt file matching
+- Enhanced Quilt memory indexing with batch upload support
+- MemoryIndex on-chain management utilities
+- HNSW index Walrus sync for cross-device restoration
+- Incremental index sync by blobId
+
+**Bug Fixes:**
+- Fix Quilt batch sync by extracting base quiltId correctly
+- Fix batch memory content storage and transaction status detection
+- Fix Quilt blobId and use `getBlob().files()` for correct retrieval
+
+**Architecture Improvements:**
+- Memory management with LRU eviction policies
+- Optimized cache strategies for embedding and HNSW services
+- Improved Quilt file handling and retrieval patterns
+
 ## 0.6.2
 
 ### Patch Changes
