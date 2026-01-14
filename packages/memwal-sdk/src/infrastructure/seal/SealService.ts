@@ -289,50 +289,49 @@ export class SealService {
   }
 
   /**
-   * Create transaction for seal_approve using wallet-based allowlists
-   * Matches Move signature: seal_approve(id: vector<u8>, requesting_wallet: address, ...)
+   * Create transaction for seal_approve using capability pattern
+   * Matches Move signature: seal_approve(cap: &MemoryCap, key_id: vector<u8>, ctx: &TxContext)
+   *
+   * @param keyId - SEAL key ID (hex string or bytes)
+   * @param userAddress - User's wallet address (sender)
+   * @param memoryCapId - Object ID of the MemoryCap
    */
   async createSealApproveTransaction(
-    id: string,
+    keyId: string,
     userAddress: string,
-    requestingWallet: string,
-    accessRegistry?: string
+    memoryCapId: string,
+    _accessRegistry?: string // Deprecated, kept for backward compatibility
   ): Promise<Uint8Array> {
     const metric = this.startMetric('transaction_creation');
 
     try {
       const tx = new Transaction();
-      
-      // Use the deployed AccessRegistry ID from environment or parameter
-      const registryId = accessRegistry || process.env.ACCESS_REGISTRY_ID || "0xc2b8a9705516370e245f4d7ce58286ccbb56554edf31d1cc5a02155ac24d43c0";
-      const normalizedWallet = normalizeSuiAddress(requestingWallet);
 
-      // Wallet-based seal_approve call
-      // entry fun seal_approve(id: vector<u8>, requesting_wallet: address, registry: &AccessRegistry, clock: &Clock, ctx: &TxContext)
+      // Capability-based seal_approve call
+      // CRITICAL: key_id MUST be first argument for SEAL key server!
+      // entry fun seal_approve(key_id: vector<u8>, cap: &MemoryCap, ctx: &TxContext)
       tx.moveCall({
-        target: `${this.config.packageId}::seal_access_control::seal_approve`,
+        target: `${this.config.packageId}::capability::seal_approve`,
         arguments: [
-          tx.pure.vector("u8", fromHex(id)), // Arg 1: Content ID (SEAL key ID)
-          tx.pure.address(normalizedWallet),  // Arg 2: Requesting wallet address
-          tx.object(registryId),              // Arg 3: AccessRegistry reference
-          tx.object('0x6')                    // Arg 4: Clock object (system clock)
+          tx.pure.vector("u8", fromHex(keyId)),      // Arg 1: SEAL key ID (MUST BE FIRST!)
+          tx.object(memoryCapId),                    // Arg 2: MemoryCap object reference
+          // ctx: &TxContext is auto-provided by Sui
         ]
       });
 
       // Set the sender for the transaction
       tx.setSender(userAddress);
 
-      const txBytes = await tx.build({ 
-        client: this.config.suiClient, 
-        onlyTransactionKind: true 
+      const txBytes = await tx.build({
+        client: this.config.suiClient,
+        onlyTransactionKind: true
       });
 
-      this.completeMetric(metric, true, { 
-        id,
+      this.completeMetric(metric, true, {
+        keyId,
+        memoryCapId,
         txSize: txBytes.length,
-        registryId,
-        clockId: '0x6',
-        requestingWallet: normalizedWallet
+        userAddress
       });
 
       return txBytes;
@@ -345,38 +344,37 @@ export class SealService {
   }
 
   /**
-   * Build a seal_approve transaction for a specific requesting wallet
+   * Build a seal_approve transaction using capability pattern
+   * Matches Move signature: seal_approve(cap: &MemoryCap, key_id: vector<u8>, ctx: &TxContext)
+   *
+   * @param keyId - SEAL key ID (bytes)
+   * @param memoryCapId - Object ID of the MemoryCap
    */
   buildSealApproveTransaction(
-    contentId: Uint8Array,
-    requestingWallet: string,
-    accessRegistry?: string
+    keyId: Uint8Array,
+    memoryCapId: string,
+    _accessRegistry?: string // Deprecated, kept for backward compatibility
   ): Transaction {
     const metric = this.startMetric('transaction_creation_wallet');
 
     try {
       const tx = new Transaction();
-      
-      // Use the deployed AccessRegistry ID from environment or parameter
-      const registryId = accessRegistry || process.env.ACCESS_REGISTRY_ID || "0x8088cc36468b53f210696f1c6b1a4de1b1666dd36a7c36f92c394ff1d342f6dd";
-      const normalizedWallet = normalizeSuiAddress(requestingWallet);
-      
-      // Wallet-based seal_approve call
+
+      // Capability-based seal_approve call
+      // CRITICAL: key_id MUST be first argument for SEAL key server!
+      // entry fun seal_approve(key_id: vector<u8>, cap: &MemoryCap, ctx: &TxContext)
       tx.moveCall({
-        target: `${this.config.packageId}::seal_access_control::seal_approve`,
+        target: `${this.config.packageId}::capability::seal_approve`,
         arguments: [
-          tx.pure.vector('u8', Array.from(contentId)), // Content identifier
-          tx.pure.address(normalizedWallet),          // Requesting wallet address
-          tx.object(registryId),                      // AccessRegistry reference
-          tx.object('0x6')                            // Clock object (system clock)
+          tx.pure.vector('u8', Array.from(keyId)),     // Arg 1: SEAL key ID (MUST BE FIRST!)
+          tx.object(memoryCapId),                      // Arg 2: MemoryCap object reference
+          // ctx: &TxContext is auto-provided by Sui
         ]
       });
 
-      this.completeMetric(metric, true, { 
-        requestingWallet: normalizedWallet,
-        contentIdLength: contentId.length,
-        registryId,
-        clockId: '0x6'
+      this.completeMetric(metric, true, {
+        keyIdLength: keyId.length,
+        memoryCapId
       });
 
       return tx;
@@ -384,7 +382,7 @@ export class SealService {
     } catch (error) {
       this.completeMetric(metric, false, undefined, error);
       const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to create transaction for wallet: ${errorMessage}`);
+      throw new Error(`Failed to create transaction for capability: ${errorMessage}`);
     }
   }
 

@@ -108,23 +108,34 @@ export class EncryptionService {
   }
 
   /**
-   * Build access approval transaction for a requesting wallet address
+   * Build access approval transaction using capability pattern
    * Uses CrossContextPermissionService for proper permission validation
    *
-   * @param userAddress - User's wallet address (used as SEAL identity)
-   * @param requestingWallet - Wallet requesting access
-   * @param accessType - Access level (read/write)
+   * @param keyId - SEAL key ID bytes (required for capability pattern)
+   * @param memoryCapId - MemoryCap object ID (required for capability pattern)
    * @returns Transaction for SEAL key server approval
+   */
+  buildAccessTransactionForCapability(
+    keyId: Uint8Array,
+    memoryCapId: string
+  ): Transaction {
+    return this.permissionService.buildSealApproveTransaction(keyId, memoryCapId);
+  }
+
+  /**
+   * Build access approval transaction for a requesting wallet address
+   * @deprecated Use buildAccessTransactionForCapability for capability-based access
    */
   async buildAccessTransactionForWallet(
     userAddress: string,
     requestingWallet: string,
-    accessType: 'read' | 'write' = 'read'
+    _accessType: 'read' | 'write' = 'read'
   ): Promise<Transaction> {
-    // Convert user address to bytes for SEAL identity
+    // Legacy fallback - use user address as identity bytes
     const identityBytes = fromHex(userAddress.replace('0x', ''));
 
-    return this.permissionService.buildSealApproveTransaction(
+    // Note: This uses the legacy buildSealApproveTransactionLegacy
+    return this.permissionService.buildSealApproveTransactionLegacy(
       identityBytes,
       requestingWallet
     );
@@ -155,13 +166,26 @@ export class EncryptionService {
       // Build access transaction if not provided
       let txBytes = options.signedTxBytes;
       if (!txBytes) {
-        console.log('🔄 Building access transaction for requesting wallet...');
-        const tx = await this.buildAccessTransactionForWallet(
-          options.userAddress,
-          requestingWallet,
-          'read'
-        );
-        txBytes = await tx.build({ client: this.suiClient });
+        // Check if capability pattern is being used (preferred)
+        if (options.memoryCapId && options.keyId) {
+          console.log('🔄 Building capability-based access transaction...');
+          console.log(`   MemoryCap ID: ${options.memoryCapId}`);
+          console.log(`   Key ID length: ${options.keyId.length} bytes`);
+          const tx = this.buildAccessTransactionForCapability(options.keyId, options.memoryCapId);
+          // CRITICAL: onlyTransactionKind: true is REQUIRED for SEAL key server!
+          txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
+        } else {
+          // Legacy fallback
+          console.log('🔄 Building legacy access transaction for requesting wallet...');
+          console.warn('⚠️  Using legacy allowlist pattern - consider using capability pattern');
+          const tx = await this.buildAccessTransactionForWallet(
+            options.userAddress,
+            requestingWallet,
+            'read'
+          );
+          // CRITICAL: onlyTransactionKind: true is REQUIRED for SEAL key server!
+          txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
+        }
       }
 
       if (!txBytes) {
@@ -363,8 +387,9 @@ export class EncryptionService {
       
       // Create the approval transaction (not signed, just bytes)
       const tx = await this.buildAccessTransactionForWallet(userAddress, contentOwner, 'read');
-      const txBytes = await tx.build({ client: this.suiClient });
-      
+      // SEAL REQUIREMENT: Must use onlyTransactionKind: true for PTB validation
+      const txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
+
       console.log(`✅ Created SEAL approval transaction bytes (${txBytes.length} bytes)`);
       console.log('   Format: Raw PTB (Programmable Transaction Block) for SEAL verification');
       
@@ -384,7 +409,7 @@ export class EncryptionService {
     const expiresAt = expiresIn ? Date.now() + expiresIn : Date.now() + 86400000; // 24h default
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::grant_access`,
+      target: `${this.packageId}::capability::grant_access`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.address(recipientAddress),
@@ -405,7 +430,7 @@ export class EncryptionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::revoke_access`,
+      target: `${this.packageId}::capability::revoke_access`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.address(recipientAddress),
@@ -427,7 +452,7 @@ export class EncryptionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::register_content`,
+      target: `${this.packageId}::capability::register_content`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.string(contentId),
@@ -516,7 +541,7 @@ export class EncryptionService {
 
       const tx = new Transaction();
       tx.moveCall({
-        target: `${this.packageId}::seal_access_control::check_access`,
+        target: `${this.packageId}::capability::check_access`,
         arguments: [
           tx.pure.address(userAddress),
           tx.pure.string(contentId),

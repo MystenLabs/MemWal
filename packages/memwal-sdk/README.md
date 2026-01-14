@@ -156,6 +156,135 @@ npm install hnswlib-node
 
 </details>
 
+## Configuration
+
+### Basic Configuration
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,               // Required: Sui keypair or wallet adapter
+  network: 'testnet',            // Required: 'testnet' | 'mainnet' | 'devnet'
+
+  // Embedding configuration (required for AI features)
+  embedding: {
+    provider: 'openrouter',      // 'google' | 'openai' | 'openrouter' | 'cohere'
+    apiKey: process.env.OPENROUTER_API_KEY,
+    modelName: 'google/gemini-embedding-001',  // Optional: defaults per provider
+    dimensions: 3072             // Optional: defaults per provider
+  },
+
+  // Optional: Sui configuration
+  sui: {
+    packageId: '0x...',          // Default: from env PACKAGE_ID
+    rpcUrl: 'https://...',       // Default: from network
+  },
+
+  // Optional: Walrus configuration
+  walrus: {
+    aggregator: 'https://...',   // Default: from network
+    publisher: 'https://...',    // Default: from network
+  },
+
+  // Optional: Feature flags
+  features: {
+    enableEncryption: true,      // Default: true (SEAL encryption)
+    enableLocalIndexing: true,   // Default: true (HNSW vector search)
+    enableKnowledgeGraph: true   // Default: true (entity extraction)
+  }
+});
+```
+
+### SEAL Encryption (Enabled by Default)
+
+**🔒 Encryption is enabled by default in v0.7.0+**
+
+All memory content is automatically encrypted using SEAL (Secure Encrypted Access Layer) with identity-based encryption.
+
+#### Default Encryption (Recommended)
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  embedding: { provider: 'openrouter', apiKey: 'key' }
+  // Encryption automatically enabled with defaults!
+});
+
+// Memories are encrypted on upload, decrypted on retrieval
+await pdw.memory.create('My private data');
+```
+
+#### Custom Encryption Configuration
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  embedding: { provider: 'openrouter', apiKey: 'key' },
+
+  // Encryption configuration (optional)
+  encryption: {
+    enabled: true,              // Default: true
+    keyServers: [               // Default: testnet key servers
+      '0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75',
+      '0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8'
+    ],
+    threshold: 2,               // Default: 2 (M of N key servers required)
+    accessRegistryId: '0x...'   // Default: testnet registry
+  }
+});
+```
+
+#### Environment Variables
+
+```bash
+# Disable encryption (not recommended for production)
+ENABLE_ENCRYPTION=false
+
+# Custom key servers (comma-separated)
+SEAL_KEY_SERVERS=0xKEY1,0xKEY2,0xKEY3
+
+# Custom threshold
+SEAL_THRESHOLD=2
+
+# Custom access registry
+ACCESS_REGISTRY_ID=0x...
+```
+
+#### How SEAL Encryption Works
+
+- **Zero gas for decryption** - No blockchain transactions required
+- **Identity-based** - Uses Sui address as identity (userAddress)
+- **Threshold security** - Requires M of N key servers (default: 2 of 2)
+- **Cross-app sharing** - Share memories between apps with same user
+- **Privacy-preserving** - Content never exposed on-chain or in plaintext
+
+#### Disabling Encryption (Development Only)
+
+⚠️ **Not recommended for production**. Only use for non-sensitive test data:
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+  embedding: { provider: 'openrouter', apiKey: 'key' },
+  features: {
+    enableEncryption: false  // ⚠️ Stores content in plaintext!
+  }
+});
+```
+
+### Embedding Providers
+
+| Provider | Model Default | Dimensions | API Key |
+|----------|---------------|------------|---------|
+| `openrouter` | `google/gemini-embedding-001` | 3072 | `OPENROUTER_API_KEY` |
+| `google` | `text-embedding-004` | 3072 | `GEMINI_API_KEY` |
+| `openai` | `text-embedding-3-small` | 1536 | `OPENAI_API_KEY` |
+| `cohere` | `embed-english-v3.0` | 1024 | `COHERE_API_KEY` |
+
+**Recommendation**: Use `openrouter` for unified access to multiple models.
+
 ## Benchmarks
 
 Tested on localhost with Option A+ (local content retrieval enabled):

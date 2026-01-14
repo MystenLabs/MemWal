@@ -445,7 +445,8 @@ export class EncryptionService {
       const tx = await this.buildAccessTransactionForWallet(userAddress, contentOwner, 'read');
       // CRITICAL: Set sender before building - required by Transaction.build()
       tx.setSender(contentOwner);
-      const txBytes = await tx.build({ client: this.suiClient });
+      // SEAL REQUIREMENT: Must use onlyTransactionKind: true for PTB validation
+      const txBytes = await tx.build({ client: this.suiClient, onlyTransactionKind: true });
 
       console.log(`✅ Created SEAL approval transaction bytes (${txBytes.length} bytes)`);
       console.log('   Format: Raw PTB (Programmable Transaction Block) for SEAL verification');
@@ -466,7 +467,7 @@ export class EncryptionService {
     const expiresAt = expiresIn ? Date.now() + expiresIn : Date.now() + 86400000; // 24h default
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::grant_access`,
+      target: `${this.packageId}::capability::grant_access`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.address(recipientAddress),
@@ -487,7 +488,7 @@ export class EncryptionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::revoke_access`,
+      target: `${this.packageId}::capability::revoke_access`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.address(recipientAddress),
@@ -509,7 +510,7 @@ export class EncryptionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::register_content`,
+      target: `${this.packageId}::capability::register_content`,
       arguments: [
         tx.pure.address(ownerAddress),
         tx.pure.string(contentId),
@@ -598,7 +599,7 @@ export class EncryptionService {
 
       const tx = new Transaction();
       tx.moveCall({
-        target: `${this.packageId}::seal_access_control::check_access`,
+        target: `${this.packageId}::capability::check_access`,
         arguments: [
           tx.pure.address(userAddress),
           tx.pure.string(contentId),

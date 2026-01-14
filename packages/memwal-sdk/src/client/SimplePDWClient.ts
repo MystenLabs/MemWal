@@ -180,6 +180,29 @@ export interface SimplePDWConfig {
   };
 
   /**
+   * Optional: SEAL encryption configuration
+   * Enables end-to-end encryption for memory content
+   */
+  encryption?: {
+    /**
+     * Enable SEAL encryption for memories (default: true)
+     */
+    enabled?: boolean;
+    /**
+     * SEAL key server object IDs (testnet defaults provided)
+     */
+    keyServers?: string[];
+    /**
+     * Number of key servers required for decryption threshold (default: 2)
+     */
+    threshold?: number;
+    /**
+     * Access registry ID for OAuth-style permission management
+     */
+    accessRegistryId?: string;
+  };
+
+  /**
    * Optional: Index manager options for hybrid restore
    */
   indexManager?: {
@@ -250,6 +273,12 @@ interface ResolvedConfig {
     enableEncryption: boolean;
     enableLocalIndexing: boolean;
     enableKnowledgeGraph: boolean;
+  };
+  encryption: {
+    enabled: boolean;
+    keyServers: string[];
+    threshold: number;
+    accessRegistryId: string;
   };
   indexManager?: {
     autoSaveInterval?: number;
@@ -380,9 +409,20 @@ export class SimplePDWClient {
         dimensions: embeddingDimensions
       },
       features: {
-        enableEncryption: config.features?.enableEncryption ?? false,
+        enableEncryption: config.features?.enableEncryption ?? true, // Changed default to true
         enableLocalIndexing: config.features?.enableLocalIndexing ?? true,
         enableKnowledgeGraph: config.features?.enableKnowledgeGraph ?? true
+      },
+      encryption: {
+        enabled: config.encryption?.enabled ?? true, // Default: enabled
+        keyServers: config.encryption?.keyServers || [
+          '0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75',
+          '0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8'
+        ],
+        threshold: config.encryption?.threshold ?? 2, // Default: 2 of N
+        accessRegistryId: config.encryption?.accessRegistryId ||
+          process.env.NEXT_PUBLIC_ACCESS_REGISTRY_ID ||
+          '0x1d0a1936e170e54ff12ef30a042b390a8ef6dff3a642c5e7056222da038bde'
       },
       indexManager: config.indexManager,
       indexBackup: config.indexBackup
@@ -578,12 +618,13 @@ export class SimplePDWClient {
     if (ai.geminiApiKey) {
       clientMemoryManager = new ClientMemoryManager({
         packageId: sui.packageId,
-        accessRegistryId: process.env.NEXT_PUBLIC_ACCESS_REGISTRY_ID ||
-          '0x1d0a1936e170e54ff12ef30a042b390a8ef6dff3a642c5e7056222da038bde',
+        accessRegistryId: config.encryption.accessRegistryId,
         walrusAggregator: walrus.aggregator,
         geminiApiKey: ai.geminiApiKey,
         walrusNetwork: walrus.network,
-        enableLocalIndexing: config.features.enableLocalIndexing
+        enableLocalIndexing: config.features.enableLocalIndexing,
+        enableEncryption: config.encryption.enabled, // Pass encryption config
+        sealServerObjectIds: config.encryption.keyServers
         // Note: hnswService will be set after async init completes
       });
     }
@@ -617,10 +658,21 @@ export class SimplePDWClient {
     // 13. MemoryAnalyticsService (for insights and analytics)
     const analytics = new MemoryAnalyticsService();
 
-    // 14. EncryptionService (for SEAL encryption - optional)
+    // 14. EncryptionService (for SEAL encryption - enabled by default)
     let encryption: EncryptionService | undefined;
     if (config.features.enableEncryption) {
-      encryption = new EncryptionService(clientAdapter, pdwConfig);
+      // Pass encryption configuration to PDWConfig
+      const encryptionEnabledConfig: PDWConfig = {
+        ...pdwConfig,
+        encryptionConfig: {
+          enabled: config.encryption.enabled,
+          keyServers: config.encryption.keyServers
+        },
+        accessRegistryId: config.encryption.accessRegistryId
+      };
+      encryption = new EncryptionService(clientAdapter, encryptionEnabledConfig);
+      console.log(`✅ EncryptionService initialized (SEAL enabled: ${config.encryption.enabled})`);
+      console.log(`   Key servers: ${config.encryption.keyServers.length}, Threshold: ${config.encryption.threshold}`);
     }
 
     // 15. PermissionService (for access control)

@@ -23,6 +23,10 @@ export interface Memory {
   embedding?: number[];
   metadata?: Record<string, any>;
   encrypted?: boolean;
+  /** Capability ID for decryption (v2.2) */
+  memoryCapId?: string;
+  /** Key ID (hex string) for decryption (v2.2) */
+  keyId?: string;
   createdAt: number;
   updatedAt?: number;
 }
@@ -164,28 +168,67 @@ export class MemoryNamespace {
           text: content
         });
         embedding = embResult.vector;
+        console.log(`✅ Embedding generated: ${embedding?.length || 0}D vector`);
+      } else {
+        console.warn('⚠️ EmbeddingService not available - no embedding will be stored!');
       }
 
-      // 3. Encrypt (if enabled)
+      // 3. Encrypt (if enabled) - Use capability-based encryption (v2.2)
       let encryptedContent: Uint8Array | undefined;
-      if (this.services.config.features.enableEncryption && this.services.encryption) {
-        onProgress?.('encrypting', 50);
+      let encryptedEmbedding: Uint8Array | undefined;
+      let memoryCapId: string | undefined;
+      let keyId: string | undefined;
+
+      if (this.services.config.features.enableEncryption && this.services.encryption && this.services.capability) {
+        onProgress?.('encrypting', 30);
         try {
-          const contentBytes = new TextEncoder().encode(content);
-          const encryptResult = await this.services.encryption.encrypt(
-            contentBytes,
-            this.services.config.userAddress,
-            2 // threshold: require 2 key servers for decryption
+          console.log('🔐 Using capability-based encryption (v2.2)...');
+
+          // Step 3.1: Get or create capability for this category
+          const cap = await this.services.capability.getOrCreate(
+            {
+              appId: category,
+              userAddress: this.services.config.userAddress
+            },
+            this.services.config.signer
           );
-          encryptedContent = encryptResult.encryptedObject;
+          memoryCapId = cap.id;
+          console.log(`   ✅ Capability ready: ${memoryCapId}`);
+
+          // Step 3.2: Compute key_id from capability
+          keyId = this.services.capability.computeKeyId(cap);
+          console.log(`   🔑 Key ID computed: ${keyId.substring(0, 20)}...`);
+
+          // Step 3.3: Encrypt content
+          const contentBytes = new TextEncoder().encode(content);
+          const encryptContentResult = await this.services.encryption.encrypt(
+            contentBytes,
+            keyId,
+            2 // threshold: 2 of 2 key servers
+          );
+          encryptedContent = encryptContentResult.encryptedObject;
+          console.log(`   ✅ Content encrypted: ${contentBytes.length} → ${encryptedContent?.length || 0} bytes`);
+
+          // Step 3.4: Encrypt embedding (v2.2 - full encryption)
+          if (embedding && embedding.length > 0) {
+            const embeddingBytes = new TextEncoder().encode(JSON.stringify(embedding));
+            const encryptEmbeddingResult = await this.services.encryption.encrypt(
+              embeddingBytes,
+              keyId,
+              2
+            );
+            encryptedEmbedding = encryptEmbeddingResult.encryptedObject;
+            console.log(`   ✅ Embedding encrypted: ${embedding.length}D → ${encryptedEmbedding?.length || 0} bytes`);
+          }
         } catch (error) {
-          console.warn('SEAL encryption failed, storing unencrypted:', error);
+          console.warn('⚠️ Capability-based encryption failed, falling back to plaintext:', error);
           // Continue without encryption if it fails
         }
       }
 
-      // 4. Upload to Walrus
-      onProgress?.('uploading to Walrus', 40);
+      // 4. Upload to Walrus (v2.2 format if encrypted)
+      onProgress?.('uploading to Walrus', 50);
+      console.log(`📤 Uploading to Walrus: content=${content.length} chars, embedding=${embedding?.length || 0}D, encrypted=${!!encryptedContent}`);
       const uploadResult = await this.services.storage.uploadMemoryPackage(
         {
           content,
@@ -194,9 +237,13 @@ export class MemoryNamespace {
             category,
             importance,
             topic: topic || '',
+            memoryCapId,
+            keyId,
             ...metadata
           },
           encryptedContent,
+          encryptedEmbedding,  // v2.2: encrypted embedding
+          encryptionType: encryptedContent ? 'seal-capability' : undefined,
           identity: this.services.config.userAddress
         },
         {
@@ -217,28 +264,72 @@ export class MemoryNamespace {
       // Use modulo to keep vectorId within u32 range (max 4,294,967,295)
       const vectorId = Date.now() % 4294967295;
 
-      if (this.services.tx) {
+      if (this.services.tx && this.services.capability) {
         try {
-          console.log('🔨 Building on-chain transaction with full metadata...');
-          const tx = this.services.tx.buildCreateMemoryRecord({
-            category,
-            vectorId,
-            blobId: uploadResult.blobId,
-            contentType: 'text/plain',
-            contentSize: new TextEncoder().encode(content).length,
-            contentHash: uploadResult.blobId, // blob_id is content-addressed (blake2b256)
-            topic: topic || '',
-            importance,
-            embeddingBlobId: uploadResult.blobId, // Embedding stored in same blob
-          });
+          console.log('🔨 Building on-chain transaction...');
 
-          // SerialTransactionExecutor handles gas coin management and prevents equivocation
-          // No manual retry needed - executor caches object versions automatically
-          console.log('📤 Executing on-chain transaction (via SerialTransactionExecutor)...');
-          const txResult = await this.services.tx.executeTransaction(
-            tx,
-            this.services.config.signer.getSigner()
-          );
+          // Reuse memoryCapId from encryption step (avoid duplicate capability creation)
+          const capId = memoryCapId;
+          if (capId) {
+            console.log(`   Using existing capability: ${capId}`);
+          }
+
+          // Use capability-based creation if capId available
+          const tx = capId
+            ? this.services.tx.buildCreateMemoryRecordLightweightWithCap({
+                category,
+                vectorId,
+                blobId: uploadResult.blobId,
+                importance,
+                gasBudget: undefined,
+                capId
+              })
+            : this.services.tx.buildCreateMemoryRecordLightweight({
+                category,
+                vectorId,
+                blobId: uploadResult.blobId,
+                importance,
+                gasBudget: undefined
+              });
+
+          console.log('📤 Executing on-chain transaction...');
+
+          // Use signer's signAndExecuteTransaction for browser wallet compatibility
+          const signer = this.services.config.signer;
+          let txResult: any;
+
+          if ('signAndExecuteTransaction' in signer && typeof signer.signAndExecuteTransaction === 'function') {
+            // Browser wallet (DappKitSigner) - use signAndExecuteTransaction directly
+            const result = await signer.signAndExecuteTransaction(tx);
+
+            // Extract created objects
+            let createdObjects: Array<{ objectId: string; objectType: string }> | undefined;
+            if (result.objectChanges && Array.isArray(result.objectChanges)) {
+              createdObjects = result.objectChanges
+                .filter((change: any) => change.type === 'created')
+                .map((change: any) => ({
+                  objectId: change.objectId,
+                  objectType: change.objectType || 'unknown',
+                }));
+            }
+
+            // Determine status
+            const effectsStatus = result.effects?.status?.status;
+            const status = effectsStatus === 'failure' ? 'failure' :
+                          effectsStatus === 'success' ? 'success' :
+                          result.digest ? 'success' : 'failure';
+
+            txResult = {
+              digest: result.digest,
+              status,
+              createdObjects,
+              effects: result.effects,
+              objectChanges: result.objectChanges
+            };
+          } else {
+            // Server-side signer - use TransactionService
+            txResult = await this.services.tx.executeTransaction(tx, signer);
+          }
 
           console.log('📋 Transaction result:', txResult.status, txResult.digest);
 
@@ -336,9 +427,13 @@ export class MemoryNamespace {
           category,
           importance,
           topic,
+          memoryCapId,
+          keyId,
           ...metadata
         },
         encrypted: !!encryptedContent,
+        memoryCapId,  // v2.2: capability ID for decryption
+        keyId,        // v2.2: key ID for decryption
         createdAt: Date.now()
       };
     } catch (error) {
@@ -737,30 +832,85 @@ export class MemoryNamespace {
       const memoryObjectIds: (string | undefined)[] = [];
       const vectorIds: number[] = [];
 
-      if (this.services.tx) {
-        // Create memory records for each file in the quilt
+      if (this.services.tx && this.services.capability) {
+        // Create memory records for each file in the quilt using auto-capability
         for (let i = 0; i < quiltResult.files.length; i++) {
           const file = quiltResult.files[i];
           const vectorId = (Date.now() + i) % 4294967295;
           vectorIds.push(vectorId);
 
           try {
-            const tx = this.services.tx.buildCreateMemoryRecord({
-              category: categories[i],
-              vectorId,
-              blobId: file.blobId,
-              contentType: 'text/plain',
-              contentSize: new TextEncoder().encode(contents[i]).length,
-              contentHash: file.blobId, // blob_id is content-addressed (blake2b256)
-              topic: options.topic || '',
-              importance,
-              embeddingBlobId: file.blobId, // Embedding stored in same blob
-            });
+            // Auto get/create capability if encryption enabled
+            let capId: string | undefined;
+            if (this.services.config.features?.enableEncryption) {
+              try {
+                const cap = await this.services.capability.getOrCreate(
+                  {
+                    appId: categories[i],
+                    userAddress: this.services.config.userAddress
+                  },
+                  this.services.config.signer
+                );
+                capId = cap.id;
+              } catch (capError) {
+                console.warn(`⚠️ Failed to auto-create capability for memory ${i}:`, capError);
+              }
+            }
 
-            const txResult = await this.services.tx.executeTransaction(
-              tx,
-              this.services.config.signer.getSigner()
-            );
+            // Use capability-based creation if capId available
+            const tx = capId
+              ? this.services.tx.buildCreateMemoryRecordLightweightWithCap({
+                  category: categories[i],
+                  vectorId,
+                  blobId: file.blobId,
+                  importance,
+                  gasBudget: undefined,
+                  capId
+                })
+              : this.services.tx.buildCreateMemoryRecordLightweight({
+                  category: categories[i],
+                  vectorId,
+                  blobId: file.blobId,
+                  importance,
+                  gasBudget: undefined
+                });
+
+            // Use signer's signAndExecuteTransaction for browser wallet compatibility
+            const signer = this.services.config.signer;
+            let txResult: any;
+
+            if ('signAndExecuteTransaction' in signer && typeof signer.signAndExecuteTransaction === 'function') {
+              // Browser wallet (DappKitSigner) - use signAndExecuteTransaction directly
+              const result = await signer.signAndExecuteTransaction(tx);
+
+              // Extract created objects
+              let createdObjects: Array<{ objectId: string; objectType: string }> | undefined;
+              if (result.objectChanges && Array.isArray(result.objectChanges)) {
+                createdObjects = result.objectChanges
+                  .filter((change: any) => change.type === 'created')
+                  .map((change: any) => ({
+                    objectId: change.objectId,
+                    objectType: change.objectType || 'unknown',
+                  }));
+              }
+
+              // Determine status
+              const effectsStatus = result.effects?.status?.status;
+              const status = effectsStatus === 'failure' ? 'failure' :
+                            effectsStatus === 'success' ? 'success' :
+                            result.digest ? 'success' : 'failure';
+
+              txResult = {
+                digest: result.digest,
+                status,
+                createdObjects,
+                effects: result.effects,
+                objectChanges: result.objectChanges
+              };
+            } else {
+              // Server-side signer - use TransactionService
+              txResult = await this.services.tx.executeTransaction(tx, signer);
+            }
 
             if (txResult.status === 'success') {
               const memoryObject = txResult.createdObjects?.find(

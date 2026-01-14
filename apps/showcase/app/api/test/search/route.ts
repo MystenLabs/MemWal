@@ -153,11 +153,15 @@ export async function POST(request: NextRequest) {
       method = 'advanced',
       walletAddress,
       text,
+      query,  // Accept both "text" and "query" for consistency
       category,
       importance,
       dateRange,
       limit = 10
     } = body;
+
+    // SDK handles both field names - prefer "text" but fallback to "query"
+    const searchText = text || query;
 
     console.log(`[TEST] search.${method}() - wallet: ${walletAddress || 'dummy'}`);
 
@@ -167,7 +171,7 @@ export async function POST(request: NextRequest) {
 
     if (method === 'advanced') {
       result = await pdw.search.advanced({
-        text,
+        text: searchText,  // Use normalized field (accepts both "text" and "query")
         category,
         importance,
         dateRange: dateRange ? {

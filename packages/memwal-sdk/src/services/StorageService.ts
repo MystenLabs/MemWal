@@ -335,6 +335,7 @@ export class StorageService {
       embedding: number[];
       metadata: Record<string, any>;
       encryptedContent?: Uint8Array;
+      encryptedEmbedding?: Uint8Array;  // NEW: encrypted embedding for fast index rebuild
       encryptionType?: string;
       identity?: string;
     },
@@ -345,26 +346,58 @@ export class StorageService {
     let uploadMetadata: Record<string, string>;
 
     if (memoryData.encryptedContent && memoryData.encryptedContent instanceof Uint8Array) {
-      // Direct binary storage for SEAL encrypted data
-      dataToUpload = memoryData.encryptedContent;
-      storageApproach = 'direct-binary';
+      // Option A v2: Full Encryption - both content AND embedding encrypted
+      // Allows fast index rebuild by decrypting embedding (no re-embed API calls)
+      // Maximum privacy - no data leakage on Walrus
+      storageApproach = 'json-package';
+
+      // Convert encrypted content to base64
+      const encryptedContentBase64 = btoa(String.fromCharCode(...memoryData.encryptedContent));
+
+      // Convert encrypted embedding to base64 (if available)
+      const encryptedEmbeddingBase64 = memoryData.encryptedEmbedding
+        ? btoa(String.fromCharCode(...memoryData.encryptedEmbedding))
+        : null;
+
+      const memoryPackage = {
+        // Encrypted content as base64 (requires SEAL decrypt to read)
+        encryptedContent: encryptedContentBase64,
+        // Encrypted embedding as base64 (for fast index rebuild without re-embed)
+        encryptedEmbedding: encryptedEmbeddingBase64,
+        // Metadata including capability info for decryption
+        metadata: {
+          ...memoryData.metadata,
+          encryptionType: memoryData.encryptionType || 'seal-real',
+          identity: memoryData.identity,
+          // Store embedding dimension for reference
+          embeddingDimension: memoryData.embedding?.length || 0,
+        },
+        // Package metadata
+        encrypted: true,
+        timestamp: Date.now(),
+        version: '2.2'  // v2.2 = Full encryption (content + embedding both encrypted)
+      };
+
+      const payloadString = JSON.stringify(memoryPackage);
+      dataToUpload = new TextEncoder().encode(payloadString);
 
       uploadMetadata = {
-        'content-type': 'application/octet-stream',
+        'content-type': 'application/json',
         'encryption-type': memoryData.encryptionType || 'seal-real',
         'context-id': `memory-${memoryData.identity || 'unknown'}`,
         'app-id': 'pdw-sdk',
         'encrypted': 'true',
         'seal-identity': memoryData.identity || '',
-        'version': '1.0',
+        'version': '2.2',
         'category': memoryData.metadata.category || 'memory',
         'created-at': new Date().toISOString(),
         'original-content-type': 'text/plain',
-        'embedding-dimensions': memoryData.embedding.length.toString(),
-        'metadata-title': memoryData.metadata.title || '',
-        'metadata-tags': JSON.stringify(memoryData.metadata.tags || []),
+        'embedding-dimensions': (memoryData.embedding?.length || 0).toString(),
+        'embedding-encrypted': memoryData.encryptedEmbedding ? 'true' : 'false',
         'storage-approach': storageApproach
       };
+
+      console.log(`🔐 Option A v2: Full encryption - content + embedding encrypted (${memoryData.embedding?.length || 0}D)`);
     } else {
       // JSON package storage
       storageApproach = 'json-package';
@@ -459,18 +492,41 @@ export class StorageService {
       const contentString = new TextDecoder().decode(content);
       memoryPackage = JSON.parse(contentString);
 
-      if (memoryPackage.version && memoryPackage.content && memoryPackage.embedding) {
+      // v2.2: JSON package with encrypted content + encrypted embedding
+      if (memoryPackage.version === '2.2' && memoryPackage.encryptedContent) {
+        storageApproach = 'json-package';
+        isEncrypted = true;
+        const embDim = memoryPackage.metadata?.embeddingDimension || 0;
+        console.log(`🔐 Detected v2.2 JSON package: encrypted content + encrypted embedding (${embDim}D)`);
+      }
+      // v2.1: JSON package with encrypted content only (no embedding on Walrus)
+      else if (memoryPackage.version === '2.1' && memoryPackage.encryptedContent) {
+        storageApproach = 'json-package';
+        isEncrypted = true;
+        const embDim = memoryPackage.metadata?.embeddingDimension || 0;
+        console.log(`🔐 Detected v2.1 JSON package: encrypted content only (embedding ${embDim}D stored locally)`);
+      }
+      // v2.0: JSON package with encrypted content + plaintext embedding (legacy)
+      else if (memoryPackage.version === '2.0' && memoryPackage.encryptedContent && memoryPackage.embedding) {
+        storageApproach = 'json-package';
+        isEncrypted = true;
+        console.log(`📦 Detected v2.0 JSON package: encrypted content + ${memoryPackage.embedding.length}D plaintext embedding`);
+      }
+      // v1.0: JSON package with plaintext content + embedding
+      else if (memoryPackage.version && memoryPackage.content && memoryPackage.embedding) {
         storageApproach = 'json-package';
         isEncrypted = false;
+        console.log(`📦 Detected v1.0 JSON package: plaintext content + ${memoryPackage.embedding.length}D embedding`);
       }
     } catch (parseError) {
-      // Not JSON - likely binary SEAL data
+      // Not JSON - likely legacy binary SEAL data (v0)
       const isBinary = content.some(byte => byte < 32 && byte !== 9 && byte !== 10 && byte !== 13);
       const hasHighBytes = content.some(byte => byte > 127);
 
       if (isBinary || hasHighBytes || content.length > 50) {
         storageApproach = 'direct-binary';
         isEncrypted = true;
+        console.log(`📦 Detected legacy binary format (no embedding stored)`);
       }
     }
 

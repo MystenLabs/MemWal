@@ -904,7 +904,7 @@ export class ClientMemoryManager {
     const idBytes = fromHex(addressHex);
 
     tx.moveCall({
-      target: `${this.config.packageId}::seal_access_control::seal_approve`,
+      target: `${this.config.packageId}::capability::seal_approve`,
       arguments: [
         tx.pure.vector('u8', Array.from(idBytes)),
         tx.pure.address(account.address),
@@ -962,7 +962,7 @@ export class ClientMemoryManager {
     const idBytes = fromHex(addressHex);
 
     tx.moveCall({
-      target: `${this.config.packageId}::seal_access_control::seal_approve`,
+      target: `${this.config.packageId}::capability::seal_approve`,
       arguments: [
         tx.pure.vector('u8', Array.from(idBytes)),
         tx.pure.address(account.address),

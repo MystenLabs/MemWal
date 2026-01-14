@@ -16,7 +16,7 @@
 
 import { SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
-import { sha3_256 } from '@noble/hashes/sha3.js';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bcs } from '@mysten/sui/bcs';
 import type {
   MemoryCap,
@@ -73,15 +73,23 @@ export class CapabilityService {
       ],
     });
 
-    const result = await this.suiClient.signAndExecuteTransaction({
-      transaction: tx,
-      signer,
-      options: {
-        showEffects: true,
-        showEvents: true,
-        showObjectChanges: true,
-      },
-    });
+    // Use signer's signAndExecuteTransaction for browser wallet compatibility
+    let result: any;
+    if ('signAndExecuteTransaction' in signer && typeof signer.signAndExecuteTransaction === 'function') {
+      // Browser wallet (DappKitSigner) - call signAndExecuteTransaction directly
+      result = await signer.signAndExecuteTransaction(tx);
+    } else {
+      // Server-side signer - use SuiClient
+      result = await this.suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer,
+        options: {
+          showEffects: true,
+          showEvents: true,
+          showObjectChanges: true,
+        },
+      });
+    }
 
     // Wait for transaction to be finalized to prevent gas coin version conflicts
     if (result.digest) {
@@ -103,9 +111,17 @@ export class CapabilityService {
 
     const eventData = createdEvent.parsedJson as any;
 
+    // Convert nonce from bytes array to hex string (same as in list())
+    const nonceBytes: number[] = Array.isArray(eventData.nonce)
+      ? eventData.nonce
+      : [];
+    const nonceHex = nonceBytes
+      .map((b: number) => b.toString(16).padStart(2, '0'))
+      .join('');
+
     return {
       id: eventData.cap_id,
-      nonce: eventData.nonce,
+      nonce: nonceHex,
       appId: eventData.app_id,
       owner: eventData.owner,
       createdAt: eventData.created_at,
@@ -318,12 +334,12 @@ export class CapabilityService {
     data.set(ownerBytes, 0);
     data.set(nonceBytes, ownerBytes.length);
 
-    // Hash with keccak256
-    const hash = sha3_256(data);
+    // Hash with keccak256 (NOT sha3_256 - they use different padding!)
+    const hash = keccak_256(data);
 
     // Return as hex string
     return '0x' + Array.from(hash)
-      .map(b => b.toString(16).padStart(2, '0'))
+      .map((b: number) => b.toString(16).padStart(2, '0'))
       .join('');
   }
 

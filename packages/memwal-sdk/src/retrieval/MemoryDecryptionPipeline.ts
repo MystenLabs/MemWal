@@ -538,7 +538,8 @@ export class MemoryDecryptionPipeline {
     
     // Build access transaction
     const accessTx = await this.encryptionService.buildAccessTransaction(request.userAddress, 'read');
-    const txBytes = await accessTx.build({ client: (this.encryptionService as any).suiClient });
+    // SEAL REQUIREMENT: Must use onlyTransactionKind: true for PTB validation
+    const txBytes = await accessTx.build({ client: (this.encryptionService as any).suiClient, onlyTransactionKind: true });
 
     // Perform decryption with timeout
     const decryptPromise = this.sealClient.decrypt({

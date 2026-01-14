@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.0
+
+### Major Changes
+
+**🔐 Default SEAL Encryption (v2.2 Format)**
+
+This release enables end-to-end encryption by default using Mysten's SEAL protocol. All memory content AND vector embeddings are now encrypted before being stored on Walrus.
+
+**New Encryption Features:**
+- **v2.2 Package Format**: Both content and embedding are encrypted (full privacy - no plaintext on Walrus)
+- **Capability-based Encryption**: Each memory gets a unique MemoryCap → keyId for decryption
+- **Session Key Caching**: Single wallet signature creates session key for multiple decrypt operations
+- **Automatic Decryption**: `pdw.storage.retrieveAndDecrypt()` handles all version detection and decryption internally
+
+**New SDK Methods:**
+- `pdw.storage.retrieveAndDecrypt(blobId, options)` - High-level decrypt API with automatic version detection
+- `pdw.storage.storeMemoryPackage()` - Now encrypts both content + embedding by default
+- Supports v2.2 (full encryption), v2.1, v2.0 (legacy), and plaintext formats
+
+**Privacy Improvements:**
+- Vector embeddings are now encrypted (prevents embedding inversion attacks)
+- Only the wallet owner can decrypt (identity-based encryption)
+- Embedding stored encrypted on Walrus, decrypted locally for HNSW index rebuild
+
+**Example Usage:**
+```typescript
+// Encrypt & Upload (automatic)
+const memory = await pdw.memory.create('Secret information');
+// Content + Embedding encrypted → uploaded to Walrus
+
+// Decrypt & Retrieve (automatic)
+const result = await pdw.storage.retrieveAndDecrypt(blobId, {
+  signFn: async (msg) => ({ signature: await wallet.sign(msg) })
+});
+console.log(result.content);     // Decrypted content
+console.log(result.embedding);   // Decrypted 3072D vector
+console.log(result.version);     // "2.2"
+```
+
+**Breaking Changes:**
+- Encryption is now enabled by default (`features.enableEncryption: true`)
+- New memories use v2.2 format (backward compatible - can still read v2.0/v2.1/legacy)
+
+---
+
 ## 0.7.0
 
 ### Minor Changes

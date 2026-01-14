@@ -137,7 +137,7 @@ export class CrossContextPermissionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::register_context_wallet`,
+      target: `${this.packageId}::capability::register_context_wallet`,
       arguments: [
         tx.object(this.accessRegistryId),
         tx.pure.address(normalizeSuiAddress(options.contextWallet)),
@@ -196,7 +196,7 @@ export class CrossContextPermissionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::grant_wallet_allowlist_access`,
+      target: `${this.packageId}::capability::grant_wallet_allowlist_access`,
       arguments: [
         tx.object(this.accessRegistryId),
         tx.pure.address(normalizeSuiAddress(options.requestingWallet)),
@@ -257,7 +257,7 @@ export class CrossContextPermissionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::revoke_wallet_allowlist_access`,
+      target: `${this.packageId}::capability::revoke_wallet_allowlist_access`,
       arguments: [
         tx.object(this.accessRegistryId),
         tx.pure.address(normalizeSuiAddress(options.requestingWallet)),
@@ -288,11 +288,13 @@ export class CrossContextPermissionService {
   ): Transaction {
     const tx = new Transaction();
 
+    // CRITICAL: key_id MUST be first argument!
+    // SEAL key server extracts 'id' from the FIRST PTB argument for decryption approval.
     tx.moveCall({
       target: `${this.packageId}::capability::seal_approve`,
       arguments: [
-        tx.pure.vector('u8', Array.from(keyId)), // id MUST be first (SEAL requirement)
-        tx.object(memoryCapId), // MemoryCap object reference
+        tx.pure.vector('u8', Array.from(keyId)), // Arg 1: key_id bytes (SEAL key server requirement!)
+        tx.object(memoryCapId), // Arg 2: MemoryCap reference
       ],
     });
 
@@ -310,7 +312,7 @@ export class CrossContextPermissionService {
     const tx = new Transaction();
 
     tx.moveCall({
-      target: `${this.packageId}::seal_access_control::seal_approve`,
+      target: `${this.packageId}::capability::seal_approve`,
       arguments: [
         tx.pure.vector('u8', Array.from(contentId)),
         tx.pure.address(normalizeSuiAddress(requestingWallet)),
@@ -418,7 +420,7 @@ export class CrossContextPermissionService {
   private async fetchWalletAllowlistEvents(): Promise<WalletAllowlistEvent[]> {
     const response = await this.client.queryEvents({
       query: {
-        MoveEventType: `${this.packageId}::seal_access_control::WalletAllowlistChanged`,
+        MoveEventType: `${this.packageId}::capability::WalletAllowlistChanged`,
       },
       limit: 1000,
       order: 'ascending',

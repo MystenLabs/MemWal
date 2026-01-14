@@ -324,7 +324,7 @@ export class ViewService {
         const grantorResponse = await this.client.getOwnedObjects({
           owner: userAddress,
           filter: {
-            StructType: `${this.config.packageId}::seal_access_control::AccessPermission`,
+            StructType: `${this.config.packageId}::capability::AccessPermission`,
           },
           options: {
             showContent: true,
@@ -382,7 +382,7 @@ export class ViewService {
     try {
       const queryOptions: any = {
         filter: {
-          StructType: `${this.config.packageId}::seal_access_control::ContentRegistry`,
+          StructType: `${this.config.packageId}::capability::ContentRegistry`,
         },
         options: {
           showContent: true,

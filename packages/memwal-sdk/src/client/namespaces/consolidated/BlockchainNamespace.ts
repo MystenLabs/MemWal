@@ -74,13 +74,56 @@ class TxSubNamespace {
   /**
    * Build transaction for creating memory record
    *
-   * @param options - Memory creation options
+   * Automatically uses capability-based creation when encryption is enabled,
+   * otherwise falls back to lightweight creation without capability.
+   *
+   * **Smart capability handling:**
+   * - If `capId` provided → use it directly (V2)
+   * - If encryption enabled + capability service available → auto get/create capability (V2)
+   * - Otherwise → fallback to legacy mode (V1)
+   *
+   * @param options - Memory creation options (with optional capId for V2)
    * @returns Transaction object
    */
-  buildCreate(options: MemoryTxOptions): Transaction {
+  async buildCreate(options: MemoryTxOptions & { capId?: string }): Promise<Transaction> {
     if (!this.services.tx) {
       throw new Error('Transaction service not configured.');
     }
+
+    let capId = options.capId;
+
+    // Auto get/create capability if encryption enabled and not explicitly provided
+    if (!capId && this.services.capability && this.services.config.features?.enableEncryption) {
+      try {
+        console.log('🔐 Auto-creating capability for encryption...');
+        const cap = await this.services.capability.getOrCreate(
+          {
+            appId: options.category,
+            userAddress: this.services.config.userAddress
+          },
+          this.services.config.signer // Pass signer for transaction signing
+        );
+        capId = cap.id;
+        console.log(`✅ Capability ready: ${capId}`);
+      } catch (capError) {
+        console.warn('⚠️ Failed to auto-create capability:', capError);
+        // Continue without capability (fallback to legacy mode)
+      }
+    }
+
+    // Use capability-based creation if capId available (V2 - RECOMMENDED for encryption)
+    if (capId) {
+      return this.services.tx.buildCreateMemoryRecordLightweightWithCap({
+        category: options.category,
+        vectorId: options.vectorId,
+        blobId: options.blobId,
+        importance: options.importance,
+        gasBudget: options.gasBudget,
+        capId: capId
+      });
+    }
+
+    // Fallback to legacy lightweight creation (V1 - no encryption support)
     return this.services.tx.buildCreateMemoryRecordLightweight({
       category: options.category,
       vectorId: options.vectorId,

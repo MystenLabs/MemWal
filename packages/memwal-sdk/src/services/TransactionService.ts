@@ -149,6 +149,54 @@ export class TransactionService {
   }
 
   /**
+   * Build transaction to create a lightweight memory record with capability (V2 - RECOMMENDED)
+   *
+   * Gas-optimized version for capability-based access control with SEAL encryption.
+   * This creates a memory record linked to a MemoryCap, enabling:
+   * - Identity-based encryption/decryption via SEAL
+   * - Cross-package memory sharing via capability transfer
+   * - Fine-grained access control
+   *
+   * Use this when:
+   * - Encryption is enabled (SEAL requires capability)
+   * - You need cross-package memory sharing
+   * - You want capability-based access control
+   *
+   * @param options - Lightweight memory creation options with capability
+   * @returns Transaction to create lightweight memory record with capability
+   */
+  buildCreateMemoryRecordLightweightWithCap(options: CreateMemoryRecordLightweightTxOptions & { capId: string }): Transaction {
+    const tx = new Transaction();
+
+    // Set gas budget if provided
+    if (options.gasBudget) {
+      tx.setGasBudget(options.gasBudget);
+    }
+
+    // Set gas price if provided
+    if (options.gasPrice) {
+      tx.setGasPrice(options.gasPrice);
+    }
+
+    // Call the capability-based memory creation function
+    // Note: Clock object (0x6) is required for real-time timestamp
+    tx.moveCall({
+      target: `${this.config.packageId}::memory::create_memory_lightweight_with_cap`,
+      arguments: [
+        tx.object(options.capId), // &MemoryCap reference (FIRST argument)
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.category))),
+        tx.pure.u64(options.vectorId),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.blobId))),
+        tx.pure.vector('u8', Array.from(new TextEncoder().encode(options.blobObjectId || ''))),
+        tx.pure.u8(options.importance),
+        tx.object('0x6'), // Sui Clock object for real-time timestamp
+      ],
+    });
+
+    return tx;
+  }
+
+  /**
    * Build transaction to update memory metadata
    */
   buildUpdateMemoryMetadata(options: UpdateMemoryMetadataTxOptions): Transaction {
