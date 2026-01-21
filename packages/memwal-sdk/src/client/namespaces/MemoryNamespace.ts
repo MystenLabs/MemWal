@@ -39,6 +39,8 @@ export interface CreateMemoryOptions {
   importance?: number; // 1-10
   topic?: string;
   metadata?: Record<string, any>;
+  /** Pre-generated embedding (if provided, skips embedding generation) */
+  embedding?: number[];
   onProgress?: (stage: string, percent: number) => void;
 }
 
@@ -73,6 +75,20 @@ export interface ListMemoryOptions {
   offset?: number;
   sortBy?: 'date' | 'importance' | 'relevance';
   order?: 'asc' | 'desc';
+}
+
+/**
+ * Options for searching memories
+ */
+export interface SearchMemoryOptions {
+  /** Maximum number of results (default: 10) */
+  limit?: number;
+  /** Minimum similarity threshold 0-1 (default: 0.5) */
+  threshold?: number;
+  /** Filter by category */
+  category?: string;
+  /** Include full content in results (default: true) */
+  includeContent?: boolean;
 }
 
 /**
@@ -132,7 +148,7 @@ export class MemoryNamespace {
    * ```
    */
   async create(content: string, options: CreateMemoryOptions = {}): Promise<Memory> {
-    const { importance = 5, topic, metadata, onProgress } = options;
+    const { importance = 5, topic, metadata, onProgress, embedding: preGeneratedEmbedding } = options;
     let category: string = options.category || 'general';
 
     try {
@@ -160,17 +176,17 @@ export class MemoryNamespace {
         }
       }
 
-      // 2. Generate embedding
-      let embedding: number[] | undefined;
-      if (this.services.embedding) {
+      // 2. Use pre-generated embedding or generate new one
+      let embedding: number[] | undefined = preGeneratedEmbedding;
+      if (embedding && embedding.length > 0) {
+        console.log(`✅ Using pre-generated embedding: ${embedding.length}D`);
+      } else if (this.services.embedding) {
         onProgress?.('generating embedding', 20);
-        const embResult = await this.services.embedding.embedText({
-          text: content
-        });
+        const embResult = await this.services.embedding.embedText({ text: content });
         embedding = embResult.vector;
-        console.log(`✅ Embedding generated: ${embedding?.length || 0}D vector`);
+        console.log(`✅ Embedding generated: ${embedding?.length || 0}D`);
       } else {
-        console.warn('⚠️ EmbeddingService not available - no embedding will be stored!');
+        console.warn('⚠️ No embedding available');
       }
 
       // 3. Encrypt (if enabled) - Use capability-based encryption (v2.2)
@@ -700,6 +716,137 @@ export class MemoryNamespace {
       }));
     } catch (error) {
       throw new Error(`Failed to list memories: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Search memories using natural language query
+   *
+   * Unified search that:
+   * 1. Converts query text to embedding
+   * 2. Performs vector similarity search
+   * 3. Returns ranked results with content
+   *
+   * @param query - Natural language search query
+   * @param options - Search options (limit, threshold, category)
+   * @returns Array of matching memories sorted by relevance
+   *
+   * @example
+   * ```typescript
+   * // Simple search
+   * const results = await pdw.memory.search('meeting notes');
+   *
+   * // With options
+   * const results = await pdw.memory.search('TypeScript tips', {
+   *   limit: 5,
+   *   category: 'note',
+   *   threshold: 0.7
+   * });
+   * ```
+   */
+  async search(query: string, options: SearchMemoryOptions = {}): Promise<Memory[]> {
+    const {
+      limit = 10,
+      threshold = 0.5,
+      category,
+      includeContent = true
+    } = options;
+
+    try {
+      // Validate query
+      if (!query || query.trim().length === 0) {
+        return [];
+      }
+
+      // Step 1: Generate embedding for query
+      if (!this.services.embedding) {
+        throw new Error('Embedding service not available - cannot perform semantic search');
+      }
+
+      const embResult = await this.services.embedding.embedText({ text: query });
+      const queryEmbedding = embResult.vector;
+
+      // Step 2: Perform vector search
+      let searchResults: any[] = [];
+
+      // Try local index first (faster)
+      if (this.services.vector) {
+        try {
+          const spaceId = this.services.config.userAddress;
+          const searchResult = await this.services.vector.searchVectors(spaceId, queryEmbedding, { k: limit * 2 });
+          searchResults = searchResult.results.map((r: any) => ({
+            id: r.metadata?.memoryObjectId || r.memoryId || String(r.vectorId),
+            vectorId: r.vectorId,
+            content: r.metadata?.content || '',
+            category: r.metadata?.category,
+            importance: r.metadata?.importance,
+            blobId: r.metadata?.blobId || r.memoryId,
+            metadata: r.metadata,
+            similarity: r.similarity || 0,
+            encrypted: r.metadata?.isEncrypted || false,
+            createdAt: r.metadata?.timestamp || Date.now()
+          }));
+        } catch (indexError) {
+          console.warn('Local index search failed:', indexError);
+        }
+      }
+
+      // Fallback to memory index service if available
+      if (searchResults.length === 0 && this.services.memoryIndex) {
+        try {
+          const results = await this.services.memoryIndex.searchMemories({
+            userAddress: this.services.config.userAddress,
+            vector: queryEmbedding,
+            k: limit * 2
+          });
+          searchResults = results.map((r: any) => ({
+            id: r.memoryObjectId || r.id,
+            content: r.content || '',
+            category: r.category,
+            importance: r.importance || r.metadata?.importance,
+            blobId: r.blobId || r.id,
+            metadata: r.metadata,
+            similarity: r.score || r.similarity || 0,
+            encrypted: r.isEncrypted || false,
+            createdAt: r.timestamp || Date.now()
+          }));
+        } catch (memIndexError) {
+          console.warn('Memory index search failed:', memIndexError);
+        }
+      }
+
+      // Step 3: Filter by threshold and category
+      let filtered = searchResults.filter(r => r.similarity >= threshold);
+
+      if (category) {
+        filtered = filtered.filter(r => r.category === category);
+      }
+
+      // Step 4: Limit results
+      const limited = filtered.slice(0, limit);
+
+      // Step 5: Optionally fetch full content for encrypted memories
+      if (includeContent) {
+        const withContent = await Promise.all(
+          limited.map(async (r) => {
+            // If content is missing or encrypted, try to fetch from storage
+            if (!r.content && r.blobId) {
+              try {
+                const memory = await this.get(r.blobId);
+                return { ...r, content: memory.content };
+              } catch {
+                return r;
+              }
+            }
+            return r;
+          })
+        );
+        return withContent as Memory[];
+      }
+
+      return limited as Memory[];
+    } catch (error) {
+      throw new Error(`Failed to search memories: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

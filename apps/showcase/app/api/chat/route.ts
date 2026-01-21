@@ -124,13 +124,34 @@ export async function POST(req: Request) {
         // Skip search for pure memory commands to improve performance
         // Pure memory commands don't need RAG context - user just wants to save data
         if (!isPureMemoryCommand) {
-          console.log(`\n🔧 Step 3: Performing vector search...`)
-          console.log(`   search.vector available: ${typeof pdw.search?.vector}`)
+          console.log(`\n🔧 Step 3: Performing memory search...`)
+          console.log(`   memory.search available: ${typeof pdw.memory?.search}`)
+
+          // Step 3a: Ensure index is loaded from disk (fixes cross-process issue)
+          // Next.js API routes may run in different processes, so we need to
+          // explicitly load the persisted index before searching
+          try {
+            console.log(`   Loading index for wallet: ${walletAddress.substring(0, 10)}...`)
+            // Check if index file exists and try to trigger loading
+            const { hasExistingIndexNode, loadIndexNode } = await import('@cmdoss/memwal-sdk')
+            const hasIndex = await hasExistingIndexNode(walletAddress)
+            console.log(`   Index exists on disk: ${hasIndex}`)
+
+            if (hasIndex) {
+              // Try to load index into memory via getStats (triggers lazy loading)
+              const stats = pdw.index.getStats(walletAddress)
+              console.log(`   Index stats after load attempt: ${JSON.stringify(stats)}`)
+            }
+          } catch (loadErr) {
+            console.log(`   ⚠️ Index pre-load check: ${loadErr}`)
+          }
+
           const searchStartTime = Date.now()
-          const searchResults = await pdw.search.vector(latestUserMessage.content, {
+          // Use NEW pdw.memory.search() API instead of legacy pdw.search.vector()
+          const searchResults = await pdw.memory.search(latestUserMessage.content, {
             limit: 10,
-            threshold: 0.5,
-            fetchContent: true
+            threshold: 0.3,  // Lower threshold for better recall
+            includeContent: true
           })
           const searchDuration = Date.now() - searchStartTime
 
@@ -140,13 +161,16 @@ export async function POST(req: Request) {
           if (searchResults && searchResults.length > 0) {
             console.log(`\n📋 Search Results:`)
             searchResults.forEach((result: any, idx: number) => {
-              console.log(`   ${idx + 1}. score=${(result.score * 100).toFixed(1)}%, content="${(result.content || '').substring(0, 50)}..."`)
+              // New API uses 'similarity', legacy uses 'score'
+              const score = result.similarity ?? result.score ?? 0
+              console.log(`   ${idx + 1}. score=${(score * 100).toFixed(1)}%, content="${(result.content || '').substring(0, 50)}..."`)
             })
             relevantMemories = '\n\n📚 **Relevant Memories from Blockchain:**\n' +
               searchResults
-                .map((result: any, idx: number) =>
-                  `${idx + 1}. ${result.content} (relevance: ${(result.score * 100).toFixed(1)}%)`
-                )
+                .map((result: any, idx: number) => {
+                  const score = result.similarity ?? result.score ?? 0
+                  return `${idx + 1}. ${result.content} (relevance: ${(score * 100).toFixed(1)}%)`
+                })
                 .join('\n')
 
             console.log(`\n✅ Found ${searchResults.length} relevant memories for RAG`)

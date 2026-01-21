@@ -64,10 +64,10 @@ export class IndexNamespace {
    * This method is provided for explicit initialization or VectorService compatibility.
    *
    * @param spaceId - Index space identifier (e.g., userAddress)
-   * @param dimension - Vector dimension (default: 3072)
+   * @param dimension - Vector dimension (default: 768)
    * @param config - Optional HNSW config (used by VectorService)
    */
-  async create(spaceId: string, dimension: number = 3072, config?: IndexConfig): Promise<void> {
+  async create(spaceId: string, dimension: number = 768, config?: IndexConfig): Promise<void> {
     const { type, service } = this.getService();
 
     if (type === 'memoryIndex') {
@@ -94,7 +94,7 @@ export class IndexNamespace {
 
     if (type === 'memoryIndex') {
       // MemoryIndexService uses batched add internally via HnswWasmService
-      // Option A+: Pass isEncrypted to control content storage
+      // Option A+: Pass isEncrypted and forceStoreContent to control content storage
       await service.indexMemory(
         spaceId,
         vectorId.toString(),
@@ -102,7 +102,10 @@ export class IndexNamespace {
         metadata?.content || '',
         metadata || {},
         vector,
-        { isEncrypted: metadata?.isEncrypted ?? false }
+        {
+          isEncrypted: metadata?.isEncrypted ?? false,
+          forceStoreContent: metadata?.forceStoreContent ?? false
+        }
       );
     } else {
       await service.addVector(spaceId, vectorId, vector, metadata);

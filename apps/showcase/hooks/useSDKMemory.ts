@@ -41,7 +41,7 @@ export interface MemorySaveStatus {
  * ```
  */
 export function useSDKMemory() {
-  const { pdw, isReady, walletAddress } = usePDWClient()
+  const { client: pdw, isReady, address: walletAddress } = usePDWClient()
 
   const [isPending, setIsPending] = useState(false)
   const [status, setStatus] = useState<MemorySaveStatus>({ stage: 'idle', message: '' })
@@ -122,7 +122,8 @@ export function useSDKMemory() {
   }, [pdw, isReady])
 
   /**
-   * Search memories using SDK
+   * Search memories using SDK - Simplified API
+   * Uses pdw.memory.search() which auto-embeds query and searches
    */
   const searchMemories = useCallback(async (
     query: string,
@@ -132,10 +133,10 @@ export function useSDKMemory() {
       throw new Error('SDK not ready')
     }
 
-    return await pdw.search.vector(query, {
+    // Use new simplified memory.search() API
+    return await pdw.memory.search(query, {
       limit: options?.limit || 10,
       category: options?.category,
-      fetchContent: true,
     })
   }, [pdw, isReady])
 

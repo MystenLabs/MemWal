@@ -35,7 +35,8 @@ export async function POST(req: Request) {
       embedding,
       blobId,
       category,
-      importance
+      importance,
+      isEncrypted  // Extract isEncrypted from request
     } = body
 
     if (!walletAddress || !embedding || !Array.isArray(embedding)) {
@@ -83,7 +84,10 @@ export async function POST(req: Request) {
           importance: importance || 5,
           content: content,
           timestamp: Date.now(),
-          isEncrypted: false
+          isEncrypted: isEncrypted ?? true,  // Default to true (encryption enabled)
+          // IMPORTANT: Force store content for server-side RAG even when encrypted
+          // This allows the chat API to retrieve content without needing to decrypt from Walrus
+          forceStoreContent: true
         }
       )
       console.log(`   ✅ pdw.index.add() completed`)

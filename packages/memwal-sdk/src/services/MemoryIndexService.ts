@@ -122,7 +122,7 @@ export class MemoryIndexService {
     }
 
     console.log(`   Max elements: ${options.maxElements || 10000}`);
-    console.log(`   Embedding dimension: ${options.dimension || 3072}`);
+    console.log(`   Embedding dimension: ${options.dimension || 768}`);
     console.log(`   HNSW parameters: M=${options.m || 16}, efConstruction=${options.efConstruction || 200}`);
   }
 
@@ -133,7 +133,7 @@ export class MemoryIndexService {
     try {
       const service = await createHnswService({
         indexConfig: {
-          dimension: this.options.dimension || 3072,
+          dimension: this.options.dimension || 768, // Default 768 for speed (was 3072)
           maxElements: this.options.maxElements || 10000,
           efConstruction: this.options.efConstruction || 200,
           m: this.options.m || 16
@@ -188,6 +188,7 @@ export class MemoryIndexService {
    * @param embedding - Pre-computed embedding vector (optional)
    * @param options - Indexing options
    * @param options.isEncrypted - If true, content will NOT be stored in index (security)
+   * @param options.forceStoreContent - If true, store content even when encrypted (for server-side RAG)
    */
   async indexMemory(
     userAddress: string,
@@ -196,7 +197,7 @@ export class MemoryIndexService {
     content: string,
     metadata: MemoryMetadata,
     embedding?: number[],
-    options?: { isEncrypted?: boolean }
+    options?: { isEncrypted?: boolean; forceStoreContent?: boolean }
   ): Promise<{ vectorId: number; indexed: boolean }> {
     try {
       console.log(`📊 Indexing memory ${memoryId} for user ${userAddress}`);
@@ -231,8 +232,13 @@ export class MemoryIndexService {
         customMetadata: metadata.customMetadata
       };
 
-      // Only store content if NOT encrypted (privacy-safe)
-      if (!isEncrypted && content) {
+      // Store content in index based on encryption and forceStoreContent settings
+      const forceStoreContent = options?.forceStoreContent ?? false;
+      if (forceStoreContent && content) {
+        // Force store content for server-side RAG (user explicitly opted-in)
+        vectorMetadata.content = content;
+        console.log('   💾 Content stored in local index (forceStoreContent=true for RAG)');
+      } else if (!isEncrypted && content) {
         vectorMetadata.content = content;
         console.log('   💾 Content stored in local index (encryption OFF)');
       } else if (isEncrypted) {

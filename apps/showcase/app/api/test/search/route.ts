@@ -2,7 +2,10 @@
  * Test endpoint for pdw.search namespace
  *
  * Usage:
- * # Vector search (semantic)
+ * # NEW: Simplified memory search (uses pdw.memory.search() with hnswlib-node)
+ * curl -X GET "http://localhost:3000/api/test/search?walletAddress=YOUR_WALLET&method=memory&query=programming"
+ *
+ * # Vector search (semantic) - legacy API
  * curl -X GET "http://localhost:3000/api/test/search?walletAddress=YOUR_WALLET&method=vector&query=programming"
  *
  * # Filter by category
@@ -42,6 +45,23 @@ export async function GET(request: NextRequest) {
     let result: any;
 
     switch (method) {
+      // NEW: Simplified API using pdw.memory.search() with hnswlib-node
+      case 'memory':
+        if (!query) {
+          return NextResponse.json(
+            { error: 'query param is required for memory search' },
+            { status: 400 }
+          );
+        }
+        console.log(`[TEST] Using NEW pdw.memory.search() with hnswlib-node`);
+        result = await pdw.memory.search(query, {
+          limit,
+          category: category || undefined,
+          threshold: 0.3, // Lower threshold for testing
+          includeContent: true
+        });
+        break;
+
       case 'vector':
         if (!query) {
           return NextResponse.json(
@@ -49,6 +69,7 @@ export async function GET(request: NextRequest) {
             { status: 400 }
           );
         }
+        // Legacy API - still works
         result = await pdw.search.vector(query, {
           limit,
           category: category || undefined,

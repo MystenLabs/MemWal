@@ -1,5 +1,173 @@
 # Changelog
 
+## 0.9.0
+
+### Major Changes
+
+**🎯 Simplified API (5 Core Namespaces)**
+
+This release introduces a simplified, unified API that reduces complexity from 20+ namespaces to 5 core namespaces. The goal is making 90% of tasks achievable with just `pdw.memory.*`.
+
+**Core Namespaces:**
+```typescript
+pdw.memory   // Create, get, search, list, delete memories
+pdw.ai       // Embed, classify, extract commands
+pdw.index    // HNSW index management
+pdw.wallet   // Wallet address and balance info
+pdw.advanced // Power user features (graph, analytics, etc.)
+```
+
+**New Unified Search API:**
+```typescript
+// OLD (multiple steps required)
+const embedding = await pdw.embeddings.generate(query);
+const results = await pdw.search.vector(embedding, { limit: 10 });
+
+// NEW (single method, auto-embeds query)
+const results = await pdw.memory.search(query, {
+  limit: 10,
+  threshold: 0.3,
+  category: 'fact',
+  includeContent: true
+});
+```
+
+**🔧 Server-Side RAG Support**
+
+Added `forceStoreContent` option for server-side RAG applications. When encryption is enabled, content is normally NOT stored in the local index for security. This option allows storing plaintext content in the local index for RAG use cases.
+
+```typescript
+await pdw.index.add(walletAddress, vectorId, embedding, {
+  content: plaintextContent,
+  blobId: blobId,
+  isEncrypted: true,
+  forceStoreContent: true  // Store content for RAG even when encrypted
+});
+```
+
+**Use Case:** Server-side chat APIs that need to search and retrieve memory content without decrypting from Walrus on every request.
+
+**⚡ Performance: Default 768 Dimensions**
+
+Changed default embedding dimensions from 3072 to 768 for better performance:
+
+| Dimensions | Embedding Speed | Storage Size | Search Speed | Quality |
+|------------|-----------------|--------------|--------------|---------|
+| **768** (new default) | Fast | Small | Fast | Good |
+| 1536 | Medium | Medium | Medium | Better |
+| 3072 | Slow | Large | Slow | Best |
+
+**Configuration:**
+```typescript
+const pdw = new SimplePDWClient({
+  embedding: {
+    provider: 'openrouter',
+    apiKey: process.env.OPENROUTER_API_KEY,
+    dimensions: 768  // Default, can be 1536 or 3072
+  }
+});
+```
+
+**Environment Variable:**
+```bash
+EMBEDDING_DIMENSIONS=768  # 768 (default), 1536, 3072
+```
+
+### New Features
+
+**`pdw.memory.search()` - Unified Semantic Search**
+- Auto-embeds query text
+- Auto-decrypts content (if encrypted)
+- Returns content with similarity scores
+- Supports category filtering
+- Configurable similarity threshold
+
+```typescript
+const results = await pdw.memory.search('work experience', {
+  limit: 10,
+  threshold: 0.3,     // Minimum similarity (0-1)
+  category: 'fact',   // Optional filter
+  includeContent: true
+});
+
+// Returns: [{ id, content, similarity, category, importance, ... }]
+```
+
+**`pdw.ai.extractMultipleMemories()` - Memory Command Extraction**
+- Parse user input for multiple memories
+- Supports "remember X and Y" patterns
+- Used by chat APIs for automatic memory detection
+
+```typescript
+const memories = pdw.ai.extractMultipleMemories(
+  "remember I like pizza and my name is John"
+);
+// Returns: ["I like pizza", "my name is John"]
+```
+
+**Index Management Improvements**
+- `forceStoreContent` option for RAG
+- Better cross-process index loading
+- Improved flush/save reliability
+
+### Deprecations
+
+The following namespaces are deprecated (still work with console warnings):
+
+| Deprecated | Use Instead |
+|------------|-------------|
+| `pdw.search.vector()` | `pdw.memory.search()` |
+| `pdw.search.byCategory()` | `pdw.memory.list({ category })` |
+| `pdw.search.hybrid()` | `pdw.memory.search(query, { category })` |
+| `pdw.embeddings.generate()` | `pdw.ai.embed()` |
+| `pdw.classify.category()` | `pdw.ai.classify()` |
+
+**Deprecation Timeline:**
+- v0.9.0: Deprecation warnings added
+- v1.0.0: Warnings become errors
+- v2.0.0: Deprecated methods removed
+
+### Bug Fixes
+
+- **RAG with Encryption**: Fixed issue where encrypted memories had no content in local index, preventing RAG from working
+- **Cross-Process Index**: Added explicit index loading for Next.js API routes running in separate processes
+- **Dimension Mismatch**: Fixed dimension configuration inconsistencies across services
+
+### Documentation
+
+- **README.md**: Complete rewrite with full API reference
+  - 5 core namespaces documented
+  - Server-side RAG section
+  - Configuration examples
+  - Embedding providers comparison
+  - Index rebuild guide
+- **CLAUDE.md**: Updated with simplified API patterns
+- **Examples**: Updated to use new `pdw.memory.search()` API
+
+### Migration Guide
+
+**From v0.8.0:**
+
+1. **Search API** (recommended but not required):
+   ```typescript
+   // Old
+   const results = await pdw.search.vector(query, { limit: 10 });
+
+   // New
+   const results = await pdw.memory.search(query, { limit: 10 });
+   ```
+
+2. **Embedding Dimensions** (if using 3072):
+   - Existing indexes continue to work
+   - New memories default to 768
+   - Set `EMBEDDING_DIMENSIONS=3072` to keep 3072
+
+3. **Server-Side RAG**:
+   - Add `forceStoreContent: true` to index operations
+   - Rebuild index to include content for existing memories
+
+---
+
 ## 0.8.0
 
 ### Major Changes
@@ -42,6 +210,25 @@ console.log(result.version);     // "2.2"
 **Breaking Changes:**
 - Encryption is now enabled by default (`features.enableEncryption: true`)
 - New memories use v2.2 format (backward compatible - can still read v2.0/v2.1/legacy)
+
+**🚀 Walrus Storage Optimization**
+
+Improved Walrus integration with proper endpoint support for faster uploads:
+
+- **Upload Relay Support**: New `walrusUploadRelayUrl` config for browser/mobile uploads (fewer network connections)
+- **Publisher Support**: `walrusPublisherUrl` for server-side direct uploads
+- **Aggregator**: `walrusAggregatorUrl` for blob retrieval
+- **Auto-detection**: Automatically uses Upload Relay in browser, Publisher on server
+- **Fixed REST API endpoints**: Correct `/v1/blobs` endpoint paths per Walrus docs
+
+**Testnet Defaults:**
+```typescript
+{
+  walrusPublisherUrl: 'https://publisher.walrus-testnet.walrus.space',
+  walrusUploadRelayUrl: 'https://upload-relay.testnet.walrus.space',
+  walrusAggregatorUrl: 'https://aggregator.walrus-testnet.walrus.space',
+}
+```
 
 ---
 
