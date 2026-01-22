@@ -5,6 +5,10 @@
  * HNSW implementation:
  * - Browser: BrowserHnswIndexService (hnswlib-wasm)
  * - Node.js: NodeHnswService (hnswlib-node)
+ * - Bun: Can use either, but hnswlib-wasm recommended (set USE_WASM_HNSW=true)
+ *
+ * Environment Variable Override:
+ * - USE_WASM_HNSW=true: Force hnswlib-wasm (useful for Bun runtime)
  *
  * Uses singleton pattern to prevent redundant initializations.
  */
@@ -70,10 +74,18 @@ export async function createHnswService(config: HnswServiceConfig = {}): Promise
  * Internal function to create a new HNSW service instance
  */
 async function createNewInstance(config: HnswServiceConfig): Promise<IHnswService> {
-  if (isBrowser()) {
-    console.log('[createHnswService] Browser environment detected, using hnswlib-wasm');
+  // Check for WASM override (useful for Bun runtime or testing)
+  // Set USE_WASM_HNSW=true to force hnswlib-wasm instead of hnswlib-node
+  const forceWasm = process.env.USE_WASM_HNSW === 'true';
 
-    // Dynamic import for browser service
+  if (forceWasm || isBrowser()) {
+    if (forceWasm) {
+      console.log('[createHnswService] USE_WASM_HNSW=true detected, forcing hnswlib-wasm');
+    } else {
+      console.log('[createHnswService] Browser environment detected, using hnswlib-wasm');
+    }
+
+    // Dynamic import for browser service (works in browsers, Bun, and Node.js)
     const { BrowserHnswIndexService } = await import('./BrowserHnswIndexService');
     const service = new BrowserHnswIndexService(config.indexConfig);
     return service as unknown as IHnswService;

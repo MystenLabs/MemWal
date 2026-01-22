@@ -100,7 +100,7 @@
     },
     "packages/memwal-sdk": {
       "name": "@cmdoss/memwal-sdk",
-      "version": "0.6.2",
+      "version": "0.9.1",
       "dependencies": {
         "@ai-sdk/google": "^2.0.46",
         "@ai-sdk/openai": "^2.0.86",

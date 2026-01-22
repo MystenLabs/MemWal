@@ -92,7 +92,7 @@ export async function getPDWClient(): Promise<any> {
       },
       features: {
         enableEncryption: true, // SEAL encryption enabled by default
-        enableLocalIndexing: true, // Enable hybrid HNSW (uses hnswlib-node for Node.js)
+        enableLocalIndexing: true, // ✅ Enabled for Node.js runtime (stable with hnswlib-node)
         enableKnowledgeGraph: true, // Enable knowledge graph extraction
       },
       // SEAL encryption configuration (optional - SDK provides defaults)
