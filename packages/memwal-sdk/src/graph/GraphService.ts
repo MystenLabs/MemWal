@@ -7,6 +7,7 @@
 
 import { EmbeddingService } from '../services/EmbeddingService';
 import { GeminiAIService, type GeminiConfig } from '../services/GeminiAIService';
+import { getChatModel } from '../config/modelDefaults';
 
 export interface Entity {
   id: string;
@@ -97,7 +98,7 @@ export class GraphService {
     embeddingService?: EmbeddingService
   ) {
     this.config = {
-      extractionModel: config.extractionModel || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+      extractionModel: getChatModel(config.extractionModel),
       confidenceThreshold: config.confidenceThreshold || 0.5,
       maxHops: config.maxHops || 3,
       enableEmbeddings: config.enableEmbeddings !== false,

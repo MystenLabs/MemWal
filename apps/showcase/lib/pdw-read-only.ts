@@ -1,4 +1,5 @@
 import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
+import { getChatModel } from '@cmdoss/memwal-sdk';
 
 // ============================================================================
 // LRU Cache with TTL for PDW Clients - Prevents Memory Leaks
@@ -303,7 +304,7 @@ async function createAndCacheClient(walletAddress: string): Promise<any> {
       // AI config for chat/analysis
       ai: {
         apiKey: aiApiKey,
-        chatModel: process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+        chatModel: getChatModel(),
       },
       walrus: {
         aggregatorUrl: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',

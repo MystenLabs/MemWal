@@ -44,6 +44,7 @@ import { isBrowser, isNode } from '../vector/IHnswService';
 import type { IHnswService } from '../vector/IHnswService';
 import { EmbeddingService } from '../services/EmbeddingService';
 import { GeminiAIService } from '../services/GeminiAIService';
+import { getChatModel } from '../config/modelDefaults';
 
 export interface ClientMemoryManagerConfig {
   packageId: string;
@@ -160,7 +161,7 @@ export class ClientMemoryManager {
 
       this.geminiAIService = new GeminiAIService({
         apiKey: this.config.geminiApiKey,
-        model: process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+        model: getChatModel(),
         temperature: 0.1
       });
 
@@ -847,16 +848,32 @@ export class ClientMemoryManager {
   }
 
   private async fetchFromWalrus(blobId: string, client: SuiClient): Promise<Uint8Array> {
-    // Use Walrus SDK for reading blobs (consistent with uploadToWalrus)
-    const extendedClient = (client as any).$extend(
-      WalrusClient.experimental_asClientExtension({
-        network: this.config.walrusNetwork,
-      })
-    );
+    // Default: Use HTTP aggregator REST API (cleaner, no 404 noise in browser)
+    // Fallback: If HTTP fails, use Walrus SDK
+    const network = this.config.walrusNetwork || 'testnet';
+    const aggregatorUrl = `https://aggregator.walrus-${network}.walrus.space`;
+    const url = `${aggregatorUrl}/v1/blobs/${blobId}`;
 
-    const walrusClient = extendedClient.walrus as any;
-    const blob = await walrusClient.readBlob({ blobId });
-    return blob;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      return new Uint8Array(arrayBuffer);
+    } catch (httpError) {
+      console.warn(`⚠️ HTTP aggregator failed, falling back to Walrus SDK:`, httpError);
+
+      // Fallback to Walrus SDK
+      const extendedClient = (client as any).$extend(
+        WalrusClient.experimental_asClientExtension({
+          network: network,
+        })
+      );
+      const walrusClient = extendedClient.walrus as any;
+      const blob = await walrusClient.readBlob({ blobId });
+      return blob;
+    }
   }
 
   /**

@@ -15,6 +15,7 @@ import { KnowledgeGraphManager } from '../graph/KnowledgeGraphManager';
 import { StorageManager } from '../infrastructure/walrus/StorageManager';
 import { BlockchainManager } from '../infrastructure/sui/BlockchainManager';
 import { Memory, ProcessedMemory, MemoryPipelineConfig, MemoryPipelineResult } from '../embedding/types';
+import { getChatModel } from '../config/modelDefaults';
 
 export interface PipelineConfig {
   // Service configurations
@@ -148,7 +149,7 @@ export class MemoryPipeline {
     this.config = {
       embedding: {
         apiKey: config.embedding?.apiKey || '',
-        model: config.embedding?.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+        model: getChatModel(config.embedding?.model),
         enableBatching: config.embedding?.enableBatching !== false,
         batchSize: config.embedding?.batchSize || 20
       },

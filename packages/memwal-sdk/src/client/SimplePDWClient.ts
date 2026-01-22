@@ -63,6 +63,7 @@ import { AINamespace } from './namespaces/consolidated/AINamespace';
 import { SecurityNamespace } from './namespaces/consolidated/SecurityNamespace';
 import { BlockchainNamespace } from './namespaces/consolidated/BlockchainNamespace';
 import { StorageNamespace as ConsolidatedStorageNamespace } from './namespaces/consolidated/StorageNamespace';
+import { AdvancedNamespace } from './namespaces/consolidated/AdvancedNamespace';
 import type { PDWConfig, ClientWithCoreApi } from '../types';
 import { ClientMemoryManager } from './ClientMemoryManager';
 import { ViewService } from '../services/ViewService';
@@ -72,6 +73,10 @@ import { IndexManager, type IndexManagerOptions, type IndexProgressCallback } fr
 // Note: createHnswService is dynamically imported only when enableLocalIndexing is true
 // This prevents bundling Node.js dependencies (hnswlib-node) in browser builds
 import type { IHnswService } from '../vector/IHnswService';
+import { MODEL_DEFAULTS } from '../config/modelDefaults';
+
+// Re-export for convenience
+export { MODEL_DEFAULTS } from '../config/modelDefaults';
 
 /**
  * Configuration for Simple PDW Client
@@ -130,7 +135,9 @@ export interface SimplePDWConfig {
     modelName?: string;
     /**
      * Embedding dimensions
-     * @default 3072 (for google/openrouter), 1536 (for openai)
+     * Lower = faster embedding generation + smaller storage + faster search
+     * @default 768 (all providers) - optimal speed/quality balance
+     * @example 768 (fast), 1536 (balanced), 3072 (highest quality)
      */
     dimensions?: number;
   };
@@ -139,8 +146,14 @@ export interface SimplePDWConfig {
    * Optional: Detailed Walrus configuration
    */
   walrus?: {
+    /** Aggregator URL for blob retrieval */
     aggregator?: string;
+    /** Publisher URL for direct blob uploads (server-side) */
     publisher?: string;
+    /** Upload Relay URL for browser/mobile uploads (fewer connections, faster) */
+    uploadRelay?: string;
+    /** Use upload relay instead of publisher (default: true in browser, false on server) */
+    useUploadRelay?: boolean;
     network?: 'testnet' | 'mainnet';
   };
 
@@ -250,6 +263,8 @@ interface ResolvedConfig {
   walrus: {
     aggregator: string;
     publisher: string;
+    uploadRelay: string;
+    useUploadRelay: boolean;
     network: 'testnet' | 'mainnet';
   };
   sui: {
@@ -381,6 +396,9 @@ export class SimplePDWClient {
     const embeddingModelName = config.embedding?.modelName || this.getDefaultEmbeddingModel(embeddingProvider);
     const embeddingDimensions = config.embedding?.dimensions || this.getDefaultEmbeddingDimensions(embeddingProvider);
 
+    // Detect browser environment for default useUploadRelay
+    const isBrowser = typeof window !== 'undefined';
+
     return {
       signer,
       userAddress,
@@ -389,6 +407,9 @@ export class SimplePDWClient {
           `https://aggregator.walrus-${network}.walrus.space`,
         publisher: config.walrus?.publisher ||
           `https://publisher.walrus-${network}.walrus.space`,
+        uploadRelay: config.walrus?.uploadRelay ||
+          `https://upload-relay.${network}.walrus.space`,
+        useUploadRelay: config.walrus?.useUploadRelay ?? isBrowser,
         network: (config.walrus?.network || network) as 'testnet' | 'mainnet'
       },
       sui: {
@@ -399,7 +420,7 @@ export class SimplePDWClient {
       },
       ai: {
         geminiApiKey: config.geminiApiKey,
-        chatModel: config.ai?.chatModel || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+        chatModel: config.ai?.chatModel || process.env.AI_CHAT_MODEL || MODEL_DEFAULTS.CHAT_MODEL,
         apiKey: config.ai?.apiKey || process.env.OPENROUTER_API_KEY || config.geminiApiKey
       },
       embedding: {
@@ -431,37 +452,45 @@ export class SimplePDWClient {
 
   /**
    * Get default embedding model for provider
+   * Uses MODEL_DEFAULTS constants - can be overridden via config
    */
   private getDefaultEmbeddingModel(provider: string): string {
     switch (provider) {
       case 'google':
-        return 'text-embedding-004';
+        return MODEL_DEFAULTS.EMBEDDING_GOOGLE;
       case 'openai':
-        return 'text-embedding-3-small';
+        return MODEL_DEFAULTS.EMBEDDING_OPENAI;
       case 'openrouter':
-        return 'google/gemini-embedding-001';
+        return MODEL_DEFAULTS.EMBEDDING_OPENROUTER;
       case 'cohere':
-        return 'embed-english-v3.0';
+        return MODEL_DEFAULTS.EMBEDDING_COHERE;
       default:
-        return 'text-embedding-004';
+        return MODEL_DEFAULTS.EMBEDDING_GOOGLE;
     }
   }
 
   /**
    * Get default embedding dimensions for provider
+   *
+   * Default is now 768 for faster performance:
+   * - 4x smaller vectors = faster indexing
+   * - ~4x less storage space
+   * - Minimal quality loss for most use cases
+   *
+   * Users can override via config.embedding.dimensions
    */
   private getDefaultEmbeddingDimensions(provider: string): number {
     switch (provider) {
       case 'google':
-        return 3072;
+        return 768; // text-embedding-004 supports output_dimensionality
       case 'openai':
-        return 1536;
+        return 768; // text-embedding-3-small supports dimensions param
       case 'openrouter':
-        return 3072; // google/gemini-embedding-001 returns 3072 dimensions
+        return 768; // Most models support dimension truncation
       case 'cohere':
-        return 1024;
+        return 768; // embed-english-v3.0 supports dimensions
       default:
-        return 3072;
+        return 768; // Default to 768 for speed
     }
   }
 
@@ -1047,43 +1076,55 @@ export class SimplePDWClient {
 
   /**
    * Search operations namespace
+   * @deprecated Use `pdw.memory.search()` for simple searches, or `pdw.advanced.search` for advanced queries
    */
   get search(): SearchNamespace {
+    console.warn('[DEPRECATED] pdw.search is deprecated. Use pdw.memory.search() instead.');
     return new SearchNamespace(this.services);
   }
 
   /**
    * Classification operations namespace
+   * @deprecated Use `pdw.ai.classify()` instead
    */
   get classify(): ClassifyNamespace {
+    console.warn('[DEPRECATED] pdw.classify is deprecated. Use pdw.ai.classify() instead.');
     return new ClassifyNamespace(this.services);
   }
 
   /**
    * Knowledge graph operations namespace
+   * @deprecated Use `pdw.advanced.graph` instead
    */
   get graph(): GraphNamespace {
+    console.warn('[DEPRECATED] pdw.graph is deprecated. Use pdw.advanced.graph instead.');
     return new GraphNamespace(this.services);
   }
 
   /**
    * Embeddings operations namespace
+   * @deprecated Use `pdw.ai.embed()` instead
    */
   get embeddings(): EmbeddingsNamespace {
+    console.warn('[DEPRECATED] pdw.embeddings is deprecated. Use pdw.ai.embed() instead.');
     return new EmbeddingsNamespace(this.services);
   }
 
   /**
    * Batch operations namespace
+   * @deprecated Use `pdw.memory.createBatch()` or `pdw.advanced.batch` instead
    */
   get batch(): BatchNamespace {
+    console.warn('[DEPRECATED] pdw.batch is deprecated. Use pdw.memory.createBatch() or pdw.advanced.batch instead.');
     return new BatchNamespace(this.services);
   }
 
   /**
    * Cache operations namespace
+   * @deprecated Use `pdw.storage.cache` or `pdw.advanced.cache` instead
    */
   get cache(): CacheNamespace {
+    console.warn('[DEPRECATED] pdw.cache is deprecated. Use pdw.storage.cache or pdw.advanced.cache instead.');
     return new CacheNamespace(this.services);
   }
 
@@ -1096,36 +1137,46 @@ export class SimplePDWClient {
 
   /**
    * Analytics and insights namespace
+   * @deprecated Use `pdw.advanced.analytics` instead
    */
   get analytics(): AnalyticsNamespace {
+    console.warn('[DEPRECATED] pdw.analytics is deprecated. Use pdw.advanced.analytics instead.');
     return new AnalyticsNamespace(this.services);
   }
 
   /**
    * SEAL encryption operations namespace
+   * @deprecated Use `pdw.security.encrypt()` or `pdw.advanced.encryption` instead
    */
   get encryption(): EncryptionNamespace {
+    console.warn('[DEPRECATED] pdw.encryption is deprecated. Use pdw.security.encrypt() or pdw.advanced.encryption instead.');
     return new EncryptionNamespace(this.services);
   }
 
   /**
    * Access control and permissions namespace
+   * @deprecated Use `pdw.security.permissions` or `pdw.advanced.permissions` instead
    */
   get permissions(): PermissionsNamespace {
+    console.warn('[DEPRECATED] pdw.permissions is deprecated. Use pdw.security.permissions or pdw.advanced.permissions instead.');
     return new PermissionsNamespace(this.services);
   }
 
   /**
    * Transaction utilities namespace
+   * @deprecated Use `pdw.blockchain.tx` or `pdw.advanced.blockchain` instead
    */
   get tx(): TxNamespace {
+    console.warn('[DEPRECATED] pdw.tx is deprecated. Use pdw.blockchain.tx or pdw.advanced.blockchain instead.');
     return new TxNamespace(this.services);
   }
 
   /**
    * Processing pipelines namespace
+   * @deprecated Use `pdw.advanced.pipeline` instead
    */
   get pipeline(): PipelineNamespace {
+    console.warn('[DEPRECATED] pdw.pipeline is deprecated. Use pdw.advanced.pipeline instead.');
     return new PipelineNamespace(this.services);
   }
 
@@ -1135,6 +1186,8 @@ export class SimplePDWClient {
    * Provides low-level access to MemoryCap capability objects.
    * For most use cases, prefer using the `context` namespace instead.
    *
+   * @deprecated Use `pdw.security.context` or `pdw.advanced.capability` instead
+   *
    * @example
    * ```typescript
    * const cap = await pdw.capability.create('MEMO');
@@ -1142,6 +1195,7 @@ export class SimplePDWClient {
    * ```
    */
   get capability(): CapabilityNamespace {
+    console.warn('[DEPRECATED] pdw.capability is deprecated. Use pdw.security.context or pdw.advanced.capability instead.');
     return new CapabilityNamespace(this.services);
   }
 
@@ -1150,6 +1204,8 @@ export class SimplePDWClient {
    *
    * Higher-level API for managing app contexts (built on capabilities).
    * Use this for managing app-scoped data and access control.
+   *
+   * @deprecated Use `pdw.security.context` or `pdw.advanced.context` instead
    *
    * @example
    * ```typescript
@@ -1164,6 +1220,7 @@ export class SimplePDWClient {
    * ```
    */
   get context(): ContextNamespace {
+    console.warn('[DEPRECATED] pdw.context is deprecated. Use pdw.security.context or pdw.advanced.context instead.');
     return new ContextNamespace(this.services);
   }
 
@@ -1285,5 +1342,46 @@ export class SimplePDWClient {
    */
   get storage(): ConsolidatedStorageNamespace {
     return new ConsolidatedStorageNamespace(this.services);
+  }
+
+  /**
+   * Advanced operations namespace (power users)
+   *
+   * Groups specialized features for advanced use cases:
+   * - Knowledge graph: `advanced.graph.*`
+   * - Analytics: `advanced.analytics.*`
+   * - Manual encryption: `advanced.encryption.*`
+   * - Permissions: `advanced.permissions.*`
+   * - Blockchain: `advanced.blockchain.*`
+   * - Pipelines: `advanced.pipeline.*`
+   *
+   * Most users won't need these - use `pdw.memory` for common operations.
+   *
+   * @example
+   * ```typescript
+   * // Knowledge graph
+   * const entities = await pdw.advanced.graph?.getEntities();
+   *
+   * // Manual encryption
+   * const encrypted = await pdw.advanced.encryption?.encrypt(data, keyId);
+   *
+   * // Permissions
+   * await pdw.advanced.permissions?.grant(userId, memoryId);
+   * ```
+   */
+  get advanced(): AdvancedNamespace {
+    return new AdvancedNamespace(this.services, {
+      graph: new GraphNamespace(this.services),
+      analytics: new AnalyticsNamespace(this.services),
+      encryption: new EncryptionNamespace(this.services),
+      permissions: new PermissionsNamespace(this.services),
+      blockchain: new TxNamespace(this.services),
+      pipeline: new PipelineNamespace(this.services),
+      capability: new CapabilityNamespace(this.services),
+      context: new ContextNamespace(this.services),
+      batch: new BatchNamespace(this.services),
+      cache: new CacheNamespace(this.services),
+      search: new SearchNamespace(this.services),
+    });
   }
 }

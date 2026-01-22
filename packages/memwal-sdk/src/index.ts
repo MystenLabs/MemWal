@@ -93,7 +93,7 @@ export type {
 
 // Configuration management
 import { Config as ConfigClass } from './config';
-export { ConfigurationHelper, Config } from './config';
+export { ConfigurationHelper, Config, MODEL_DEFAULTS, getChatModel, getDefaultEmbeddingModel } from './config';
 export type { SDKConfig, EnvironmentConfig } from './config';
 
 // Internal Config reference for use in this file

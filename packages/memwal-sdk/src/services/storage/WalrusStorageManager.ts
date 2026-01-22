@@ -157,13 +157,17 @@ export class WalrusStorageManager {
       // Create writeBlobFlow
       const flow = walrusClient.writeBlobFlow({ blob: data });
 
-      // Step 1: Encode blob
+      // Step 1: Encode blob (local operation)
+      const encodeStart = performance.now();
       await flow.encode();
+      const encodeDuration = performance.now() - encodeStart;
+      console.log(`   ⏱️ Encode: ${encodeDuration.toFixed(0)}ms`);
 
       // Get signer address
       const signerAddress = options.signer.getAddress();
 
       // Step 2: Register blob on-chain
+      const registerStart = performance.now();
       const registerTx = flow.register({
         epochs: options.epochs || this.config.epochs || 3,
         deletable: options.deletable ?? true,
@@ -172,17 +176,26 @@ export class WalrusStorageManager {
 
       registerTx.setSender(signerAddress);
       const { digest: registerDigest } = await options.signer.signAndExecuteTransaction(registerTx);
+      const registerDuration = performance.now() - registerStart;
+      console.log(`   ⏱️ Register TX: ${registerDuration.toFixed(0)}ms`);
 
-      // Step 3: Upload to storage
+      // Step 3: Upload to storage nodes
+      const uploadStart = performance.now();
       await flow.upload({ digest: registerDigest });
+      const uploadDuration = performance.now() - uploadStart;
+      console.log(`   ⏱️ Storage upload: ${uploadDuration.toFixed(0)}ms`);
+
+      // Get blob info early (available after upload)
+      const blob = await flow.getBlob();
 
       // Step 4: Certify blob on-chain
+      const certifyStart = performance.now();
       const certifyTx = flow.certify();
       certifyTx.setSender(signerAddress);
       await options.signer.signAndExecuteTransaction(certifyTx);
+      const certifyDuration = performance.now() - certifyStart;
+      console.log(`   ⏱️ Certify TX: ${certifyDuration.toFixed(0)}ms`);
 
-      // Get blob info
-      const blob = await flow.getBlob();
       const uploadTimeMs = performance.now() - startTime;
 
       console.log(`✅ Blob uploaded successfully`);
@@ -205,25 +218,58 @@ export class WalrusStorageManager {
   }
 
   /**
-   * Retrieve blob by ID from Walrus
+   * Get aggregator URL based on network
+   */
+  private getAggregatorUrl(): string {
+    const network = this.config.network || 'testnet';
+    return `https://aggregator.walrus-${network}.walrus.space`;
+  }
+
+  /**
+   * Retrieve blob by ID from Walrus using HTTP REST API (with SDK fallback)
+   *
+   * Default: Uses HTTP aggregator REST API to avoid 404 errors in browser console.
+   * Fallback: If HTTP fails, falls back to WalrusClient.readBlob().
    *
    * @param blobId - The Walrus blob ID
    * @returns Blob content as Uint8Array
    */
   async getBlob(blobId: string): Promise<Uint8Array> {
+    const aggregatorUrl = this.getAggregatorUrl();
+    const url = `${aggregatorUrl}/v1/blobs/${blobId}`;
+
+    // Try HTTP aggregator first (cleaner, no 404 noise)
     try {
-      console.log(`📥 Retrieving blob ${blobId} from Walrus...`);
-      const content = await this.suiClient.walrus.readBlob({ blobId });
-      console.log(`✅ Retrieved ${content.length} bytes from Walrus`);
+      console.log(`📥 Retrieving blob ${blobId} via HTTP aggregator...`);
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const content = new Uint8Array(arrayBuffer);
+      console.log(`✅ Retrieved ${content.length} bytes from Walrus aggregator`);
       return content;
-    } catch (error) {
-      console.error(`❌ Failed to retrieve blob ${blobId}:`, error);
-      throw new Error(`Failed to retrieve blob ${blobId}: ${error}`);
+    } catch (httpError) {
+      console.warn(`⚠️ HTTP aggregator failed, falling back to Walrus SDK:`, httpError);
+
+      // Fallback to Walrus SDK
+      try {
+        const content = await this.suiClient.walrus.readBlob({ blobId });
+        console.log(`✅ Retrieved ${content.length} bytes via Walrus SDK fallback`);
+        return content;
+      } catch (sdkError) {
+        console.error(`❌ Both HTTP and SDK failed for blob ${blobId}`);
+        throw new Error(`Failed to retrieve blob ${blobId}: HTTP error: ${httpError}, SDK error: ${sdkError}`);
+      }
     }
   }
 
   /**
    * Retrieve blob with detailed timing and metadata
+   *
+   * Uses HTTP REST API aggregator for cleaner fetch without 404 noise.
    *
    * @param blobId - The Walrus blob ID
    * @returns Retrieval result with timing information
@@ -234,7 +280,7 @@ export class WalrusStorageManager {
     try {
       console.log(`🔄 WALRUS RETRIEVAL: ${blobId}`);
 
-      const content = await this.suiClient.walrus.readBlob({ blobId });
+      const content = await this.getBlob(blobId);
       const retrievalTime = Date.now() - startTime;
 
       console.log(`✅ WALRUS RETRIEVAL SUCCESS:`);

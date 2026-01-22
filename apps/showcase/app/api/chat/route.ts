@@ -1,6 +1,7 @@
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import { streamText } from 'ai'
 import { getReadOnlyPDWClient } from '@/lib/pdw-read-only'
+import { getChatModel } from '@cmdoss/memwal-sdk'
 
 // OpenRouter provider - official provider for Vercel AI SDK
 const openrouter = createOpenRouter({
@@ -219,7 +220,7 @@ ${relevantMemories ? `\n## User's Stored Memories:\n${relevantMemories}\n\nUse t
 Be helpful, conversational, and combine personal memories with general knowledge when appropriate.`
 
     const result = streamText({
-      model: openrouter('google/gemini-2.5-flash'),
+      model: openrouter(getChatModel()),
       messages,
       system: systemPrompt,
     })

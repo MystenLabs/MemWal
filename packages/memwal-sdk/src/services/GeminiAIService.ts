@@ -10,6 +10,7 @@
  */
 
 import { OpenRouter } from '@openrouter/sdk';
+import { getChatModel } from '../config/modelDefaults';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -63,7 +64,7 @@ export class GeminiAIService {
     }
 
     this.config = {
-      model: config.model || process.env.AI_CHAT_MODEL || 'google/gemini-2.5-flash',
+      model: getChatModel(config.model),
       temperature: config.temperature || 0.1,
       maxTokens: config.maxTokens || 4096,
       timeout: config.timeout || 30000,

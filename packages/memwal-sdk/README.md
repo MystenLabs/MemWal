@@ -334,6 +334,9 @@ GEMINI_API_KEY=...
 OPENAI_API_KEY=sk-...
 COHERE_API_KEY=...
 
+# AI Chat Model (for RAG responses, knowledge graph extraction)
+AI_CHAT_MODEL=google/gemini-2.5-flash
+
 # Walrus (optional - defaults to testnet)
 WALRUS_NETWORK=testnet
 WALRUS_AGGREGATOR=https://aggregator.walrus-testnet.walrus.space
@@ -361,6 +364,89 @@ ACCESS_REGISTRY_ID=0x...
 - **3072**: Highest quality, slowest
 
 **Recommendation**: Use `openrouter` with 768 dimensions for best performance.
+
+### AI Model Configuration
+
+The SDK uses centralized defaults that can be customized via environment variables or code.
+
+#### Configuration Priority
+
+```text
+User Config (code) → Environment Variable → SDK Default
+```
+
+#### SDK Defaults
+
+```typescript
+import { MODEL_DEFAULTS, getChatModel } from '@cmdoss/memwal-sdk';
+
+// View default values
+console.log(MODEL_DEFAULTS);
+// {
+//   EMBEDDING_OPENROUTER: 'google/gemini-embedding-001',
+//   EMBEDDING_GOOGLE: 'text-embedding-004',
+//   EMBEDDING_OPENAI: 'text-embedding-3-small',
+//   EMBEDDING_COHERE: 'embed-english-v3.0',
+//   CHAT_MODEL: 'google/gemini-2.5-flash',
+//   EMBEDDING_DIMENSIONS: 768,
+// }
+
+// Get current chat model (checks env first, then default)
+const model = getChatModel();  // 'google/gemini-2.5-flash'
+```
+
+#### Method 1: Environment Variables (Recommended)
+
+```bash
+# .env
+# Embedding
+EMBEDDING_PROVIDER=openrouter
+EMBEDDING_MODEL=google/gemini-embedding-001
+EMBEDDING_DIMENSIONS=768
+
+# Chat/Analysis (RAG, knowledge graph)
+AI_CHAT_MODEL=google/gemini-2.5-flash
+```
+
+#### Method 2: Code Configuration
+
+```typescript
+const pdw = new SimplePDWClient({
+  signer: keypair,
+  network: 'testnet',
+
+  // Embedding config
+  embedding: {
+    provider: 'openrouter',
+    apiKey: process.env.OPENROUTER_API_KEY!,
+    modelName: 'google/gemini-embedding-001',  // Override default
+    dimensions: 1536,  // Override default 768
+  },
+
+  // AI chat config
+  ai: {
+    apiKey: process.env.OPENROUTER_API_KEY!,
+    chatModel: 'google/gemini-2.5-pro',  // Override default
+  },
+});
+```
+
+#### Available Models
+
+| Purpose | Environment Variable | Default | Alternatives |
+|---------|---------------------|---------|--------------|
+| **Embedding** | `EMBEDDING_MODEL` | `google/gemini-embedding-001` | `text-embedding-3-small`, `embed-english-v3.0` |
+| **Chat/RAG** | `AI_CHAT_MODEL` | `google/gemini-2.5-flash` | `google/gemini-2.5-pro`, `openai/gpt-4o`, `anthropic/claude-3.5-sonnet` |
+
+#### Model Selection Tips
+
+| Model | Speed | Quality | Cost | Best For |
+|-------|-------|---------|------|----------|
+| `google/gemini-2.5-flash` | ⚡ Fast | Good | $ | Default, most tasks |
+| `google/gemini-2.5-pro` | Medium | ⬆️ Better | $$ | Complex reasoning |
+| `openai/gpt-4o-mini` | ⚡ Fast | Good | $ | OpenAI alternative |
+| `openai/gpt-4o` | Slow | ⬆️ Best | $$$ | Highest quality |
+| `anthropic/claude-3.5-sonnet` | Medium | ⬆️ Better | $$ | Balanced |
 
 ## SEAL Encryption
 
