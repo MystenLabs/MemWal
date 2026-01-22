@@ -1,7 +1,13 @@
-# Build stage
-FROM oven/bun:1.1.38-debian AS builder
+# ============================================
+# Node.js Dockerfile for Railway Deployment
+# ============================================
+# This uses Node.js instead of Bun for stable hnswlib-node support.
+# Native C++ modules (hnswlib-node) work reliably with Node.js runtime.
 
-# Install build dependencies for native modules (hnswlib-node)
+# Build stage
+FROM node:20-slim AS builder
+
+# Install build dependencies for native modules
 RUN apt-get update && apt-get install -y \
     python3 \
     build-essential \
@@ -11,43 +17,48 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy package files first for better caching
-COPY package.json bun.lock ./
+# Copy package files for better caching
+COPY package.json package-lock.json* bun.lock* ./
 COPY packages/memwal-sdk/package.json ./packages/memwal-sdk/
 COPY apps/showcase/package.json ./apps/showcase/
 
-# Install dependencies (including native modules)
-RUN bun install
+# Install dependencies with npm (handles native modules better than bun)
+RUN npm install --legacy-peer-deps || npm install
 
 # Copy source code
 COPY . .
 
-# Build SDK first, then showcase
-RUN bun run build:sdk
-RUN bun run build:showcase
+# Build SDK first
+WORKDIR /app/packages/memwal-sdk
+RUN npm run build
+
+# Build showcase app
+WORKDIR /app/apps/showcase
+RUN npm run build
 
 # Production stage
-FROM oven/bun:1.1.38-debian AS runner
+FROM node:20-slim AS runner
 
-# Install runtime dependencies for native modules
+# Install runtime dependencies (lighter than build deps)
 RUN apt-get update && apt-get install -y \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy built artifacts and dependencies
+# Copy built artifacts and dependencies from builder
 COPY --from=builder /app/package.json ./
-COPY --from=builder /app/bun.lock ./
+COPY --from=builder /app/package-lock.json* ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/apps/showcase ./apps/showcase
 
-# Set environment
-ENV NODE_ENV=development
+# Set environment to production
+ENV NODE_ENV=production
 ENV PORT=3000
 
 EXPOSE 3000
 
-# Start the application in development mode
-CMD ["bun", "run", "dev"]
+# Start the Next.js app with Node.js
+WORKDIR /app/apps/showcase
+CMD ["node", "node_modules/next/dist/server/lib/start-server.js"]
