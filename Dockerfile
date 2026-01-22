@@ -34,9 +34,10 @@ COPY apps/showcase/package.json ./apps/showcase/
 # Install dependencies with Bun (handles workspace:* protocol)
 RUN bun install
 
-# Rebuild native modules with npm (hnswlib-node requires proper compilation)
-# This ensures hnswlib-node is built with Node.js toolchain
+# Explicitly install and rebuild hnswlib-node in SDK package
+# Bun doesn't handle optional dependencies well, so use npm for native modules
 WORKDIR /app/packages/memwal-sdk
+RUN npm install hnswlib-node@^3.0.0 --save-optional
 RUN npm rebuild hnswlib-node || echo "hnswlib-node rebuild skipped"
 
 # Copy source code
