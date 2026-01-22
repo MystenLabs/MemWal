@@ -948,17 +948,68 @@ export class MemoryNamespace {
         encryptedContents.push(...contents.map(() => undefined));
       }
 
+      // Step 3.5: Encrypt all embeddings (parallel, if enabled)
+      onProgress?.('encrypting embeddings', 40);
+      const encryptedEmbeddings: (Uint8Array | undefined)[] = [];
+      console.log(`🔐 [createBatch] Step 3.5: Encrypting embeddings`);
+      console.log(`   Embeddings count: ${embeddings.length}`);
+      console.log(`   Encryption enabled: ${this.services.config.features.enableEncryption}`);
+      console.log(`   Encryption service: ${!!this.services.encryption}`);
+      if (this.services.config.features.enableEncryption && this.services.encryption) {
+        const encryptEmbeddingPromises = embeddings.map(async (embedding, idx) => {
+          if (!embedding || embedding.length === 0) {
+            console.log(`   Embedding ${idx}: SKIP (empty or undefined)`);
+            return undefined;
+          }
+          try {
+            console.log(`   Embedding ${idx}: ${embedding.length}D -> encrypting...`);
+            // Convert embedding to bytes (same method as single create)
+            const embeddingBytes = new Float32Array(embedding);
+            const embeddingUint8 = new Uint8Array(embeddingBytes.buffer);
+
+            const result = await this.services.encryption!.encrypt(
+              embeddingUint8,
+              this.services.config.userAddress,
+              2
+            );
+            console.log(`   Embedding ${idx}: encrypted -> ${result.encryptedObject?.length || 0} bytes`);
+            return result.encryptedObject;
+          } catch (error) {
+            console.warn(`   Embedding ${idx}: FAILED -`, error);
+            return undefined;
+          }
+        });
+        const encryptEmbeddingResults = await Promise.all(encryptEmbeddingPromises);
+        encryptedEmbeddings.push(...encryptEmbeddingResults);
+        console.log(`   Total encrypted embeddings: ${encryptedEmbeddings.filter(e => e !== undefined).length}/${encryptedEmbeddings.length}`);
+      } else {
+        console.log(`   SKIP encryption (disabled or no service)`);
+        encryptedEmbeddings.push(...embeddings.map(() => undefined));
+      }
+
       // Step 4: Batch upload to Walrus using Quilt (single transaction!)
       onProgress?.('uploading to Walrus (Quilt batch)', 50);
 
+      // Security: When encryption is enabled, NEVER upload raw content/embedding
+      // Only encrypted data should be stored on Walrus
+      const encryptionEnabled = this.services.config.features.enableEncryption && this.services.encryption;
+
       // Prepare batch memories for QuiltBatchManager
       const batchMemories = contents.map((content, i) => ({
-        content,
+        // When encryption is enabled, pass empty content (encrypted version will be used)
+        // When disabled, pass original content for plaintext storage
+        content: encryptionEnabled ? '' : content,
         category: categories[i],
         importance,
         topic: topic || '',
-        embedding: embeddings[i] || [],
-        encryptedContent: encryptedContents[i] || new TextEncoder().encode(content),
+        // When encryption is enabled, pass empty embedding (encrypted version will be used)
+        // When disabled, pass original embedding for plaintext storage
+        embedding: encryptionEnabled ? [] : (embeddings[i] || []),
+        // Only pass encrypted data when encryption is enabled
+        encryptedContent: encryptedContents[i],
+        encryptedEmbedding: encryptedEmbeddings[i],
+        // Store original embedding dimensions (needed when embedding is [] for encryption)
+        embeddingDimensions: embeddings[i]?.length || 0,
         id: `memory-${Date.now()}-${i}` // Client-side tracking ID
       }));
 

@@ -44,6 +44,8 @@ export interface BatchMemory {
   topic: string;
   embedding: number[];
   encryptedContent?: Uint8Array; // Optional - only when encryption is enabled
+  encryptedEmbedding?: Uint8Array; // Optional - encrypted embedding for v2.2
+  embeddingDimensions?: number; // Original embedding dimensions (when encrypted, embedding is [])
   summary?: string;
   id?: string; // Optional client-side ID for tracking
 }
@@ -54,7 +56,7 @@ export interface BatchMemory {
  */
 export interface QuiltMemoryPackage {
   content: string;              // Plaintext content (empty if encrypted)
-  embedding: number[];          // Vector embedding
+  embedding: number[];          // Vector embedding (empty array if encrypted)
   metadata: {
     category: string;
     importance: number;
@@ -62,9 +64,10 @@ export interface QuiltMemoryPackage {
     [key: string]: unknown;
   };
   timestamp: number;
-  version: string;              // Package format version
+  version: string;              // Package format version: 2.0=plaintext, 2.1=content encrypted, 2.2=both encrypted
   encrypted?: boolean;          // Whether content is encrypted
   encryptedContent?: string;    // Base64-encoded encrypted content (if encrypted)
+  encryptedEmbedding?: string;  // Base64-encoded encrypted embedding (if v2.2)
 }
 
 export interface QuiltUploadOptions {
@@ -192,26 +195,41 @@ export class QuiltBatchManager {
           : `memory-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 9)}.json`;
 
         const isEncrypted = !!memory.encryptedContent && memory.encryptedContent.length > 0;
+        const hasEncryptedEmbedding = !!memory.encryptedEmbedding && memory.encryptedEmbedding.length > 0;
         const timestamp = Date.now();
+
+        // Determine version based on encryption state
+        // v2.2: both content AND embedding encrypted
+        // v2.1: only content encrypted (embedding plaintext - legacy)
+        // v2.0.0: no encryption (plaintext)
+        const version = hasEncryptedEmbedding ? '2.2' : (isEncrypted ? '2.1' : '2.0.0');
 
         // Create memory package (JSON format - consistent with regular storage)
         const memoryPackage: QuiltMemoryPackage = {
           // Content: plaintext if not encrypted, empty if encrypted
           content: isEncrypted ? '' : memory.content,
-          embedding: memory.embedding,
+          // Embedding: plaintext if not encrypted, empty array if encrypted
+          embedding: hasEncryptedEmbedding ? [] : memory.embedding,
           metadata: {
             category: memory.category,
             importance: memory.importance,
             topic: memory.topic,
             ...(memory.summary ? { summary: memory.summary } : {}),
-            ...(memory.id ? { memoryId: memory.id } : {})
+            ...(memory.id ? { memoryId: memory.id } : {}),
+            // Store original embedding dimensions for decryption
+            // Use embeddingDimensions field if available (when encrypted, embedding is [])
+            ...(hasEncryptedEmbedding ? { embeddingDimensions: memory.embeddingDimensions || memory.embedding.length } : {})
           },
           timestamp,
-          version: '2.0.0', // Quilt JSON package version
+          version,
           encrypted: isEncrypted,
           // Store encrypted content as base64 for JSON compatibility
           ...(isEncrypted && memory.encryptedContent ? {
             encryptedContent: this.uint8ArrayToBase64(memory.encryptedContent)
+          } : {}),
+          // Store encrypted embedding as base64 (v2.2)
+          ...(hasEncryptedEmbedding && memory.encryptedEmbedding ? {
+            encryptedEmbedding: this.uint8ArrayToBase64(memory.encryptedEmbedding)
           } : {})
         };
 
@@ -241,6 +259,7 @@ export class QuiltBatchManager {
 
             // Encryption info
             'encrypted': isEncrypted ? 'true' : 'false',
+            'embedding-encrypted': hasEncryptedEmbedding ? 'true' : 'false',
             ...(isEncrypted ? { 'encryption_type': 'seal' } : {}),
 
             // Owner
@@ -248,8 +267,9 @@ export class QuiltBatchManager {
 
             // Content info
             'content_size': contents.length.toString(),
-            'embedding_dimensions': memory.embedding.length.toString(),
-            'package_version': '2.0.0',
+            // Use embeddingDimensions field if available (when encrypted, embedding is [])
+            'embedding_dimensions': (memory.embeddingDimensions || memory.embedding.length).toString(),
+            'package_version': version,
 
             // Optional rich metadata
             ...(memory.summary ? { 'summary': memory.summary } : {}),

@@ -411,8 +411,9 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
               metadata = memoryData.metadata || {};
               timestamp = memoryData.timestamp || Date.now();
 
-              if (!embedding || embedding.length !== 3072) {
-                throw new Error(`Invalid embedding in JSON: length=${embedding?.length || 0}`);
+              // Validate embedding exists and has reasonable length (768, 1536, or 3072 are common)
+              if (!embedding || embedding.length < 768) {
+                throw new Error(`Invalid embedding in JSON: length=${embedding?.length || 0} (min 768)`);
               }
 
               // Debug: Log content status
@@ -437,8 +438,9 @@ async function performIncrementalSync(walletAddress: string, startTime: number):
                 const embeddingResult = await pdw.embeddings.generate(content);
                 embedding = Array.from(embeddingResult);
 
-                if (embedding.length !== 3072) {
-                  throw new Error(`Generated embedding wrong dimension: ${embedding.length}`);
+                // Validate embedding has reasonable length (default is now 768)
+                if (embedding.length < 768) {
+                  throw new Error(`Generated embedding too small: ${embedding.length} (min 768)`);
                 }
               } catch (embError) {
                 throw new Error(`Failed to generate embedding: ${(embError as Error).message}`);

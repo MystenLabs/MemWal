@@ -83,7 +83,7 @@ export class NodeHnswService implements IHnswService {
 
   constructor(config: HnswServiceConfig = {}) {
     this.indexConfig = {
-      dimension: config.indexConfig?.dimension || 3072,
+      dimension: config.indexConfig?.dimension || 768, // Default 768 for speed (was 3072)
       maxElements: config.indexConfig?.maxElements || 10000,
       efConstruction: config.indexConfig?.efConstruction || 200,
       m: config.indexConfig?.m || 16,

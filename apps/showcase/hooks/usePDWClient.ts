@@ -133,6 +133,7 @@ export function usePDWClient(): UsePDWClientReturn {
       const network = (process.env.NEXT_PUBLIC_SUI_NETWORK as 'testnet' | 'mainnet') || 'testnet'
       const walrusAggregator = process.env.NEXT_PUBLIC_WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space'
       const walrusPublisher = process.env.NEXT_PUBLIC_WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space'
+      const walrusUploadRelay = process.env.NEXT_PUBLIC_WALRUS_UPLOAD_RELAY || 'https://upload-relay.testnet.walrus.space'
 
       if (!packageId) {
         throw new Error('NEXT_PUBLIC_PACKAGE_ID not configured')
@@ -148,12 +149,14 @@ export function usePDWClient(): UsePDWClientReturn {
           network,
         },
         walrus: {
-          aggregatorUrl: walrusAggregator,
-          publisherUrl: walrusPublisher,
+          aggregator: walrusAggregator,
+          publisher: walrusPublisher,
+          uploadRelay: walrusUploadRelay,
+          useUploadRelay: true, // Browser: use upload relay for faster uploads (fewer connections)
         },
         features: {
           enableLocalIndexing: false, // Browser doesn't support hnswlib-node
-          enableEncryption: false,
+          enableEncryption: true, // ✅ Enable SEAL encryption for browser
           enableKnowledgeGraph: false, // Keep it simple for client-side
         },
       })

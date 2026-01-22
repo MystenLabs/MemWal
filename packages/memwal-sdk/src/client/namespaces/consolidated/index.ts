@@ -37,3 +37,5 @@ export type {
   MemoryPackage,
   UploadOptions
 } from './StorageNamespace';
+
+export { AdvancedNamespace } from './AdvancedNamespace';

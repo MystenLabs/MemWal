@@ -85,13 +85,25 @@ export async function getPDWClient(): Promise<any> {
         ...(embeddingDimensions && { dimensions: embeddingDimensions }),
       },
       walrus: {
-        aggregatorUrl: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
-        publisherUrl: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',
+        aggregator: process.env.WALRUS_AGGREGATOR || 'https://aggregator.walrus-testnet.walrus.space',
+        publisher: process.env.WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space',
+        uploadRelay: process.env.WALRUS_UPLOAD_RELAY || 'https://upload-relay.testnet.walrus.space',
+        useUploadRelay: false, // Server-side: use publisher directly for full control
       },
       features: {
-        enableEncryption: false, // Disable for now (can enable with SEAL later)
+        enableEncryption: true, // SEAL encryption enabled by default
         enableLocalIndexing: true, // Enable hybrid HNSW (uses hnswlib-node for Node.js)
         enableKnowledgeGraph: true, // Enable knowledge graph extraction
+      },
+      // SEAL encryption configuration (optional - SDK provides defaults)
+      encryption: {
+        enabled: process.env.ENABLE_ENCRYPTION !== 'false', // Default: true (set env to 'false' to disable)
+        // Optional: Override key servers (defaults to testnet servers)
+        keyServers: process.env.SEAL_KEY_SERVERS?.split(',') || undefined,
+        // Optional: Override threshold (default: 2)
+        threshold: process.env.SEAL_THRESHOLD ? parseInt(process.env.SEAL_THRESHOLD) : undefined,
+        // Optional: Override access registry (defaults to testnet registry)
+        accessRegistryId: process.env.ACCESS_REGISTRY_ID || undefined,
       },
     });
 

@@ -22,11 +22,15 @@ export function createDefaultConfig(): PDWConfig {
       cacheEnabled: true,
       encryptionEnabled: true,
     },
-    // Walrus Storage Configuration
+    // Walrus Storage Configuration (Testnet defaults)
+    // Publisher: Direct blob uploads (server-side, full control)
     walrusPublisherUrl: 'https://publisher.walrus-testnet.walrus.space',
+    // Upload Relay: Optimized for browser/mobile (fewer connections, faster)
+    walrusUploadRelayUrl: 'https://upload-relay.testnet.walrus.space',
+    // Aggregator: Blob retrieval
     walrusAggregatorUrl: 'https://aggregator.walrus-testnet.walrus.space',
-    walrusMaxFileSize: 1024 * 1024 * 1024, // 1GB
-    walrusTimeout: 30000, // 30 seconds
+    walrusMaxFileSize: 10 * 1024 * 1024, // 10MB (public service limit)
+    walrusTimeout: 60000, // 60 seconds for upload relay
   };
 }
 
@@ -44,8 +48,9 @@ export function createTestnetConfig(overrides: Partial<PDWConfig> = {}): PDWConf
         threshold: 2,
       },
     },
-    // Testnet Walrus endpoints (same as default for now)
+    // Testnet Walrus endpoints
     walrusPublisherUrl: 'https://publisher.walrus-testnet.walrus.space',
+    walrusUploadRelayUrl: 'https://upload-relay.testnet.walrus.space',
     walrusAggregatorUrl: 'https://aggregator.walrus-testnet.walrus.space',
     ...overrides,
   };

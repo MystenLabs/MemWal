@@ -17,8 +17,14 @@ export interface WalrusConfig {
   network?: 'testnet' | 'mainnet';
   adminAddress?: string;
   storageEpochs?: number;
+  /** Publisher URL for direct blob uploads (server-side) */
+  publisherHost?: string;
+  /** Upload Relay URL for browser/mobile uploads (fewer connections, faster) */
   uploadRelayHost?: string;
+  /** Aggregator URL for blob retrieval */
   aggregatorHost?: string;
+  /** Use upload relay instead of publisher (default: true for browser, false for server) */
+  useUploadRelay?: boolean;
   retryAttempts?: number;
   timeoutMs?: number;
   sealService?: SealService;
@@ -123,13 +129,21 @@ export class WalrusStorageService {
 
   constructor(config: Partial<WalrusConfig> = {}) {
     const network = config.network || 'testnet';
+    // Detect browser environment for default useUploadRelay
+    const isBrowser = typeof window !== 'undefined';
 
     this.config = {
       network,
       adminAddress: config.adminAddress || '',
       storageEpochs: config.storageEpochs || 12,
+      // Publisher: direct uploads (server-side)
+      publisherHost: config.publisherHost || 'https://publisher.walrus-testnet.walrus.space',
+      // Upload Relay: optimized for browser/mobile (fewer connections)
       uploadRelayHost: config.uploadRelayHost || 'https://upload-relay.testnet.walrus.space',
+      // Aggregator: blob retrieval
       aggregatorHost: config.aggregatorHost || 'https://aggregator.walrus-testnet.walrus.space',
+      // Use upload relay by default in browser, publisher on server
+      useUploadRelay: config.useUploadRelay ?? isBrowser,
       retryAttempts: config.retryAttempts || 3,
       timeoutMs: config.timeoutMs || 60000,
       sealService: config.sealService,
@@ -519,9 +533,20 @@ export class WalrusStorageService {
       }
     }
 
-    // Fallback to REST API if no signer (read-only mode or relay upload)
+    // Fallback to REST API based on useUploadRelay config
     try {
-      const response = await fetch(`${this.config.uploadRelayHost}/v1/store?epochs=${this.config.storageEpochs}`, {
+      let url: string;
+      if (this.config.useUploadRelay) {
+        // Upload Relay: optimized for browser/mobile (fewer network connections)
+        // POST to /v1/blobs endpoint
+        url = `${this.config.uploadRelayHost}/v1/blobs?epochs=${this.config.storageEpochs}`;
+      } else {
+        // Publisher: direct upload (server-side)
+        // PUT to /v1/blobs endpoint
+        url = `${this.config.publisherHost}/v1/blobs?epochs=${this.config.storageEpochs}`;
+      }
+
+      const response = await fetch(url, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/octet-stream'
@@ -568,9 +593,9 @@ export class WalrusStorageService {
       }
     }
 
-    // Fallback to REST API
+    // Fallback to REST API - Aggregator endpoint: GET /v1/blobs/<blob-id>
     try {
-      const response = await fetch(`${this.config.aggregatorHost}/v1/${blobId}`);
+      const response = await fetch(`${this.config.aggregatorHost}/v1/blobs/${blobId}`);
 
       if (!response.ok) {
         throw new Error(`Retrieval failed: ${response.status} ${response.statusText}`);

@@ -45,7 +45,7 @@ const PROCESS_STEPS: ProcessStep[] = [
   {
     id: 3,
     title: 'SEARCH RELEVANT MEMORIES',
-    description: 'pdw.search.vector(userMessage, { limit: 5 })\nQueries HNSW index on Sui blockchain',
+    description: 'pdw.memory.search(userMessage, { limit: 5 })\nSimplified API - auto-embeds and searches',
     status: 'pending'
   },
   {
@@ -57,25 +57,25 @@ const PROCESS_STEPS: ProcessStep[] = [
   {
     id: 5,
     title: 'EXTRACT KNOWLEDGE',
-    description: 'pdw.graph.extract(conversation)\nIdentifies memorable facts and relationships',
+    description: 'pdw.advanced.graph.extract(conversation)\nIdentifies memorable facts and relationships',
     status: 'pending'
   },
   {
     id: 6,
-    title: 'GENERATE EMBEDDINGS',
-    description: 'pdw.embeddings.generate(memoryContent)\nCreates 768-dimension vector',
+    title: 'CREATE MEMORY',
+    description: 'pdw.memory.create(content, options)\nSimplified API - handles embedding + encryption + upload',
     status: 'pending'
   },
   {
     id: 7,
-    title: 'ENCRYPT WITH SEAL',
-    description: 'pdw.encryption.encryptWithKeyId(data, keyId)\nIdentity-based encryption using MemoryCap',
+    title: 'SEAL ENCRYPTION (AUTO)',
+    description: 'memory.create() handles encryption internally\nIdentity-based encryption using MemoryCap',
     status: 'pending'
   },
   {
     id: 8,
     title: 'STORE ON BLOCKCHAIN',
-    description: 'Upload to Walrus → Register on Sui\nHNSW index entry + ownership record',
+    description: 'Upload to Walrus + Register on Sui\nAll handled by pdw.memory.create()',
     status: 'pending'
   },
   {

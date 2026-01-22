@@ -1118,7 +1118,9 @@ export class StorageNamespace {
       importance: number;
       topic: string;
       embedding: number[];
-      encryptedContent: Uint8Array;
+      encryptedContent?: Uint8Array;    // Optional - only when encryption enabled
+      encryptedEmbedding?: Uint8Array;  // Optional - encrypted embedding for v2.2
+      embeddingDimensions?: number;     // Original embedding dimensions (when encrypted, embedding is [])
       summary?: string;
       id?: string;
     }>,

@@ -175,7 +175,7 @@ export class EmbeddingService {
       // New behavior: Direct EmbeddingModel from ai-sdk
       this.embeddingModel = config.model;
       this.modelName = 'custom';
-      this.dimensions = config.dimensions || 3072;
+      this.dimensions = config.dimensions || 768; // Default 768 for speed (was 3072)
       this.provider = 'custom';
       console.log('✅ EmbeddingService initialized with custom ai-sdk model');
       return;
@@ -246,19 +246,26 @@ export class EmbeddingService {
 
   /**
    * Get default dimensions for provider
+   *
+   * Default is now 768 for faster performance:
+   * - 4x smaller vectors = faster indexing & search
+   * - ~4x less storage space
+   * - Minimal quality loss for most use cases
+   *
+   * Users can override via config.dimensions
    */
   private getDefaultDimensions(provider: string): number {
     switch (provider) {
       case 'google':
-        return 3072;
+        return 768; // text-embedding-004 supports output_dimensionality
       case 'openai':
-        return 1536; // text-embedding-3-small default
+        return 768; // text-embedding-3-small supports dimensions param
       case 'openrouter':
-        return 3072; // google/gemini-embedding-001 returns 3072 dimensions
+        return 768; // Most models support dimension truncation
       case 'cohere':
-        return 1024;
+        return 768; // embed-english-v3.0 supports dimensions
       default:
-        return 3072;
+        return 768; // Default to 768 for speed
     }
   }
 
@@ -362,16 +369,25 @@ export class EmbeddingService {
   /**
    * Generate embedding using OpenRouter SDK
    * Uses official @openrouter/sdk for embeddings
+   * Passes dimensions parameter to truncate output vectors
    */
   private async embedTextOpenRouter(text: string, startTime: number): Promise<EmbeddingResult> {
     if (!this.openRouterClient) {
       throw new Error('OpenRouter client not initialized');
     }
 
-    const result = await this.openRouterClient.embeddings.generate({
+    // Build request with optional dimensions parameter
+    const request: any = {
       model: this.modelName,
       input: text
-    });
+    };
+
+    // Add dimensions if configured (enables output truncation)
+    if (this.dimensions && this.dimensions < 3072) {
+      request.dimensions = this.dimensions;
+    }
+
+    const result = await this.openRouterClient.embeddings.generate(request);
 
     // Handle union type - result can be string or object
     if (typeof result === 'string') {
@@ -453,16 +469,25 @@ export class EmbeddingService {
 
   /**
    * Generate batch embeddings using OpenRouter SDK
+   * Passes dimensions parameter to truncate output vectors
    */
   private async embedBatchOpenRouter(texts: string[], startTime: number): Promise<BatchEmbeddingResult> {
     if (!this.openRouterClient) {
       throw new Error('OpenRouter client not initialized');
     }
 
-    const result = await this.openRouterClient.embeddings.generate({
+    // Build request with optional dimensions parameter
+    const request: any = {
       model: this.modelName,
       input: texts
-    });
+    };
+
+    // Add dimensions if configured (enables output truncation)
+    if (this.dimensions && this.dimensions < 3072) {
+      request.dimensions = this.dimensions;
+    }
+
+    const result = await this.openRouterClient.embeddings.generate(request);
 
     // Handle union type - result can be string or object
     if (typeof result === 'string') {

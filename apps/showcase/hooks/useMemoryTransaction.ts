@@ -40,7 +40,6 @@ export interface PreparedMemory {
     createdAt: number
     walletAddress: string
   }
-  // Note: blobId is now optional - client will upload to Walrus
   blobId?: string
 }
 
@@ -52,35 +51,11 @@ interface SaveMemoryResult {
 }
 
 /**
- * Convert category string to numeric code for smart contract
- */
-function getCategoryCode(category: string): number {
-  const categories: Record<string, number> = {
-    'personal': 0,
-    'work': 1,
-    'health': 2,
-    'finance': 3,
-    'education': 4,
-    'social': 5,
-    'travel': 6,
-    'hobbies': 7,
-    'general': 8,
-    'custom': 8,
-    'fact': 9,
-    'preference': 10,
-    'todo': 11,
-    'note': 12,
-  }
-  return categories[category.toLowerCase()] ?? 8 // default to custom
-}
-
-/**
  * Hook to save memory using client-side PDW SDK with Slush wallet signing
  *
- * Flow:
- * 1. Prepare on server (embedding, classify) - call /api/memory/prepare
- * 2. Upload to Walrus using PDW client (USER SIGNS - pays storage fee)
- * 3. Register on blockchain using PDW client (USER SIGNS - pays gas fee)
+ * Simplified version that delegates all logic to SDK:
+ * - SDK handles: upload to Walrus, encryption, blockchain tx, capability management
+ * - App only handles: preparation (embedding, classify) and indexing
  */
 export function useMemoryTransaction() {
   const { client, initClient, address, isConnected } = usePDWClient()
@@ -118,7 +93,7 @@ export function useMemoryTransaction() {
       const prepared: PreparedMemory = prepareResult.prepared
       console.log(`✅ Prepared: category=${prepared.category}, importance=${prepared.importance}`)
 
-      // Step 2: Get or initialize PDW client with DappKitSigner
+      // Step 2: Get or initialize PDW client
       console.log('🔧 Step 2: Initializing PDW client...')
       let pdw = client
       if (!pdw) {
@@ -128,70 +103,39 @@ export function useMemoryTransaction() {
         }
       }
 
-      // Step 3: Upload to Walrus (USER SIGNS - pays storage fee)
-      // Use storeMemoryPackage() to create proper JSON format for rebuildIndexNode
-      console.log('📤 Step 3: Uploading memory package to Walrus (user will sign)...')
-      const blobResult = await pdw.storage.storeMemoryPackage({
-        content: content,
-        contentType: 'text/plain',
-        embedding: prepared.embedding,
-        metadata: {
-          category: prepared.category,
-          importance: prepared.importance,
-          topic: '',
-        },
-      })
-      console.log(`✅ Walrus upload complete, blobId: ${blobResult.blobId}`)
-
-      // Step 4: Build and execute blockchain transaction (USER SIGNS - pays gas)
-      console.log('⛓️ Step 4: Creating memory on blockchain (user will sign)...')
-      const vectorId = Date.now() % 4294967295 // Keep within u32 range
-
-      // Use buildCreate() - the correct method in BlockchainNamespace.tx
-      const tx = pdw.blockchain.tx.buildCreate({
-        category: prepared.category,
-        vectorId,
-        blobId: blobResult.blobId,
+      // Step 3: Use SDK to handle everything (upload, encrypt, blockchain, capability)
+      console.log('🚀 Step 3: Creating memory via SDK (handles upload, encryption, blockchain)...')
+      const memory = await pdw.memory.create(content, {
+        category: prepared.category as any,
         importance: prepared.importance,
+        embedding: prepared.embedding // Pass pre-generated embedding for v2.2 encryption
       })
 
-      const txResult = await pdw.blockchain.tx.execute(tx)
-      console.log('📋 Transaction result:', txResult.status, txResult.digest)
+      console.log('✅ Memory created via SDK:', memory.id)
 
-      if (txResult.status !== 'success') {
-        return { success: false, error: txResult.error || 'Transaction failed' }
-      }
-
-      // Extract memory object ID
-      const memoryObject = txResult.createdObjects?.find(
-        (obj: any) => obj.objectType?.includes('::memory::Memory')
-      )
-      const memoryId = memoryObject?.objectId
-
-      console.log('✅ Memory saved! ID:', memoryId)
-
-      // Step 5: Index the memory for vector search
-      console.log('📇 Step 5: Indexing memory for search...')
+      // Step 4: Index the memory for vector search (server-side)
+      console.log('📇 Step 4: Indexing memory for search...')
       try {
         const indexResponse = await fetch('/api/memory/index', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             walletAddress,
-            memoryId,
-            vectorId,
+            memoryId: memory.id,
+            vectorId: memory.vectorId,
             content,
             embedding: prepared.embedding,
-            blobId: blobResult.blobId,
+            blobId: memory.blobId,
             category: prepared.category,
-            importance: prepared.importance
+            importance: prepared.importance,
+            isEncrypted: true
           })
         })
         const indexResult = await indexResponse.json()
         if (indexResult.success) {
           console.log('✅ Memory indexed for search')
 
-          // Step 6: Sync index to Walrus (background, non-blocking)
+          // Sync index to Walrus (background, non-blocking)
           syncIndexToWalrus(walletAddress)
         } else {
           console.warn('⚠️ Memory indexing failed:', indexResult.error)
@@ -203,8 +147,8 @@ export function useMemoryTransaction() {
 
       return {
         success: true,
-        memoryId,
-        blobId: blobResult.blobId,
+        memoryId: memory.id,
+        blobId: memory.blobId,
       }
     } catch (error) {
       console.error('❌ Failed to save memory:', error)
@@ -219,7 +163,7 @@ export function useMemoryTransaction() {
 
   /**
    * Save pre-prepared memory (when embedding/classification already done)
-   * Still requires Walrus upload and blockchain signing
+   * Still requires SDK to handle upload, encryption, blockchain
    */
   const savePreppedMemory = useCallback(async (
     prepared: PreparedMemory
@@ -240,49 +184,15 @@ export function useMemoryTransaction() {
         }
       }
 
-      let blobId = prepared.blobId
-
-      // If no blobId, upload to Walrus first (USER SIGNS)
-      if (!blobId) {
-        console.log('📤 Uploading memory package to Walrus (user will sign)...')
-        const blobResult = await pdw.storage.storeMemoryPackage({
-          content: prepared.content,
-          contentType: 'text/plain',
-          embedding: prepared.embedding,
-          metadata: {
-            category: prepared.category,
-            importance: prepared.importance,
-            topic: '',
-          },
-        })
-        blobId = blobResult.blobId
-        console.log(`✅ Walrus upload complete, blobId: ${blobId}`)
-      }
-
-      // Build and execute blockchain transaction (USER SIGNS)
-      console.log('⛓️ Creating memory on blockchain (user will sign)...')
-      const vectorId = Date.now() % 4294967295
-
-      // Use buildCreate() - the correct method in BlockchainNamespace.tx
-      const tx = pdw.blockchain.tx.buildCreate({
-        category: prepared.category,
-        vectorId,
-        blobId,
+      // Use SDK to handle everything
+      console.log('🚀 Creating memory via SDK...')
+      const memory = await pdw.memory.create(prepared.content, {
+        category: prepared.category as any,
         importance: prepared.importance,
+        embedding: prepared.embedding // Pass pre-generated embedding for v2.2 encryption
       })
 
-      const txResult = await pdw.blockchain.tx.execute(tx)
-
-      if (txResult.status !== 'success') {
-        return { success: false, error: txResult.error || 'Transaction failed' }
-      }
-
-      const memoryObject = txResult.createdObjects?.find(
-        (obj: any) => obj.objectType?.includes('::memory::Memory')
-      )
-      const memoryId = memoryObject?.objectId
-
-      console.log('✅ Memory saved! ID:', memoryId)
+      console.log('✅ Memory created via SDK:', memory.id)
 
       // Index the memory for vector search
       console.log('📇 Indexing memory for search...')
@@ -292,13 +202,14 @@ export function useMemoryTransaction() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             walletAddress: address,
-            memoryId,
-            vectorId,
+            memoryId: memory.id,
+            vectorId: memory.vectorId,
             content: prepared.content,
             embedding: prepared.embedding,
-            blobId,
+            blobId: memory.blobId,
             category: prepared.category,
-            importance: prepared.importance
+            importance: prepared.importance,
+            isEncrypted: true
           })
         })
         const indexResult = await indexResponse.json()
@@ -316,8 +227,8 @@ export function useMemoryTransaction() {
 
       return {
         success: true,
-        memoryId,
-        blobId,
+        memoryId: memory.id,
+        blobId: memory.blobId,
       }
     } catch (error) {
       console.error('❌ Failed to save memory:', error)
@@ -356,8 +267,8 @@ export function useBatchMemoryTransaction() {
   const [isPending, setIsPending] = useState(false)
 
   /**
-   * Save pre-prepared memories using Walrus Quilt batch upload
-   * ~90% gas savings compared to individual uploads
+   * Save pre-prepared memories using SDK's createBatch()
+   * SDK handles: Quilt batch upload, encryption, blockchain tx, capability
    */
   const savePreppedMemoriesBatch = useCallback(async (
     preparedMemories: PreparedMemory[]
@@ -368,90 +279,6 @@ export function useBatchMemoryTransaction() {
 
     if (preparedMemories.length === 0) {
       return { success: false, successCount: 0, failCount: 0, error: 'No memories to save' }
-    }
-
-    // For single memory, use regular save
-    if (preparedMemories.length === 1) {
-      // Import savePreppedMemory behavior for single item
-      const prepared = preparedMemories[0]
-      setIsPending(true)
-      try {
-        let pdw = client
-        if (!pdw) {
-          pdw = await initClient()
-          if (!pdw) {
-            return { success: false, successCount: 0, failCount: 1, error: 'Failed to initialize PDW client' }
-          }
-        }
-
-        const blobResult = await pdw.storage.storeMemoryPackage({
-          content: prepared.content,
-          contentType: 'text/plain',
-          embedding: prepared.embedding,
-          metadata: {
-            category: prepared.category,
-            importance: prepared.importance,
-            topic: '',
-          },
-        })
-
-        const vectorId = Date.now() % 4294967295
-        const tx = pdw.blockchain.tx.buildCreate({
-          category: prepared.category,
-          vectorId,
-          blobId: blobResult.blobId,
-          importance: prepared.importance,
-        })
-
-        const txResult = await pdw.blockchain.tx.execute(tx)
-
-        if (txResult.status !== 'success') {
-          return { success: false, successCount: 0, failCount: 1, error: txResult.error || 'Transaction failed' }
-        }
-
-        const memoryObject = txResult.createdObjects?.find(
-          (obj: any) => obj.objectType?.includes('::memory::Memory')
-        )
-        const memoryId = memoryObject?.objectId
-
-        // Index the memory
-        try {
-          await fetch('/api/memory/index', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              walletAddress: address,
-              memoryId,
-              vectorId,
-              content: prepared.content,
-              embedding: prepared.embedding,
-              blobId: blobResult.blobId,
-              category: prepared.category,
-              importance: prepared.importance
-            })
-          })
-        } catch (e) {
-          console.warn('Index failed:', e)
-        }
-
-        syncIndexToWalrus(address!)
-
-        return {
-          success: true,
-          successCount: 1,
-          failCount: 0,
-          memories: [{ memoryId, blobId: blobResult.blobId }]
-        }
-      } catch (error) {
-        return {
-          success: false,
-          successCount: 0,
-          failCount: 1,
-          error: error instanceof Error ? error.message : 'Failed to save memory'
-        }
-      } finally {
-        setIsPending(false)
-      }
     }
 
     setIsPending(true)
@@ -466,105 +293,51 @@ export function useBatchMemoryTransaction() {
         }
       }
 
-      console.log(`📦 Batch uploading ${preparedMemories.length} memories using Walrus Quilt...`)
+      console.log(`📦 Batch creating ${preparedMemories.length} memories via SDK...`)
 
-      // Prepare batch memories for QuiltBatchManager
-      // Let QuiltBatchManager create the JSON package with content included
-      // DO NOT set encryptedContent - it makes QuiltBatchManager think content is encrypted
-      // and it will store empty content in the JSON package
-      const batchMemories = preparedMemories.map((prepared, i) => {
-        return {
-          content: prepared.content,
-          category: prepared.category as 'general' | 'preference' | 'fact' | 'todo' | 'note',
-          importance: prepared.importance,
-          topic: '',
-          embedding: prepared.embedding,
-          // NOTE: Do NOT set encryptedContent here!
-          // QuiltBatchManager will create JSON package with content automatically
-          id: `memory-${Date.now()}-${i}`
-        }
+      // Use SDK's createBatch() which handles everything
+      const contents = preparedMemories.map(p => p.content)
+      const memories = await pdw.memory.createBatch(contents, {
+        category: preparedMemories[0]?.category as any,
+        importance: preparedMemories[0]?.importance || 5
       })
 
-      // Step 1: Batch upload to Walrus using Quilt (requires user to sign 2 transactions)
-      // - Transaction 1: Register blob on-chain
-      // - Transaction 2: Certify upload on-chain
-      console.log('📤 Uploading batch to Walrus via Quilt (user will sign 2 transactions)...')
+      console.log(`✅ ${memories.length} memories created via SDK`)
 
-      // Get signer from PDW client config (same as storeMemoryPackage does internally)
-      const pdwConfig = pdw.getConfig()
-
-      const quiltResult = await pdw.storage.uploadMemoryBatch(
-        batchMemories,
-        {
-          signer: pdwConfig.signer,  // Pass signer from PDW config
-          epochs: 3,
-          userAddress: pdwConfig.userAddress
-        }
-      )
-
-      console.log(`✅ Quilt upload complete: ${quiltResult.files.length} files in ${quiltResult.uploadTimeMs}ms`)
-
-      // Step 2: Register each memory on blockchain
-      const savedMemories: Array<{ memoryId?: string; blobId: string }> = []
+      // Index all memories
       let successCount = 0
       let failCount = 0
+      const savedMemories: Array<{ memoryId?: string; blobId: string }> = []
 
-      for (let i = 0; i < quiltResult.files.length; i++) {
-        const file = quiltResult.files[i]
+      for (let i = 0; i < memories.length; i++) {
+        const memory = memories[i]
         const prepared = preparedMemories[i]
 
         try {
-          console.log(`⛓️ [${i + 1}/${quiltResult.files.length}] Registering on blockchain...`)
-          const vectorId = (Date.now() + i) % 4294967295
-
-          const tx = pdw.blockchain.tx.buildCreate({
-            category: prepared.category,
-            vectorId,
-            blobId: file.blobId,
-            importance: prepared.importance,
+          await fetch('/api/memory/index', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              walletAddress: address,
+              memoryId: memory.id,
+              vectorId: memory.vectorId,
+              content: prepared.content,
+              embedding: prepared.embedding,
+              blobId: memory.blobId,
+              category: prepared.category,
+              importance: prepared.importance,
+              isEncrypted: true
+            })
           })
-
-          const txResult = await pdw.blockchain.tx.execute(tx)
-
-          if (txResult.status === 'success') {
-            successCount++
-            const memoryObject = txResult.createdObjects?.find(
-              (obj: any) => obj.objectType?.includes('::memory::Memory')
-            )
-            const memoryId = memoryObject?.objectId
-            savedMemories.push({ memoryId, blobId: file.blobId })
-
-            // Index the memory
-            try {
-              await fetch('/api/memory/index', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  walletAddress: address,
-                  memoryId,
-                  vectorId,
-                  content: prepared.content,
-                  embedding: prepared.embedding,
-                  blobId: file.blobId,
-                  category: prepared.category,
-                  importance: prepared.importance
-                })
-              })
-              console.log(`   ✅ Memory ${i + 1} registered and indexed`)
-            } catch (indexError) {
-              console.warn(`   ⚠️ Memory ${i + 1} indexing failed:`, indexError)
-            }
-          } else {
-            failCount++
-            console.error(`   ❌ Memory ${i + 1} blockchain registration failed:`, txResult.error)
-          }
-        } catch (err) {
+          successCount++
+          savedMemories.push({ memoryId: memory.id, blobId: memory.blobId })
+        } catch (e) {
           failCount++
-          console.error(`   ❌ Memory ${i + 1} failed:`, err)
+          console.warn(`Index failed for memory ${i}:`, e)
         }
       }
 
-      console.log(`\n📊 Batch complete: ${successCount} succeeded, ${failCount} failed`)
+      console.log(`📊 Batch complete: ${successCount} indexed, ${failCount} failed`)
 
       // Sync index to Walrus (background)
       if (successCount > 0) {
@@ -576,7 +349,7 @@ export function useBatchMemoryTransaction() {
         successCount,
         failCount,
         memories: savedMemories,
-        error: failCount > 0 ? `${failCount}/${preparedMemories.length} memories failed` : undefined
+        error: failCount > 0 ? `${failCount}/${preparedMemories.length} memories failed indexing` : undefined
       }
     } catch (error) {
       console.error('❌ Batch save failed:', error)
@@ -592,7 +365,7 @@ export function useBatchMemoryTransaction() {
   }, [client, initClient, address, isConnected])
 
   /**
-   * Legacy: Save memories one by one (less efficient)
+   * Legacy: Save memories from raw content (less efficient than pre-prepared)
    */
   const saveMemories = useCallback(async (
     walletAddress: string,
@@ -618,7 +391,7 @@ export function useBatchMemoryTransaction() {
         }
       }
 
-      // Use SDK's createBatch which uses Quilt internally
+      // Use SDK's createBatch which handles everything
       console.log(`📦 Creating ${contents.length} memories via SDK batch...`)
       const memories = await pdw.memory.createBatch(contents, {
         category: category as any,

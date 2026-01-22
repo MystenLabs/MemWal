@@ -37,7 +37,11 @@ export interface PDWConfig {
   /** Storage configuration */
   storageConfig?: StorageConfig;
   /** Walrus storage configuration */
+  /** Publisher URL for direct blob uploads (server-side) */
   walrusPublisherUrl?: string;
+  /** Upload Relay URL for browser/mobile uploads (fewer connections, faster) */
+  walrusUploadRelayUrl?: string;
+  /** Aggregator URL for blob retrieval */
   walrusAggregatorUrl?: string;
   walrusMaxFileSize?: number;
   walrusTimeout?: number;

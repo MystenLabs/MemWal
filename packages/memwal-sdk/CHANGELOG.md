@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.1
+
+### Bug Fixes
+
+- **Encrypted Embedding Support**: Added `encryptedEmbedding` field to batch/quilt upload (v2.2 format)
+- **Security**: Raw content and raw embedding are no longer uploaded to Walrus when encryption is enabled
+- **AI Model Configuration**: Centralized AI model settings (`MODEL_DEFAULTS`, `getChatModel()`)
+
+### Known Issues
+
+⚠️ **Quilt Batch Upload Bug**: Encrypted embedding may not work correctly in some cases when using `pdw.memory.createBatch()`. This will be fixed in upcoming patches.
+
+**Workaround**: For critical data requiring encryption, use single memory upload:
+```typescript
+// Use single upload instead of batch for encrypted memories
+await pdw.memory.create('Your content here');
+```
+
+Single memory upload (`pdw.memory.create()`) correctly encrypts both content and embedding using v2.2 format.
+
+---
+
 ## 0.9.0
 
 ### Major Changes

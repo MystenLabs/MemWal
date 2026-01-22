@@ -185,16 +185,16 @@ export class WalrusStorageManager {
       const uploadDuration = performance.now() - uploadStart;
       console.log(`   ⏱️ Storage upload: ${uploadDuration.toFixed(0)}ms`);
 
-      // Get blob info early (available after upload)
-      const blob = await flow.getBlob();
-
-      // Step 4: Certify blob on-chain
+      // Step 4: Certify blob on-chain (MUST be done before getBlob)
       const certifyStart = performance.now();
       const certifyTx = flow.certify();
       certifyTx.setSender(signerAddress);
       await options.signer.signAndExecuteTransaction(certifyTx);
       const certifyDuration = performance.now() - certifyStart;
       console.log(`   ⏱️ Certify TX: ${certifyDuration.toFixed(0)}ms`);
+
+      // Step 5: Get blob info (only available AFTER certify)
+      const blob = await flow.getBlob();
 
       const uploadTimeMs = performance.now() - startTime;
 
