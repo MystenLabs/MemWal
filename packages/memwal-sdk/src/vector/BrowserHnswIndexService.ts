@@ -73,10 +73,10 @@ export class BrowserHnswIndexService {
     indexConfig: Partial<HNSWIndexConfig> = {},
     batchConfig: Partial<BatchConfig> = {}
   ) {
-    // Default HNSW configuration
+    // Default HNSW configuration (optimized for lower memory usage)
     this.indexConfig = {
       dimension: indexConfig.dimension || 768, // Default 768 for speed (was 3072)
-      maxElements: indexConfig.maxElements || 10000,
+      maxElements: indexConfig.maxElements || 5000, // Reduced from 10000
       efConstruction: indexConfig.efConstruction || 200,
       m: indexConfig.m || 16,
       randomSeed: indexConfig.randomSeed || 42,

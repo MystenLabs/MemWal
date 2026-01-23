@@ -46,6 +46,8 @@ export interface BatchMemory {
   encryptedContent?: Uint8Array; // Optional - only when encryption is enabled
   encryptedEmbedding?: Uint8Array; // Optional - encrypted embedding for v2.2
   embeddingDimensions?: number; // Original embedding dimensions (when encrypted, embedding is [])
+  memoryCapId?: string; // Capability ID for decryption (v2.2)
+  keyId?: string; // Key ID (hex string) for decryption (v2.2)
   summary?: string;
   id?: string; // Optional client-side ID for tracking
 }
@@ -61,6 +63,8 @@ export interface QuiltMemoryPackage {
     category: string;
     importance: number;
     topic: string;
+    memoryCapId?: string;       // Capability ID for decryption (v2.2)
+    keyId?: string;             // Key ID for decryption (v2.2)
     [key: string]: unknown;
   };
   timestamp: number;
@@ -218,7 +222,10 @@ export class QuiltBatchManager {
             ...(memory.id ? { memoryId: memory.id } : {}),
             // Store original embedding dimensions for decryption
             // Use embeddingDimensions field if available (when encrypted, embedding is [])
-            ...(hasEncryptedEmbedding ? { embeddingDimensions: memory.embeddingDimensions || memory.embedding.length } : {})
+            ...(hasEncryptedEmbedding ? { embeddingDimensions: memory.embeddingDimensions || memory.embedding.length } : {}),
+            // Capability-based encryption metadata (v2.2)
+            ...(memory.memoryCapId ? { memoryCapId: memory.memoryCapId } : {}),
+            ...(memory.keyId ? { keyId: memory.keyId } : {})
           },
           timestamp,
           version,

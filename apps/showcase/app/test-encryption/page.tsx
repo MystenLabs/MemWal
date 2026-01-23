@@ -25,10 +25,10 @@ export default function TestEncryptionPage() {
   const [createdBlobId, setCreatedBlobId] = useState<string | null>(null)
   const [createdMemoryCapId, setCreatedMemoryCapId] = useState<string | null>(null)
 
-  // Batch test state
-  const [batchSteps, setBatchSteps] = useState<TestStep[]>([])
-  const [isBatchRunning, setIsBatchRunning] = useState(false)
-  const [batchQuiltId, setBatchQuiltId] = useState<string | null>(null)
+  // Batch test state (DISABLED - use showcase app for batch testing)
+  // const [batchSteps, setBatchSteps] = useState<TestStep[]>([])
+  // const [isBatchRunning, setIsBatchRunning] = useState(false)
+  // const [batchQuiltId, setBatchQuiltId] = useState<string | null>(null)
 
   // Test content input
   const [testContent, setTestContent] = useState('Aaron is a member of CommandOSS')
@@ -39,15 +39,16 @@ export default function TestEncryptionPage() {
     ))
   }
 
-  const updateBatchStep = (index: number, updates: Partial<TestStep>) => {
-    setBatchSteps(prev => prev.map((step, i) =>
-      i === index ? { ...step, ...updates } : step
-    ))
-  }
+  // const updateBatchStep = (index: number, updates: Partial<TestStep>) => {
+  //   setBatchSteps(prev => prev.map((step, i) =>
+  //     i === index ? { ...step, ...updates } : step
+  //   ))
+  // }
 
   // ============================================================================
-  // BATCH/QUILT TEST - Tests encrypted embedding in batch upload
+  // BATCH/QUILT TEST - DISABLED (use showcase app for batch testing)
   // ============================================================================
+  /*
   const runBatchTest = useCallback(async () => {
     if (!account?.address) {
       alert('Please connect your wallet first!')
@@ -102,7 +103,6 @@ export default function TestEncryptionPage() {
       console.log('\n📍 BATCH STEP 2: pdw.memory.createBatch()')
 
       const batchContents = [
-        'Batch test memory 1: Alice works at Anthropic',
         'Batch test memory 2: Bob is a software engineer',
         'Batch test memory 3: Carol loves hiking on weekends'
       ]
@@ -308,6 +308,7 @@ export default function TestEncryptionPage() {
       setIsBatchRunning(false)
     }
   }, [account, client, initClient])
+  */
 
   const runFullTest = useCallback(async () => {
     if (!account?.address) {
@@ -820,16 +821,17 @@ export default function TestEncryptionPage() {
           </CardContent>
         </Card>
 
-        {/* Run Test Buttons */}
+        {/* Run Test Button */}
         <div className="flex gap-4 mb-8">
           <Button
             onClick={runFullTest}
-            disabled={!account || isRunning || isBatchRunning}
+            disabled={!account || isRunning}
             className="flex-1 h-12 text-lg"
             variant={isRunning ? 'secondary' : 'default'}
           >
             {isRunning ? '🔄 Running...' : '🚀 Single Memory Test'}
           </Button>
+          {/* Batch test button disabled - use showcase app for batch testing
           <Button
             onClick={runBatchTest}
             disabled={!account || isRunning || isBatchRunning}
@@ -838,6 +840,7 @@ export default function TestEncryptionPage() {
           >
             {isBatchRunning ? '🔄 Running...' : '📦 Batch/Quilt Test (v2.2)'}
           </Button>
+          */}
         </div>
 
         {/* Single Memory Test Steps */}
@@ -882,7 +885,7 @@ export default function TestEncryptionPage() {
           </div>
         )}
 
-        {/* Batch/Quilt Test Steps */}
+        {/* Batch/Quilt Test Steps - DISABLED (use showcase app for batch testing)
         {batchSteps.length > 0 && (
           <div className="space-y-4 mt-8">
             <h2 className="text-xl font-semibold mb-4">
@@ -927,7 +930,6 @@ export default function TestEncryptionPage() {
               </Card>
             ))}
 
-            {/* Quilt ID display */}
             {batchQuiltId && (
               <Card className="bg-gray-900 border-purple-800">
                 <CardHeader className="pb-2">
@@ -953,6 +955,7 @@ export default function TestEncryptionPage() {
             )}
           </div>
         )}
+        */}
 
         {/* Created Resources */}
         {(createdBlobId || createdMemoryCapId) && (

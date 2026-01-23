@@ -24,10 +24,10 @@ import type {
 } from './IHnswService';
 import { LRUCache, estimateIndexCacheSize } from '../utils/LRUCache';
 
-// Memory management constants
-const DEFAULT_MAX_CACHED_INDEXES = 5;
+// Memory management constants (optimized for lower memory usage)
+const DEFAULT_MAX_CACHED_INDEXES = 2; // Reduced from 5
 const DEFAULT_INDEX_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const DEFAULT_MAX_MEMORY_MB = 512;
+const DEFAULT_MAX_MEMORY_MB = 256; // Reduced from 512
 
 // Dynamic import types for hnswlib-node
 type HierarchicalNSW = any;
@@ -84,7 +84,7 @@ export class NodeHnswService implements IHnswService {
   constructor(config: HnswServiceConfig = {}) {
     this.indexConfig = {
       dimension: config.indexConfig?.dimension || 768, // Default 768 for speed (was 3072)
-      maxElements: config.indexConfig?.maxElements || 10000,
+      maxElements: config.indexConfig?.maxElements || 5000, // Reduced from 10000 for lower memory
       efConstruction: config.indexConfig?.efConstruction || 200,
       m: config.indexConfig?.m || 16,
       randomSeed: config.indexConfig?.randomSeed || 42,

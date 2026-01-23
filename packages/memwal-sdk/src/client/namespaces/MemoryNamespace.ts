@@ -36,11 +36,17 @@ export interface Memory {
  */
 export interface CreateMemoryOptions {
   category?: 'fact' | 'preference' | 'todo' | 'note' | 'general';
-  importance?: number; // 1-10
+  importance?: number; // 1-10 (single value for all if using batch)
   topic?: string;
   metadata?: Record<string, any>;
   /** Pre-generated embedding (if provided, skips embedding generation) */
   embedding?: number[];
+  /** Pre-generated embeddings for batch (one per content, parallel to contents array) */
+  embeddings?: number[][];
+  /** Per-memory importance values for batch (one per content, parallel to contents array) */
+  importances?: number[];
+  /** Per-memory categories for batch (one per content, parallel to contents array) */
+  categories?: string[];
   onProgress?: (stage: string, percent: number) => void;
 }
 
@@ -889,17 +895,28 @@ export class MemoryNamespace {
     const { importance = 5, topic, metadata, onProgress } = options;
 
     // For single item, use regular create()
+    // Extract first element from arrays (embeddings, importances, categories) for single-item case
     if (contents.length === 1) {
-      const memory = await this.create(contents[0], options);
+      const singleOptions: CreateMemoryOptions = {
+        ...options,
+        // Extract first element from arrays for single-item delegation
+        embedding: options.embeddings?.[0] || options.embedding,
+        importance: options.importances?.[0] ?? options.importance,
+        category: (options.categories?.[0] as CreateMemoryOptions['category']) || options.category,
+      };
+      const memory = await this.create(contents[0], singleOptions);
       return [memory];
     }
 
     try {
       onProgress?.('preparing batch', 5);
 
-      // Step 1: Auto-classify all contents (parallel)
+      // Step 1: Auto-classify all contents (parallel) - or use pre-provided categories
       const categories: string[] = [];
-      if (!options.category && this.services.classifier) {
+      if (options.categories && options.categories.length === contents.length) {
+        // Use pre-provided categories (from server-side classification)
+        categories.push(...options.categories);
+      } else if (!options.category && this.services.classifier) {
         onProgress?.('classifying', 10);
         const classifyPromises = contents.map(async (content) => {
           try {
@@ -914,77 +931,133 @@ export class MemoryNamespace {
         categories.push(...contents.map(() => options.category || 'general'));
       }
 
-      // Step 2: Generate embeddings (parallel)
+      // Step 2: Generate embeddings (parallel) - or use pre-provided embeddings
       onProgress?.('generating embeddings', 20);
       const embeddings: number[][] = [];
-      if (this.services.embedding) {
+      if (options.embeddings && options.embeddings.length === contents.length) {
+        // Use pre-provided embeddings (from server-side generation)
+        embeddings.push(...options.embeddings);
+      } else if (this.services.embedding) {
         const embeddingPromises = contents.map(content =>
           this.services.embedding!.embedText({ text: content }).then(r => r.vector)
         );
         const embeddingResults = await Promise.all(embeddingPromises);
         embeddings.push(...embeddingResults);
+      } else if (!options.embeddings) {
+        // No embedding service and no pre-provided embeddings
+        throw new Error('No embedding available. Provide pre-generated embeddings via options.embeddings or configure embedding service.');
       }
 
-      // Step 3: Encrypt all contents (parallel, if enabled)
+      // Step 3: Encrypt using capability-based encryption (same as single create)
+      // This ensures batch encryption is consistent with single memory encryption
       onProgress?.('encrypting', 35);
       const encryptedContents: (Uint8Array | undefined)[] = [];
-      if (this.services.config.features.enableEncryption && this.services.encryption) {
-        const encryptPromises = contents.map(async (content) => {
-          try {
-            const contentBytes = new TextEncoder().encode(content);
-            const result = await this.services.encryption!.encrypt(
-              contentBytes,
-              this.services.config.userAddress,
-              2
-            );
-            return result.encryptedObject;
-          } catch {
-            return undefined;
-          }
-        });
-        const encryptResults = await Promise.all(encryptPromises);
-        encryptedContents.push(...encryptResults);
-      } else {
-        encryptedContents.push(...contents.map(() => undefined));
-      }
-
-      // Step 3.5: Encrypt all embeddings (parallel, if enabled)
-      onProgress?.('encrypting embeddings', 40);
       const encryptedEmbeddings: (Uint8Array | undefined)[] = [];
-      console.log(`🔐 [createBatch] Step 3.5: Encrypting embeddings`);
-      console.log(`   Embeddings count: ${embeddings.length}`);
+      const memoryCapIds: (string | undefined)[] = [];
+      const keyIds: (string | undefined)[] = [];
+
+      console.log(`🔐 [createBatch] Step 3: Capability-based encryption (v2.2)`);
+      console.log(`   Contents count: ${contents.length}`);
       console.log(`   Encryption enabled: ${this.services.config.features.enableEncryption}`);
       console.log(`   Encryption service: ${!!this.services.encryption}`);
-      if (this.services.config.features.enableEncryption && this.services.encryption) {
-        const encryptEmbeddingPromises = embeddings.map(async (embedding, idx) => {
-          if (!embedding || embedding.length === 0) {
-            console.log(`   Embedding ${idx}: SKIP (empty or undefined)`);
-            return undefined;
-          }
-          try {
-            console.log(`   Embedding ${idx}: ${embedding.length}D -> encrypting...`);
-            // Convert embedding to bytes (same method as single create)
-            const embeddingBytes = new Float32Array(embedding);
-            const embeddingUint8 = new Uint8Array(embeddingBytes.buffer);
+      console.log(`   Capability service: ${!!this.services.capability}`);
 
-            const result = await this.services.encryption!.encrypt(
-              embeddingUint8,
-              this.services.config.userAddress,
+      if (this.services.config.features.enableEncryption && this.services.encryption && this.services.capability) {
+        // Group by category for efficient capability management
+        const categoryGroups = new Map<string, number[]>();
+        categories.forEach((cat, idx) => {
+          const existing = categoryGroups.get(cat) || [];
+          existing.push(idx);
+          categoryGroups.set(cat, existing);
+        });
+
+        // Get/create capabilities for each category
+        const categoryCapabilities = new Map<string, { capId: string; keyId: string }>();
+        for (const [category] of categoryGroups) {
+          try {
+            console.log(`   Getting capability for category: ${category}`);
+            const cap = await this.services.capability!.getOrCreate(
+              {
+                appId: category,
+                userAddress: this.services.config.userAddress
+              },
+              this.services.config.signer
+            );
+            const keyId = this.services.capability!.computeKeyId(cap);
+            categoryCapabilities.set(category, { capId: cap.id, keyId });
+            console.log(`   ✅ Capability for ${category}: ${cap.id.substring(0, 20)}...`);
+          } catch (error) {
+            console.error(`   ❌ Failed to get capability for ${category}:`, error);
+          }
+        }
+
+        // Encrypt all contents and embeddings in parallel
+        const encryptPromises = contents.map(async (content, idx) => {
+          const category = categories[idx];
+          const capInfo = categoryCapabilities.get(category);
+
+          if (!capInfo) {
+            console.warn(`   Content ${idx}: SKIP (no capability for ${category})`);
+            return { content: undefined, embedding: undefined, capId: undefined, keyId: undefined };
+          }
+
+          let encryptedContent: Uint8Array | undefined;
+          let encryptedEmbedding: Uint8Array | undefined;
+
+          try {
+            // Encrypt content
+            console.log(`   Content ${idx}: ${content.length} chars -> encrypting with keyId...`);
+            const contentBytes = new TextEncoder().encode(content);
+            const contentResult = await this.services.encryption!.encrypt(
+              contentBytes,
+              capInfo.keyId,
               2
             );
-            console.log(`   Embedding ${idx}: encrypted -> ${result.encryptedObject?.length || 0} bytes`);
-            return result.encryptedObject;
+            encryptedContent = contentResult.encryptedObject;
+            console.log(`   Content ${idx}: encrypted -> ${encryptedContent?.length || 0} bytes`);
+
+            // Encrypt embedding (same format as single create - JSON string)
+            const embedding = embeddings[idx];
+            if (embedding && embedding.length > 0) {
+              console.log(`   Embedding ${idx}: ${embedding.length}D -> encrypting with keyId...`);
+              const embeddingBytes = new TextEncoder().encode(JSON.stringify(embedding));
+              const embeddingResult = await this.services.encryption!.encrypt(
+                embeddingBytes,
+                capInfo.keyId,
+                2
+              );
+              encryptedEmbedding = embeddingResult.encryptedObject;
+              console.log(`   Embedding ${idx}: encrypted -> ${encryptedEmbedding?.length || 0} bytes`);
+            }
           } catch (error) {
-            console.warn(`   Embedding ${idx}: FAILED -`, error);
-            return undefined;
+            console.error(`   Content/Embedding ${idx}: ENCRYPTION FAILED -`, error);
           }
+
+          return {
+            content: encryptedContent,
+            embedding: encryptedEmbedding,
+            capId: capInfo.capId,
+            keyId: capInfo.keyId
+          };
         });
-        const encryptEmbeddingResults = await Promise.all(encryptEmbeddingPromises);
-        encryptedEmbeddings.push(...encryptEmbeddingResults);
-        console.log(`   Total encrypted embeddings: ${encryptedEmbeddings.filter(e => e !== undefined).length}/${encryptedEmbeddings.length}`);
+
+        const encryptResults = await Promise.all(encryptPromises);
+        encryptResults.forEach(result => {
+          encryptedContents.push(result.content);
+          encryptedEmbeddings.push(result.embedding);
+          memoryCapIds.push(result.capId);
+          keyIds.push(result.keyId);
+        });
+
+        console.log(`   Total encrypted: ${encryptedContents.filter(e => e !== undefined).length}/${contents.length} contents, ${encryptedEmbeddings.filter(e => e !== undefined).length}/${embeddings.length} embeddings`);
       } else {
-        console.log(`   SKIP encryption (disabled or no service)`);
-        encryptedEmbeddings.push(...embeddings.map(() => undefined));
+        console.log(`   SKIP encryption (disabled or missing service/capability)`);
+        contents.forEach(() => {
+          encryptedContents.push(undefined);
+          encryptedEmbeddings.push(undefined);
+          memoryCapIds.push(undefined);
+          keyIds.push(undefined);
+        });
       }
 
       // Step 4: Batch upload to Walrus using Quilt (single transaction!)
@@ -992,15 +1065,23 @@ export class MemoryNamespace {
 
       // Security: When encryption is enabled, NEVER upload raw content/embedding
       // Only encrypted data should be stored on Walrus
-      const encryptionEnabled = this.services.config.features.enableEncryption && this.services.encryption;
+      // Must have all three: enableEncryption flag, encryption service, AND capability service
+      const encryptionEnabled = this.services.config.features.enableEncryption &&
+                                this.services.encryption &&
+                                this.services.capability;
 
       // Prepare batch memories for QuiltBatchManager
+      // Use per-memory importance if provided, otherwise fallback to single importance value
+      const importanceValues = options.importances && options.importances.length === contents.length
+        ? options.importances
+        : contents.map(() => importance);
+
       const batchMemories = contents.map((content, i) => ({
         // When encryption is enabled, pass empty content (encrypted version will be used)
         // When disabled, pass original content for plaintext storage
         content: encryptionEnabled ? '' : content,
         category: categories[i],
-        importance,
+        importance: importanceValues[i],
         topic: topic || '',
         // When encryption is enabled, pass empty embedding (encrypted version will be used)
         // When disabled, pass original embedding for plaintext storage
@@ -1010,6 +1091,9 @@ export class MemoryNamespace {
         encryptedEmbedding: encryptedEmbeddings[i],
         // Store original embedding dimensions (needed when embedding is [] for encryption)
         embeddingDimensions: embeddings[i]?.length || 0,
+        // Capability-based encryption metadata (for decryption)
+        memoryCapId: memoryCapIds[i],
+        keyId: keyIds[i],
         id: `memory-${Date.now()}-${i}` // Client-side tracking ID
       }));
 

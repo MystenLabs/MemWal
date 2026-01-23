@@ -296,10 +296,16 @@ export function useBatchMemoryTransaction() {
       console.log(`📦 Batch creating ${preparedMemories.length} memories via SDK...`)
 
       // Use SDK's createBatch() which handles everything
+      // Pass pre-generated embeddings, importances, and categories for each memory
       const contents = preparedMemories.map(p => p.content)
+      const embeddings = preparedMemories.map(p => p.embedding)
+      const importances = preparedMemories.map(p => p.importance)
+      const categories = preparedMemories.map(p => p.category)
+
       const memories = await pdw.memory.createBatch(contents, {
-        category: preparedMemories[0]?.category as any,
-        importance: preparedMemories[0]?.importance || 5
+        embeddings,     // Pre-generated embeddings from server
+        importances,    // Per-memory importance from AI classification
+        categories,     // Per-memory category from AI classification
       })
 
       console.log(`✅ ${memories.length} memories created via SDK`)

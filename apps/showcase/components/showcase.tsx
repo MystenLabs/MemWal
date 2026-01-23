@@ -486,8 +486,8 @@ export default function Showcase() {
             reason: memoryData.reason
           })
 
-          if (memoryData.needsClientSigning && memoryData.preparedBatch && memoryData.preparedBatch.length > 0) {
-            // Batch memories - save ALL using Walrus Quilt (single transaction for all blobs!)
+          if (memoryData.needsClientSigning && memoryData.preparedBatch && memoryData.preparedBatch.length > 1) {
+            // Multiple memories (2+) - use Quilt batch upload for gas savings
             console.log(`📦 Batch memories prepared: ${memoryData.preparedBatch.length} memories to save via Quilt`)
 
             // Convert to PreparedMemory array
@@ -511,6 +511,32 @@ export default function Showcase() {
 
             if (batchResult.error) {
               console.error('⚠️ Batch save had errors:', batchResult.error)
+            }
+          } else if (memoryData.needsClientSigning && memoryData.preparedBatch && memoryData.preparedBatch.length === 1) {
+            // Single memory from batch response - use single memory method (simpler, more efficient)
+            const prepared = memoryData.preparedBatch[0]
+            console.log('📝 Single memory from batch, using direct save:', {
+              content: prepared.content.substring(0, 50) + '...',
+              category: prepared.category,
+              embeddingDims: prepared.embedding?.length || 0
+            })
+
+            const preparedData: PreparedMemory = {
+              content: prepared.content,
+              blobId: prepared.blobId,
+              embedding: prepared.embedding,
+              category: prepared.category,
+              importance: prepared.importance,
+            }
+
+            const saveResult = await savePreppedMemory(preparedData)
+            console.log('💾 Save result:', saveResult)
+
+            if (saveResult.success) {
+              console.log('✅ Memory saved to blockchain:', saveResult.memoryId)
+              fetchMemoriesFromBlockchain()
+            } else {
+              console.error('❌ Failed to save memory:', saveResult.error)
             }
           } else if (memoryData.needsClientSigning && memoryData.prepared) {
             // Single memory (backwards compatibility)
