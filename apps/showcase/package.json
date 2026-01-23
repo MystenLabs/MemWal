@@ -11,7 +11,7 @@
   "dependencies": {
     "@ai-sdk/google": "^2.0.45",
     "@ai-sdk/openai": "^2.0.86",
-    "@cmdoss/memwal-sdk": "workspace:*",
+    "@cmdoss/memwal-sdk": "file:../../packages/memwal-sdk",
     "@emotion/is-prop-valid": "latest",
     "@hookform/resolvers": "^3.10.0",
     "@mysten/dapp-kit": "^0.19.11",

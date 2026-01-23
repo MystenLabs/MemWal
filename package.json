@@ -7,25 +7,25 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "cd apps/showcase && bun run dev",
-    "dev:showcase": "cd apps/showcase && bun run dev",
-    "build": "bun run build:sdk && bun run build:showcase",
-    "build:sdk": "cd packages/memwal-sdk && bun run build",
-    "build:showcase": "cd apps/showcase && bun run build",
-    "start": "cd apps/showcase && bun run start",
-    "lint": "bun run lint:sdk && bun run lint:showcase",
-    "lint:sdk": "cd packages/memwal-sdk && bun run lint",
-    "lint:showcase": "cd apps/showcase && bun run lint",
-    "clean": "rm -rf apps/*/node_modules packages/*/node_modules node_modules apps/*/.next packages/*/dist",
+    "dev": "cd apps/showcase && npm run dev",
+    "dev:showcase": "cd apps/showcase && npm run dev",
+    "build": "npm run build:sdk && npm run build:showcase",
+    "build:sdk": "cd packages/memwal-sdk && npm run build",
+    "build:showcase": "cd apps/showcase && npm run build",
+    "start": "cd apps/showcase && npm run start",
+    "lint": "npm run lint:sdk && npm run lint:showcase",
+    "lint:sdk": "cd packages/memwal-sdk && npm run lint",
+    "lint:showcase": "cd apps/showcase && npm run lint",
+    "clean": "rm -rf apps/*/node_modules packages/*/node_modules node_modules apps/*/.next packages/*/dist bun.lock package-lock.json",
     "changeset": "changeset",
     "changeset:add": "changeset add",
     "version": "changeset version",
-    "release": "bun run build:sdk && changeset publish"
+    "release": "npm run build:sdk && changeset publish"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
     "typescript": "^5"
   },
-  "packageManager": "bun@1.3.5"
+  "packageManager": "npm@10.8.2"
 }

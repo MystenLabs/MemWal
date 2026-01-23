@@ -69,5 +69,10 @@ benchmark-*.txt
 
 # Whitepaper LaTeX
 Personal_Data_Wallet___whitepaper*/
+
+# Package manager files
 .pnpm-store/
 bun.lockb
+bun.lock
+# Keep package-lock.json for npm
+!package-lock.json
