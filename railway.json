@@ -7,7 +7,7 @@
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "node node_modules/next/dist/server/lib/start-server.js",
+    "startCommand": "cd apps/showcase && npm run start",
     "sleepApplication": false,
     "useLegacyStacker": false,
     "restartPolicyType": "ON_FAILURE",
