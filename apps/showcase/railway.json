@@ -5,7 +5,6 @@
     "dockerfilePath": "apps/showcase/Dockerfile"
   },
   "deploy": {
-    "startCommand": "cd /app/apps/showcase && node node_modules/next/dist/server/lib/start-server.js",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
