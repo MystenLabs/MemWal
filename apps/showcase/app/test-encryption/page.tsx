@@ -27,7 +27,7 @@ export default function TestEncryptionPage() {
 
   // Batch test state (DISABLED - use showcase app for batch testing)
   // const [batchSteps, setBatchSteps] = useState<TestStep[]>([])
-  // const [isBatchRunning, setIsBatchRunning] = useState(false)
+  const [isBatchRunning] = useState(false) // Keep for JSX compatibility
   // const [batchQuiltId, setBatchQuiltId] = useState<string | null>(null)
 
   // Test content input
