@@ -7,7 +7,7 @@
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "cd apps/showcase && npm run start",
+    "startCommand": "npm run start",
     "sleepApplication": false,
     "useLegacyStacker": false,
     "restartPolicyType": "ON_FAILURE",
