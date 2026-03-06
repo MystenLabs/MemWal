@@ -1,0 +1,538 @@
+use axum::{extract::State, Extension, Json};
+use std::sync::Arc;
+
+use crate::crypto;
+use crate::walrus;
+use crate::types::*;
+
+// ============================================================
+// Embedding — OpenRouter/OpenAI API (with mock fallback)
+// ============================================================
+
+/// OpenAI-compatible embedding request
+#[derive(serde::Serialize)]
+struct EmbeddingApiRequest {
+    model: String,
+    input: String,
+}
+
+/// OpenAI-compatible embedding response
+#[derive(serde::Deserialize)]
+struct EmbeddingApiResponse {
+    data: Vec<EmbeddingData>,
+}
+
+#[derive(serde::Deserialize)]
+struct EmbeddingData {
+    embedding: Vec<f32>,
+}
+
+/// Generate an embedding vector from text.
+/// Uses OpenRouter/OpenAI API when OPENAI_API_KEY is set, mock otherwise.
+async fn generate_embedding(
+    client: &reqwest::Client,
+    config: &Config,
+    text: &str,
+) -> Result<Vec<f32>, AppError> {
+    match &config.openai_api_key {
+        Some(api_key) => {
+            // Real embedding via OpenRouter/OpenAI-compatible API
+            let url = format!("{}/embeddings", config.openai_api_base);
+            tracing::debug!("  → Calling embedding API: {}", url);
+
+            let resp = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&EmbeddingApiRequest {
+                    model: "openai/text-embedding-3-small".to_string(),
+                    input: text.to_string(),
+                })
+                .send()
+                .await
+                .map_err(|e| AppError::Internal(format!("Embedding API request failed: {}", e)))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(AppError::Internal(format!(
+                    "Embedding API error ({}): {}", status, body
+                )));
+            }
+
+            let api_resp: EmbeddingApiResponse = resp.json().await.map_err(|e| {
+                AppError::Internal(format!("Failed to parse embedding response: {}", e))
+            })?;
+
+            if api_resp.data.is_empty() {
+                return Err(AppError::Internal("Embedding API returned no data".into()));
+            }
+
+            let vector = api_resp.data.into_iter().next().unwrap().embedding;
+            tracing::info!("  → Real embedding: {} dimensions", vector.len());
+            Ok(vector)
+        }
+        None => {
+            // Mock embedding (deterministic hash-based)
+            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY set)");
+            use sha2::Digest;
+            let hash = sha2::Sha256::digest(text.as_bytes());
+            let mock_vector: Vec<f32> = hash
+                .iter()
+                .cycle()
+                .take(1536)
+                .enumerate()
+                .map(|(i, &b)| {
+                    let val = (b as f32 / 255.0) * 2.0 - 1.0;
+                    val * (1.0 + (i as f32 * 0.001).sin())
+                })
+                .collect();
+            Ok(mock_vector)
+        }
+    }
+}
+
+// ============================================================
+// Routes
+// ============================================================
+
+/// POST /api/remember
+///
+/// Full TEE flow:
+/// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
+/// 2. Embed text → vector
+/// 3. Encrypt text (AES-256-GCM)
+/// 4. Upload encrypted blob → Walrus → blobId
+/// 5. Store {vector, blobId, encKey} in Vector DB
+pub async fn remember(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberRequest>,
+) -> Result<Json<RememberResponse>, AppError> {
+    if body.text.is_empty() {
+        return Err(AppError::BadRequest("Text cannot be empty".into()));
+    }
+
+    // Owner is derived from delegate key via onchain verification (auth middleware)
+    let owner = &auth.owner;
+    let text = &body.text;
+    tracing::info!("📝 Remember: text=\"{}...\" owner={}", &text[..text.len().min(50)], owner);
+
+    // Step 1: Embed text → vector
+    let vector = generate_embedding(&state.http_client, &state.config, text).await?;
+    tracing::debug!("  → Embedding: {} dimensions", vector.len());
+
+    // Step 2: Encrypt text (AES-256-GCM)
+    let enc_result = crypto::encrypt(text.as_bytes())?;
+    tracing::debug!("  → Encrypted: {} bytes", enc_result.ciphertext.len());
+
+    // Step 3: Upload encrypted blob → Walrus
+    let upload_result = walrus::upload_blob(&state.http_client, &enc_result.ciphertext, 5, &owner).await?;
+    let blob_id = upload_result.blob_id;
+    tracing::debug!("  → Walrus upload: blobId={}, objectId={:?}", blob_id, upload_result.object_id);
+
+    // Step 4: Store {vector, blobId, encKey} in Vector DB
+    let id = uuid::Uuid::new_v4().to_string();
+    state.db.insert_vector(&id, owner, &blob_id, &vector, &enc_result.key)?;
+    tracing::debug!("  → DB stored: id={}", id);
+
+    tracing::info!(
+        "💾 Remember complete: blob_id={}, owner={}, dims={}",
+        blob_id, owner, vector.len()
+    );
+
+    Ok(Json(RememberResponse {
+        id,
+        blob_id,
+        owner: owner.clone(),
+    }))
+}
+
+/// POST /api/recall
+///
+/// Full TEE flow:
+/// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
+/// 2. Embed query → vector
+/// 3. Search Vector DB → top-K {blobId, encKey}
+/// 4. Download blobs from Walrus
+/// 5. Decrypt with encKey
+/// 6. Return plaintext results
+pub async fn recall(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RecallRequest>,
+) -> Result<Json<RecallResponse>, AppError> {
+    if body.query.is_empty() {
+        return Err(AppError::BadRequest("Query cannot be empty".into()));
+    }
+
+    // Owner is derived from delegate key via onchain verification (auth middleware)
+    let owner = &auth.owner;
+    tracing::info!("🔍 Recall: query=\"{}...\" owner={}", &body.query[..body.query.len().min(50)], owner);
+
+    // Step 1: Embed query → vector
+    let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
+    tracing::debug!("  → Query embedding: {} dimensions", query_vector.len());
+
+    // Step 2: Search Vector DB
+    let hits = state.db.search_similar(&query_vector, owner, body.limit)?;
+    tracing::debug!("  → Found {} matches", hits.len());
+
+    // Step 3 & 4: Download from Walrus + decrypt each result
+    let mut results = Vec::new();
+    for hit in &hits {
+        // Download encrypted blob from Walrus
+        match walrus::download_blob(&state.http_client, &hit.blob_id).await {
+            Ok(encrypted_data) => {
+                // Decrypt using stored key
+                let key_bytes = hex::decode(&hit.enc_key).map_err(|e| {
+                    AppError::Internal(format!("Failed to decode enc_key: {}", e))
+                })?;
+
+                match crypto::decrypt(&encrypted_data, &key_bytes) {
+                    Ok(plaintext) => {
+                        let text = String::from_utf8(plaintext).map_err(|e| {
+                            AppError::Internal(format!("Invalid UTF-8 in decrypted data: {}", e))
+                        })?;
+                        results.push(RecallResult {
+                            blob_id: hit.blob_id.clone(),
+                            text,
+                            distance: hit.distance,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to decrypt blob {}: {}", hit.blob_id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to download blob {}: {}", hit.blob_id, e);
+            }
+        }
+    }
+
+    let total = results.len();
+    tracing::info!("🔍 Recall complete: {} results for owner={}", total, owner);
+
+    Ok(Json(RecallResponse { results, total }))
+}
+
+/// POST /api/embed
+///
+/// Generate embedding vector from text (no storage)
+pub async fn embed(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EmbedRequest>,
+) -> Result<Json<EmbedResponse>, AppError> {
+    if body.text.is_empty() {
+        return Err(AppError::BadRequest("Text cannot be empty".into()));
+    }
+
+    tracing::info!("📐 Embed: text=\"{}\"", &body.text[..body.text.len().min(50)]);
+
+    let vector = generate_embedding(&state.http_client, &state.config, &body.text).await?;
+
+    Ok(Json(EmbedResponse { vector }))
+}
+
+/// POST /api/analyze
+///
+/// AI fact extraction flow:
+/// 1. Verify auth (middleware) → get owner
+/// 2. Call LLM to extract memorable facts from text
+/// 3. For each fact: embed → encrypt → Walrus upload → store
+pub async fn analyze(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<AnalyzeRequest>,
+) -> Result<Json<AnalyzeResponse>, AppError> {
+    if body.text.is_empty() {
+        return Err(AppError::BadRequest("Text cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    tracing::info!("🧠 Analyze: text=\"{}...\" owner={}", &body.text[..body.text.len().min(50)], owner);
+
+    // Step 1: Extract facts using LLM
+    let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
+    tracing::info!("  → Extracted {} facts", facts.len());
+
+    if facts.is_empty() {
+        return Ok(Json(AnalyzeResponse {
+            facts: vec![],
+            total: 0,
+            owner: owner.clone(),
+        }));
+    }
+
+    // Step 2: Remember each fact (embed → encrypt → Walrus → store)
+    let mut stored_facts = Vec::new();
+    for fact_text in &facts {
+        // Embed
+        let vector = generate_embedding(&state.http_client, &state.config, fact_text).await?;
+
+        // Encrypt
+        let enc_result = crypto::encrypt(fact_text.as_bytes())?;
+
+        // Upload to Walrus
+        let upload_result = walrus::upload_blob(&state.http_client, &enc_result.ciphertext, 5, owner).await?;
+
+        // Store in Vector DB
+        let id = uuid::Uuid::new_v4().to_string();
+        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector, &enc_result.key)?;
+
+        stored_facts.push(AnalyzedFact {
+            text: fact_text.clone(),
+            id,
+            blob_id: upload_result.blob_id,
+        });
+    }
+
+    let total = stored_facts.len();
+    tracing::info!("🧠 Analyze complete: {} facts stored for owner={}", total, owner);
+
+    Ok(Json(AnalyzeResponse {
+        facts: stored_facts,
+        total,
+        owner: owner.clone(),
+    }))
+}
+
+// ============================================================
+// LLM Fact Extraction
+// ============================================================
+
+/// Chat completion request for OpenRouter/OpenAI
+#[derive(serde::Serialize)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+}
+
+#[derive(serde::Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Chat completion response
+#[derive(serde::Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatChoice {
+    message: ChatMessageResp,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatMessageResp {
+    content: String,
+}
+
+const FACT_EXTRACTION_PROMPT: &str = r#"You are a fact extraction system. Given a text or conversation, extract distinct factual statements about the user that are worth remembering for future interactions.
+
+Rules:
+- Extract personal preferences, habits, constraints, biographical info, and important facts
+- Each fact should be a single, self-contained statement
+- Skip greetings, small talk, and questions
+- If the text contains no memorable facts, respond with NONE
+- Return one fact per line, no numbering or bullets
+- Be concise but specific
+
+Examples:
+Input: "I'm allergic to peanuts and I live in Hanoi. What's the weather like?"
+Output:
+User is allergic to peanuts
+User lives in Hanoi
+
+Input: "Hey, how are you?"
+Output:
+NONE"#;
+
+/// Extract memorable facts from text using LLM
+async fn extract_facts_llm(
+    client: &reqwest::Client,
+    config: &Config,
+    text: &str,
+) -> Result<Vec<String>, AppError> {
+    let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
+        AppError::Internal("OPENAI_API_KEY required for fact extraction".into())
+    })?;
+
+    let url = format!("{}/chat/completions", config.openai_api_base);
+    tracing::debug!("  → Calling LLM for fact extraction: {}", url);
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&ChatCompletionRequest {
+            model: "openai/gpt-4o-mini".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: FACT_EXTRACTION_PROMPT.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                },
+            ],
+            temperature: 0.1,
+        })
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("LLM API request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "LLM API error ({}): {}", status, body
+        )));
+    }
+
+    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse LLM response: {}", e))
+    })?;
+
+    let content = api_resp
+        .choices
+        .first()
+        .map(|c| c.message.content.trim().to_string())
+        .unwrap_or_default();
+
+    // Parse response: one fact per line, skip "NONE"
+    if content == "NONE" || content.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let facts: Vec<String> = content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && l != "NONE")
+        .collect();
+
+    Ok(facts)
+}
+
+/// GET /health
+pub async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// POST /api/ask
+///
+/// Full AI-with-memory demo:
+/// 1. Recall relevant memories for the question
+/// 2. Inject memories into LLM system prompt
+/// 3. Call LLM with user question + memory context
+/// 4. Return answer + memories used
+pub async fn ask(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<AskRequest>,
+) -> Result<Json<AskResponse>, AppError> {
+    if body.question.is_empty() {
+        return Err(AppError::BadRequest("Question cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    let limit = body.limit.unwrap_or(5);
+    tracing::info!("💬 Ask: question=\"{}...\" owner={}", &body.question[..body.question.len().min(50)], owner);
+
+    // Step 1: Recall relevant memories
+    let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
+    let hits = state.db.search_similar(&query_vector, owner, limit)?;
+
+    let mut memories = Vec::new();
+    for hit in &hits {
+        match walrus::download_blob(&state.http_client, &hit.blob_id).await {
+            Ok(encrypted_data) => {
+                let key_bytes = hex::decode(&hit.enc_key).map_err(|e| {
+                    AppError::Internal(format!("Failed to decode enc_key: {}", e))
+                })?;
+                match crypto::decrypt(&encrypted_data, &key_bytes) {
+                    Ok(plaintext) => {
+                        let text = String::from_utf8(plaintext).map_err(|e| {
+                            AppError::Internal(format!("Invalid UTF-8: {}", e))
+                        })?;
+                        memories.push(RecallResult {
+                            blob_id: hit.blob_id.clone(),
+                            text,
+                            distance: hit.distance,
+                        });
+                    }
+                    Err(e) => tracing::warn!("Decrypt failed for {}: {}", hit.blob_id, e),
+                }
+            }
+            Err(e) => tracing::warn!("Download failed for {}: {}", hit.blob_id, e),
+        }
+    }
+
+    let memories_used = memories.len();
+    tracing::info!("💬 Ask: {} memories found for context", memories_used);
+
+    // Step 2: Build prompt with memory context
+    let memory_context = if memories.is_empty() {
+        "No memories found for this user yet.".to_string()
+    } else {
+        let lines: Vec<String> = memories.iter()
+            .map(|m| format!("- {} (relevance: {:.2})", m.text, 1.0 - m.distance))
+            .collect();
+        format!("Known facts about this user:\n{}", lines.join("\n"))
+    };
+
+    let system_prompt = format!(
+        "You are a helpful AI assistant with access to the user's personal memories stored in MemWal. \
+        Use the following context to provide personalized answers. If the memories don't contain relevant \
+        information, say so honestly.\n\n{}", memory_context
+    );
+
+    // Step 3: Call LLM
+    let api_key = state.config.openai_api_key.as_ref().ok_or_else(|| {
+        AppError::Internal("OPENAI_API_KEY required for /api/ask".into())
+    })?;
+    let url = format!("{}/chat/completions", state.config.openai_api_base);
+
+    let resp = state.http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&ChatCompletionRequest {
+            model: "openai/gpt-4o-mini".to_string(),
+            messages: vec![
+                ChatMessage { role: "system".to_string(), content: system_prompt },
+                ChatMessage { role: "user".to_string(), content: body.question.clone() },
+            ],
+            temperature: 0.7,
+        })
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("LLM request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!("LLM error ({}): {}", status, body_text)));
+    }
+
+    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse LLM response: {}", e))
+    })?;
+
+    let answer = api_resp.choices.first()
+        .map(|c| c.message.content.trim().to_string())
+        .unwrap_or_else(|| "No response from LLM".to_string());
+
+    tracing::info!("💬 Ask complete: answer length={} chars", answer.len());
+
+    Ok(Json(AskResponse { answer, memories_used, memories }))
+}
+

@@ -76,3 +76,14 @@ bun.lockb
 bun.lock
 # Keep package-lock.json for npm
 !package-lock.json
+
+# Rust build artifacts
+target/
+
+# SQLite databases (local data)
+**/data/*.db
+**/data/*.db-shm
+**/data/*.db-wal
+
+# Gemini AI
+.gemini/
