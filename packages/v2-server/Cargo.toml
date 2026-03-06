@@ -18,9 +18,8 @@ ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# Encryption (TEE)
-aes-gcm = "0.10"
-rand = "0.8"
+# SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
+# (no Rust crypto deps needed)
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +35,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP client (for Sui RPC onchain verification)
 reqwest = { version = "0.12", features = ["json"] }
 
+# Walrus SDK
+walrus_rs = "0.1"
+
 # Utils
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+base64 = "0.22"

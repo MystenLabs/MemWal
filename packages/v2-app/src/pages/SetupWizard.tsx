@@ -103,31 +103,26 @@ export default function SetupWizard() {
                         tx.pure('string', 'Web App'),
                     ],
                 })
-            } else {
-                // Create account + add delegate key in ONE transaction (PTB)
-                setTxStatus('creating account & registering key...')
 
-                const account = tx.moveCall({
-                    target: `${config.memwalPackageId}::account::create_account`,
-                })
+                const result = await signAndExecute({ transaction: tx })
+                await suiClient.waitForTransaction({ digest: result.digest })
+            } else {
+                // Step A: Create account first (entry fn — transfers object internally)
+                setTxStatus('creating account...')
 
                 tx.moveCall({
-                    target: `${config.memwalPackageId}::account::add_delegate_key`,
+                    target: `${config.memwalPackageId}::account::create_account`,
                     arguments: [
-                        account[0],  // use the account object returned from create
-                        tx.pure('vector<u8>', pubKeyBytes),
-                        tx.pure('string', 'Web App'),
+                        tx.object(config.memwalRegistryId),
                     ],
                 })
-            }
 
-            const result = await signAndExecute({ transaction: tx })
-            await suiClient.waitForTransaction({ digest: result.digest })
+                const createResult = await signAndExecute({ transaction: tx })
+                await suiClient.waitForTransaction({ digest: createResult.digest })
 
-            // If we created a new account, find the object ID from tx result
-            if (!knownAccountId) {
+                // Find the created MemWalAccount object
                 const txDetails = await suiClient.getTransactionBlock({
-                    digest: result.digest,
+                    digest: createResult.digest,
                     options: { showObjectChanges: true },
                 })
                 const createdObj = txDetails.objectChanges?.find(
@@ -138,6 +133,21 @@ export default function SetupWizard() {
                 if (createdObj && 'objectId' in createdObj) {
                     knownAccountId = createdObj.objectId
                 }
+
+                // Step B: Add delegate key to the new account
+                setTxStatus('adding delegate key...')
+                const tx2 = new Transaction()
+                tx2.moveCall({
+                    target: `${config.memwalPackageId}::account::add_delegate_key`,
+                    arguments: [
+                        tx2.object(knownAccountId!),
+                        tx2.pure('vector<u8>', pubKeyBytes),
+                        tx2.pure('string', 'Web App'),
+                    ],
+                })
+
+                const addResult = await signAndExecute({ transaction: tx2 })
+                await suiClient.waitForTransaction({ digest: addResult.digest })
             }
 
             setTxStatus('delegate key registered onchain!')

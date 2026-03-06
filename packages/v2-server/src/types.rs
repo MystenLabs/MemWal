@@ -11,6 +11,7 @@ pub struct AppState {
     pub db: VectorDb,
     pub config: Config,
     pub http_client: reqwest::Client,
+    pub walrus_client: walrus_rs::WalrusClient,
 }
 
 // ============================================================
@@ -26,6 +27,11 @@ pub struct Config {
     pub memwal_account_id: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_api_base: String,
+    pub walrus_publisher_url: String,
+    pub walrus_aggregator_url: String,
+    pub sui_private_key: Option<String>,
+    pub package_id: String,
+    pub registry_id: String,
 }
 
 impl Config {
@@ -55,6 +61,15 @@ impl Config {
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            walrus_publisher_url: std::env::var("WALRUS_PUBLISHER_URL")
+                .unwrap_or_else(|_| "https://publisher.walrus-testnet.walrus.space".to_string()),
+            walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
+                .unwrap_or_else(|_| "https://aggregator.walrus-testnet.walrus.space".to_string()),
+            sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
+            package_id: std::env::var("MEMWAL_PACKAGE_ID")
+                .expect("MEMWAL_PACKAGE_ID must be set"),
+            registry_id: std::env::var("MEMWAL_REGISTRY_ID")
+                .expect("MEMWAL_REGISTRY_ID must be set"),
         }
     }
 }
@@ -109,7 +124,6 @@ pub struct RecallResult {
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
-    pub enc_key: String,
 }
 
 /// POST /api/embed
@@ -177,6 +191,7 @@ pub struct HealthResponse {
 /// Headers required for authenticated requests
 #[derive(Debug, Clone)]
 pub struct AuthInfo {
+    #[allow(dead_code)]
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)
     pub owner: String,
@@ -189,6 +204,7 @@ pub struct AuthInfo {
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
+    #[allow(dead_code)]
     Unauthorized(String),
     Internal(String),
 }

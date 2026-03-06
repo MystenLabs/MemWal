@@ -1,7 +1,7 @@
 mod auth;
-mod crypto;
 mod db;
 mod routes;
+mod seal;
 mod sui;
 mod types;
 mod walrus;
@@ -29,19 +29,36 @@ async fn main() {
 
     // Load config
     let config = Config::from_env();
-    tracing::info!("Starting MemWal V2 Server on port {}", config.port);
+    tracing::info!("starting memwal v2 server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
-    tracing::info!("  MemWalAccount: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
+    tracing::info!("  package id: {}", config.package_id);
+    tracing::info!("  registry id: {}", config.registry_id);
+    tracing::info!("  memwal account: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
 
     // Initialize database
     let db = VectorDb::new(&config.db_path, config.vector_dimensions)
         .expect("Failed to initialize database");
+
+    // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
+    let walrus_client = walrus_rs::WalrusClient::new(
+        &config.walrus_aggregator_url,
+        &config.walrus_publisher_url,
+    )
+    .expect("Failed to initialize Walrus client (invalid URL?)");
+    tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
+    tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
+    if config.sui_private_key.is_some() {
+        tracing::info!("  Walrus upload: relay mode (SERVER_SUI_PRIVATE_KEY configured)");
+    } else {
+        tracing::warn!("  Walrus upload: SERVER_SUI_PRIVATE_KEY not set, uploads will fail");
+    }
 
     // Shared application state
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
         http_client: reqwest::Client::new(),
+        walrus_client,
     });
 
     // Build routes
@@ -74,9 +91,9 @@ async fn main() {
         .await
         .expect("Failed to bind address");
 
-    tracing::info!("🚀 MemWal V2 Server listening on {}", addr);
-    tracing::info!("   Health: http://localhost:{}/health", config.port);
-    tracing::info!("   API:    http://localhost:{}/api/{{remember,recall,embed,analyze}}", config.port);
+    tracing::info!("memwal v2 server listening on {}", addr);
+    tracing::info!("  health: http://localhost:{}/health", config.port);
+    tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,embed,analyze}}", config.port);
 
     axum::serve(listener, app)
         .await

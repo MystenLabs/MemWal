@@ -194,12 +194,7 @@ const result = await generateText({
                         >
                             {copied === 'sdk' ? 'done' : 'copy'}
                         </button>
-                        <pre style={{
-                            background: 'var(--bg-input)', border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)', padding: 20, overflow: 'auto',
-                            fontSize: '0.8rem', lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
-                        }}>
+                        <pre className="demo-code-block" style={{ padding: 20 }}>
                             <code>{sdkSnippet}</code>
                         </pre>
                     </div>
@@ -221,12 +216,7 @@ const result = await generateText({
                         >
                             {copied === 'ai' ? 'done' : 'copy'}
                         </button>
-                        <pre style={{
-                            background: 'var(--bg-input)', border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)', padding: 20, overflow: 'auto',
-                            fontSize: '0.8rem', lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
-                        }}>
+                        <pre className="demo-code-block" style={{ padding: 20 }}>
                             <code>{aiSnippet}</code>
                         </pre>
                     </div>
@@ -237,11 +227,7 @@ const result = await generateText({
                     <div className="card-header">
                         <div><div className="card-title">install</div></div>
                     </div>
-                    <pre style={{
-                        background: 'var(--bg-input)', border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)', padding: 16,
-                        fontSize: '0.85rem', fontFamily: 'var(--font-mono)', color: 'var(--accent)',
-                    }}>
+                    <pre className="demo-code-block" style={{ color: 'var(--accent)' }}>
                         <code>npm install @cmdoss/memwal-v2</code>
                     </pre>
                 </div>

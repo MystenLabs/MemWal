@@ -38,7 +38,6 @@ impl VectorDb {
                 owner TEXT NOT NULL,
                 blob_id TEXT NOT NULL,
                 vector BLOB NOT NULL,
-                enc_key BLOB NOT NULL,
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_vector_entries_owner
@@ -59,14 +58,13 @@ impl VectorDb {
         })
     }
 
-    /// Insert a vector entry with encryption key
+    /// Insert a vector entry
     pub fn insert_vector(
         &self,
         id: &str,
         owner: &str,
         blob_id: &str,
         vector: &[f32],
-        enc_key: &[u8],
     ) -> Result<(), AppError> {
         let conn = self.conn.lock().map_err(|e| {
             AppError::Internal(format!("DB lock poisoned: {}", e))
@@ -77,9 +75,9 @@ impl VectorDb {
         let now = chrono::Utc::now().timestamp();
 
         conn.execute(
-            "INSERT INTO vector_entries (id, owner, blob_id, vector, enc_key, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, owner, blob_id, vector_bytes, enc_key, now],
+            "INSERT INTO vector_entries (id, owner, blob_id, vector, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, owner, blob_id, vector_bytes, now],
         )
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
@@ -88,7 +86,7 @@ impl VectorDb {
     }
 
     /// Search for similar vectors using cosine similarity
-    /// Returns blob_id, distance, and enc_key for each match
+    /// Returns blob_id and distance for each match
     pub fn search_similar(
         &self,
         query_vector: &[f32],
@@ -103,7 +101,7 @@ impl VectorDb {
         // (In production with large datasets, use sqlite-vec or HNSW index)
         let mut stmt = conn
             .prepare(
-                "SELECT blob_id, vector, enc_key FROM vector_entries WHERE owner = ?1",
+                "SELECT blob_id, vector FROM vector_entries WHERE owner = ?1",
             )
             .map_err(|e| AppError::Internal(format!("Failed to prepare query: {}", e)))?;
 
@@ -111,15 +109,14 @@ impl VectorDb {
             .query_map(params![owner], |row| {
                 let blob_id: String = row.get(0)?;
                 let vector_bytes: Vec<u8> = row.get(1)?;
-                let enc_key: Vec<u8> = row.get(2)?;
-                Ok((blob_id, vector_bytes, enc_key))
+                Ok((blob_id, vector_bytes))
             })
             .map_err(|e| AppError::Internal(format!("Failed to query vectors: {}", e)))?;
 
         let mut results: Vec<SearchHit> = Vec::new();
 
         for row in rows {
-            let (blob_id, vector_bytes, enc_key) = row.map_err(|e| {
+            let (blob_id, vector_bytes) = row.map_err(|e| {
                 AppError::Internal(format!("Failed to read row: {}", e))
             })?;
 
@@ -129,7 +126,6 @@ impl VectorDb {
             results.push(SearchHit {
                 blob_id,
                 distance,
-                enc_key: hex::encode(&enc_key),
             });
         }
 

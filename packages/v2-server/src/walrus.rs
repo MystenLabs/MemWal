@@ -1,150 +1,111 @@
 use crate::types::AppError;
-
-const WALRUS_TESTNET_AGGREGATOR: &str = "https://aggregator.walrus-testnet.walrus.space";
-const WALRUS_TESTNET_PUBLISHER: &str = "https://publisher.walrus-testnet.walrus.space";
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 /// Result of a Walrus blob upload
 pub struct UploadResult {
     /// Walrus content-addressed blob ID (base64url)
     pub blob_id: String,
     /// Sui object ID of the Blob object (hex, e.g. "0x...")
-    /// Only available for newly created blobs
     pub object_id: Option<String>,
 }
 
-/// Upload an encrypted blob to Walrus via the Publisher HTTP API.
+/// Upload an encrypted blob to Walrus via the **Upload Relay**.
 ///
-/// Returns the blob ID and (if newly created) the Sui object ID.
-/// The blob object is transferred to `owner_address` via `send_object_to`.
+/// Calls the TS sidecar script (`scripts/walrus-upload.ts`) which uses
+/// `@mysten/walrus` SDK with the multi-step writeBlobFlow:
+///   1. Encode blob (Red Stuff encoding)
+///   2. Register blob on Sui (server wallet signs)
+///   3. Upload encoded data to upload-relay
+///   4. Certify blob on Sui (server wallet signs)
+///
+/// The server wallet pays for gas + storage, and the blob is
+/// transferred to `owner_address` after registration.
 pub async fn upload_blob(
-    client: &reqwest::Client,
     data: &[u8],
-    epochs: u32,
+    epochs: u64,
     owner_address: &str,
+    sui_private_key: &str,
 ) -> Result<UploadResult, AppError> {
-    let url = format!(
-        "{}/v1/blobs?epochs={}&send_object_to={}",
-        WALRUS_TESTNET_PUBLISHER, epochs, owner_address
-    );
+    let data_b64 = BASE64.encode(data);
 
-    let response = client
-        .put(&url)
-        .header("Content-Type", "application/octet-stream")
-        .body(data.to_vec())
-        .send()
+    let scripts_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("scripts");
+
+    let output = tokio::process::Command::new("npx")
+        .args([
+            "tsx",
+            "walrus-upload.ts",
+            "--data",
+            &data_b64,
+            "--private-key",
+            sui_private_key,
+            "--owner",
+            owner_address,
+            "--epochs",
+            &epochs.to_string(),
+        ])
+        .current_dir(&scripts_dir)
+        .output()
         .await
-        .map_err(|e| AppError::Internal(format!("Walrus upload failed: {}", e)))?;
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to spawn walrus-upload.ts: {}. Is Node.js/npx installed?",
+                e
+            ))
+        })?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppError::Internal(format!(
-            "Walrus upload HTTP {}: {}",
-            status, body
+            "walrus-upload.ts exited with {}: {}",
+            output.status, stderr
         )));
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Walrus response parse error: {}", e)))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Response can be either:
-    // { "newlyCreated": { "blobObject": { "id": "0x...", "blobId": "..." } } }
-    // { "alreadyCertified": { "blobId": "..." } }
-
-    if let Some(newly_created) = body.get("newlyCreated") {
-        let blob_object = newly_created.get("blobObject").ok_or_else(|| {
-            AppError::Internal("newlyCreated missing blobObject".into())
-        })?;
-
-        let blob_id = blob_object
-            .get("blobId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AppError::Internal("blobObject missing blobId".into()))?;
-
-        let object_id = blob_object
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        tracing::info!(
-            "📦 Walrus upload OK (new): blobId={}, objectId={}, owner={}",
-            blob_id,
-            object_id.as_deref().unwrap_or("?"),
-            owner_address
-        );
-
-        if let Some(ref oid) = object_id {
-            tracing::info!(
-                "  → Blob object {} transferred to user {}",
-                oid, owner_address
-            );
-        }
-
-        Ok(UploadResult {
-            blob_id: blob_id.to_string(),
-            object_id,
-        })
-    } else if let Some(already_certified) = body.get("alreadyCertified") {
-        let blob_id = already_certified
-            .get("blobId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AppError::Internal("alreadyCertified missing blobId".into()))?;
-
-        tracing::info!("📦 Walrus upload OK (existing): blobId={}", blob_id);
-
-        Ok(UploadResult {
-            blob_id: blob_id.to_string(),
-            object_id: None, // Already certified, no new object created
-        })
-    } else {
-        Err(AppError::Internal(format!(
-            "Walrus response unknown format: {}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        )))
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RelayResult {
+        blob_id: String,
+        object_id: Option<String>,
     }
+
+    let result: RelayResult = serde_json::from_str(stdout.trim()).map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse walrus-upload.ts output: {}. Output: {}",
+            e, stdout
+        ))
+    })?;
+
+    tracing::info!(
+        "walrus upload via relay ok: blob_id={}, object_id={:?}, owner={}",
+        result.blob_id,
+        result.object_id,
+        owner_address
+    );
+
+    Ok(UploadResult {
+        blob_id: result.blob_id,
+        object_id: result.object_id,
+    })
 }
 
-/// Download a blob from Walrus via the Aggregator HTTP API.
-///
-/// Returns the raw bytes of the blob.
+/// Download a blob from Walrus via the walrus_rs SDK (Aggregator HTTP API).
 pub async fn download_blob(
-    client: &reqwest::Client,
+    walrus_client: &walrus_rs::WalrusClient,
     blob_id: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let url = format!("{}/v1/blobs/{}", WALRUS_TESTNET_AGGREGATOR, blob_id);
-
-    let response = client
-        .get(&url)
-        .send()
+    let bytes = walrus_client
+        .read_blob_by_id(blob_id)
         .await
         .map_err(|e| AppError::Internal(format!("Walrus download failed: {}", e)))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(AppError::Internal(format!(
-            "Walrus download HTTP {}: {}",
-            status, body
-        )));
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Walrus download read error: {}", e)))?;
-
     tracing::info!(
-        "📥 Walrus download OK: blobId={}, {} bytes",
+        "walrus download ok: blob_id={}, {} bytes",
         blob_id,
         bytes.len()
     );
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
