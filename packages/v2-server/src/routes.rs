@@ -1,7 +1,7 @@
 use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
 
-use crate::crypto;
+use crate::seal;
 use crate::walrus;
 use crate::types::*;
 
@@ -101,9 +101,9 @@ async fn generate_embedding(
 /// Full TEE flow:
 /// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
 /// 2. Embed text → vector
-/// 3. Encrypt text (AES-256-GCM)
+/// 3. Encrypt text (SEAL threshold encryption)
 /// 4. Upload encrypted blob → Walrus → blobId
-/// 5. Store {vector, blobId, encKey} in Vector DB
+/// 5. Store {vector, blobId} in Vector DB
 pub async fn remember(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -116,28 +116,35 @@ pub async fn remember(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let text = &body.text;
-    tracing::info!("📝 Remember: text=\"{}...\" owner={}", &text[..text.len().min(50)], owner);
+    tracing::info!("remember: text=\"{}...\" owner={}", &text[..text.len().min(50)], owner);
 
     // Step 1: Embed text → vector
     let vector = generate_embedding(&state.http_client, &state.config, text).await?;
     tracing::debug!("  → Embedding: {} dimensions", vector.len());
 
-    // Step 2: Encrypt text (AES-256-GCM)
-    let enc_result = crypto::encrypt(text.as_bytes())?;
-    tracing::debug!("  → Encrypted: {} bytes", enc_result.ciphertext.len());
+    // Step 2: Encrypt text (SEAL threshold encryption)
+    let encrypted = seal::seal_encrypt(
+        text.as_bytes(),
+        owner,
+        &state.config.package_id,
+    ).await?;
+    tracing::debug!("  → SEAL encrypted: {} bytes", encrypted.len());
 
-    // Step 3: Upload encrypted blob → Walrus
-    let upload_result = walrus::upload_blob(&state.http_client, &enc_result.ciphertext, 5, &owner).await?;
+    // Step 3: Upload encrypted blob → Walrus (via Upload Relay)
+    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
+        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
+    })?;
+    let upload_result = walrus::upload_blob(&encrypted, 5, owner, sui_key).await?;
     let blob_id = upload_result.blob_id;
     tracing::debug!("  → Walrus upload: blobId={}, objectId={:?}", blob_id, upload_result.object_id);
 
-    // Step 4: Store {vector, blobId, encKey} in Vector DB
+    // Step 4: Store {vector, blobId} in Vector DB
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, &blob_id, &vector, &enc_result.key)?;
+    state.db.insert_vector(&id, owner, &blob_id, &vector)?;
     tracing::debug!("  → DB stored: id={}", id);
 
     tracing::info!(
-        "💾 Remember complete: blob_id={}, owner={}, dims={}",
+        "remember complete: blob_id={}, owner={}, dims={}",
         blob_id, owner, vector.len()
     );
 
@@ -153,9 +160,9 @@ pub async fn remember(
 /// Full TEE flow:
 /// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
 /// 2. Embed query → vector
-/// 3. Search Vector DB → top-K {blobId, encKey}
+/// 3. Search Vector DB → top-K {blobId}
 /// 4. Download blobs from Walrus
-/// 5. Decrypt with encKey
+/// 5. Decrypt with SEAL (admin wallet)
 /// 6. Return plaintext results
 pub async fn recall(
     State(state): State<Arc<AppState>>,
@@ -168,7 +175,12 @@ pub async fn recall(
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
-    tracing::info!("🔍 Recall: query=\"{}...\" owner={}", &body.query[..body.query.len().min(50)], owner);
+    tracing::info!("recall: query=\"{}...\" owner={}", &body.query[..body.query.len().min(50)], owner);
+
+    // Need admin private key for SEAL decryption
+    let private_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
+        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+    })?;
 
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
@@ -178,18 +190,19 @@ pub async fn recall(
     let hits = state.db.search_similar(&query_vector, owner, body.limit)?;
     tracing::debug!("  → Found {} matches", hits.len());
 
-    // Step 3 & 4: Download from Walrus + decrypt each result
+    // Step 3 & 4: Download from Walrus + SEAL decrypt each result
     let mut results = Vec::new();
     for hit in &hits {
         // Download encrypted blob from Walrus
-        match walrus::download_blob(&state.http_client, &hit.blob_id).await {
+        match walrus::download_blob(&state.walrus_client, &hit.blob_id).await {
             Ok(encrypted_data) => {
-                // Decrypt using stored key
-                let key_bytes = hex::decode(&hit.enc_key).map_err(|e| {
-                    AppError::Internal(format!("Failed to decode enc_key: {}", e))
-                })?;
-
-                match crypto::decrypt(&encrypted_data, &key_bytes) {
+                // Decrypt using SEAL (admin wallet authorized in AccountRegistry)
+                match seal::seal_decrypt(
+                    &encrypted_data,
+                    private_key,
+                    &state.config.package_id,
+                    &state.config.registry_id,
+                ).await {
                     Ok(plaintext) => {
                         let text = String::from_utf8(plaintext).map_err(|e| {
                             AppError::Internal(format!("Invalid UTF-8 in decrypted data: {}", e))
@@ -201,7 +214,7 @@ pub async fn recall(
                         });
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to decrypt blob {}: {}", hit.blob_id, e);
+                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", hit.blob_id, e);
                     }
                 }
             }
@@ -212,7 +225,7 @@ pub async fn recall(
     }
 
     let total = results.len();
-    tracing::info!("🔍 Recall complete: {} results for owner={}", total, owner);
+    tracing::info!("recall complete: {} results for owner={}", total, owner);
 
     Ok(Json(RecallResponse { results, total }))
 }
@@ -228,7 +241,7 @@ pub async fn embed(
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
 
-    tracing::info!("📐 Embed: text=\"{}\"", &body.text[..body.text.len().min(50)]);
+    tracing::info!("embed: text=\"{}\"", &body.text[..body.text.len().min(50)]);
 
     let vector = generate_embedding(&state.http_client, &state.config, &body.text).await?;
 
@@ -251,7 +264,7 @@ pub async fn analyze(
     }
 
     let owner = &auth.owner;
-    tracing::info!("🧠 Analyze: text=\"{}...\" owner={}", &body.text[..body.text.len().min(50)], owner);
+    tracing::info!("analyze: text=\"{}...\" owner={}", &body.text[..body.text.len().min(50)], owner);
 
     // Step 1: Extract facts using LLM
     let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
@@ -265,21 +278,28 @@ pub async fn analyze(
         }));
     }
 
-    // Step 2: Remember each fact (embed → encrypt → Walrus → store)
+    // Step 2: Remember each fact (embed → SEAL encrypt → Walrus → store)
     let mut stored_facts = Vec::new();
     for fact_text in &facts {
         // Embed
         let vector = generate_embedding(&state.http_client, &state.config, fact_text).await?;
 
-        // Encrypt
-        let enc_result = crypto::encrypt(fact_text.as_bytes())?;
+        // SEAL Encrypt
+        let encrypted = seal::seal_encrypt(
+            fact_text.as_bytes(),
+            owner,
+            &state.config.package_id,
+        ).await?;
 
-        // Upload to Walrus
-        let upload_result = walrus::upload_blob(&state.http_client, &enc_result.ciphertext, 5, owner).await?;
+        // Upload to Walrus (via Upload Relay)
+        let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
+            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
+        })?;
+        let upload_result = walrus::upload_blob(&encrypted, 5, owner, sui_key).await?;
 
         // Store in Vector DB
         let id = uuid::Uuid::new_v4().to_string();
-        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector, &enc_result.key)?;
+        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector)?;
 
         stored_facts.push(AnalyzedFact {
             text: fact_text.clone(),
@@ -289,7 +309,7 @@ pub async fn analyze(
     }
 
     let total = stored_facts.len();
-    tracing::info!("🧠 Analyze complete: {} facts stored for owner={}", total, owner);
+    tracing::info!("analyze complete: {} facts stored for owner={}", total, owner);
 
     Ok(Json(AnalyzeResponse {
         facts: stored_facts,
@@ -445,20 +465,27 @@ pub async fn ask(
 
     let owner = &auth.owner;
     let limit = body.limit.unwrap_or(5);
-    tracing::info!("💬 Ask: question=\"{}...\" owner={}", &body.question[..body.question.len().min(50)], owner);
+    tracing::info!("ask: question=\"{}...\" owner={}", &body.question[..body.question.len().min(50)], owner);
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
     let hits = state.db.search_similar(&query_vector, owner, limit)?;
 
+    // Need admin private key for SEAL decryption
+    let private_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
+        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+    })?;
+
     let mut memories = Vec::new();
     for hit in &hits {
-        match walrus::download_blob(&state.http_client, &hit.blob_id).await {
+        match walrus::download_blob(&state.walrus_client, &hit.blob_id).await {
             Ok(encrypted_data) => {
-                let key_bytes = hex::decode(&hit.enc_key).map_err(|e| {
-                    AppError::Internal(format!("Failed to decode enc_key: {}", e))
-                })?;
-                match crypto::decrypt(&encrypted_data, &key_bytes) {
+                match seal::seal_decrypt(
+                    &encrypted_data,
+                    private_key,
+                    &state.config.package_id,
+                    &state.config.registry_id,
+                ).await {
                     Ok(plaintext) => {
                         let text = String::from_utf8(plaintext).map_err(|e| {
                             AppError::Internal(format!("Invalid UTF-8: {}", e))
@@ -469,7 +496,7 @@ pub async fn ask(
                             distance: hit.distance,
                         });
                     }
-                    Err(e) => tracing::warn!("Decrypt failed for {}: {}", hit.blob_id, e),
+                    Err(e) => tracing::warn!("SEAL decrypt failed for {}: {}", hit.blob_id, e),
                 }
             }
             Err(e) => tracing::warn!("Download failed for {}: {}", hit.blob_id, e),
@@ -477,7 +504,7 @@ pub async fn ask(
     }
 
     let memories_used = memories.len();
-    tracing::info!("💬 Ask: {} memories found for context", memories_used);
+    tracing::info!("ask: {} memories found for context", memories_used);
 
     // Step 2: Build prompt with memory context
     let memory_context = if memories.is_empty() {
@@ -490,7 +517,7 @@ pub async fn ask(
     };
 
     let system_prompt = format!(
-        "You are a helpful AI assistant with access to the user's personal memories stored in MemWal. \
+        "You are a helpful AI assistant with access to the user's personal memories stored in memwal. \
         Use the following context to provide personalized answers. If the memories don't contain relevant \
         information, say so honestly.\n\n{}", memory_context
     );
@@ -531,8 +558,7 @@ pub async fn ask(
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_else(|| "No response from LLM".to_string());
 
-    tracing::info!("💬 Ask complete: answer length={} chars", answer.len());
+    tracing::info!("ask complete: answer length={} chars", answer.len());
 
     Ok(Json(AskResponse { answer, memories_used, memories }))
 }
-

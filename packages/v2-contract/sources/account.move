@@ -1,18 +1,18 @@
-/// MemWal V2 — Account & Delegate Key Management
+/// MemWal V2 — Account, Admin & SEAL Access Control
 ///
-/// Core on-chain module for managing MemWal accounts and delegate keys.
-/// Each user creates a MemWalAccount (shared object) that stores a list of
-/// authorized Ed25519 public keys (delegate keys). The server verifies
-/// that a request's signing key is in this list before processing it.
+/// Core on-chain module for managing MemWal accounts, delegate keys,
+/// and TEE admin authorization for SEAL encryption/decryption.
 ///
 /// ## Architecture
-/// - MemWalAccount: owned object, stores owner + delegate_keys
+/// - AdminCap: capability object — holder is the admin authority
+/// - AccountRegistry: shared object — tracks accounts (prevents duplicates) + stores TEE admin address
+/// - MemWalAccount: owned object — stores owner + delegate_keys
 /// - DelegateKey: struct with public_key (32 bytes), label, created_at
-/// - Entry functions: create_account, add_delegate_key, remove_delegate_key
-/// - View function: is_delegate (checks if a public key is authorized)
+/// - seal_approve: SEAL policy — authorizes owner OR TEE admin to decrypt
 module memwal_v2::account {
     use std::string::String;
     use sui::event;
+    use sui::table::{Self, Table};
 
     // ============================================================
     // Error Codes
@@ -24,6 +24,10 @@ module memwal_v2::account {
     const EDelegateKeyNotFound: u64 = 1;
     /// Maximum number of delegate keys reached
     const ETooManyDelegateKeys: u64 = 2;
+    /// Account already exists for this address
+    const EAccountAlreadyExists: u64 = 3;
+    /// Caller is not authorized to decrypt (SEAL)
+    const ENoAccess: u64 = 100;
 
     /// Maximum delegate keys per account
     const MAX_DELEGATE_KEYS: u64 = 20;
@@ -31,6 +35,23 @@ module memwal_v2::account {
     // ============================================================
     // Structs
     // ============================================================
+
+    /// Admin capability — whoever owns this object is the admin authority.
+    /// Created once at module init and transferred to deployer.
+    /// Can be transferred to the TEE server wallet.
+    public struct AdminCap has key, store {
+        id: UID,
+    }
+
+    /// Shared registry — tracks all MemWalAccounts and stores TEE admin address.
+    /// Prevents duplicate account creation and provides admin address for SEAL.
+    public struct AccountRegistry has key {
+        id: UID,
+        /// Maps owner address → account object ID (prevents duplicates)
+        accounts: Table<address, ID>,
+        /// TEE admin Sui address — authorized for SEAL decrypt on behalf of users
+        admin: address,
+    }
 
     /// Main account object — one per user
     /// Stores the list of authorized delegate keys
@@ -74,28 +95,84 @@ module memwal_v2::account {
         public_key: vector<u8>,
     }
 
+    public struct AdminChanged has copy, drop {
+        old_admin: address,
+        new_admin: address,
+    }
+
     // ============================================================
-    // Entry Functions
+    // Init — runs once at module publish
     // ============================================================
 
-    /// Create a new MemWalAccount
-    /// The caller becomes the owner, and the account is transferred to them
-    entry fun create_account(ctx: &mut TxContext) {
+    /// Create AdminCap (transferred to deployer) and AccountRegistry (shared).
+    fun init(ctx: &mut TxContext) {
+        // AdminCap → deployer
+        transfer::transfer(
+            AdminCap { id: object::new(ctx) },
+            ctx.sender(),
+        );
+
+        // AccountRegistry → shared object
+        transfer::share_object(AccountRegistry {
+            id: object::new(ctx),
+            accounts: table::new(ctx),
+            admin: ctx.sender(),
+        });
+    }
+
+    // ============================================================
+    // Admin Functions
+    // ============================================================
+
+    /// Update the TEE admin address in the registry.
+    /// Only the AdminCap holder can call this.
+    entry fun set_admin(
+        _cap: &AdminCap,
+        registry: &mut AccountRegistry,
+        new_admin: address,
+    ) {
+        let old_admin = registry.admin;
+        registry.admin = new_admin;
+
+        event::emit(AdminChanged {
+            old_admin,
+            new_admin,
+        });
+    }
+
+    // ============================================================
+    // Account Entry Functions
+    // ============================================================
+
+    /// Create a new MemWalAccount.
+    /// Each address can only create ONE account (enforced by registry).
+    entry fun create_account(
+        registry: &mut AccountRegistry,
+        ctx: &mut TxContext,
+    ) {
+        let sender = ctx.sender();
+
+        // Check: no duplicate accounts
+        assert!(!registry.accounts.contains(sender), EAccountAlreadyExists);
+
         let account = MemWalAccount {
             id: object::new(ctx),
-            owner: ctx.sender(),
+            owner: sender,
             delegate_keys: vector::empty(),
-            created_at: 0, // TODO: Use sui::clock for real timestamp
+            created_at: 0, // NOTE: currently set to 0; use sui::clock if real timestamps are needed
         };
 
         let account_id = object::id(&account);
 
+        // Register in the registry
+        registry.accounts.add(sender, account_id);
+
         event::emit(AccountCreated {
             account_id,
-            owner: ctx.sender(),
+            owner: sender,
         });
 
-        transfer::transfer(account, ctx.sender());
+        transfer::transfer(account, sender);
     }
 
     /// Add a delegate key to the account
@@ -132,7 +209,7 @@ module memwal_v2::account {
         let key = DelegateKey {
             public_key: public_key,
             label: label,
-            created_at: 0, // TODO: Use sui::clock for real timestamp
+            created_at: 0, // NOTE: currently set to 0; use sui::clock if real timestamps are needed
         };
 
         let account_id = object::id(account);
@@ -215,5 +292,60 @@ module memwal_v2::account {
     /// Get a delegate key's label by index
     public fun delegate_label_at(account: &MemWalAccount, index: u64): &String {
         &account.delegate_keys[index].label
+    }
+
+    /// Get the TEE admin address from registry
+    public fun admin(registry: &AccountRegistry): address {
+        registry.admin
+    }
+
+    /// Check if an address already has an account
+    public fun has_account(registry: &AccountRegistry, addr: address): bool {
+        registry.accounts.contains(addr)
+    }
+
+    // ============================================================
+    // SEAL Access Control
+    // ============================================================
+
+    /// SEAL policy: authorize owner OR TEE admin to decrypt.
+    ///
+    /// Key ID format: [package_id][bcs::to_bytes(owner_address)]
+    /// This is called by SEAL key servers via dry_run to verify access.
+    ///
+    /// Access is granted if the caller is:
+    /// 1. The data owner (caller address matches key ID), OR
+    /// 2. The TEE admin (caller matches registry.admin)
+    entry fun seal_approve(
+        id: vector<u8>,
+        registry: &AccountRegistry,
+        ctx: &TxContext,
+    ) {
+        let caller = ctx.sender();
+        let caller_bytes = sui::bcs::to_bytes(&caller);
+
+        // Owner can decrypt their own data
+        let is_owner = (id == caller_bytes);
+        // TEE admin can decrypt any user's data
+        let is_admin = (registry.admin == caller);
+
+        assert!(is_owner || is_admin, ENoAccess);
+    }
+
+    /// Compute the SEAL key ID for a given owner address.
+    /// Used by clients to construct the correct key ID for encryption.
+    /// Key ID = bcs::to_bytes(owner_address)
+    /// (Package ID prefix is added automatically by SEAL SDK)
+    public fun seal_key_id(owner: address): vector<u8> {
+        sui::bcs::to_bytes(&owner)
+    }
+
+    // ============================================================
+    // Test helpers
+    // ============================================================
+
+    #[test_only]
+    public fun test_init(ctx: &mut TxContext) {
+        init(ctx);
     }
 }

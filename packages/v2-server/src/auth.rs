@@ -106,7 +106,7 @@ pub async fn verify_signature(
             StatusCode::UNAUTHORIZED
         })?;
 
-    tracing::debug!("✅ Signature verified for key: {}", public_key_hex);
+    tracing::debug!("signature verified for key: {}", public_key_hex);
 
     // Step 2: Verify onchain — check delegate_key ∈ MemWalAccount
     let owner = verify_delegate_key_onchain(
@@ -121,7 +121,7 @@ pub async fn verify_signature(
         StatusCode::UNAUTHORIZED
     })?;
 
-    tracing::debug!("✅ Onchain verified! Owner: {}", owner);
+    tracing::debug!("onchain verified, owner: {}", owner);
 
     // Store auth info in request extensions
     parts.extensions.insert(AuthInfo {

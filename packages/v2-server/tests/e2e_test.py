@@ -66,7 +66,7 @@ def test_health():
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
         assert data["status"] == "ok", f"Expected ok, got {data['status']}"
-        print(f"✅ Health check: {data}")
+        print(f"[pass] health check: {data}")
 
 
 def test_unauthorized():
@@ -83,7 +83,7 @@ def test_unauthorized():
         assert False, "Should have returned 401"
     except urllib.error.HTTPError as e:
         assert e.code == 401, f"Expected 401, got {e.code}"
-        print(f"✅ Unsigned request rejected: {e.code}")
+        print(f"[pass] unsigned request rejected: {e.code}")
 
 
 def test_remember_recall_flow(signing_key: SigningKey):
@@ -103,7 +103,7 @@ def test_remember_recall_flow(signing_key: SigningKey):
     assert "id" in result, f"Expected 'id' in response, got {result}"
     assert result["blob_id"] == "blob_test_001"
     assert result["owner"] == pk_hex
-    print(f"✅ Remember: id={result['id']}, blob_id={result['blob_id']}")
+    print(f"[pass] remember: id={result['id']}, blob_id={result['blob_id']}")
 
     # 2. Store another memory with different vector
     test_vector_2 = [0.2 * i for i in range(10)]
@@ -113,7 +113,7 @@ def test_remember_recall_flow(signing_key: SigningKey):
         "owner": pk_hex,
     }
     result2 = make_signed_request("POST", "/api/remember", remember_body_2, signing_key)
-    print(f"✅ Remember #2: id={result2['id']}, blob_id={result2['blob_id']}")
+    print(f"[pass] remember #2: id={result2['id']}, blob_id={result2['blob_id']}")
 
     # 3. Recall (search for similar vectors)
     recall_body = {
@@ -129,7 +129,7 @@ def test_remember_recall_flow(signing_key: SigningKey):
     top_hit = recall_result["results"][0]
     assert top_hit["blob_id"] == "blob_test_001", f"Expected blob_test_001, got {top_hit['blob_id']}"
     assert top_hit["distance"] < 0.01, f"Expected near-zero distance, got {top_hit['distance']}"
-    print(f"✅ Recall: {recall_result['total']} results, top hit = {top_hit['blob_id']} (dist={top_hit['distance']:.6f})")
+    print(f"[pass] recall: {recall_result['total']} results, top hit = {top_hit['blob_id']} (dist={top_hit['distance']:.6f})")
 
 
 def test_embed_stub(signing_key: SigningKey):
@@ -138,7 +138,7 @@ def test_embed_stub(signing_key: SigningKey):
     result = make_signed_request("POST", "/api/embed", embed_body, signing_key)
     assert "vector" in result
     assert len(result["vector"]) == 1536, f"Expected 1536 dims, got {len(result['vector'])}"
-    print(f"✅ Embed stub: returned {len(result['vector'])} dimensions")
+    print(f"[pass] embed stub: returned {len(result['vector'])} dimensions")
 
 
 def test_wrong_signature():
@@ -172,7 +172,7 @@ def test_wrong_signature():
         assert False, "Should have returned 401 for wrong signature"
     except urllib.error.HTTPError as e:
         assert e.code == 401
-        print(f"✅ Wrong signature rejected: {e.code}")
+        print(f"[pass] wrong signature rejected: {e.code}")
 
 
 def test_expired_timestamp(signing_key: SigningKey):
@@ -203,7 +203,7 @@ def test_expired_timestamp(signing_key: SigningKey):
         assert False, "Should have returned 401 for expired timestamp"
     except urllib.error.HTTPError as e:
         assert e.code == 401
-        print(f"✅ Expired timestamp rejected: {e.code}")
+        print(f"[pass] expired timestamp rejected: {e.code}")
 
 
 if __name__ == "__main__":
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     # Generate a fresh Ed25519 keypair
     signing_key = SigningKey.generate()
     pk_hex = signing_key.verify_key.encode().hex()
-    print(f"🔑 Generated Ed25519 keypair")
+    print(f"generated Ed25519 keypair")
     print(f"   Public key: {pk_hex[:16]}...{pk_hex[-16:]}")
     print()
     
@@ -236,5 +236,5 @@ if __name__ == "__main__":
     print()
     
     print("=" * 50)
-    print("  ✅ ALL TESTS PASSED!")
+    print("  all tests passed")
     print("=" * 50)

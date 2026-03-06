@@ -5,96 +5,17 @@
  * that executes the call against a live server.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, type ReactNode } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
 } from '@mysten/dapp-kit'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import { apiCall } from '../utils/api'
 
 // ============================================================
-// Minimal inline memwal client for demo (no npm import needed)
-// ============================================================
-
-async function signRequest(
-    privateKeyHex: string,
-    method: string,
-    path: string,
-    body: string,
-) {
-    const ed = await import('@noble/ed25519')
-    const timestamp = Math.floor(Date.now() / 1000).toString()
-
-    // SHA-256 of body
-    const bodyBytes = new TextEncoder().encode(body)
-    const hashBuf = await crypto.subtle.digest('SHA-256', bodyBytes)
-    const bodySha = Array.from(new Uint8Array(hashBuf))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-
-    const message = `${timestamp}.${method}.${path}.${bodySha}`
-    const msgBytes = new TextEncoder().encode(message)
-
-    const privKey = Uint8Array.from(
-        { length: privateKeyHex.length / 2 },
-        (_, i) => parseInt(privateKeyHex.slice(i * 2, i * 2 + 2), 16),
-    )
-    const pubKey = await ed.getPublicKeyAsync(privKey)
-    const signature = await ed.signAsync(msgBytes, privKey)
-
-    return {
-        timestamp,
-        publicKey: Array.from(pubKey)
-            .map((b) => b.toString(16).padStart(2, '0'))
-            .join(''),
-        signature: Array.from(signature)
-            .map((b) => b.toString(16).padStart(2, '0'))
-            .join(''),
-    }
-}
-
-async function apiCall(
-    privateKeyHex: string,
-    serverUrl: string,
-    path: string,
-    body: object,
-    accountId?: string,
-) {
-    const bodyStr = JSON.stringify(body)
-    const { timestamp, publicKey, signature } = await signRequest(
-        privateKeyHex,
-        'POST',
-        path,
-        bodyStr,
-    )
-
-    const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'x-public-key': publicKey,
-        'x-signature': signature,
-        'x-timestamp': timestamp,
-    }
-    if (accountId) {
-        headers['x-account-id'] = accountId
-    }
-
-    const resp = await fetch(`${serverUrl}${path}`, {
-        method: 'POST',
-        headers,
-        body: bodyStr,
-    })
-
-    if (!resp.ok) {
-        const err = await resp.text()
-        throw new Error(`API error (${resp.status}): ${err}`)
-    }
-
-    return resp.json()
-}
-
-// ============================================================
-// Demo Step Component
+// Demo Step — reusable step card
 // ============================================================
 
 interface DemoStepProps {
@@ -104,8 +25,11 @@ interface DemoStepProps {
     code: string
     onRun: () => Promise<void>
     result: string | null
+    resultLabel?: string
     error: string | null
     loading: boolean
+    highlight?: boolean
+    children?: ReactNode
 }
 
 function DemoStep({
@@ -115,29 +39,18 @@ function DemoStep({
     code,
     onRun,
     result,
+    resultLabel = 'response',
     error,
     loading,
+    highlight,
+    children,
 }: DemoStepProps) {
+    const hasOutput = result || error
     return (
-        <div className="card" style={{ marginBottom: 24 }}>
+        <div className="card demo-step">
             <div className="card-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div
-                        style={{
-                            width: 36,
-                            height: 36,
-                            borderRadius: '50%',
-                            background: 'var(--accent-subtle)',
-                            border: '1px solid var(--border-accent)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '1rem',
-                            fontWeight: 700,
-                            color: 'var(--accent)',
-                            flexShrink: 0,
-                        }}
-                    >
+                <div className="demo-step-header-row">
+                    <div className={`demo-step-badge${highlight ? ' demo-step-badge--highlight' : ''}`}>
                         {number}
                     </div>
                     <div>
@@ -159,100 +72,30 @@ function DemoStep({
                 </button>
             </div>
 
-            {/* Code */}
-            <pre
-                style={{
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: 16,
-                    overflow: 'auto',
-                    fontSize: '0.78rem',
-                    lineHeight: 1.7,
-                    fontFamily: 'var(--font-mono)',
-                    color: 'var(--text-secondary)',
-                    marginBottom: result || error ? 12 : 0,
-                }}
-            >
+            {/* Optional inputs (injected via children) */}
+            {children}
+
+            {/* Code block */}
+            <pre className={`demo-code-block${hasOutput ? ' demo-code-block--spaced' : ''}`}>
                 <code>{code}</code>
             </pre>
 
-            {/* Result */}
-            {
-                result && (
-                    <div
-                        style={{
-                            background: 'rgba(52, 211, 153, 0.06)',
-                            border: '1px solid rgba(52, 211, 153, 0.2)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                        }}
-                    >
-                        <div
-                            style={{
-                                fontSize: '0.7rem',
-                                color: 'var(--success)',
-                                letterSpacing: '0.08em',
-                                marginBottom: 8,
-                                fontWeight: 600,
-                            }}
-                        >
-                            response
-                        </div>
-                        <pre
-                            style={{
-                                fontSize: '0.78rem',
-                                lineHeight: 1.6,
-                                fontFamily: 'var(--font-mono)',
-                                color: 'var(--text-primary)',
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-all',
-                                margin: 0,
-                            }}
-                        >
-                            {result}
-                        </pre>
-                    </div>
-                )
-            }
+            {/* Success result */}
+            {result && (
+                <div className="demo-result-panel">
+                    <div className="demo-result-label">{resultLabel}</div>
+                    <pre className="demo-result-pre">{result}</pre>
+                </div>
+            )}
 
             {/* Error */}
-            {
-                error && (
-                    <div
-                        style={{
-                            background: 'rgba(248, 113, 113, 0.06)',
-                            border: '1px solid rgba(248, 113, 113, 0.2)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                        }}
-                    >
-                        <div
-                            style={{
-                                fontSize: '0.7rem',
-                                color: 'var(--danger)',
-                                letterSpacing: '0.08em',
-                                marginBottom: 8,
-                                fontWeight: 600,
-                            }}
-                        >
-                            error
-                        </div>
-                        <pre
-                            style={{
-                                fontSize: '0.78rem',
-                                fontFamily: 'var(--font-mono)',
-                                color: 'var(--danger)',
-                                whiteSpace: 'pre-wrap',
-                                margin: 0,
-                            }}
-                        >
-                            {error}
-                        </pre>
-                    </div>
-                )
-            }
-        </div >
+            {error && (
+                <div className="demo-error-panel">
+                    <div className="demo-error-label">error</div>
+                    <pre className="demo-error-pre">{error}</pre>
+                </div>
+            )}
+        </div>
     )
 }
 
@@ -308,7 +151,8 @@ export default function Playground() {
         await disconnect()
     }, [clearDelegateKeys, disconnect])
 
-    // Step 1: Health check
+    // ---- Handlers ----
+
     const runHealth = useCallback(async () => {
         setHealthLoading(true)
         setHealthResult(null)
@@ -324,7 +168,6 @@ export default function Playground() {
         }
     }, [serverUrl])
 
-    // Step 2: Remember
     const runRemember = useCallback(async () => {
         if (!delegateKey) return
         setRememberLoading(true)
@@ -342,7 +185,6 @@ export default function Playground() {
         }
     }, [delegateKey, serverUrl, rememberText, accountObjectId])
 
-    // Step 3: Recall
     const runRecall = useCallback(async () => {
         if (!delegateKey) return
         setRecallLoading(true)
@@ -361,7 +203,6 @@ export default function Playground() {
         }
     }, [delegateKey, serverUrl, recallQuery, accountObjectId])
 
-    // Step 4: Analyze
     const runAnalyze = useCallback(async () => {
         if (!delegateKey) return
         setAnalyzeLoading(true)
@@ -379,7 +220,6 @@ export default function Playground() {
         }
     }, [delegateKey, serverUrl, analyzeText, accountObjectId])
 
-    // Step 5: Ask AI (true middleware pattern — user's own LLM key)
     const runAsk = useCallback(async () => {
         if (!delegateKey) return
         if (!askLlmKey.trim()) {
@@ -391,7 +231,7 @@ export default function Playground() {
         setAskError(null)
 
         try {
-            // Phase 1: Call memwal recall (memory layer only)
+            // Phase 1: Recall memories
             setAskPhase('step 1/3 — recalling memories from memwal...')
             const recallData = await apiCall(delegateKey, serverUrl, '/api/recall', {
                 query: askQuestion,
@@ -400,7 +240,7 @@ export default function Playground() {
 
             const memories = recallData.results || []
 
-            // Phase 2: Build prompt with memory context (this is what withmemwal does)
+            // Phase 2: Build prompt with memory context
             setAskPhase(`step 2/3 — injecting ${memories.length} memories into prompt...`)
             const memoryContext = memories.length > 0
                 ? `The following are known facts about this user (from encrypted Walrus storage):\n${memories.map((m: any) => `- ${m.text} (relevance: ${(((1 - m.distance) * 100)).toFixed(0)}%)`).join('\n')}`
@@ -408,7 +248,7 @@ export default function Playground() {
 
             const systemPrompt = `You are a helpful AI assistant. The user has a personal memory store powered by memwal (encrypted, stored on Walrus blockchain).\n\n${memoryContext}\n\nUse the above context to provide personalized answers. If the memories don't contain relevant information, say so honestly.`
 
-            // Phase 3: Call user's own LLM (NOT memwal — this is the user's API key)
+            // Phase 3: Call user's own LLM
             setAskPhase('step 3/3 — calling your LLM with enriched prompt...')
             const llmBase = askLlmProvider === 'openrouter'
                 ? 'https://openrouter.ai/api/v1'
@@ -451,6 +291,8 @@ export default function Playground() {
         }
     }, [delegateKey, serverUrl, askQuestion, askLlmKey, askLlmProvider])
 
+    // ---- Render ----
+
     return (
         <>
             <nav className="nav">
@@ -461,15 +303,11 @@ export default function Playground() {
                     <div className="nav-user">
                         <a
                             href="#"
+                            className="demo-nav-back"
                             onClick={(e) => {
                                 e.preventDefault()
                                 window.location.hash = ''
                                 window.location.reload()
-                            }}
-                            style={{
-                                color: 'var(--text-secondary)',
-                                fontSize: '0.8rem',
-                                textDecoration: 'none',
                             }}
                         >
                             ← dashboard
@@ -498,38 +336,11 @@ export default function Playground() {
                 </div>
 
                 {/* Server info */}
-                <div
-                    style={{
-                        display: 'flex',
-                        gap: 16,
-                        marginBottom: 32,
-                        flexWrap: 'wrap',
-                    }}
-                >
-                    <div
-                        style={{
-                            background: 'var(--bg-card)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            padding: '8px 16px',
-                            fontSize: '0.8rem',
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                        }}
-                    >
+                <div className="demo-server-info">
+                    <div className="demo-server-tag">
                         server: <span style={{ color: 'var(--accent)' }}>{serverUrl}</span>
                     </div>
-                    <div
-                        style={{
-                            background: 'var(--bg-card)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)',
-                            padding: '8px 16px',
-                            fontSize: '0.8rem',
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                        }}
-                    >
+                    <div className="demo-server-tag">
                         key: <span style={{ color: 'var(--text-muted)' }}>{keyPreview}</span>
                     </div>
                 </div>
@@ -551,52 +362,25 @@ console.log(data)
                 />
 
                 {/* Step 2: Remember */}
-                <div className="card" style={{ marginBottom: 24 }}>
-                    <div className="card-header">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div
-                                style={{
-                                    width: 36,
-                                    height: 36,
-                                    borderRadius: '50%',
-                                    background: 'var(--accent-subtle)',
-                                    border: '1px solid var(--border-accent)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: '1rem',
-                                    fontWeight: 700,
-                                    color: 'var(--accent)',
-                                    flexShrink: 0,
-                                }}
-                            >
-                                2
-                            </div>
-                            <div>
-                                <div className="card-title">remember</div>
-                                <div className="card-subtitle">
-                                    store a memory → embed → encrypt → Walrus
-                                </div>
-                            </div>
-                        </div>
-                        <button
-                            className="btn btn-primary btn-sm"
-                            onClick={runRemember}
-                            disabled={rememberLoading}
-                            style={{ minWidth: 80 }}
-                        >
-                            {rememberLoading ? (
-                                <span
-                                    className="spinner"
-                                    style={{ width: 14, height: 14 }}
-                                />
-                            ) : (
-                                '▶ run'
-                            )}
-                        </button>
-                    </div>
+                <DemoStep
+                    number={2}
+                    title="remember"
+                    description="store a memory → embed → encrypt → Walrus"
+                    code={`const memwal = memwal.create({
+  key: "${keyPreview}",
+  serverUrl: "${serverUrl}",
+})
 
-                    {/* Input */}
+const result = await memwal.remember(
+  "${rememberText.slice(0, 60)}..."
+)
+// → { id, blob_id, owner }`}
+                    onRun={runRemember}
+                    result={rememberResult}
+                    resultLabel="stored on Walrus (encrypted)"
+                    error={rememberError}
+                    loading={rememberLoading}
+                >
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>memory text:</label>
                         <textarea
@@ -607,148 +391,22 @@ console.log(data)
                             style={{ resize: 'vertical' }}
                         />
                     </div>
-
-                    <pre
-                        style={{
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                            overflow: 'auto',
-                            fontSize: '0.78rem',
-                            lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                            marginBottom: rememberResult || rememberError ? 12 : 0,
-                        }}
-                    >
-                        <code>{`const memwal = memwal.create({
-  key: "${keyPreview}",
-  serverUrl: "${serverUrl}",
-})
-
-const result = await memwal.remember(
-  "${rememberText.slice(0, 60)}..."
-)
-// → { id, blob_id, owner }`}</code>
-                    </pre>
-
-                    {rememberResult && (
-                        <div
-                            style={{
-                                background: 'rgba(52, 211, 153, 0.06)',
-                                border: '1px solid rgba(52, 211, 153, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--success)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                stored on Walrus (encrypted)
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    lineHeight: 1.6,
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--text-primary)',
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-all',
-                                    margin: 0,
-                                }}
-                            >
-                                {rememberResult}
-                            </pre>
-                        </div>
-                    )}
-                    {rememberError && (
-                        <div
-                            style={{
-                                background: 'rgba(248, 113, 113, 0.06)',
-                                border: '1px solid rgba(248, 113, 113, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--danger)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                error
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--danger)',
-                                    whiteSpace: 'pre-wrap',
-                                    margin: 0,
-                                }}
-                            >
-                                {rememberError}
-                            </pre>
-                        </div>
-                    )}
-                </div>
+                </DemoStep>
 
                 {/* Step 3: Recall */}
-                <div className="card" style={{ marginBottom: 24 }}>
-                    <div className="card-header">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div
-                                style={{
-                                    width: 36,
-                                    height: 36,
-                                    borderRadius: '50%',
-                                    background: 'var(--accent-subtle)',
-                                    border: '1px solid var(--border-accent)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: '1rem',
-                                    fontWeight: 700,
-                                    color: 'var(--accent)',
-                                    flexShrink: 0,
-                                }}
-                            >
-                                3
-                            </div>
-                            <div>
-                                <div className="card-title">recall</div>
-                                <div className="card-subtitle">
-                                    semantic search → download → decrypt
-                                </div>
-                            </div>
-                        </div>
-                        <button
-                            className="btn btn-primary btn-sm"
-                            onClick={runRecall}
-                            disabled={recallLoading}
-                            style={{ minWidth: 80 }}
-                        >
-                            {recallLoading ? (
-                                <span
-                                    className="spinner"
-                                    style={{ width: 14, height: 14 }}
-                                />
-                            ) : (
-                                '▶ run'
-                            )}
-                        </button>
-                    </div>
-
+                <DemoStep
+                    number={3}
+                    title="recall"
+                    description="semantic search → download → decrypt"
+                    code={`const result = await memwal.recall("${recallQuery}")
+// Server: embed query → cosine search → download blob → decrypt
+// → { results: [{ text, blob_id, distance }], total }`}
+                    onRun={runRecall}
+                    result={recallResult}
+                    resultLabel="memories found (decrypted)"
+                    error={recallError}
+                    loading={recallLoading}
+                >
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>search query:</label>
                         <input
@@ -757,142 +415,24 @@ const result = await memwal.remember(
                             onChange={(e) => setRecallQuery(e.target.value)}
                         />
                     </div>
-
-                    <pre
-                        style={{
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                            overflow: 'auto',
-                            fontSize: '0.78rem',
-                            lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                            marginBottom: recallResult || recallError ? 12 : 0,
-                        }}
-                    >
-                        <code>{`const result = await memwal.recall("${recallQuery}")
-// Server: embed query → cosine search → download blob → decrypt
-// → { results: [{ text, blob_id, distance }], total }`}</code>
-                    </pre>
-
-                    {recallResult && (
-                        <div
-                            style={{
-                                background: 'rgba(52, 211, 153, 0.06)',
-                                border: '1px solid rgba(52, 211, 153, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--success)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                memories found (decrypted)
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    lineHeight: 1.6,
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--text-primary)',
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-all',
-                                    margin: 0,
-                                }}
-                            >
-                                {recallResult}
-                            </pre>
-                        </div>
-                    )}
-                    {recallError && (
-                        <div
-                            style={{
-                                background: 'rgba(248, 113, 113, 0.06)',
-                                border: '1px solid rgba(248, 113, 113, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--danger)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                error
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--danger)',
-                                    whiteSpace: 'pre-wrap',
-                                    margin: 0,
-                                }}
-                            >
-                                {recallError}
-                            </pre>
-                        </div>
-                    )}
-                </div>
+                </DemoStep>
 
                 {/* Step 4: Analyze */}
-                <div className="card" style={{ marginBottom: 24 }}>
-                    <div className="card-header">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div
-                                style={{
-                                    width: 36,
-                                    height: 36,
-                                    borderRadius: '50%',
-                                    background: 'var(--accent-subtle)',
-                                    border: '1px solid var(--border-accent)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: '1rem',
-                                    fontWeight: 700,
-                                    color: 'var(--accent)',
-                                    flexShrink: 0,
-                                }}
-                            >
-                                4
-                            </div>
-                            <div>
-                                <div className="card-title">analyze</div>
-                                <div className="card-subtitle">
-                                    LLM extracts facts → stores each as memory
-                                </div>
-                            </div>
-                        </div>
-                        <button
-                            className="btn btn-primary btn-sm"
-                            onClick={runAnalyze}
-                            disabled={analyzeLoading}
-                            style={{ minWidth: 80 }}
-                        >
-                            {analyzeLoading ? (
-                                <span
-                                    className="spinner"
-                                    style={{ width: 14, height: 14 }}
-                                />
-                            ) : (
-                                '▶ run'
-                            )}
-                        </button>
-                    </div>
-
+                <DemoStep
+                    number={4}
+                    title="analyze"
+                    description="LLM extracts facts → stores each as memory"
+                    code={`const result = await memwal.analyze(
+  "${analyzeText.slice(0, 50)}..."
+)
+// Server: LLM extracts facts → embed → encrypt → Walrus → store
+// → { facts: [{ text, id, blob_id }], total, owner }`}
+                    onRun={runAnalyze}
+                    result={analyzeResult}
+                    resultLabel="facts extracted & stored"
+                    error={analyzeError}
+                    loading={analyzeLoading}
+                >
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>conversation text to analyze:</label>
                         <textarea
@@ -903,120 +443,13 @@ const result = await memwal.remember(
                             style={{ resize: 'vertical' }}
                         />
                     </div>
-
-                    <pre
-                        style={{
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                            overflow: 'auto',
-                            fontSize: '0.78rem',
-                            lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                            marginBottom: analyzeResult || analyzeError ? 12 : 0,
-                        }}
-                    >
-                        <code>{`const result = await memwal.analyze(
-  "${analyzeText.slice(0, 50)}..."
-)
-// Server: LLM extracts facts → embed → encrypt → Walrus → store
-// → { facts: [{ text, id, blob_id }], total, owner }`}</code>
-                    </pre>
-
-                    {analyzeResult && (
-                        <div
-                            style={{
-                                background: 'rgba(52, 211, 153, 0.06)',
-                                border: '1px solid rgba(52, 211, 153, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--success)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                facts extracted & stored
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    lineHeight: 1.6,
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--text-primary)',
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-all',
-                                    margin: 0,
-                                }}
-                            >
-                                {analyzeResult}
-                            </pre>
-                        </div>
-                    )}
-                    {analyzeError && (
-                        <div
-                            style={{
-                                background: 'rgba(248, 113, 113, 0.06)',
-                                border: '1px solid rgba(248, 113, 113, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--danger)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                error
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--danger)',
-                                    whiteSpace: 'pre-wrap',
-                                    margin: 0,
-                                }}
-                            >
-                                {analyzeError}
-                            </pre>
-                        </div>
-                    )}
-                </div>
+                </DemoStep>
 
                 {/* Step 5: Ask AI — true middleware pattern */}
-                <div className="card" style={{ marginBottom: 24 }}>
+                <div className="card demo-step">
                     <div className="card-header">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                            <div
-                                style={{
-                                    width: 36,
-                                    height: 36,
-                                    borderRadius: '50%',
-                                    background: 'linear-gradient(135deg, var(--accent-subtle), rgba(77, 162, 255, 0.15))',
-                                    border: '1px solid var(--border-accent)',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: '1rem',
-                                    fontWeight: 700,
-                                    color: 'var(--accent)',
-                                    flexShrink: 0,
-                                }}
-                            >
-                                5
-                            </div>
+                        <div className="demo-step-header-row">
+                            <div className="demo-step-badge demo-step-badge--highlight">5</div>
                             <div>
                                 <div className="card-title">ask AI (with memory)</div>
                                 <div className="card-subtitle">
@@ -1039,20 +472,8 @@ const result = await memwal.remember(
                     </div>
 
                     {/* LLM API Key input */}
-                    <div style={{
-                        background: 'rgba(77, 162, 255, 0.04)',
-                        border: '1px solid rgba(77, 162, 255, 0.15)',
-                        borderRadius: 'var(--radius-md)',
-                        padding: 16,
-                        marginBottom: 12,
-                    }}>
-                        <div style={{
-                            fontSize: '0.7rem',
-                            color: 'var(--accent)',
-                            letterSpacing: '0.08em',
-                            marginBottom: 8,
-                            fontWeight: 600,
-                        }}>
+                    <div className="demo-info-panel">
+                        <div className="demo-info-label">
                             your LLM API key (not stored, client-side only)
                         </div>
                         <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
@@ -1089,20 +510,7 @@ const result = await memwal.remember(
                         />
                     </div>
 
-                    <pre
-                        style={{
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                            overflow: 'auto',
-                            fontSize: '0.78rem',
-                            lineHeight: 1.7,
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                            marginBottom: askResult || askError || askPhase ? 12 : 0,
-                        }}
-                    >
+                    <pre className={`demo-code-block${askResult || askError || askPhase ? ' demo-code-block--spaced' : ''}`}>
                         <code>{`import { withMemWal } from "@cmdoss/memwal-v2/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
@@ -1123,20 +531,7 @@ const { text } = await generateText({
 
                     {/* Loading phase */}
                     {askPhase && (
-                        <div
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 10,
-                                padding: '12px 16px',
-                                background: 'rgba(77, 162, 255, 0.06)',
-                                border: '1px solid rgba(77, 162, 255, 0.15)',
-                                borderRadius: 'var(--radius-md)',
-                                fontSize: '0.8rem',
-                                color: 'var(--accent)',
-                                marginBottom: 12,
-                            }}
-                        >
+                        <div className="demo-phase-indicator">
                             <span className="spinner" style={{ width: 14, height: 14 }} />
                             {askPhase}
                         </div>
@@ -1145,71 +540,22 @@ const { text } = await generateText({
                     {askResult && (
                         <>
                             {/* AI Answer */}
-                            <div
-                                style={{
-                                    background: 'linear-gradient(135deg, rgba(77, 162, 255, 0.08), rgba(52, 211, 153, 0.06))',
-                                    border: '1px solid rgba(77, 162, 255, 0.2)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 20,
-                                    marginBottom: 12,
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        fontSize: '0.7rem',
-                                        color: 'var(--accent)',
-                                        letterSpacing: '0.08em',
-                                        marginBottom: 12,
-                                        fontWeight: 600,
-                                    }}
-                                >
+                            <div className="demo-ai-panel">
+                                <div className="demo-info-label" style={{ marginBottom: 12 }}>
                                     AI response (your LLM + memwal memory)
                                 </div>
-                                <div
-                                    style={{
-                                        fontSize: '0.9rem',
-                                        lineHeight: 1.7,
-                                        color: 'var(--text-primary)',
-                                        whiteSpace: 'pre-wrap',
-                                    }}
-                                >
+                                <div className="demo-ai-answer">
                                     {askResult.answer}
                                 </div>
                             </div>
 
                             {/* Memories Used */}
-                            <div
-                                style={{
-                                    background: 'rgba(52, 211, 153, 0.06)',
-                                    border: '1px solid rgba(52, 211, 153, 0.2)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 16,
-                                    marginBottom: 12,
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        fontSize: '0.7rem',
-                                        color: 'var(--success)',
-                                        letterSpacing: '0.08em',
-                                        marginBottom: 10,
-                                        fontWeight: 600,
-                                    }}
-                                >
+                            <div className="demo-result-panel" style={{ marginBottom: 12 }}>
+                                <div className="demo-result-label" style={{ marginBottom: 10 }}>
                                     {askResult.memories.length} memories injected as context
                                 </div>
                                 {askResult.memories.map((m: any, i: number) => (
-                                    <div
-                                        key={i}
-                                        style={{
-                                            display: 'flex',
-                                            gap: 8,
-                                            alignItems: 'baseline',
-                                            marginBottom: 6,
-                                            fontSize: '0.8rem',
-                                            fontFamily: 'var(--font-mono)',
-                                        }}
-                                    >
+                                    <div key={i} className="demo-memory-item">
                                         <span style={{ color: 'var(--success)', flexShrink: 0 }}>
                                             {((1 - m.distance) * 100).toFixed(0)}%
                                         </span>
@@ -1221,7 +567,7 @@ const { text } = await generateText({
                             </div>
 
                             {/* System Prompt Preview */}
-                            <details style={{ marginBottom: 0 }}>
+                            <details>
                                 <summary style={{
                                     fontSize: '0.72rem',
                                     color: 'var(--text-muted)',
@@ -1230,56 +576,16 @@ const { text } = await generateText({
                                 }}>
                                     view system prompt sent to LLM
                                 </summary>
-                                <pre
-                                    style={{
-                                        fontSize: '0.72rem',
-                                        lineHeight: 1.5,
-                                        fontFamily: 'var(--font-mono)',
-                                        color: 'var(--text-muted)',
-                                        whiteSpace: 'pre-wrap',
-                                        background: 'var(--bg-input)',
-                                        border: '1px solid var(--border)',
-                                        borderRadius: 'var(--radius-sm)',
-                                        padding: 12,
-                                        margin: 0,
-                                    }}
-                                >
+                                <pre className="demo-code-block" style={{ fontSize: '0.72rem', lineHeight: 1.5, color: 'var(--text-muted)' }}>
                                     {askResult.systemPrompt}
                                 </pre>
                             </details>
                         </>
                     )}
                     {askError && (
-                        <div
-                            style={{
-                                background: 'rgba(248, 113, 113, 0.06)',
-                                border: '1px solid rgba(248, 113, 113, 0.2)',
-                                borderRadius: 'var(--radius-md)',
-                                padding: 16,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: '0.7rem',
-                                    color: 'var(--danger)',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                }}
-                            >
-                                error
-                            </div>
-                            <pre
-                                style={{
-                                    fontSize: '0.78rem',
-                                    fontFamily: 'var(--font-mono)',
-                                    color: 'var(--danger)',
-                                    whiteSpace: 'pre-wrap',
-                                    margin: 0,
-                                }}
-                            >
-                                {askError}
-                            </pre>
+                        <div className="demo-error-panel">
+                            <div className="demo-error-label">error</div>
+                            <pre className="demo-error-pre">{askError}</pre>
                         </div>
                     )}
                 </div>
@@ -1291,19 +597,7 @@ const { text } = await generateText({
                             <div className="card-title">architecture flow</div>
                         </div>
                     </div>
-                    <pre
-                        style={{
-                            background: 'var(--bg-input)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 20,
-                            overflow: 'auto',
-                            fontSize: '0.75rem',
-                            lineHeight: 1.8,
-                            fontFamily: 'var(--font-mono)',
-                            color: 'var(--text-secondary)',
-                        }}
-                    >
+                    <pre className="demo-code-block" style={{ padding: 20, fontSize: '0.75rem', lineHeight: 1.8 }}>
                         <code>{`┌──────────┐     Ed25519 signed request     ┌──────────────┐
 │  Client  │ ──────────────────────────────▶ │  Rust Server │
 │  (SDK)   │                                 │  (Axum)      │

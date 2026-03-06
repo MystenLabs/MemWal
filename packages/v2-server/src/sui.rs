@@ -88,7 +88,7 @@ pub async fn verify_delegate_key_onchain(
             if let Some(stored_arr) = stored_key.as_array() {
                 if *stored_arr == pk_as_numbers {
                     tracing::info!(
-                        "✅ Delegate key verified onchain! Owner: {}",
+                        "delegate key verified onchain, owner: {}",
                         owner
                     );
                     return Ok(owner);

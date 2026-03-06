@@ -99,7 +99,7 @@ function RegisterEnokiWallets() {
   useEffect(() => {
     if (!isEnokiNetwork(network)) return
     if (!config.enokiApiKey || !config.googleClientId) {
-      console.warn('⚠️ Enoki API key or Google Client ID not set. Skipping Enoki wallet registration.')
+      console.warn('Enoki API key or Google Client ID not set. Skipping Enoki wallet registration.')
       return
     }
 
