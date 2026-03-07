@@ -35,9 +35,10 @@ async fn main() {
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!("  memwal account: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
 
-    // Initialize database
-    let db = VectorDb::new(&config.db_path, config.vector_dimensions)
-        .expect("Failed to initialize database");
+    // Initialize database (PostgreSQL + pgvector)
+    let db = VectorDb::new(&config.database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
 
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
     let walrus_client = walrus_rs::WalrusClient::new(

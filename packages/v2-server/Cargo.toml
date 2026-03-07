@@ -10,8 +10,9 @@ tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
-# Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Database (PostgreSQL + pgvector)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+pgvector = { version = "0.4", features = ["sqlx"] }
 
 # Auth
 ed25519-dalek = { version = "2", features = ["serde"] }

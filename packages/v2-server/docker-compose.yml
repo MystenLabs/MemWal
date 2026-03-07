@@ -1,0 +1,38 @@
+name: memwal
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: memwal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: memwal
+      POSTGRES_USER: memwal
+      POSTGRES_PASSWORD: memwal_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - memwal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memwal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: memwal-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - memwal_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  memwal_pgdata:
+  memwal_redis:
