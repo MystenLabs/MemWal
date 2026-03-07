@@ -22,10 +22,6 @@
  */
 
 import { wrapLanguageModel } from "ai";
-import type {
-    LanguageModelV1,
-    LanguageModelV1CallOptions,
-} from "ai";
 import { MemWal } from "../memwal.js";
 import type { MemWalConfig, RecallMemory } from "../types.js";
 
@@ -55,13 +51,13 @@ export interface WithMemWalOptions extends MemWalConfig {
  * - Injects relevant memories into the system prompt
  *
  * AFTER each LLM call:
- * - Saves the user message as a memory (server: embed → encrypt → Walrus → store)
+ * - Analyzes and saves important facts (server: LLM extract → embed → encrypt → Walrus → store)
  * - Fire-and-forget — does not block the response
  */
 export function withMemWal(
-    model: LanguageModelV1,
+    model: any,
     options: WithMemWalOptions
-): LanguageModelV1 {
+): any {
     const memwal = MemWal.create(options);
     const maxMemories = options.maxMemories ?? 5;
     const autoSave = options.autoSave ?? true;
@@ -73,7 +69,7 @@ export function withMemWal(
             // ============================================================
             // BEFORE: Search memories + inject into prompt
             // ============================================================
-            transformParams: async ({ params }) => {
+            transformParams: async ({ params }: any) => {
                 try {
                     const lastUserMessage = findLastUserMessage(params.prompt);
                     if (!lastUserMessage) return params;
@@ -82,7 +78,7 @@ export function withMemWal(
 
                     // Filter by minimum relevance (distance < 1 - minRelevance)
                     const relevant = recallResult.results.filter(
-                        (m) => (1 - m.distance) >= minRelevance
+                        (m: RecallMemory) => (1 - m.distance) >= minRelevance
                     );
 
                     if (relevant.length === 0) return params;
@@ -105,16 +101,31 @@ export function withMemWal(
             },
 
             // ============================================================
-            // AFTER: Save user message as memory (fire-and-forget)
+            // AFTER: Analyze and save important facts (fire-and-forget)
             // ============================================================
-            wrapGenerate: async ({ doGenerate, params }) => {
+            wrapGenerate: async ({ doGenerate, params }: any) => {
                 const result = await doGenerate();
 
                 if (autoSave) {
-                    // Save the user's message — this is the primary source of memories
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
-                        memwal.remember(userMessage).catch((err) =>
+                        memwal.analyze(userMessage).catch((err: any) =>
+                            console.warn("[MemWal] Auto-save failed:", err)
+                        );
+                    }
+                }
+
+                return result;
+            },
+
+            // Stream variant — needed for streamText()
+            wrapStream: async ({ doStream, params }: any) => {
+                const result = await doStream();
+
+                if (autoSave) {
+                    const userMessage = findLastUserMessage(params.prompt);
+                    if (userMessage) {
+                        memwal.analyze(userMessage).catch((err: any) =>
                             console.warn("[MemWal] Auto-save failed:", err)
                         );
                     }
@@ -131,7 +142,7 @@ export function withMemWal(
 // ============================================================
 
 function findLastUserMessage(
-    prompt: LanguageModelV1CallOptions["prompt"]
+    prompt: any
 ): string | null {
     if (!Array.isArray(prompt)) return null;
 
@@ -154,31 +165,31 @@ function formatMemories(memories: RecallMemory[]): string {
     const lines = memories.map(
         (m) => `- ${m.text} (relevance: ${(1 - m.distance).toFixed(2)})`
     );
-    return `The following are known facts about this user:\n${lines.join("\n")}`;
+    return `[Memory Context] The following are known facts about this user from their personal memory store. Use these facts to answer the user's question:\n${lines.join("\n")}`;
 }
 
 function injectMemoryContext(
-    prompt: LanguageModelV1CallOptions["prompt"],
+    prompt: any,
     memoryContext: string
-): LanguageModelV1CallOptions["prompt"] {
+): any {
     if (!Array.isArray(prompt)) return prompt;
 
-    const hasSystem = prompt.some((m: any) => m.role === "system");
+    // Insert memory as a separate system message right before the last user message
+    // This ensures the LLM sees it prominently, not buried in a long system prompt
+    const lastUserIndex = prompt.reduce(
+        (idx, m, i) => ((m as any).role === "user" ? i : idx),
+        -1
+    );
 
-    if (hasSystem) {
-        return prompt.map((m: any) => {
-            if (m.role === "system") {
-                return {
-                    ...m,
-                    content:
-                        typeof m.content === "string"
-                            ? `${m.content}\n\n${memoryContext}`
-                            : m.content,
-                };
-            }
-            return m;
+    if (lastUserIndex > 0) {
+        const result = [...prompt];
+        result.splice(lastUserIndex, 0, {
+            role: "system" as const,
+            content: memoryContext,
         });
-    } else {
-        return [{ role: "system" as const, content: memoryContext }, ...prompt];
+        return result;
     }
+
+    // Fallback: prepend as system message
+    return [{ role: "system" as const, content: memoryContext }, ...prompt];
 }

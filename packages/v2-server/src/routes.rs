@@ -140,7 +140,7 @@ pub async fn remember(
 
     // Step 4: Store {vector, blobId} in Vector DB
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, &blob_id, &vector)?;
+    state.db.insert_vector(&id, owner, &blob_id, &vector).await?;
     tracing::debug!("  → DB stored: id={}", id);
 
     tracing::info!(
@@ -187,7 +187,7 @@ pub async fn recall(
     tracing::debug!("  → Query embedding: {} dimensions", query_vector.len());
 
     // Step 2: Search Vector DB
-    let hits = state.db.search_similar(&query_vector, owner, body.limit)?;
+    let hits = state.db.search_similar(&query_vector, owner, body.limit).await?;
     tracing::debug!("  → Found {} matches", hits.len());
 
     // Step 3 & 4: Download from Walrus + SEAL decrypt each result
@@ -299,7 +299,7 @@ pub async fn analyze(
 
         // Store in Vector DB
         let id = uuid::Uuid::new_v4().to_string();
-        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector)?;
+        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector).await?;
 
         stored_facts.push(AnalyzedFact {
             text: fact_text.clone(),
@@ -469,7 +469,7 @@ pub async fn ask(
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
-    let hits = state.db.search_similar(&query_vector, owner, limit)?;
+    let hits = state.db.search_similar(&query_vector, owner, limit).await?;
 
     // Need admin private key for SEAL decryption
     let private_key = state.config.sui_private_key.as_deref().ok_or_else(|| {

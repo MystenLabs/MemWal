@@ -21,8 +21,7 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
-    pub db_path: String,
-    pub vector_dimensions: usize,
+    pub database_url: String,
     pub sui_rpc_url: String,
     pub memwal_account_id: Option<String>,
     pub openai_api_key: Option<String>,
@@ -49,12 +48,8 @@ impl Config {
                 .unwrap_or_else(|_| "3001".to_string())
                 .parse()
                 .expect("PORT must be a number"),
-            db_path: std::env::var("DB_PATH")
-                .unwrap_or_else(|_| "./data/memwal.db".to_string()),
-            vector_dimensions: std::env::var("VECTOR_DIMENSIONS")
-                .unwrap_or_else(|_| "1536".to_string())
-                .parse()
-                .expect("VECTOR_DIMENSIONS must be a number"),
+            database_url: std::env::var("DATABASE_URL")
+                .expect("DATABASE_URL must be set (e.g. postgresql://memwal:memwal_secret@localhost:5432/memwal)"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
                 .unwrap_or_else(|_| default_rpc.to_string()),
             memwal_account_id: std::env::var("MEMWAL_ACCOUNT_ID").ok(),
