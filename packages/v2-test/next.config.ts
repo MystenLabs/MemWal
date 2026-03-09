@@ -1,4 +1,3 @@
-import { withBotId } from "botid/next/config";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
@@ -18,4 +17,14 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default withBotId(nextConfig);
+// BotId is Vercel-only (requires OIDC token), skip on Railway/other platforms
+const isVercel = !!process.env.VERCEL;
+if (isVercel) {
+  const { withBotId } = require("botid/next/config");
+  module.exports = withBotId(nextConfig);
+} else {
+  module.exports = nextConfig;
+}
+
+export default nextConfig;
+
