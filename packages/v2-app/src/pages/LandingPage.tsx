@@ -72,12 +72,6 @@ export default function LandingPage() {
                     /* Fallback: standard dapp-kit ConnectButton for any Sui wallet */
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
                         <ConnectButton />
-                        {!hasEnokiConfig && (
-                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', maxWidth: 380, textAlign: 'center' }}>
-                                Google zkLogin requires VITE_ENOKI_API_KEY and VITE_GOOGLE_CLIENT_ID.
-                                using standard Sui wallet connection as fallback.
-                            </p>
-                        )}
                     </div>
                 )}
 

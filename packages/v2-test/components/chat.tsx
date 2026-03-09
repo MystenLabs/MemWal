@@ -77,8 +77,15 @@ export function Chat({
     }
     return true;
   });
+  const [memwalKey, setMemwalKey] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('memwalKey') || '';
+    }
+    return '';
+  });
   const currentModelIdRef = useRef(currentModelId);
   const useMemWalRef = useRef(useMemWal);
+  const memwalKeyRef = useRef(memwalKey);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
@@ -88,6 +95,15 @@ export function Chat({
     useMemWalRef.current = useMemWal;
     localStorage.setItem('useMemWal', String(useMemWal));
   }, [useMemWal]);
+
+  useEffect(() => {
+    memwalKeyRef.current = memwalKey;
+    if (memwalKey) {
+      localStorage.setItem('memwalKey', memwalKey);
+    } else {
+      localStorage.removeItem('memwalKey');
+    }
+  }, [memwalKey]);
 
   const {
     messages,
@@ -139,6 +155,7 @@ export function Chat({
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
             useMemWal: useMemWalRef.current,
+            memwalKey: memwalKeyRef.current || undefined,
             ...request.body,
           },
         };
@@ -239,6 +256,8 @@ export function Chat({
               stop={stop}
               useMemWal={useMemWal}
               onUseMemWalChange={setUseMemWal}
+              memwalKey={memwalKey}
+              onMemwalKeyChange={setMemwalKey}
             />
           )}
         </div>
