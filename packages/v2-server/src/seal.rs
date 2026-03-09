@@ -1,66 +1,75 @@
-use crate::types::AppError;
+use crate::types::{AppError, SidecarError};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
-/// Encrypt plaintext using SEAL threshold encryption via TS sidecar.
+/// Request/response types for sidecar HTTP API
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SealEncryptRequest {
+    data: String,
+    owner: String,
+    package_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SealEncryptResponse {
+    encrypted_data: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SealDecryptRequest {
+    data: String,
+    private_key: String,
+    package_id: String,
+    registry_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SealDecryptResponse {
+    decrypted_data: String,
+}
+
+/// Encrypt plaintext using SEAL threshold encryption via HTTP sidecar.
 ///
-/// Calls `scripts/seal-encrypt.ts` which uses `@mysten/seal` SDK.
+/// Calls the long-lived sidecar server at `POST /seal/encrypt`.
 /// The ciphertext is bound to the user's address via SEAL key ID.
 ///
 /// Returns: SEAL encrypted bytes
 pub async fn seal_encrypt(
+    client: &reqwest::Client,
+    sidecar_url: &str,
     data: &[u8],
     owner_address: &str,
     package_id: &str,
 ) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let scripts_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("scripts");
-
-    let output = tokio::process::Command::new("npx")
-        .args([
-            "tsx",
-            "seal-encrypt.ts",
-            "--data",
-            &data_b64,
-            "--owner",
-            owner_address,
-            "--package-id",
-            package_id,
-        ])
-        .current_dir(&scripts_dir)
-        .output()
+    let resp = client
+        .post(&url)
+        .json(&SealEncryptRequest {
+            data: data_b64,
+            owner: owner_address.to_string(),
+            package_id: package_id.to_string(),
+        })
+        .send()
         .await
         .map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to spawn seal-encrypt.ts: {}. Is Node.js/npx installed?",
-                e
-            ))
+            AppError::Internal(format!("Sidecar seal/encrypt request failed: {}. Is the sidecar running?", e))
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Internal(format!(
-            "seal-encrypt.ts exited with {}: {}",
-            output.status, stderr
-        )));
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
+            return Err(AppError::Internal(format!("seal encrypt failed: {}", err.error)));
+        }
+        return Err(AppError::Internal(format!("seal encrypt failed: {}", body)));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse JSON: { "encryptedData": "<base64>" }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct SealEncryptResult {
-        encrypted_data: String,
-    }
-
-    let result: SealEncryptResult = serde_json::from_str(stdout.trim()).map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to parse seal-encrypt.ts output: {}. Output: {}",
-            e, stdout
-        ))
+    let result: SealEncryptResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse seal/encrypt response: {}", e))
     })?;
 
     let encrypted_bytes = BASE64.decode(&result.encrypted_data).map_err(|e| {
@@ -76,70 +85,48 @@ pub async fn seal_encrypt(
     Ok(encrypted_bytes)
 }
 
-/// Decrypt SEAL-encrypted data using admin wallet via TS sidecar.
+/// Decrypt SEAL-encrypted data using admin wallet via HTTP sidecar.
 ///
-/// Calls `scripts/seal-decrypt.ts` which uses `@mysten/seal` SDK.
+/// Calls the long-lived sidecar server at `POST /seal/decrypt`.
 /// The admin wallet (TEE server) is authorized in the AccountRegistry
 /// to decrypt any user's data via `seal_approve`.
 ///
 /// Returns: decrypted plaintext bytes
 pub async fn seal_decrypt(
+    client: &reqwest::Client,
+    sidecar_url: &str,
     encrypted_data: &[u8],
     private_key: &str,
     package_id: &str,
     registry_id: &str,
 ) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/decrypt", sidecar_url);
     let data_b64 = BASE64.encode(encrypted_data);
 
-    let scripts_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("scripts");
-
-    let output = tokio::process::Command::new("npx")
-        .args([
-            "tsx",
-            "seal-decrypt.ts",
-            "--data",
-            &data_b64,
-            "--private-key",
-            private_key,
-            "--package-id",
-            package_id,
-            "--registry-id",
-            registry_id,
-        ])
-        .current_dir(&scripts_dir)
-        .output()
+    let resp = client
+        .post(&url)
+        .json(&SealDecryptRequest {
+            data: data_b64,
+            private_key: private_key.to_string(),
+            package_id: package_id.to_string(),
+            registry_id: registry_id.to_string(),
+        })
+        .send()
         .await
         .map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to spawn seal-decrypt.ts: {}. Is Node.js/npx installed?",
-                e
-            ))
+            AppError::Internal(format!("Sidecar seal/decrypt request failed: {}. Is the sidecar running?", e))
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Internal(format!(
-            "seal-decrypt.ts exited with {}: {}",
-            output.status, stderr
-        )));
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
+            return Err(AppError::Internal(format!("seal decrypt failed: {}", err.error)));
+        }
+        return Err(AppError::Internal(format!("seal decrypt failed: {}", body)));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse JSON: { "decryptedData": "<base64>" }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct SealDecryptResult {
-        decrypted_data: String,
-    }
-
-    let result: SealDecryptResult = serde_json::from_str(stdout.trim()).map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to parse seal-decrypt.ts output: {}. Output: {}",
-            e, stdout
-        ))
+    let result: SealDecryptResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse seal/decrypt response: {}", e))
     })?;
 
     let decrypted_bytes = BASE64.decode(&result.decrypted_data).map_err(|e| {

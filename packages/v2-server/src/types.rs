@@ -31,6 +31,8 @@ pub struct Config {
     pub sui_private_key: Option<String>,
     pub package_id: String,
     pub registry_id: String,
+    /// URL of the SEAL/Walrus TS sidecar HTTP server
+    pub sidecar_url: String,
 }
 
 impl Config {
@@ -65,6 +67,8 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
+            sidecar_url: std::env::var("SIDECAR_URL")
+                .unwrap_or_else(|_| "http://localhost:3002".to_string()),
         }
     }
 }
@@ -228,4 +232,14 @@ impl axum::response::IntoResponse for AppError {
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
     }
+}
+
+// ============================================================
+// Sidecar Types (shared by seal.rs + walrus.rs)
+// ============================================================
+
+/// Error response from the TS sidecar HTTP server
+#[derive(Debug, Deserialize)]
+pub struct SidecarError {
+    pub error: String,
 }

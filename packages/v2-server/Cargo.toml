@@ -39,6 +39,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Walrus SDK
 walrus_rs = "0.1"
 
+# Async utilities
+futures = "0.3"
+
 # Utils
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"

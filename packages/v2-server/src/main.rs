@@ -35,6 +35,45 @@ async fn main() {
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!("  memwal account: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
 
+    // Start TS sidecar HTTP server (SEAL + Walrus operations)
+    let sidecar_url = config.sidecar_url.clone();
+    tracing::info!("  sidecar: starting at {}", sidecar_url);
+    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
+    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
+    let mut sidecar_child = tokio::process::Command::new("npx")
+        .args(["tsx", "sidecar-server.ts"])
+        .current_dir(&scripts_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("Failed to start TS sidecar. Is Node.js installed?");
+
+    // Wait for sidecar to be ready (health check with retry)
+    let http_client = reqwest::Client::new();
+    let health_url = format!("{}/health", sidecar_url);
+    let mut ready = false;
+    for attempt in 1..=30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        match http_client.get(&health_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("  sidecar: ready (attempt {})", attempt);
+                ready = true;
+                break;
+            }
+            _ => {
+                if attempt % 5 == 0 {
+                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
+                }
+            }
+        }
+    }
+    if !ready {
+        sidecar_child.kill().await.ok();
+        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
+    }
+
     // Initialize database (PostgreSQL + pgvector)
     let db = VectorDb::new(&config.database_url)
         .await
@@ -58,7 +97,7 @@ async fn main() {
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
-        http_client: reqwest::Client::new(),
+        http_client,
         walrus_client,
     });
 
@@ -96,7 +135,18 @@ async fn main() {
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,embed,analyze}}", config.port);
 
+    // Graceful shutdown: kill sidecar when server stops
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("shutting down...");
+    };
+
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
         .expect("Server failed");
+
+    // Cleanup sidecar after shutdown
+    sidecar_child.kill().await.ok();
+    tracing::info!("sidecar stopped");
 }

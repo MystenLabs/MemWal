@@ -47,6 +47,8 @@ COPY migrations/ ./migrations/
 
 # Railway injects PORT env var
 ENV PORT=3001
+ENV SIDECAR_PORT=3002
+ENV SIDECAR_SCRIPTS_DIR=/app/scripts
 EXPOSE ${PORT}
 
 CMD ["./memwal-v2-server"]
