@@ -1,0 +1,15 @@
+node_modules
+.next
+.env
+.env.*
+!.env.example
+.turbo
+coverage
+test-results
+playwright-report
+blob-report
+playwright
+docker-compose.yml
+.cursor
+.vscode
+.github
