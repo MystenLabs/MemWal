@@ -1,4 +1,6 @@
-import { geolocation, ipAddress } from "@vercel/functions";
+// Vercel-specific — only used when running on Vercel
+const isVercel = !!process.env.VERCEL;
+const vercelFunctions = isVercel ? require("@vercel/functions") : null;
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -7,7 +9,8 @@ import {
   stepCountIs,
   streamText,
 } from "ai";
-import { checkBotId } from "botid/server";
+// BotId is Vercel-only
+const checkBotId = isVercel ? require("botid/server").checkBotId : async () => ({ isBot: false });
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
@@ -79,7 +82,9 @@ export async function POST(request: Request) {
       return new ChatbotError("bad_request:api").toResponse();
     }
 
-    await checkIpRateLimit(ipAddress(request));
+    if (isVercel) {
+      await checkIpRateLimit(vercelFunctions.ipAddress(request));
+    }
 
     const userType: UserType = session.user.type;
 
@@ -119,13 +124,13 @@ export async function POST(request: Request) {
       ? (messages as ChatMessage[])
       : [...convertToUIMessages(messagesFromDb), message as ChatMessage];
 
-    const { longitude, latitude, city, country } = geolocation(request);
+    const geo = isVercel ? vercelFunctions.geolocation(request) : {};
 
     const requestHints: RequestHints = {
-      longitude,
-      latitude,
-      city,
-      country,
+      longitude: geo.longitude,
+      latitude: geo.latitude,
+      city: geo.city,
+      country: geo.country,
     };
 
     if (message?.role === "user") {
