@@ -100,10 +100,9 @@ async fn generate_embedding(
 ///
 /// Full TEE flow:
 /// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
-/// 2. Embed text → vector
-/// 3. Encrypt text (SEAL threshold encryption)
-/// 4. Upload encrypted blob → Walrus → blobId
-/// 5. Store {vector, blobId} in Vector DB
+/// 2. Embed text + Encrypt text concurrently (independent operations)
+/// 3. Upload encrypted blob → Walrus → blobId
+/// 4. Store {vector, blobId} in Vector DB
 pub async fn remember(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -118,27 +117,29 @@ pub async fn remember(
     let text = &body.text;
     tracing::info!("remember: text=\"{}...\" owner={}", &text[..text.len().min(50)], owner);
 
-    // Step 1: Embed text → vector
-    let vector = generate_embedding(&state.http_client, &state.config, text).await?;
-    tracing::debug!("  → Embedding: {} dimensions", vector.len());
+    // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
+    let embed_fut = generate_embedding(&state.http_client, &state.config, text);
+    let encrypt_fut = seal::seal_encrypt(
+        &state.http_client, &state.config.sidecar_url,
+        text.as_bytes(), owner, &state.config.package_id,
+    );
+    let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+    let vector = vector_result?;
+    let encrypted = encrypted_result?;
+    tracing::debug!("  → Embedding: {} dims, SEAL encrypted: {} bytes", vector.len(), encrypted.len());
 
-    // Step 2: Encrypt text (SEAL threshold encryption)
-    let encrypted = seal::seal_encrypt(
-        text.as_bytes(),
-        owner,
-        &state.config.package_id,
-    ).await?;
-    tracing::debug!("  → SEAL encrypted: {} bytes", encrypted.len());
-
-    // Step 3: Upload encrypted blob → Walrus (via Upload Relay)
+    // Step 2: Upload encrypted blob → Walrus (via sidecar)
     let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
         AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
     })?;
-    let upload_result = walrus::upload_blob(&encrypted, 5, owner, sui_key).await?;
+    let upload_result = walrus::upload_blob(
+        &state.http_client, &state.config.sidecar_url,
+        &encrypted, 5, owner, sui_key,
+    ).await?;
     let blob_id = upload_result.blob_id;
     tracing::debug!("  → Walrus upload: blobId={}, objectId={:?}", blob_id, upload_result.object_id);
 
-    // Step 4: Store {vector, blobId} in Vector DB
+    // Step 3: Store {vector, blobId} in Vector DB
     let id = uuid::Uuid::new_v4().to_string();
     state.db.insert_vector(&id, owner, &blob_id, &vector).await?;
     tracing::debug!("  → DB stored: id={}", id);
@@ -161,9 +162,8 @@ pub async fn remember(
 /// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
 /// 2. Embed query → vector
 /// 3. Search Vector DB → top-K {blobId}
-/// 4. Download blobs from Walrus
-/// 5. Decrypt with SEAL (admin wallet)
-/// 6. Return plaintext results
+/// 4. Download + Decrypt all blobs concurrently (via sidecar HTTP)
+/// 5. Return plaintext results
 pub async fn recall(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -190,39 +190,49 @@ pub async fn recall(
     let hits = state.db.search_similar(&query_vector, owner, body.limit).await?;
     tracing::debug!("  → Found {} matches", hits.len());
 
-    // Step 3 & 4: Download from Walrus + SEAL decrypt each result
-    let mut results = Vec::new();
-    for hit in &hits {
-        // Download encrypted blob from Walrus
-        match walrus::download_blob(&state.walrus_client, &hit.blob_id).await {
-            Ok(encrypted_data) => {
-                // Decrypt using SEAL (admin wallet authorized in AccountRegistry)
-                match seal::seal_decrypt(
-                    &encrypted_data,
-                    private_key,
-                    &state.config.package_id,
-                    &state.config.registry_id,
-                ).await {
-                    Ok(plaintext) => {
-                        let text = String::from_utf8(plaintext).map_err(|e| {
-                            AppError::Internal(format!("Invalid UTF-8 in decrypted data: {}", e))
-                        })?;
-                        results.push(RecallResult {
-                            blob_id: hit.blob_id.clone(),
-                            text,
-                            distance: hit.distance,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", hit.blob_id, e);
+    // Step 3: Download + SEAL decrypt all results concurrently
+    let tasks: Vec<_> = hits.iter().map(|hit| {
+        let walrus_client = &state.walrus_client;
+        let http_client = &state.http_client;
+        let sidecar_url = state.config.sidecar_url.clone();
+        let blob_id = hit.blob_id.clone();
+        let distance = hit.distance;
+        let private_key = private_key.to_string();
+        let package_id = state.config.package_id.clone();
+        let registry_id = state.config.registry_id.clone();
+        async move {
+            // Download encrypted blob from Walrus (native Rust)
+            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!("Failed to download blob {}: {}", blob_id, e);
+                    return None;
+                }
+            };
+            // Decrypt using SEAL (via sidecar HTTP)
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &registry_id).await {
+                Ok(plaintext) => {
+                    match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
+                        Err(e) => {
+                            tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
+                            None
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to download blob {}: {}", hit.blob_id, e);
+                Err(e) => {
+                    tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                    None
+                }
             }
         }
-    }
+    }).collect();
+
+    let results: Vec<RecallResult> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
 
     let total = results.len();
     tracing::info!("recall complete: {} results for owner={}", total, owner);
@@ -253,7 +263,7 @@ pub async fn embed(
 /// AI fact extraction flow:
 /// 1. Verify auth (middleware) → get owner
 /// 2. Call LLM to extract memorable facts from text
-/// 3. For each fact: embed → encrypt → Walrus upload → store
+/// 3. For each fact concurrently: embed + encrypt → Walrus upload → store
 pub async fn analyze(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -278,34 +288,52 @@ pub async fn analyze(
         }));
     }
 
-    // Step 2: Remember each fact (embed → SEAL encrypt → Walrus → store)
-    let mut stored_facts = Vec::new();
-    for fact_text in &facts {
-        // Embed
-        let vector = generate_embedding(&state.http_client, &state.config, fact_text).await?;
+    // Validate required key upfront before spawning tasks
+    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
+        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
+    })?.to_string();
 
-        // SEAL Encrypt
-        let encrypted = seal::seal_encrypt(
-            fact_text.as_bytes(),
-            owner,
-            &state.config.package_id,
-        ).await?;
+    // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
+    let tasks: Vec<_> = facts.iter().map(|fact_text| {
+        let state = Arc::clone(&state);
+        let owner = owner.clone();
+        let fact_text = fact_text.clone();
+        let sui_key = sui_key.clone();
+        async move {
+            // Embed + SEAL encrypt concurrently (independent operations)
+            let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
+            let encrypt_fut = seal::seal_encrypt(
+                &state.http_client, &state.config.sidecar_url,
+                fact_text.as_bytes(), &owner, &state.config.package_id,
+            );
+            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+            let vector = vector_result?;
+            let encrypted = encrypted_result?;
 
-        // Upload to Walrus (via Upload Relay)
-        let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
-        })?;
-        let upload_result = walrus::upload_blob(&encrypted, 5, owner, sui_key).await?;
+            // Upload to Walrus (via sidecar HTTP)
+            let upload_result = walrus::upload_blob(
+                &state.http_client, &state.config.sidecar_url,
+                &encrypted, 5, &owner, &sui_key,
+            ).await?;
 
-        // Store in Vector DB
-        let id = uuid::Uuid::new_v4().to_string();
-        state.db.insert_vector(&id, owner, &upload_result.blob_id, &vector).await?;
+            // Store in Vector DB
+            let id = uuid::Uuid::new_v4().to_string();
+            state.db.insert_vector(&id, &owner, &upload_result.blob_id, &vector).await?;
 
-        stored_facts.push(AnalyzedFact {
-            text: fact_text.clone(),
-            id,
-            blob_id: upload_result.blob_id,
-        });
+            Ok::<AnalyzedFact, AppError>(AnalyzedFact {
+                text: fact_text,
+                id,
+                blob_id: upload_result.blob_id,
+            })
+        }
+    }).collect();
+
+    let results = futures::future::join_all(tasks).await;
+
+    // Collect successes, fail on first error (same semantics as sequential version)
+    let mut stored_facts = Vec::with_capacity(results.len());
+    for result in results {
+        stored_facts.push(result?);
     }
 
     let total = stored_facts.len();
@@ -476,32 +504,47 @@ pub async fn ask(
         AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
     })?;
 
-    let mut memories = Vec::new();
-    for hit in &hits {
-        match walrus::download_blob(&state.walrus_client, &hit.blob_id).await {
-            Ok(encrypted_data) => {
-                match seal::seal_decrypt(
-                    &encrypted_data,
-                    private_key,
-                    &state.config.package_id,
-                    &state.config.registry_id,
-                ).await {
-                    Ok(plaintext) => {
-                        let text = String::from_utf8(plaintext).map_err(|e| {
-                            AppError::Internal(format!("Invalid UTF-8: {}", e))
-                        })?;
-                        memories.push(RecallResult {
-                            blob_id: hit.blob_id.clone(),
-                            text,
-                            distance: hit.distance,
-                        });
+    // Download + SEAL decrypt all memories concurrently
+    let tasks: Vec<_> = hits.iter().map(|hit| {
+        let walrus_client = &state.walrus_client;
+        let http_client = &state.http_client;
+        let sidecar_url = state.config.sidecar_url.clone();
+        let blob_id = hit.blob_id.clone();
+        let distance = hit.distance;
+        let private_key = private_key.to_string();
+        let package_id = state.config.package_id.clone();
+        let registry_id = state.config.registry_id.clone();
+        async move {
+            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!("Download failed for {}: {}", blob_id, e);
+                    return None;
+                }
+            };
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &registry_id).await {
+                Ok(plaintext) => {
+                    match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
+                        Err(e) => {
+                            tracing::warn!("Invalid UTF-8: {}", e);
+                            None
+                        }
                     }
-                    Err(e) => tracing::warn!("SEAL decrypt failed for {}: {}", hit.blob_id, e),
+                }
+                Err(e) => {
+                    tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                    None
                 }
             }
-            Err(e) => tracing::warn!("Download failed for {}: {}", hit.blob_id, e),
         }
-    }
+    }).collect();
+
+    let memories: Vec<RecallResult> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
 
     let memories_used = memories.len();
     tracing::info!("ask: {} memories found for context", memories_used);
