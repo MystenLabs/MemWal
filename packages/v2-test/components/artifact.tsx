@@ -349,6 +349,7 @@ function PureArtifact({
                     status={status}
                     stop={stop}
                     useMemWal={true}
+                    memwalKey=""
                   />
                 </div>
               </div>
