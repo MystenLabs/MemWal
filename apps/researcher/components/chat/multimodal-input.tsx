@@ -40,12 +40,12 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
   PromptInputTools,
-} from "./elements/prompt-input";
-import { ArrowUpIcon, PaperclipIcon, StopIcon } from "./icons";
+} from "../elements/prompt-input";
+import { ArrowUpIcon, PaperclipIcon, StopIcon } from "../icons";
 import { PreviewAttachment } from "./preview-attachment";
-import { SourceUpload } from "./source-upload";
+import { SourceUpload } from "../sources/source-upload";
 import { SuggestedActions } from "./suggested-actions";
-import { Button } from "./ui/button";
+import { Button } from "../ui/button";
 import type { VisibilityType } from "./visibility-selector";
 
 function setCookie(name: string, value: string) {

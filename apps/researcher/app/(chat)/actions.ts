@@ -2,7 +2,7 @@
 
 import { generateText, type UIMessage } from "ai";
 import { cookies } from "next/headers";
-import type { VisibilityType } from "@/components/visibility-selector";
+import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { titlePrompt } from "@/lib/ai/prompts";
 import { getTitleModel } from "@/lib/ai/providers";
 import {

@@ -15,7 +15,7 @@ import {
   ChevronDownIcon,
   GlobeIcon,
   LockIcon,
-} from "./icons";
+} from "../icons";
 
 export type VisibilityType = "private" | "public";
 
