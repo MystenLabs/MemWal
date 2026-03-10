@@ -10,7 +10,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { useSources } from "@/hooks/use-sources";
-import { Button } from "./ui/button";
+import { Button } from "../ui/button";
 
 function PureSourceUpload({
   disabled,

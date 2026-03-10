@@ -3,22 +3,21 @@ import type { UseChatHelpers } from "@ai-sdk/react";
 import { useState } from "react";
 import type { ChatMessage } from "@/lib/types";
 import { cn, sanitizeText } from "@/lib/utils";
-import { useDataStream } from "./data-stream-provider";
-import { MessageContent } from "./elements/message";
-import { Response } from "./elements/response";
+import { useDataStream } from "../data/data-stream-provider";
+import { MessageContent } from "../elements/message";
+import { Response } from "../elements/response";
 import {
   Tool,
   ToolContent,
   ToolHeader,
   ToolInput,
-} from "./elements/tool";
-import { SourceCard, type SourceCardData } from "./source-card";
-import { SparklesIcon } from "./icons";
+} from "../elements/tool";
+import { SourceCard, type SourceCardData } from "../sources/source-card";
+import { SparklesIcon } from "../icons";
 import { MessageActions } from "./message-actions";
 import { MessageEditor } from "./message-editor";
 import { MessageReasoning } from "./message-reasoning";
 import { PreviewAttachment } from "./preview-attachment";
-import { Weather } from "./weather";
 
 const PurePreviewMessage = ({
   addToolApprovalResponse,
@@ -185,7 +184,7 @@ const PurePreviewMessage = ({
                 if (!output.sources || output.sources.length === 0) {
                   return (
                     <div key={toolCallId} className="w-full">
-                      <Tool className="w-full" defaultOpen={true}>
+                      <Tool className="w-full" defaultOpen={false}>
                         <ToolHeader state={state} type="tool-listSources" />
                         <ToolContent>
                           <div className="px-4 py-3 text-sm text-muted-foreground">
@@ -199,7 +198,7 @@ const PurePreviewMessage = ({
 
                 return (
                   <div key={toolCallId} className="w-full">
-                    <Tool className="w-full" defaultOpen={true}>
+                    <Tool className="w-full" defaultOpen={false}>
                       <ToolHeader state={state} type="tool-listSources" />
                       <ToolContent>
                         <div className="space-y-2 p-3">
@@ -226,7 +225,7 @@ const PurePreviewMessage = ({
 
               return (
                 <div key={toolCallId} className="w-full">
-                  <Tool className="w-full" defaultOpen={true}>
+                  <Tool className="w-full" defaultOpen={false}>
                     <ToolHeader state={state} type="tool-listSources" />
                     <ToolContent>
                       <div className="px-4 py-3 text-sm text-muted-foreground">
@@ -255,7 +254,7 @@ const PurePreviewMessage = ({
                 if (!output.results || output.results.length === 0) {
                   return (
                     <div key={toolCallId} className="w-full">
-                      <Tool className="w-full" defaultOpen={true}>
+                      <Tool className="w-full" defaultOpen={false}>
                         <ToolHeader
                           state={state}
                           type="tool-searchSourceContent"
@@ -272,7 +271,7 @@ const PurePreviewMessage = ({
 
                 return (
                   <div key={toolCallId} className="w-full">
-                    <Tool className="w-full" defaultOpen={true}>
+                    <Tool className="w-full" defaultOpen={false}>
                       <ToolHeader
                         state={state}
                         type="tool-searchSourceContent"
@@ -298,7 +297,7 @@ const PurePreviewMessage = ({
 
               return (
                 <div key={toolCallId} className="w-full">
-                  <Tool className="w-full" defaultOpen={true}>
+                  <Tool className="w-full" defaultOpen={false}>
                     <ToolHeader
                       state={state}
                       type="tool-searchSourceContent"
@@ -307,100 +306,6 @@ const PurePreviewMessage = ({
                       <div className="px-4 py-3 text-sm text-muted-foreground">
                         Searching sources...
                       </div>
-                    </ToolContent>
-                  </Tool>
-                </div>
-              );
-            }
-
-            if (type === "tool-getWeather") {
-              const { toolCallId, state } = part;
-              const approvalId = (part as { approval?: { id: string } })
-                .approval?.id;
-              const isDenied =
-                state === "output-denied" ||
-                (state === "approval-responded" &&
-                  (part as { approval?: { approved?: boolean } }).approval
-                    ?.approved === false);
-              const widthClass = "w-[min(100%,450px)]";
-
-              if (state === "output-available") {
-                return (
-                  <div className={widthClass} key={toolCallId}>
-                    <Weather weatherAtLocation={part.output} />
-                  </div>
-                );
-              }
-
-              if (isDenied) {
-                return (
-                  <div className={widthClass} key={toolCallId}>
-                    <Tool className="w-full" defaultOpen={true}>
-                      <ToolHeader
-                        state="output-denied"
-                        type="tool-getWeather"
-                      />
-                      <ToolContent>
-                        <div className="px-4 py-3 text-muted-foreground text-sm">
-                          Weather lookup was denied.
-                        </div>
-                      </ToolContent>
-                    </Tool>
-                  </div>
-                );
-              }
-
-              if (state === "approval-responded") {
-                return (
-                  <div className={widthClass} key={toolCallId}>
-                    <Tool className="w-full" defaultOpen={true}>
-                      <ToolHeader state={state} type="tool-getWeather" />
-                      <ToolContent>
-                        <ToolInput input={part.input} />
-                      </ToolContent>
-                    </Tool>
-                  </div>
-                );
-              }
-
-              return (
-                <div className={widthClass} key={toolCallId}>
-                  <Tool className="w-full" defaultOpen={true}>
-                    <ToolHeader state={state} type="tool-getWeather" />
-                    <ToolContent>
-                      {(state === "input-available" ||
-                        state === "approval-requested") && (
-                        <ToolInput input={part.input} />
-                      )}
-                      {state === "approval-requested" && approvalId && (
-                        <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
-                          <button
-                            className="rounded-md px-3 py-1.5 text-muted-foreground text-sm transition-colors hover:bg-muted hover:text-foreground"
-                            onClick={() => {
-                              addToolApprovalResponse({
-                                id: approvalId,
-                                approved: false,
-                                reason: "User denied weather lookup",
-                              });
-                            }}
-                            type="button"
-                          >
-                            Deny
-                          </button>
-                          <button
-                            className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground text-sm transition-colors hover:bg-primary/90"
-                            onClick={() => {
-                              addToolApprovalResponse({
-                                id: approvalId,
-                                approved: true,
-                              });
-                            }}
-                            type="button"
-                          >
-                            Allow
-                          </button>
-                        </div>
-                      )}
                     </ToolContent>
                   </Tool>
                 </div>

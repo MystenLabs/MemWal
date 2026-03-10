@@ -2,8 +2,8 @@ import { memo } from "react";
 import { toast } from "sonner";
 import { useCopyToClipboard } from "usehooks-ts";
 import type { ChatMessage } from "@/lib/types";
-import { Action, Actions } from "./elements/actions";
-import { CopyIcon, PencilEditIcon } from "./icons";
+import { Action, Actions } from "../elements/actions";
+import { CopyIcon, PencilEditIcon } from "../icons";
 
 export function PureMessageActions({
   chatId: _chatId,

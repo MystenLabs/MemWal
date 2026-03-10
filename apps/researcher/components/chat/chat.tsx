@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
-import { ChatHeader } from "@/components/chat-header";
+import { ChatHeader } from "./chat-header";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,13 +22,13 @@ import { useChatVisibility } from "@/hooks/use-chat-visibility";
 import { ChatbotError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
-import { useDataStream } from "./data-stream-provider";
+import { useDataStream } from "../data/data-stream-provider";
 import { Messages } from "./messages";
 import { MultimodalInput } from "./multimodal-input";
-import { MyStuffPanel } from "./my-stuff-panel";
-import type { SourceCardData } from "./source-card";
-import { getChatHistoryPaginationKey } from "./sidebar-history";
-import { toast } from "./toast";
+import { MyStuffPanel } from "../sources/my-stuff-panel";
+import type { SourceCardData } from "../sources/source-card";
+import { getChatHistoryPaginationKey } from "../sidebar/sidebar-history";
+import { toast } from "../toast";
 import type { VisibilityType } from "./visibility-selector";
 
 export function Chat({
@@ -160,7 +160,7 @@ export function Chat({
         };
       },
     }),
-    onData: (dataPart) => {
+    onData: (dataPart: any) => {
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
     },
     onFinish: () => {
