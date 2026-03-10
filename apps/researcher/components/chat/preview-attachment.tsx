@@ -1,3 +1,4 @@
+import { FileTextIcon } from "lucide-react";
 import Image from "next/image";
 import type { Attachment } from "@/lib/types";
 import { Loader } from "../elements/loader";
@@ -14,6 +15,7 @@ export const PreviewAttachment = ({
   onRemove?: () => void;
 }) => {
   const { name, url, contentType } = attachment;
+  const isPdf = contentType === "application/pdf";
 
   return (
     <div
@@ -28,6 +30,11 @@ export const PreviewAttachment = ({
           src={url}
           width={64}
         />
+      ) : isPdf ? (
+        <div className="flex size-full flex-col items-center justify-center gap-0.5 text-muted-foreground">
+          <FileTextIcon className="size-5" />
+          <span className="text-[10px] font-medium">PDF</span>
+        </div>
       ) : (
         <div className="flex size-full items-center justify-center text-muted-foreground text-xs">
           File
