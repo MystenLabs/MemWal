@@ -17,6 +17,11 @@ import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import { allowedModelIds } from "@/lib/ai/models";
 import { researchPrompt } from "@/lib/ai/prompts";
+import {
+  extractUrlsFromText,
+  processSource,
+  type SourceInput,
+} from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools } from "@/lib/ai/tools/research-tools";
 import { isProductionEnvironment } from "@/lib/constants";
@@ -39,7 +44,7 @@ import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 function getStreamContext() {
   try {
@@ -147,6 +152,90 @@ export async function POST(request: Request) {
     const stream = createUIMessageStream({
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
+        // --- Detect and process sources before AI responds ---
+        if (message?.role === "user") {
+          const sources: SourceInput[] = [];
+
+          // Extract URLs from text parts
+          for (const part of message.parts) {
+            if (part.type === "text" && part.text) {
+              const urls = extractUrlsFromText(part.text);
+              for (const url of urls) {
+                sources.push({ type: "url", url });
+              }
+            }
+          }
+
+          // Find PDF file parts
+          for (const part of message.parts) {
+            if (
+              part.type === "file" &&
+              (part as { mediaType?: string }).mediaType === "application/pdf"
+            ) {
+              const filePart = part as { url: string; name: string };
+              sources.push({
+                type: "pdf",
+                fileUrl: filePart.url,
+                fileName: filePart.name,
+              });
+            }
+          }
+
+          if (sources.length > 0) {
+            let processedCount = 0;
+
+            for (const source of sources) {
+              const label =
+                source.type === "url"
+                  ? source.url
+                  : (source as { fileName: string }).fileName;
+
+              dataStream.write({
+                type: "data-source-processing",
+                data: { label },
+                transient: true,
+              });
+
+              try {
+                const result = await processSource({
+                  source,
+                  userId: session.user.id,
+                });
+                dataStream.write({
+                  type: "data-source-processed",
+                  data: {
+                    title: result.title,
+                    chunkCount: result.chunkCount,
+                    sourceId: result.sourceId,
+                  },
+                  transient: true,
+                });
+                processedCount++;
+              } catch (error) {
+                console.error("Source processing error:", error);
+                dataStream.write({
+                  type: "data-source-error",
+                  data: {
+                    label,
+                    error:
+                      error instanceof Error
+                        ? error.message
+                        : "Failed to process source",
+                  },
+                  transient: true,
+                });
+              }
+            }
+
+            dataStream.write({
+              type: "data-sources-done",
+              data: { count: processedCount },
+              transient: true,
+            });
+          }
+        }
+
+        // --- Stream AI response ---
         const result = streamText({
           model: getLanguageModel(selectedChatModel),
           system: researchPrompt,
