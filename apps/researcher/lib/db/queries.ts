@@ -12,7 +12,7 @@ import {
   lt,
   type SQL,
 } from "drizzle-orm";
-import type { VisibilityType } from "@/components/visibility-selector";
+import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { ChatbotError } from "../errors";
 import { generateUUID } from "../utils";
 import {

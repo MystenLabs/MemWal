@@ -53,12 +53,7 @@ async function extractFromPdf(file: File): Promise<string> {
   const buffer = new Uint8Array(await file.arrayBuffer());
   const result = await extractText(buffer, { mergePages: true });
 
-  const text =
-    typeof result.text === "string"
-      ? result.text
-      : Array.isArray(result.text)
-        ? result.text.join("\n")
-        : String(result.text);
+  const text = String(result.text);
 
   if (!text || text.trim().length === 0) {
     throw new ChatbotError(

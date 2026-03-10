@@ -1,10 +1,10 @@
 "use client";
 
-import type { ComponentProps } from "react";
+import type { StreamdownProps } from "streamdown";
 import { Streamdown } from "streamdown";
 import { cn } from "@/lib/utils";
 
-type ResponseProps = ComponentProps<typeof Streamdown>;
+type ResponseProps = StreamdownProps;
 
 export function Response({ className, children, ...props }: ResponseProps) {
   return (

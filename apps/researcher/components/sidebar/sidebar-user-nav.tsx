@@ -19,8 +19,8 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { guestRegex } from "@/lib/constants";
-import { LoaderIcon } from "./icons";
-import { toast } from "./toast";
+import { LoaderIcon } from "../icons";
+import { toast } from "../toast";
 
 export function SidebarUserNav({ user }: { user: User }) {
   const router = useRouter();
