@@ -19,6 +19,10 @@ export type ChatTools = {
 export type CustomUIDataTypes = {
   appendMessage: string;
   "chat-title": string;
+  "source-processing": { label: string };
+  "source-processed": { title: string; chunkCount: number; sourceId: string };
+  "source-error": { label: string; error: string };
+  "sources-done": { count: number };
 };
 
 export type ChatMessage = UIMessage<
