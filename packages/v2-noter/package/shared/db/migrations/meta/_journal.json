@@ -8,6 +8,13 @@
       "when": 1772165529784,
       "tag": "0000_curly_karen_page",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1773214559127,
+      "tag": "0001_flat_amazoness",
+      "breakpoints": true
     }
   ]
 }
