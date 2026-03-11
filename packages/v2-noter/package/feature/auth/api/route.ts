@@ -1,0 +1,297 @@
+/**
+ * AUTH API ROUTES
+ * tRPC routes for zkLogin authentication
+ */
+
+import { router, procedure } from "@/shared/lib/trpc/init";
+import { TRPCError } from "@trpc/server";
+import { uuidv7 } from "uuidv7";
+import {
+  initiateLoginInput,
+  completeLoginInput,
+  validateSessionInput,
+  connectWalletInput,
+} from "./input";
+import {
+  generateEphemeralKeyPair,
+  generateRandomnessValue,
+  computeNonce,
+  calculateMaxEpoch,
+  calculateSessionExpiration,
+  decodeAndValidateJwt,
+  verifyNonce,
+  extractUserProfile,
+  isSessionExpired,
+} from "../domain/zklogin";
+import {
+  getCurrentEpoch,
+  deriveAddress,
+  fetchUserSalt,
+  generateZkProof,
+} from "../lib/zklogin-client";
+import { OAUTH_PROVIDERS, OAUTH_SCOPES, AUTH_ERRORS } from "../constant";
+import { buildOAuthUrl } from "../domain/zklogin";
+import { zkLoginSessions, walletSessions } from "@/shared/db/schema";
+import { eq } from "drizzle-orm";
+import * as authService from "../domain/service";
+
+export const authRouter = router({
+  /**
+   * Step 1: Initiate OAuth login flow
+   * Generates ephemeral keypair, nonce, and returns OAuth URL
+   */
+  initiateLogin: procedure
+    .input(initiateLoginInput)
+    .mutation(async ({ ctx, input }) => {
+      const { provider, redirectUri } = input;
+
+      // Validate provider
+      const providerConfig = OAUTH_PROVIDERS[provider];
+      if (!providerConfig) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: AUTH_ERRORS.INVALID_PROVIDER,
+        });
+      }
+
+      try {
+        // Generate ephemeral keypair
+        const ephemeralKeyPair = generateEphemeralKeyPair();
+
+        // Get current epoch from Sui network
+        const currentEpoch = await getCurrentEpoch();
+        const maxEpoch = calculateMaxEpoch(currentEpoch);
+
+        // Generate randomness and compute nonce
+        const randomness = generateRandomnessValue();
+        const nonce = computeNonce(ephemeralKeyPair.publicKey, maxEpoch, randomness);
+
+        // Create session record (without userId yet)
+        const sessionId = uuidv7();
+        const expiresAt = calculateSessionExpiration();
+
+        await ctx.db.insert(zkLoginSessions).values({
+          id: sessionId,
+          ephemeralPrivateKey: ephemeralKeyPair.privateKey,
+          ephemeralPublicKey: ephemeralKeyPair.publicKey,
+          maxEpoch,
+          randomness,
+          nonce,
+          expiresAt,
+        });
+
+        // Build OAuth URL
+        const defaultRedirectUri = `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`;
+        const authUrl = buildOAuthUrl({
+          authUrl: providerConfig.authUrl,
+          clientId: providerConfig.clientId,
+          redirectUri: redirectUri || defaultRedirectUri,
+          nonce,
+          scopes: [...OAUTH_SCOPES[provider]], // Convert readonly to mutable array
+          state: sessionId, // Pass session ID in state for callback
+        });
+
+        return {
+          authUrl,
+          sessionId,
+          nonce,
+        };
+      } catch (error) {
+        console.error("Failed to initiate login:", error);
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
+  /**
+   * Step 2: Complete OAuth login after callback
+   * Validates JWT, generates ZK proof, creates/updates user
+   */
+  completeLogin: procedure
+    .input(completeLoginInput)
+    .mutation(async ({ ctx, input }) => {
+      const { jwt, sessionId } = input;
+
+      try {
+        // Fetch session
+        const [session] = await ctx.db
+          .select()
+          .from(zkLoginSessions)
+          .where(eq(zkLoginSessions.id, sessionId))
+          .limit(1);
+
+        if (!session) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Session not found",
+          });
+        }
+
+        // Check session expiration
+        if (isSessionExpired(session)) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: AUTH_ERRORS.SESSION_EXPIRED,
+          });
+        }
+
+        // Decode and validate JWT
+        const jwtClaims = decodeAndValidateJwt(jwt);
+
+        // Verify nonce matches
+        if (!verifyNonce(jwtClaims, session.nonce)) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: AUTH_ERRORS.INVALID_JWT,
+          });
+        }
+
+        // Fetch user salt
+        const salt = await fetchUserSalt(jwt);
+
+        // Derive Sui address
+        const suiAddress = await deriveAddress(jwt, salt);
+
+        // Generate ZK proof (or reuse cached proof)
+        let zkProof;
+        if (session.zkProof) {          zkProof = session.zkProof;
+        } else {          zkProof = await generateZkProof({
+            jwt,
+            ephemeralPublicKey: session.ephemeralPublicKey,
+            maxEpoch: session.maxEpoch,
+            randomness: session.randomness,
+            salt,
+          });
+        }
+
+        // Extract user profile from JWT
+        const profile = extractUserProfile(jwtClaims);
+
+        // Upsert user (create or update via service)
+        const user = await authService.upsertZkLoginUser(ctx.db, {
+          suiAddress,
+          provider: profile.provider,
+          providerSub: profile.providerSub,
+          name: profile.name,
+          email: profile.email,
+          avatar: profile.avatar,
+        });
+
+        // Update session with userId and proof
+        await authService.updateZkLoginSession(ctx.db, {
+          sessionId,
+          userId: user.id,
+          zkProof,
+        });
+
+        return {
+          user,
+          suiAddress,
+          sessionId,
+          sessionData: {
+            sessionId,
+            ephemeralKeyPair: {
+              privateKey: session.ephemeralPrivateKey,
+              publicKey: session.ephemeralPublicKey,
+            },
+            maxEpoch: session.maxEpoch,
+            randomness: session.randomness,
+            nonce: session.nonce,
+            zkProof,
+            expiresAt: session.expiresAt,
+          },
+        };
+      } catch (error) {
+        console.error("Failed to complete login:", error);
+
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
+  /**
+   * Get current session (for resuming auth state)
+   * Works for both zkLogin and wallet sessions
+   */
+  getSession: procedure
+    .input(validateSessionInput)
+    .query(({ ctx, input }) =>
+      authService.getActiveSession(ctx.db, input.sessionId)
+    ),
+
+  /**
+   * Logout - clear session (works for both zkLogin and wallet)
+   */
+  logout: procedure
+    .input(validateSessionInput)
+    .mutation(async ({ ctx, input }) => {
+      await authService.deleteSession(ctx.db, input.sessionId);
+      return { success: true };
+    }),
+
+  /**
+   * Connect wallet - authenticate with Sui wallet (Slush, Sui Wallet)
+   * Verifies signature and creates session
+   */
+  connectWallet: procedure
+    .input(connectWalletInput)
+    .mutation(async ({ ctx, input }) => {
+      const { walletType, address, signature, message } = input;
+
+      try {
+        // TODO: Verify signature on server-side
+        // For now, we trust the client signature
+        // In production, use @mysten/sui.js to verify the signature
+        // Create or update user via service
+        const user = await authService.upsertWalletUser(ctx.db, {
+          address,
+          walletType,
+        });
+
+        // Create wallet session
+        const sessionId = uuidv7();
+        const expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + 24); // 24 hour session
+
+        await ctx.db.insert(walletSessions).values({
+          id: sessionId,
+          userId: user.id,
+          walletAddress: address,
+          walletType,
+          signedMessage: message,
+          signature,
+          signedAt: new Date(),
+          expiresAt,
+        });
+
+        // Return wallet session data (no ephemeral keys for wallet auth)
+        return {
+          user,
+          sessionId,
+          sessionData: {
+            sessionId,
+            expiresAt,
+          },
+        };
+      } catch (error) {
+        console.error("Failed to connect wallet:", error);
+
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+});

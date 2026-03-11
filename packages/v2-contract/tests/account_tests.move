@@ -1,4 +1,5 @@
 #[test_only]
+#[allow(implicit_const_copy)]
 module memwal_v2::account_tests {
     use std::string;
     use sui::test_scenario;
@@ -113,7 +114,7 @@ module memwal_v2::account_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = 3)] // EAccountAlreadyExists
+    #[expected_failure(abort_code = account::EAccountAlreadyExists)]
     fun test_duplicate_account_fails() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
@@ -241,7 +242,7 @@ module memwal_v2::account_tests {
     }
 
     #[test]
-    #[expected_failure]
+    #[expected_failure(abort_code = account::EDelegateKeyAlreadyExists)]
     fun test_add_duplicate_key_fails() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
@@ -262,7 +263,7 @@ module memwal_v2::account_tests {
     }
 
     #[test]
-    #[expected_failure]
+    #[expected_failure(abort_code = account::EDelegateKeyNotFound)]
     fun test_remove_nonexistent_key_fails() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
@@ -281,7 +282,7 @@ module memwal_v2::account_tests {
     }
 
     #[test]
-    #[expected_failure]
+    #[expected_failure(abort_code = account::ENotOwner)]
     fun test_non_owner_cannot_add_key() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
@@ -357,7 +358,7 @@ module memwal_v2::account_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = 100)] // ENoAccess
+    #[expected_failure(abort_code = account::ENoAccess)]
     fun test_seal_approve_unauthorized() {
         let mut scenario = test_scenario::begin(OWNER);
 

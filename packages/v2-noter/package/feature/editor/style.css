@@ -1,0 +1,56 @@
+/**
+ * Lexical Editor Styles for Chat
+ */
+
+/* Editor container */
+.chat-editor-container {
+  position: relative;
+  width: 100%;
+}
+
+/* Renderer container */
+.chat-renderer {
+  position: relative;
+  width: 100%;
+}
+
+/* Coin mention node styles */
+.coin-mention-wrapper {
+  display: inline;
+}
+
+/* Make sure mentions are inline */
+[data-lexical-coin-mention] {
+  display: inline;
+}
+
+/* Lexical editor focus styles */
+.chat-editor-container [contenteditable]:focus {
+  outline: none;
+}
+
+/* Disable editing on renderer */
+.chat-renderer [contenteditable] {
+  cursor: default;
+  user-select: text;
+}
+
+/* Placeholder styles */
+.chat-editor-container .editor-placeholder {
+  color: hsl(var(--muted-foreground));
+  overflow: hidden;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: 8px;
+  left: 12px;
+  font-size: 14px;
+  user-select: none;
+  display: inline-block;
+  pointer-events: none;
+}
+
+/* Typeahead menu positioning */
+.chat-editor-container .typeahead-popover {
+  position: fixed;
+  z-index: 50;
+}

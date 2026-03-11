@@ -278,14 +278,17 @@ async fn load_cursor(pool: &sqlx::PgPool) -> Option<EventCursor> {
 async fn save_cursor(pool: &sqlx::PgPool, cursor: &EventCursor) {
     let json_str = serde_json::to_string(cursor).unwrap_or_default();
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO indexer_state (key, value)
          VALUES ('event_cursor', $1)
          ON CONFLICT (key) DO UPDATE SET value = $1",
     )
     .bind(&json_str)
     .execute(pool)
-    .await;
+    .await
+    {
+        tracing::warn!("failed to save cursor (will re-process events on restart): {}", e);
+    }
 }
 
 // ============================================================

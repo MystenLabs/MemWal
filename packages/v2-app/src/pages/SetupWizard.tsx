@@ -155,9 +155,10 @@ export default function SetupWizard() {
             // Save to localStorage (including account object ID)
             setDelegateKeys(privateKeyHex, publicKeyHex, knownAccountId || '')
             setStep('done')
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('Onchain operation failed:', err)
-            setError(err?.message || 'transaction failed. please try again.')
+            const message = err instanceof Error ? err.message : 'transaction failed. please try again.'
+            setError(message)
             setStep('show-key') // Go back to key display
         }
     }, [address, publicKeyHex, privateKeyHex, suiClient, signAndExecute, setDelegateKeys])

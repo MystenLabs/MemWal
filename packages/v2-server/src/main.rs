@@ -106,7 +106,9 @@ async fn main() {
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route("/api/recall", post(routes::recall))
-        .route("/api/embed", post(routes::embed))
+        .route("/api/remember/manual", post(routes::remember_manual))
+        .route("/api/recall/manual", post(routes::recall_manual))
+
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .layer(middleware::from_fn_with_state(
@@ -133,7 +135,7 @@ async fn main() {
 
     tracing::info!("memwal v2 server listening on {}", addr);
     tracing::info!("  health: http://localhost:{}/health", config.port);
-    tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,embed,analyze}}", config.port);
+    tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
     // Graceful shutdown: kill sidecar when server stops
     let shutdown = async {

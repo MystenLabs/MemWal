@@ -240,22 +240,76 @@ pub async fn recall(
     Ok(Json(RecallResponse { results, total }))
 }
 
-/// POST /api/embed
+
+
+/// POST /api/remember/manual
 ///
-/// Generate embedding vector from text (no storage)
-pub async fn embed(
+/// Manual flow — user handles everything externally:
+/// 1. SEAL encrypt (user's own wallet)
+/// 2. Generate embedding vector (user's own model)
+/// 3. Upload to Walrus (user's own relay)
+/// Then sends {blob_id, vector} here for server to store.
+pub async fn remember_manual(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<EmbedRequest>,
-) -> Result<Json<EmbedResponse>, AppError> {
-    if body.text.is_empty() {
-        return Err(AppError::BadRequest("Text cannot be empty".into()));
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberManualRequest>,
+) -> Result<Json<RememberManualResponse>, AppError> {
+    if body.blob_id.is_empty() {
+        return Err(AppError::BadRequest("blob_id cannot be empty".into()));
+    }
+    if body.vector.is_empty() {
+        return Err(AppError::BadRequest("vector cannot be empty".into()));
     }
 
-    tracing::info!("embed: text=\"{}\"", &body.text[..body.text.len().min(50)]);
+    let owner = &auth.owner;
+    tracing::info!(
+        "remember_manual: blob_id={} vector_dims={} owner={}",
+        body.blob_id, body.vector.len(), owner
+    );
 
-    let vector = generate_embedding(&state.http_client, &state.config, &body.text).await?;
+    // Store {vector, blobId} in Vector DB — that's it
+    let id = uuid::Uuid::new_v4().to_string();
+    state.db.insert_vector(&id, owner, &body.blob_id, &body.vector).await?;
 
-    Ok(Json(EmbedResponse { vector }))
+    tracing::info!("remember_manual complete: id={}, blob_id={}", id, body.blob_id);
+
+    Ok(Json(RememberManualResponse {
+        id,
+        blob_id: body.blob_id,
+        owner: owner.clone(),
+    }))
+}
+
+/// POST /api/recall/manual
+///
+/// Manual flow — user provides pre-computed query vector.
+/// Server searches Vector DB and returns {blob_id, distance}[].
+/// User downloads from Walrus + SEAL decrypts on their own.
+pub async fn recall_manual(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RecallManualRequest>,
+) -> Result<Json<RecallManualResponse>, AppError> {
+    if body.vector.is_empty() {
+        return Err(AppError::BadRequest("vector cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    tracing::info!(
+        "recall_manual: vector_dims={} limit={} owner={}",
+        body.vector.len(), body.limit, owner
+    );
+
+    // Search Vector DB — return blob IDs + distances only
+    let hits = state.db.search_similar(&body.vector, owner, body.limit).await?;
+    let total = hits.len();
+
+    tracing::info!("recall_manual complete: {} results for owner={}", total, owner);
+
+    Ok(Json(RecallManualResponse {
+        results: hits,
+        total,
+    }))
 }
 
 /// POST /api/analyze
