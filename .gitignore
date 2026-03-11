@@ -87,3 +87,6 @@ target/
 
 # Gemini AI
 .gemini/
+
+# Local system documents
+whole-system-documents/
