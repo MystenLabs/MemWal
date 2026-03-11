@@ -10,6 +10,10 @@
             "import": "./dist/index.js",
             "types": "./dist/index.d.ts"
         },
+        "./manual": {
+            "import": "./dist/manual-entry.js",
+            "types": "./dist/manual-entry.d.ts"
+        },
         "./ai": {
             "import": "./dist/ai/index.js",
             "types": "./dist/ai/index.d.ts"
@@ -21,16 +25,35 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
-        "@noble/ed25519": "^2.3.0",
-        "ai": ">=4.0.0",
-        "zod": "^3.23.0"
+        "@noble/ed25519": "^2.3.0"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",
         "typescript": "^5.5.0"
     },
     "peerDependencies": {
-        "ai": ">=4.0.0"
+        "ai": ">=4.0.0",
+        "zod": "^3.23.0",
+        "@mysten/sui": ">=2.5.0",
+        "@mysten/seal": ">=1.1.0",
+        "@mysten/walrus": ">=1.0.3"
+    },
+    "peerDependenciesMeta": {
+        "ai": {
+            "optional": true
+        },
+        "zod": {
+            "optional": true
+        },
+        "@mysten/sui": {
+            "optional": true
+        },
+        "@mysten/seal": {
+            "optional": true
+        },
+        "@mysten/walrus": {
+            "optional": true
+        }
     },
     "files": [
         "dist",

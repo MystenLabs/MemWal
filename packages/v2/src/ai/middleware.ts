@@ -21,6 +21,7 @@
  * ```
  */
 
+import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { wrapLanguageModel } from "ai";
 import { MemWal } from "../memwal.js";
 import type { MemWalConfig, RecallMemory } from "../types.js";
@@ -29,6 +30,15 @@ import type { MemWalConfig, RecallMemory } from "../types.js";
 // Config
 // ============================================================
 
+/**
+ * Accept both LanguageModelV2 (ai SDK v4/v5) and LanguageModelV3 (ai SDK v6+).
+ * We use `any` because LanguageModelV3 may not exist in older @ai-sdk/provider,
+ * and the two interfaces are structurally incompatible at the type level.
+ * `wrapLanguageModel` from `ai` handles version detection internally.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyLanguageModel = any;
+
 export interface WithMemWalOptions extends MemWalConfig {
     /** Max memories to inject per request (default: 5) */
     maxMemories?: number;
@@ -36,6 +46,8 @@ export interface WithMemWalOptions extends MemWalConfig {
     autoSave?: boolean;
     /** Minimum similarity score to include a memory (0-1, default: 0.3) */
     minRelevance?: number;
+    /** Enable debug logging (default: false) */
+    debug?: boolean;
 }
 
 // ============================================================
@@ -55,17 +67,23 @@ export interface WithMemWalOptions extends MemWalConfig {
  * - Fire-and-forget — does not block the response
  */
 export function withMemWal(
-    model: any,
+    model: AnyLanguageModel,
     options: WithMemWalOptions
-): any {
+) {
     const memwal = MemWal.create(options);
     const maxMemories = options.maxMemories ?? 5;
     const autoSave = options.autoSave ?? true;
     const minRelevance = options.minRelevance ?? 0.3;
+    const debug = options.debug ?? false;
 
-    return wrapLanguageModel({
+    const log = debug
+        ? (...args: unknown[]) => console.warn("[MemWal]", ...args)
+        : () => { };
+
+    return (wrapLanguageModel as any)({
         model,
         middleware: {
+            specificationVersion: 'v3', // Required by ai SDK v6+; ignored by v4/v5
             // ============================================================
             // BEFORE: Search memories + inject into prompt
             // ============================================================
@@ -89,13 +107,11 @@ export function withMemWal(
                         memoryContext
                     );
 
-                    console.log(
-                        `[MemWal] 🔍 Found ${relevant.length} relevant memories`
-                    );
+                    log(`🔍 Found ${relevant.length} relevant memories`);
 
                     return { ...params, prompt: enrichedPrompt };
                 } catch (error) {
-                    console.warn("[MemWal] Memory search failed:", error);
+                    log("Memory search failed:", error);
                     return params;
                 }
             },
@@ -109,8 +125,8 @@ export function withMemWal(
                 if (autoSave) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
-                        memwal.analyze(userMessage).catch((err: any) =>
-                            console.warn("[MemWal] Auto-save failed:", err)
+                        memwal.analyze(userMessage).catch((err: unknown) =>
+                            log("Auto-save failed:", err)
                         );
                     }
                 }
@@ -125,8 +141,8 @@ export function withMemWal(
                 if (autoSave) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
-                        memwal.analyze(userMessage).catch((err: any) =>
-                            console.warn("[MemWal] Auto-save failed:", err)
+                        memwal.analyze(userMessage).catch((err: unknown) =>
+                            log("Auto-save failed:", err)
                         );
                     }
                 }
@@ -142,12 +158,12 @@ export function withMemWal(
 // ============================================================
 
 function findLastUserMessage(
-    prompt: any
+    prompt: unknown
 ): string | null {
     if (!Array.isArray(prompt)) return null;
 
     for (let i = prompt.length - 1; i >= 0; i--) {
-        const msg = prompt[i] as any;
+        const msg = prompt[i] as { role?: string; content?: unknown };
         if (msg.role === "user") {
             if (typeof msg.content === "string") return msg.content;
             if (Array.isArray(msg.content)) {
@@ -169,15 +185,15 @@ function formatMemories(memories: RecallMemory[]): string {
 }
 
 function injectMemoryContext(
-    prompt: any,
+    prompt: unknown,
     memoryContext: string
-): any {
+): unknown {
     if (!Array.isArray(prompt)) return prompt;
 
     // Insert memory as a separate system message right before the last user message
     // This ensures the LLM sees it prominently, not buried in a long system prompt
     const lastUserIndex = prompt.reduce(
-        (idx, m, i) => ((m as any).role === "user" ? i : idx),
+        (idx: number, m: any, i: number) => (m.role === "user" ? i : idx),
         -1
     );
 

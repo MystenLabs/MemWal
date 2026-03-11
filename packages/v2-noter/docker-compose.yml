@@ -1,0 +1,23 @@
+name: memwal-v2-noter
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: v2-noter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: noter
+      POSTGRES_USER: noter
+      POSTGRES_PASSWORD: noter_secret
+    ports:
+      - "5434:5432"
+    volumes:
+      - noter_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noter"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  noter_pgdata:

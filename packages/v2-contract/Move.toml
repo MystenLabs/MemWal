@@ -1,6 +1,6 @@
 [package]
 name = "memwal_v2"
-edition = "2024.beta"
+edition = "2024"
 authors = ["CommandOSS"]
 
 [dependencies]

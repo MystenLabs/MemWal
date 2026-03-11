@@ -3,24 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "workspaces": [
-    "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "cd apps/showcase && npm run dev",
-    "dev:showcase": "cd apps/showcase && npm run dev",
-    "build": "npm run build:sdk && npm run build:showcase",
-    "build:sdk": "cd packages/memwal-sdk && npm run build",
-    "build:showcase": "cd apps/showcase && npm run build",
-    "start": "cd apps/showcase && npm run start",
-    "lint": "npm run lint:sdk && npm run lint:showcase",
-    "lint:sdk": "cd packages/memwal-sdk && npm run lint",
-    "lint:showcase": "cd apps/showcase && npm run lint",
-    "clean": "rm -rf apps/*/node_modules packages/*/node_modules node_modules apps/*/.next packages/*/dist bun.lock package-lock.json",
+    "clean": "rm -rf packages/*/node_modules node_modules packages/*/dist package-lock.json",
     "changeset": "changeset",
     "changeset:add": "changeset add",
     "version": "changeset version",
-    "release": "npm run build:sdk && changeset publish"
+    "release": "npm run build:sdk && changeset publish",
+    "build:sdk": "cd packages/v2 && npm run build"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",

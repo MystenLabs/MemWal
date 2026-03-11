@@ -125,16 +125,7 @@ pub struct SearchHit {
     pub distance: f64,
 }
 
-/// POST /api/embed
-#[derive(Debug, Deserialize)]
-pub struct EmbedRequest {
-    pub text: String,
-}
 
-#[derive(Debug, Serialize)]
-pub struct EmbedResponse {
-    pub vector: Vec<f32>,
-}
 
 /// POST /api/analyze
 /// Extract facts from conversation text using LLM, then remember each fact
@@ -157,6 +148,38 @@ pub struct AnalyzeResponse {
     pub facts: Vec<AnalyzedFact>,
     pub total: usize,
     pub owner: String,
+}
+
+/// POST /api/remember/manual
+/// User handles SEAL encrypt + embedding + Walrus upload.
+/// Server only stores the vector ↔ blobId mapping.
+#[derive(Debug, Deserialize)]
+pub struct RememberManualRequest {
+    pub blob_id: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RememberManualResponse {
+    pub id: String,
+    pub blob_id: String,
+    pub owner: String,
+}
+
+/// POST /api/recall/manual
+/// User provides pre-computed query vector.
+/// Server returns matching blobIds + distances (no download/decrypt).
+#[derive(Debug, Deserialize)]
+pub struct RecallManualRequest {
+    pub vector: Vec<f32>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecallManualResponse {
+    pub results: Vec<SearchHit>,
+    pub total: usize,
 }
 
 /// POST /api/ask

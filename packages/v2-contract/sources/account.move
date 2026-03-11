@@ -26,6 +26,8 @@ module memwal_v2::account {
     const ETooManyDelegateKeys: u64 = 2;
     /// Account already exists for this address
     const EAccountAlreadyExists: u64 = 3;
+    /// Caller is not the account owner
+    const ENotOwner: u64 = 4;
     /// Caller is not authorized to decrypt (SEAL)
     const ENoAccess: u64 = 100;
 
@@ -187,7 +189,7 @@ module memwal_v2::account {
         ctx: &TxContext,
     ) {
         // Verify caller is the owner
-        assert!(account.owner == ctx.sender(), 0);
+        assert!(account.owner == ctx.sender(), ENotOwner);
 
         // Check max limit
         assert!(
@@ -207,8 +209,8 @@ module memwal_v2::account {
         };
 
         let key = DelegateKey {
-            public_key: public_key,
-            label: label,
+            public_key,
+            label,
             created_at: 0, // NOTE: currently set to 0; use sui::clock if real timestamps are needed
         };
 
@@ -233,7 +235,7 @@ module memwal_v2::account {
         ctx: &TxContext,
     ) {
         // Verify caller is the owner
-        assert!(account.owner == ctx.sender(), 0);
+        assert!(account.owner == ctx.sender(), ENotOwner);
 
         // Find and remove the key
         let mut found = false;

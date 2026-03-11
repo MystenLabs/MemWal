@@ -2,17 +2,21 @@
  * Playground — Interactive Demo Showcase
  *
  * Shows code for each memwal SDK operation, with a "Run" button
- * that executes the call against a live server.
+ * that executes the call against a live server using the real SDK.
  */
 
-import { useState, useCallback, type ReactNode } from 'react'
+import { useState, useCallback, useMemo, type ReactNode } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
+    useSignAndExecuteTransaction,
+    useSignPersonalMessage,
+    useSuiClient,
 } from '@mysten/dapp-kit'
+import { MemWal } from '@cmdoss/memwal-v2'
+import { MemWalManual } from '@cmdoss/memwal-v2/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
-import { apiCall } from '../utils/api'
 
 // ============================================================
 // Demo Step — reusable step card
@@ -106,13 +110,30 @@ function DemoStep({
 export default function Playground() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { delegateKey, accountObjectId, clearDelegateKeys } = useDelegateKey()
+    const { delegateKey, clearDelegateKeys } = useDelegateKey()
 
     const address = currentAccount?.address || ''
     const serverUrl = config.memwalServerUrl
     const keyPreview = delegateKey
         ? `${delegateKey.slice(0, 8)}...${delegateKey.slice(-8)}`
         : '...'
+
+    // Wallet signing hooks (for full client-side mode)
+    const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction()
+    const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
+    const suiClient = useSuiClient()
+
+    // ============================================================
+    // SDK Instance — created from delegate key
+    // ============================================================
+
+    const memwal = useMemo(() => {
+        if (!delegateKey) return null
+        return MemWal.create({
+            key: delegateKey,
+            serverUrl,
+        })
+    }, [delegateKey, serverUrl])
 
     // Step states
     const [healthResult, setHealthResult] = useState<string | null>(null)
@@ -141,87 +162,96 @@ export default function Playground() {
     const [askQuestion, setAskQuestion] = useState('What do you know about me?')
     const [askLlmKey, setAskLlmKey] = useState('')
     const [askLlmProvider, setAskLlmProvider] = useState<'openai' | 'openrouter'>('openai')
-    const [askResult, setAskResult] = useState<{ answer: string; memories: any[]; systemPrompt: string } | null>(null)
+    const [askResult, setAskResult] = useState<{ answer: string; memories: { text: string; distance: number; blobId?: string }[]; systemPrompt: string } | null>(null)
     const [askError, setAskError] = useState<string | null>(null)
     const [askLoading, setAskLoading] = useState(false)
     const [askPhase, setAskPhase] = useState('')
+
+    // Full client-side mode states
+    const [fullRememberText, setFullRememberText] = useState(
+        "I enjoy hiking in the mountains on weekends and my favorite trail is in Dalat."
+    )
+    const [fullRememberResult, setFullRememberResult] = useState<string | null>(null)
+    const [fullRememberError, setFullRememberError] = useState<string | null>(null)
+    const [fullRememberLoading, setFullRememberLoading] = useState(false)
+    const [fullRememberPhase, setFullRememberPhase] = useState('')
+
+    const [fullRecallQuery, setFullRecallQuery] = useState('outdoor activities')
+    const [fullRecallResult, setFullRecallResult] = useState<string | null>(null)
+    const [fullRecallError, setFullRecallError] = useState<string | null>(null)
+    const [fullRecallLoading, setFullRecallLoading] = useState(false)
+    const [fullRecallPhase, setFullRecallPhase] = useState('')
+
 
     const handleLogout = useCallback(async () => {
         clearDelegateKeys()
         await disconnect()
     }, [clearDelegateKeys, disconnect])
 
-    // ---- Handlers ----
+    // ---- Handlers (using SDK) ----
 
     const runHealth = useCallback(async () => {
+        if (!memwal) return
         setHealthLoading(true)
         setHealthResult(null)
         setHealthError(null)
         try {
-            const resp = await fetch(`${serverUrl}/health`)
-            const data = await resp.json()
+            const data = await memwal.health()
             setHealthResult(JSON.stringify(data, null, 2))
-        } catch (err: any) {
-            setHealthError(err.message)
+        } catch (err: unknown) {
+            setHealthError(err instanceof Error ? err.message : String(err))
         } finally {
             setHealthLoading(false)
         }
-    }, [serverUrl])
+    }, [memwal])
 
     const runRemember = useCallback(async () => {
-        if (!delegateKey) return
+        if (!memwal) return
         setRememberLoading(true)
         setRememberResult(null)
         setRememberError(null)
         try {
-            const data = await apiCall(delegateKey, serverUrl, '/api/remember', {
-                text: rememberText,
-            }, accountObjectId || undefined)
+            const data = await memwal.remember(rememberText)
             setRememberResult(JSON.stringify(data, null, 2))
-        } catch (err: any) {
-            setRememberError(err.message)
+        } catch (err: unknown) {
+            setRememberError(err instanceof Error ? err.message : String(err))
         } finally {
             setRememberLoading(false)
         }
-    }, [delegateKey, serverUrl, rememberText, accountObjectId])
+    }, [memwal, rememberText])
 
     const runRecall = useCallback(async () => {
-        if (!delegateKey) return
+        if (!memwal) return
         setRecallLoading(true)
         setRecallResult(null)
         setRecallError(null)
         try {
-            const data = await apiCall(delegateKey, serverUrl, '/api/recall', {
-                query: recallQuery,
-                limit: 5,
-            }, accountObjectId || undefined)
+            const data = await memwal.recall(recallQuery, 5)
             setRecallResult(JSON.stringify(data, null, 2))
-        } catch (err: any) {
-            setRecallError(err.message)
+        } catch (err: unknown) {
+            setRecallError(err instanceof Error ? err.message : String(err))
         } finally {
             setRecallLoading(false)
         }
-    }, [delegateKey, serverUrl, recallQuery, accountObjectId])
+    }, [memwal, recallQuery])
 
     const runAnalyze = useCallback(async () => {
-        if (!delegateKey) return
+        if (!memwal) return
         setAnalyzeLoading(true)
         setAnalyzeResult(null)
         setAnalyzeError(null)
         try {
-            const data = await apiCall(delegateKey, serverUrl, '/api/analyze', {
-                text: analyzeText,
-            }, accountObjectId || undefined)
+            const data = await memwal.analyze(analyzeText)
             setAnalyzeResult(JSON.stringify(data, null, 2))
-        } catch (err: any) {
-            setAnalyzeError(err.message)
+        } catch (err: unknown) {
+            setAnalyzeError(err instanceof Error ? err.message : String(err))
         } finally {
             setAnalyzeLoading(false)
         }
-    }, [delegateKey, serverUrl, analyzeText, accountObjectId])
+    }, [memwal, analyzeText])
 
     const runAsk = useCallback(async () => {
-        if (!delegateKey) return
+        if (!memwal) return
         if (!askLlmKey.trim()) {
             setAskError('Please enter your LLM API key (OpenAI or OpenRouter)')
             return
@@ -231,19 +261,15 @@ export default function Playground() {
         setAskError(null)
 
         try {
-            // Phase 1: Recall memories
+            // Phase 1: Recall memories using SDK
             setAskPhase('step 1/3 — recalling memories from memwal...')
-            const recallData = await apiCall(delegateKey, serverUrl, '/api/recall', {
-                query: askQuestion,
-                limit: 5,
-            }, accountObjectId || undefined)
-
+            const recallData = await memwal.recall(askQuestion, 5)
             const memories = recallData.results || []
 
             // Phase 2: Build prompt with memory context
             setAskPhase(`step 2/3 — injecting ${memories.length} memories into prompt...`)
             const memoryContext = memories.length > 0
-                ? `The following are known facts about this user (from encrypted Walrus storage):\n${memories.map((m: any) => `- ${m.text} (relevance: ${(((1 - m.distance) * 100)).toFixed(0)}%)`).join('\n')}`
+                ? `The following are known facts about this user (from encrypted Walrus storage):\n${memories.map((m) => `- ${m.text} (relevance: ${(((1 - m.distance) * 100)).toFixed(0)}%)`).join('\n')}`
                 : 'No memories found for this user yet.'
 
             const systemPrompt = `You are a helpful AI assistant. The user has a personal memory store powered by memwal (encrypted, stored on Walrus blockchain).\n\n${memoryContext}\n\nUse the above context to provide personalized answers. If the memories don't contain relevant information, say so honestly.`
@@ -283,13 +309,117 @@ export default function Playground() {
 
             setAskPhase('')
             setAskResult({ answer, memories, systemPrompt })
-        } catch (err: any) {
+        } catch (err: unknown) {
             setAskPhase('')
-            setAskError(err.message)
+            setAskError(err instanceof Error ? err.message : String(err))
         } finally {
             setAskLoading(false)
         }
-    }, [delegateKey, serverUrl, askQuestion, askLlmKey, askLlmProvider])
+    }, [memwal, askQuestion, askLlmKey, askLlmProvider])
+
+    // ---- Full Client-Side Mode (MemWalManual) ----
+
+    const memwalManual = useMemo(() => {
+        if (!delegateKey || !address || !askLlmKey.trim()) return null
+        try {
+            const embeddingApiBase = askLlmProvider === 'openrouter'
+                ? 'https://openrouter.ai/api/v1'
+                : 'https://api.openai.com/v1'
+            return MemWalManual.create({
+                key: delegateKey,
+                serverUrl,
+                walletSigner: {
+                    address,
+                    signAndExecuteTransaction: (input) => signAndExecuteTransaction({ transaction: input.transaction }),
+                    signPersonalMessage: (input) => signPersonalMessage({ message: input.message }),
+                },
+                suiClient,
+                embeddingApiKey: askLlmKey.trim(),
+                embeddingApiBase,
+                packageId: config.memwalPackageId,
+                registryId: config.memwalRegistryId,
+                suiNetwork: config.suiNetwork,
+            })
+        } catch {
+            return null
+        }
+    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider])
+
+    const runFullRemember = useCallback(async () => {
+        if (!memwalManual) return
+        setFullRememberLoading(true)
+        setFullRememberResult(null)
+        setFullRememberError(null)
+        try {
+            setFullRememberPhase('step 1/4 — embedding text (OpenAI)...')
+            // SDK handles: embed → SEAL encrypt → Walrus upload → register
+            const data = await memwalManual.rememberManual(fullRememberText)
+            setFullRememberPhase('')
+            setFullRememberResult(JSON.stringify(data, null, 2))
+        } catch (err: unknown) {
+            setFullRememberPhase('')
+            setFullRememberError(err instanceof Error ? err.message : String(err))
+        } finally {
+            setFullRememberLoading(false)
+        }
+    }, [memwalManual, fullRememberText])
+
+    const runFullRecall = useCallback(async () => {
+        if (!memwalManual) return
+        setFullRecallLoading(true)
+        setFullRecallResult(null)
+        setFullRecallError(null)
+        try {
+            setFullRecallPhase('embed → search → Walrus download → SEAL decrypt (wallet popup)...')
+
+            // DEBUG: Step-by-step trace
+            console.log('[DEBUG] === recallManual START ===')
+            console.log('[DEBUG] query:', fullRecallQuery)
+
+            // Step 1: embed (via server)
+            console.log('[DEBUG] Step 1: Embedding query...')
+            // @ts-ignore - access private method for debugging
+            const vector = await memwalManual.embed(fullRecallQuery)
+            console.log('[DEBUG] Step 1 OK: vector dims =', vector.length)
+
+            // Step 2: search server
+            console.log('[DEBUG] Step 2: Searching server...')
+            // @ts-ignore - access private method for debugging
+            const searchResult = await memwalManual.signedRequest('POST', '/api/recall/manual', { vector, limit: 5 })
+            console.log('[DEBUG] Step 2 OK: searchResult =', JSON.stringify(searchResult))
+
+            // Step 3: Download blobs
+            const hits = (searchResult as any).results || []
+            console.log('[DEBUG] Step 3: Downloading', hits.length, 'blobs from Walrus...')
+            for (const hit of hits) {
+                try {
+                    console.log('[DEBUG]   downloading blob:', hit.blob_id)
+                    // @ts-ignore
+                    const blobData = await memwalManual.walrusDownload(hit.blob_id)
+                    console.log('[DEBUG]   OK: blob', hit.blob_id, 'size =', blobData.length, 'bytes')
+                } catch (err) {
+                    console.error('[DEBUG]   FAIL: blob', hit.blob_id, err)
+                }
+            }
+
+            // Now run the actual SDK method
+            console.log('[DEBUG] Running actual recallManual...')
+            const data = await memwalManual.recallManual(fullRecallQuery, 5)
+            console.log('[DEBUG] recallManual result:', JSON.stringify(data))
+            console.log('[DEBUG] === recallManual END ===')
+
+            setFullRecallPhase('')
+            setFullRecallResult(JSON.stringify(data, null, 2))
+        } catch (err: unknown) {
+            console.error('[DEBUG] recallManual THREW:', err)
+            setFullRecallPhase('')
+            setFullRecallError(err instanceof Error ? err.message : String(err))
+        } finally {
+            setFullRecallLoading(false)
+        }
+    }, [memwalManual, fullRecallQuery])
+
+
 
     // ---- Render ----
 
@@ -331,7 +461,8 @@ export default function Playground() {
                     <h2>interactive demo</h2>
                     <p>
                         try each memwal SDK operation live. click{' '}
-                        <strong>▶ run</strong> to execute against your server.
+                        <strong>▶ run</strong> to execute against your server
+                        using <code>@cmdoss/memwal-v2</code>.
                     </p>
                 </div>
 
@@ -343,6 +474,9 @@ export default function Playground() {
                     <div className="demo-server-tag">
                         key: <span style={{ color: 'var(--text-muted)' }}>{keyPreview}</span>
                     </div>
+                    <div className="demo-server-tag">
+                        SDK: <span style={{ color: 'var(--success)' }}>@cmdoss/memwal-v2</span>
+                    </div>
                 </div>
 
                 {/* Step 1: Health */}
@@ -350,10 +484,14 @@ export default function Playground() {
                     number={1}
                     title="health check"
                     description="verify the memwal server is running"
-                    code={`// Check server health
-const resp = await fetch("${serverUrl}/health")
-const data = await resp.json()
-console.log(data)
+                    code={`import { MemWal } from "@cmdoss/memwal-v2"
+
+const memwal = MemWal.create({
+  key: "${keyPreview}",
+  serverUrl: "${serverUrl}",
+})
+
+const data = await memwal.health()
 // → { status: "ok", version: "0.1.0" }`}
                     onRun={runHealth}
                     result={healthResult}
@@ -366,15 +504,10 @@ console.log(data)
                     number={2}
                     title="remember"
                     description="store a memory → embed → encrypt → Walrus"
-                    code={`const memwal = memwal.create({
-  key: "${keyPreview}",
-  serverUrl: "${serverUrl}",
-})
-
-const result = await memwal.remember(
+                    code={`const result = await memwal.remember(
   "${rememberText.slice(0, 60)}..."
 )
-// → { id, blob_id, owner }`}
+// → { id, blobId, owner }`}
                     onRun={runRemember}
                     result={rememberResult}
                     resultLabel="stored on Walrus (encrypted)"
@@ -398,9 +531,9 @@ const result = await memwal.remember(
                     number={3}
                     title="recall"
                     description="semantic search → download → decrypt"
-                    code={`const result = await memwal.recall("${recallQuery}")
-// Server: embed query → cosine search → download blob → decrypt
-// → { results: [{ text, blob_id, distance }], total }`}
+                    code={`const result = await memwal.recall("${recallQuery}", 5)
+// Server: embed query → cosine search → download → decrypt
+// → { results: [{ text, blobId, distance }], total }`}
                     onRun={runRecall}
                     result={recallResult}
                     resultLabel="memories found (decrypted)"
@@ -426,7 +559,7 @@ const result = await memwal.remember(
   "${analyzeText.slice(0, 50)}..."
 )
 // Server: LLM extracts facts → embed → encrypt → Walrus → store
-// → { facts: [{ text, id, blob_id }], total, owner }`}
+// → { facts: [{ text, id, blobId }], total, owner }`}
                     onRun={runAnalyze}
                     result={analyzeResult}
                     resultLabel="facts extracted & stored"
@@ -445,11 +578,68 @@ const result = await memwal.remember(
                     </div>
                 </DemoStep>
 
-                {/* Step 5: Ask AI — true middleware pattern */}
+                {/* Step 5: Configure LLM API Key */}
                 <div className="card demo-step">
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">5</div>
+                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>5</div>
+                            <div>
+                                <div className="card-title">configure your LLM</div>
+                                <div className="card-subtitle">
+                                    memwal is just the memory layer — you bring your own LLM
+                                </div>
+                            </div>
+                        </div>
+                        {askLlmKey.trim() && (
+                            <span style={{ fontSize: '0.78rem', color: 'var(--success)', fontWeight: 500 }}>
+                                ✓ ready
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="demo-info-panel">
+                        <div className="demo-info-label">
+                            your LLM API key (not stored, client-side only)
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                            <select
+                                className="input"
+                                value={askLlmProvider}
+                                onChange={(e) => setAskLlmProvider(e.target.value as 'openai' | 'openrouter')}
+                                style={{ width: 140, flexShrink: 0 }}
+                            >
+                                <option value="openai">OpenAI</option>
+                                <option value="openrouter">OpenRouter</option>
+                            </select>
+                            <input
+                                className="input"
+                                type="password"
+                                value={askLlmKey}
+                                onChange={(e) => setAskLlmKey(e.target.value)}
+                                placeholder={askLlmProvider === 'openai' ? 'sk-...' : 'sk-or-v1-...'}
+                                style={{ flex: 1 }}
+                            />
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            required for steps 6–8. your key stays in this browser tab — never sent to memwal.
+                        </div>
+                    </div>
+
+                    <pre className="demo-code-block">
+                        <code>{`// memwal doesn't include an LLM — you choose your own.
+// steps 6–8 use this key for:
+//   • ask AI: recalls memories → injects into your LLM prompt
+//   • full client-side: embeds text via your OpenAI / OpenRouter key
+//
+// your key is never sent to memwal servers.`}</code>
+                    </pre>
+                </div>
+
+                {/* Step 6: Ask AI — true middleware pattern */}
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                    <div className="card-header">
+                        <div className="demo-step-header-row">
+                            <div className="demo-step-badge demo-step-badge--highlight">6</div>
                             <div>
                                 <div className="card-title">ask AI (with memory)</div>
                                 <div className="card-subtitle">
@@ -471,35 +661,6 @@ const result = await memwal.remember(
                         </button>
                     </div>
 
-                    {/* LLM API Key input */}
-                    <div className="demo-info-panel">
-                        <div className="demo-info-label">
-                            your LLM API key (not stored, client-side only)
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                            <select
-                                className="input"
-                                value={askLlmProvider}
-                                onChange={(e) => setAskLlmProvider(e.target.value as any)}
-                                style={{ width: 140, flexShrink: 0 }}
-                            >
-                                <option value="openai">OpenAI</option>
-                                <option value="openrouter">OpenRouter</option>
-                            </select>
-                            <input
-                                className="input"
-                                type="password"
-                                value={askLlmKey}
-                                onChange={(e) => setAskLlmKey(e.target.value)}
-                                placeholder={askLlmProvider === 'openai' ? 'sk-...' : 'sk-or-v1-...'}
-                                style={{ flex: 1 }}
-                            />
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                            memwal is just the memory layer. you bring your own LLM.
-                        </div>
-                    </div>
-
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>your question:</label>
                         <input
@@ -518,7 +679,7 @@ import { generateText } from "ai"
 // wrap your model with memwal — that's it
 const model = withMemWal(openai("gpt-4o-mini"), {
   key: delegateKeyHex,
-  serverUrl: "https://your-memwal-server.com"
+  serverUrl: "${serverUrl}"
 })
 
 // use as normal — memwal handles memory automatically
@@ -554,7 +715,7 @@ const { text } = await generateText({
                                 <div className="demo-result-label" style={{ marginBottom: 10 }}>
                                     {askResult.memories.length} memories injected as context
                                 </div>
-                                {askResult.memories.map((m: any, i: number) => (
+                                {askResult.memories.map((m, i) => (
                                     <div key={i} className="demo-memory-item">
                                         <span style={{ color: 'var(--success)', flexShrink: 0 }}>
                                             {((1 - m.distance) * 100).toFixed(0)}%
@@ -590,39 +751,157 @@ const { text } = await generateText({
                     )}
                 </div>
 
-                {/* Architecture overview */}
-                <div className="card" style={{ marginBottom: 40 }}>
-                    <div className="card-header">
-                        <div>
-                            <div className="card-title">architecture flow</div>
-                        </div>
-                    </div>
-                    <pre className="demo-code-block" style={{ padding: 20, fontSize: '0.75rem', lineHeight: 1.8 }}>
-                        <code>{`┌──────────┐     Ed25519 signed request     ┌──────────────┐
-│  Client  │ ──────────────────────────────▶ │  Rust Server │
-│  (SDK)   │                                 │  (Axum)      │
-└──────────┘                                 └──────┬───────┘
-                                                    │
-                                    ┌───────────────┼───────────────┐
-                                    ▼               ▼               ▼
-                              ┌──────────┐   ┌──────────┐   ┌──────────┐
-                              │ Embed    │   │ Encrypt  │   │ Walrus   │
-                              │(OpenAI)  │   │(AES-256) │   │ (Store)  │
-                              └────┬─────┘   └────┬─────┘   └────┬─────┘
-                                   │              │              │
-                                   ▼              │              │
-                              ┌──────────┐        │              │
-                              │ Vector   │◀───────┘              │
-                              │ DB       │◀──────────────────────┘
-                              │ (SQLite) │   blob_id + enc_key
-                              └──────────┘
 
-  remember: text → embed → encrypt → Walrus upload → store vector
-  recall:   query → embed → cosine search → download → decrypt
-  analyze:  text → LLM extract facts → remember each fact
-  ask:      question → recall memories → inject context → LLM answer`}</code>
+
+                {/* Step 7: Remember (full client-side) */}
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                    <div className="card-header">
+                        <div className="demo-step-header-row">
+                            <div className="demo-step-badge demo-step-badge--highlight">7</div>
+                            <div>
+                                <div className="card-title">remember (full client-side)</div>
+                                <div className="card-subtitle">
+                                    SDK: embed → SEAL encrypt → Walrus upload → register vector
+                                </div>
+                            </div>
+                        </div>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={runFullRemember}
+                            disabled={fullRememberLoading || !memwalManual}
+                            style={{ minWidth: 80 }}
+                        >
+                            {fullRememberLoading ? (
+                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                            ) : (
+                                '▶ run'
+                            )}
+                        </button>
+                    </div>
+
+                    <div className="input-group" style={{ marginBottom: 12 }}>
+                        <label>memory text:</label>
+                        <textarea
+                            className="input"
+                            rows={2}
+                            value={fullRememberText}
+                            onChange={(e) => setFullRememberText(e.target.value)}
+                            style={{ resize: 'vertical' }}
+                        />
+                    </div>
+
+                    <pre className={`demo-code-block${fullRememberResult || fullRememberError || fullRememberPhase ? ' demo-code-block--spaced' : ''}`}>
+                        <code>{`import { MemWalManual } from "@cmdoss/memwal-v2/manual"
+
+const memwal = MemWalManual.create({
+  key: delegateKeyHex,
+  walletSigner: {           // uses connected wallet!
+    address,                // from useCurrentAccount()
+    signAndExecuteTransaction,
+    signPersonalMessage,
+  },
+  embeddingApiKey: "sk-or-v1-...",
+  embeddingApiBase: "https://openrouter.ai/api/v1",
+  packageId: "${config.memwalPackageId.slice(0, 10)}...",
+  registryId: "${config.memwalRegistryId.slice(0, 10)}...",
+})
+
+// SDK handles ALL 4 steps client-side:
+// 1. embed text (via OpenRouter)
+// 2. SEAL encrypt (wallet signs)
+// 3. upload to Walrus (wallet signs)
+// 4. register vector with server
+await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
                     </pre>
+
+                    {fullRememberPhase && (
+                        <div className="demo-phase-indicator">
+                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            {fullRememberPhase}
+                        </div>
+                    )}
+
+                    {fullRememberResult && (
+                        <div className="demo-result-panel">
+                            <div className="demo-result-label">stored (SEAL encrypted → Walrus → vector registered)</div>
+                            <pre className="demo-result-pre">{fullRememberResult}</pre>
+                        </div>
+                    )}
+                    {fullRememberError && (
+                        <div className="demo-error-panel">
+                            <div className="demo-error-label">error</div>
+                            <pre className="demo-error-pre">{fullRememberError}</pre>
+                        </div>
+                    )}
                 </div>
+
+                {/* Step 8: Recall (full client-side) */}
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                    <div className="card-header">
+                        <div className="demo-step-header-row">
+                            <div className="demo-step-badge demo-step-badge--highlight">8</div>
+                            <div>
+                                <div className="card-title">recall (full client-side)</div>
+                                <div className="card-subtitle">
+                                    SDK: embed query → search → Walrus download → SEAL decrypt
+                                </div>
+                            </div>
+                        </div>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            onClick={runFullRecall}
+                            disabled={fullRecallLoading || !memwalManual}
+                            style={{ minWidth: 80 }}
+                        >
+                            {fullRecallLoading ? (
+                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                            ) : (
+                                '▶ run'
+                            )}
+                        </button>
+                    </div>
+
+                    <div className="input-group" style={{ marginBottom: 12 }}>
+                        <label>search query:</label>
+                        <input
+                            className="input"
+                            value={fullRecallQuery}
+                            onChange={(e) => setFullRecallQuery(e.target.value)}
+                        />
+                    </div>
+
+                    <pre className={`demo-code-block${fullRecallResult || fullRecallError || fullRecallPhase ? ' demo-code-block--spaced' : ''}`}>
+                        <code>{`// SDK handles ALL 4 steps client-side:
+// 1. embed query (OpenAI)
+// 2. search server for matching vectors
+// 3. download encrypted blobs from Walrus
+// 4. SEAL decrypt each result
+const result = await memwal.recallManual("${fullRecallQuery}", 5)
+// → { results: [{ blobId, text, distance }], total }`}</code>
+                    </pre>
+
+                    {fullRecallPhase && (
+                        <div className="demo-phase-indicator">
+                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            {fullRecallPhase}
+                        </div>
+                    )}
+
+                    {fullRecallResult && (
+                        <div className="demo-result-panel">
+                            <div className="demo-result-label">memories found (downloaded + decrypted client-side)</div>
+                            <pre className="demo-result-pre">{fullRecallResult}</pre>
+                        </div>
+                    )}
+                    {fullRecallError && (
+                        <div className="demo-error-panel">
+                            <div className="demo-error-label">error</div>
+                            <pre className="demo-error-pre">{fullRecallError}</pre>
+                        </div>
+                    )}
+                </div>
+
+
             </div>
         </>
     )

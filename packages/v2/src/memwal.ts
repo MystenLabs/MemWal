@@ -34,7 +34,12 @@ import type {
     EmbedResult,
     AnalyzeResult,
     HealthResult,
+    RememberManualOptions,
+    RememberManualResult,
+    RecallManualOptions,
+    RecallManualResult,
 } from "./types.js";
+import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -46,14 +51,6 @@ async function getEd() {
         _ed = await import("@noble/ed25519");
     }
     return _ed;
-}
-
-let _crypto: typeof import("crypto") | null = null;
-async function getCrypto() {
-    if (!_crypto) {
-        _crypto = await import("crypto");
-    }
-    return _crypto;
 }
 
 // ============================================================
@@ -122,6 +119,67 @@ export class MemWal {
         return this.signedRequest<RecallResult>("POST", "/api/recall", {
             query,
             limit,
+        });
+    }
+
+    // ============================================================
+    // Manual API (user handles SEAL + embedding + Walrus)
+    // ============================================================
+
+    /**
+     * Remember (manual mode) — user handles SEAL encrypt, embedding,
+     * and Walrus upload externally. Server only stores the vector ↔ blobId mapping.
+     *
+     * @param opts.blobId - Walrus blob ID (user already uploaded encrypted data)
+     * @param opts.vector - Embedding vector (user already generated, e.g. 1536-dim)
+     * @returns RememberManualResult with id, blobId, owner
+     *
+     * @example
+     * ```typescript
+     * // 1. User encrypts + uploads + embeds on their own
+     * const blobId = await myWalrusUpload(sealEncryptedData)
+     * const vector = await myEmbeddingModel.embed(text)
+     *
+     * // 2. Register vector mapping with server
+     * const result = await memwal.rememberManual({ blobId, vector })
+     * ```
+     */
+    async rememberManual(opts: RememberManualOptions): Promise<RememberManualResult> {
+        return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
+            blob_id: opts.blobId,
+            vector: opts.vector,
+        });
+    }
+
+    /**
+     * Recall (manual mode) — user provides a pre-computed query vector.
+     * Server returns matching blobIds + distances.
+     * User then downloads from Walrus + SEAL decrypts on their own.
+     *
+     * @param opts.vector - Pre-computed query embedding vector
+     * @param opts.limit - Max results (default: 10)
+     * @returns RecallManualResult with blobId + distance pairs (no decrypted text)
+     *
+     * @example
+     * ```typescript
+     * // 1. User generates query embedding
+     * const queryVector = await myEmbeddingModel.embed("food allergies")
+     *
+     * // 2. Search for similar vectors
+     * const hits = await memwal.recallManual({ vector: queryVector })
+     *
+     * // 3. User downloads + decrypts each result
+     * for (const hit of hits.results) {
+     *     const encrypted = await walrus.download(hit.blob_id)
+     *     const plaintext = await seal.decrypt(encrypted)
+     *     console.log(plaintext, hit.distance)
+     * }
+     * ```
+     */
+    async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
+        return this.signedRequest<RecallManualResult>("POST", "/api/recall/manual", {
+            vector: opts.vector,
+            limit: opts.limit ?? 10,
         });
     }
 
@@ -200,14 +258,10 @@ export class MemWal {
         body: object,
     ): Promise<T> {
         const ed = await getEd();
-        const crypto = await getCrypto();
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const bodyStr = JSON.stringify(body);
-        const bodySha256 = crypto
-            .createHash("sha256")
-            .update(bodyStr)
-            .digest("hex");
+        const bodySha256 = await sha256hex(bodyStr);
 
         // Build message to sign
         const message = `${timestamp}.${method}.${path}.${bodySha256}`;
@@ -237,23 +291,4 @@ export class MemWal {
 
         return res.json() as Promise<T>;
     }
-}
-
-// ============================================================
-// Hex Helpers
-// ============================================================
-
-function hexToBytes(hex: string): Uint8Array {
-    const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-    const bytes = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < bytes.length; i++) {
-        bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
-    }
-    return bytes;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-    return Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
 }
