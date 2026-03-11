@@ -89,7 +89,8 @@ export function getMemWalModel(modelId: string, memwalKey?: string) {
     serverUrl: memwalServerUrl || "http://localhost:3001",
     maxMemories: 5,
     autoSave: true,
-    minRelevance: 0.3,
+    minRelevance: 0,
+    debug: true,
   });
 }
 
