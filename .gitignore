@@ -97,3 +97,6 @@ target/
 
 # x-wallet
 x-wallet/
+
+# Local system documents
+whole-system-documents/

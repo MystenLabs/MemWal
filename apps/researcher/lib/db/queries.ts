@@ -10,6 +10,8 @@ import {
   gte,
   inArray,
   lt,
+  lte,
+  sql,
   type SQL,
 } from "drizzle-orm";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
@@ -494,15 +496,123 @@ export async function createSourceChunks({
     section: string;
     content: string;
     embedding: number[];
+    chunkIndex: number;
+    tokenCount: number;
     expiresAt: Date;
   }[];
 }) {
   try {
-    return await db.insert(sourceChunk).values(chunks);
+    return await db.insert(sourceChunk).values(
+      chunks.map((chunk) => ({
+        sourceId: chunk.sourceId,
+        section: chunk.section,
+        content: chunk.content,
+        embedding: chunk.embedding,
+        chunkIndex: chunk.chunkIndex,
+        tokenCount: chunk.tokenCount,
+        searchVector: sql`to_tsvector('english', ${chunk.content})`,
+        expiresAt: chunk.expiresAt,
+      }))
+    );
   } catch (_error) {
     throw new ChatbotError(
       "bad_request:database",
       "Failed to create source chunks"
+    );
+  }
+}
+
+export async function getChunksByIds({
+  chunkIds,
+  userId,
+}: {
+  chunkIds: string[];
+  userId: string;
+}) {
+  if (chunkIds.length === 0) return [];
+
+  try {
+    return await db
+      .select({
+        id: sourceChunk.id,
+        section: sourceChunk.section,
+        content: sourceChunk.content,
+        sourceId: sourceChunk.sourceId,
+        sourceTitle: source.title,
+        chunkIndex: sourceChunk.chunkIndex,
+        tokenCount: sourceChunk.tokenCount,
+      })
+      .from(sourceChunk)
+      .innerJoin(source, eq(sourceChunk.sourceId, source.id))
+      .where(
+        and(
+          inArray(sourceChunk.id, chunkIds),
+          eq(source.userId, userId),
+          gt(sourceChunk.expiresAt, new Date())
+        )
+      )
+      .orderBy(asc(sourceChunk.chunkIndex));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get chunks by ids"
+    );
+  }
+}
+
+export async function getChunkNeighbors({
+  chunkId,
+  windowSize,
+  userId,
+}: {
+  chunkId: string;
+  windowSize: number;
+  userId: string;
+}) {
+  try {
+    // Look up the target chunk's sourceId and chunkIndex
+    const [target] = await db
+      .select({
+        sourceId: sourceChunk.sourceId,
+        chunkIndex: sourceChunk.chunkIndex,
+      })
+      .from(sourceChunk)
+      .innerJoin(source, eq(sourceChunk.sourceId, source.id))
+      .where(
+        and(
+          eq(sourceChunk.id, chunkId),
+          eq(source.userId, userId),
+          gt(sourceChunk.expiresAt, new Date())
+        )
+      )
+      .limit(1);
+
+    if (!target) return [];
+
+    // Get chunks within the window range from the same source
+    return await db
+      .select({
+        id: sourceChunk.id,
+        section: sourceChunk.section,
+        content: sourceChunk.content,
+        sourceId: sourceChunk.sourceId,
+        chunkIndex: sourceChunk.chunkIndex,
+        tokenCount: sourceChunk.tokenCount,
+      })
+      .from(sourceChunk)
+      .where(
+        and(
+          eq(sourceChunk.sourceId, target.sourceId),
+          gte(sourceChunk.chunkIndex, target.chunkIndex - windowSize),
+          lte(sourceChunk.chunkIndex, target.chunkIndex + windowSize),
+          gt(sourceChunk.expiresAt, new Date())
+        )
+      )
+      .orderBy(asc(sourceChunk.chunkIndex));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get chunk neighbors"
     );
   }
 }
