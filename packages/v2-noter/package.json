@@ -15,6 +15,8 @@
     "clean": "rm -rf .next out build"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.41",
+    "@ai-sdk/react": "3.0.39",
     "@base-ui/react": "^1.2.0",
     "@cmdoss/memwal-v2": "file:../v2",
     "@hookform/resolvers": "^5.2.2",
@@ -29,11 +31,13 @@
     "@lexical/text": "^0.41.0",
     "@lexical/utils": "^0.41.0",
     "@mysten/sui": "^2.5.0",
+    "@mysten/wallet-standard": "^0.15.0",
     "@mysten/zklogin": "^0.8.1",
     "@tanstack/react-query": "^5.90.21",
     "@trpc/client": "^11.10.0",
     "@trpc/react-query": "^11.10.0",
     "@trpc/server": "^11.10.0",
+    "ai": "6.0.37",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
