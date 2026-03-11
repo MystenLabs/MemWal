@@ -71,12 +71,10 @@ COPY --from=builder /app/packages/v2-noter/.next/standalone ./
 COPY --from=builder /app/packages/v2-noter/.next/static ./.next/static
 COPY --from=builder /app/packages/v2-noter/public ./public
 
-# Copy DB migration files + drizzle deps (not included in standalone output)
+# Copy DB migration files + migrate script (not included in standalone output)
 COPY --from=builder /app/packages/v2-noter/package/shared/db/ ./package/shared/db/
 COPY --from=builder /app/packages/v2-noter/package/shared/lib/db/ ./package/shared/lib/db/
-COPY --from=builder /app/packages/v2-noter/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/packages/v2-noter/node_modules/drizzle-orm ./node_modules/drizzle-orm
-COPY --from=builder /app/packages/v2-noter/node_modules/drizzle-kit ./node_modules/drizzle-kit
 COPY --from=builder /app/packages/v2-noter/node_modules/postgres ./node_modules/postgres
 COPY --from=builder /app/packages/v2-noter/node_modules/dotenv ./node_modules/dotenv
 
@@ -88,4 +86,4 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx drizzle-kit push && node server.js"]
+CMD ["sh", "-c", "tsx package/shared/lib/db/migrate.ts && node server.js"]
