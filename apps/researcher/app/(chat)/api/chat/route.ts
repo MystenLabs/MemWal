@@ -19,11 +19,10 @@ import { allowedModelIds } from "@/lib/ai/models";
 import { researchPrompt } from "@/lib/ai/prompts";
 import {
   extractUrlsFromText,
-  processSource,
   type SourceInput,
 } from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
-import { getResearchTools } from "@/lib/ai/tools/research-tools";
+import { getResearchTools, processSource } from "@/lib/rag";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -243,7 +242,7 @@ export async function POST(request: Request) {
           stopWhen: stepCountIs(5),
           experimental_activeTools: isReasoningModel
             ? []
-            : ["listSources", "searchSourceContent"],
+            : ["listSources", "searchSourceContent", "getChunkContent", "getSourceContext"],
           tools: researchTools,
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,
