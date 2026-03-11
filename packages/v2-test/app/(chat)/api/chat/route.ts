@@ -191,7 +191,7 @@ export async function POST(request: Request) {
         });
 
         dataStream.merge(
-          result.toUIMessageStream({ sendReasoning: isReasoningModel })
+          result.toUIMessageStream({ sendReasoning: isReasoningModel, sendFinish: false })
         );
 
         if (titlePromise) {
