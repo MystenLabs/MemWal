@@ -1,6 +1,6 @@
 import type { InferUITool, UIMessage } from "ai";
 import { z } from "zod";
-import type { getResearchTools } from "./ai/tools/research-tools";
+import type { getResearchTools } from "./rag/tools";
 
 export type DataPart = { type: "append-message"; message: string };
 

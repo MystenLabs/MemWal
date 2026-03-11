@@ -1,5 +1,5 @@
 import { auth } from "@/app/(auth)/auth";
-import { processSource } from "@/lib/ai/source-processing";
+import { processSource } from "@/lib/rag";
 import { ChatbotError } from "@/lib/errors";
 
 export const maxDuration = 120; // source processing can take a while

@@ -1,5 +1,6 @@
 import type { InferSelectModel } from "drizzle-orm";
 import {
+  customType,
   integer,
   json,
   pgTable,
@@ -11,6 +12,13 @@ import {
   vector,
   foreignKey,
 } from "drizzle-orm/pg-core";
+
+/** PostgreSQL tsvector type for full-text search */
+const tsvectorType = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 // ============================================================
 // Core tables (from v2-test base)
@@ -100,6 +108,9 @@ export const sourceChunk = pgTable("SourceChunk", {
   section: text("section").notNull(),
   content: text("content").notNull(),
   embedding: vector("embedding", { dimensions: 1536 }),
+  chunkIndex: integer("chunkIndex").notNull().default(0),
+  tokenCount: integer("tokenCount").notNull().default(0),
+  searchVector: tsvectorType("searchVector"),
   expiresAt: timestamp("expiresAt").notNull(),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
