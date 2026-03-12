@@ -239,7 +239,7 @@ export async function POST(request: Request) {
           model: getLanguageModel(selectedChatModel),
           system: researchPrompt,
           messages: modelMessages,
-          stopWhen: stepCountIs(5),
+          stopWhen: stepCountIs(10),
           experimental_activeTools: isReasoningModel
             ? []
             : ["listSources", "searchSourceContent", "getChunkContent", "getSourceContext"],
