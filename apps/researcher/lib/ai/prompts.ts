@@ -27,10 +27,13 @@ Follow this multi-step approach — you MUST complete steps 1 through 3 before a
 
 4. **EXPAND**: Use getSourceContext() if a chunk references context from neighboring sections.
 
-5. **STOP**: If search scores are all below 0.4, the sources likely don't cover this topic. Say so honestly.
+5. **GAP**: If search scores are all below 0.4, the sources don't cover this topic. In this case:
+   - Still answer using your general knowledge — be helpful first
+   - Clearly note which parts come from the user's sources vs. your general knowledge
+   - Suggest the user can provide additional sources (URLs or PDFs) for more grounded, source-backed answers on this specific topic
 
 ## CRITICAL RULE
-You MUST call searchSourceContent and then getChunkContent before writing any answer that draws on user sources. Answering from listSources summaries/claims alone produces shallow, unreferenced responses. Always read the actual text.
+You MUST call searchSourceContent and then getChunkContent before writing any answer that draws on user sources. Answering from listSources summaries/claims alone produces shallow, unreferenced responses. Always read the actual text. However, if sources don't cover the topic, you should still engage with the question using your own knowledge — just be transparent about the source gap.
 
 ## Anti-patterns — Do NOT:
 - Answer research questions using only listSources metadata (summaries/claims)
@@ -38,6 +41,7 @@ You MUST call searchSourceContent and then getChunkContent before writing any an
 - Read all chunks when 2-3 answer the question
 - Guess at content you haven't retrieved
 - Ignore relevance scores — they tell you how good the match is
+- Refuse to answer or go silent just because sources don't cover a topic — use your knowledge and be transparent
 
 ## Automatic Source Processing
 When the user includes URLs or attaches PDFs, those sources are automatically processed and indexed before you respond. Use searchSourceContent to access the content.
@@ -48,6 +52,30 @@ When the user includes URLs or attaches PDFs, those sources are automatically pr
 - Keep responses concise and well-structured
 - Use markdown formatting for readability
 `;
+
+const recallSprintGuidance = `## Sprint Memory Recall
+
+You have access to a **recallSprint** tool that searches long-term research memory (MemWal) for detailed findings from previous sprints.
+
+The sprint metadata above (titles, summaries, source lists) is for orientation only — the full reports, data points, citations, and detailed findings are stored in MemWal.
+
+**ALWAYS use recallSprint when:**
+- The user asks ANY question related to previous sprint topics
+- You need specific findings, facts, quotes, or data from past research
+- You need to cross-reference findings across multiple sprints
+- You want to ground your answer in actual research content
+
+**Only skip recallSprint when:**
+- The user asks a general "what did I research?" question (summaries suffice for listing topics)
+- The user is starting a completely new topic unrelated to any sprint
+- The user explicitly says they don't need past research context
+
+**Strategy:** Use the sprint titles and summaries to construct targeted recallSprint queries. For example, if a sprint is titled "Global Green Energy Landscape", search for specific sub-topics like "solar panel efficiency trends" rather than the full title.
+`;
+
+export function getSprintResumePrompt(sprintContextBlock: string): string {
+  return researchPrompt + "\n\n" + sprintContextBlock + "\n\n" + recallSprintGuidance;
+}
 
 export const titlePrompt = `Generate a short chat title (2-5 words) summarizing the user's message.
 
