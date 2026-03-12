@@ -235,8 +235,33 @@ export class MemWal {
             throw new Error(`MemWal API error (${res.status}): ${errText}`);
         }
 
-        return res.json() as Promise<T>;
+        const json = await res.json();
+        return snakeToCamel(json) as T;
     }
+}
+
+// ============================================================
+// Snake_case → camelCase normalizer
+// ============================================================
+
+/**
+ * Recursively converts snake_case keys to camelCase.
+ * The Rust server uses serde's default snake_case serialization
+ * (e.g. blob_id) but the SDK types expect camelCase (e.g. blobId).
+ */
+function snakeToCamel(obj: unknown): unknown {
+    if (Array.isArray(obj)) {
+        return obj.map(snakeToCamel);
+    }
+    if (obj !== null && typeof obj === "object") {
+        const result: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+            const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+            result[camelKey] = snakeToCamel(value);
+        }
+        return result;
+    }
+    return obj;
 }
 
 // ============================================================
