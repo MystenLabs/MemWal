@@ -1,12 +1,14 @@
 import type { UseChatHelpers } from "@ai-sdk/react";
 import { ArrowDownIcon } from "lucide-react";
-import { memo, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useMessages } from "@/hooks/use-messages";
+import { useResearchActivity } from "@/hooks/use-research-activity";
 import type { ChatMessage } from "@/lib/types";
 import { useDataStream } from "../data/data-stream-provider";
 import { Greeting } from "./greeting";
-import { PreviewMessage, ThinkingMessage } from "./message";
-import { SourceProcessingStatus, useSourceProcessing } from "./source-processing-status";
+import { PreviewMessage } from "./message";
+import { ResearchActivity } from "./research-activity";
+import { useSourceProcessing } from "./source-processing-provider";
 
 type MessagesProps = {
   addToolApprovalResponse: UseChatHelpers<ChatMessage>["addToolApprovalResponse"];
@@ -18,9 +20,6 @@ type MessagesProps = {
   isReadonly: boolean;
   selectedModelId: string;
 };
-
-// Memoize to avoid re-renders on every streaming token
-const MemoizedSourceProcessingStatus = memo(SourceProcessingStatus);
 
 function PureMessages({
   addToolApprovalResponse,
@@ -45,7 +44,7 @@ function PureMessages({
   useDataStream();
 
   // Clear source processing events when a new request starts
-  const { clear: clearSourceEvents, events: sourceEvents } = useSourceProcessing();
+  const { clear: clearSourceEvents } = useSourceProcessing();
   const prevStatus = useRef(status);
   useEffect(() => {
     if (status === "submitted" && prevStatus.current === "ready") {
@@ -54,18 +53,20 @@ function PureMessages({
     prevStatus.current = status;
   }, [status, clearSourceEvents]);
 
-  // Find where to insert the source processing status:
-  // After the last user message, before the assistant response
-  const hasSourceEvents = sourceEvents.length > 0;
-  const isActive = status === "submitted" || status === "streaming";
-  const showSourceStatus = hasSourceEvents && isActive;
+  // Unified research activity indicator
+  const lastAssistantMessage = messages
+    .filter((m) => m.role === "assistant")
+    .at(-1);
+  const activity = useResearchActivity(lastAssistantMessage, status);
 
-  // Find the index of the last user message in the current turn
-  let sourceStatusInsertIndex = -1;
-  if (showSourceStatus) {
+  // Insert activity indicator after the last user message (above assistant response)
+  const isActive = status === "submitted" || status === "streaming";
+  const showActivity = activity.steps.length > 0 && isActive;
+  let activityInsertIndex = -1;
+  if (showActivity) {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "user") {
-        sourceStatusInsertIndex = i + 1; // insert after this user message
+        activityInsertIndex = i + 1;
         break;
       }
     }
@@ -99,22 +100,14 @@ function PureMessages({
               />,
             ];
 
-            // Render source status right after the last user message
-            if (index + 1 === sourceStatusInsertIndex) {
+            if (index + 1 === activityInsertIndex) {
               items.push(
-                <MemoizedSourceProcessingStatus key="source-processing-status" />
+                <ResearchActivity key="research-activity" activity={activity} />
               );
             }
 
             return items;
           })}
-
-          {status === "submitted" &&
-            !messages.some((msg) =>
-              msg.parts?.some(
-                (part) => "state" in part && part.state === "approval-responded"
-              )
-            ) && <ThinkingMessage />}
 
           <div
             className="min-h-[24px] min-w-[24px] shrink-0"

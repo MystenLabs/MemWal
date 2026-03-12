@@ -3,7 +3,7 @@ import Script from "next/script";
 import { Suspense } from "react";
 import { AppSidebar } from "@/components/sidebar/app-sidebar";
 import { DataStreamProvider } from "@/components/data/data-stream-provider";
-import { SourceProcessingProvider } from "@/components/chat/source-processing-status";
+import { SourceProcessingProvider } from "@/components/chat/source-processing-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { auth } from "../(auth)/auth";
 
