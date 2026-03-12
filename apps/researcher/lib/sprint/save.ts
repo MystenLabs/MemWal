@@ -43,7 +43,7 @@ export async function saveSprint({
   const report = await generateSprintReport({ chatId, userId });
   console.log(`[sprint:save] Report generated: "${report.title}"`);
 
-  // 4. Build source metadata from citations (deduplicate by sourceId)
+  // 4. Build source metadata from citations (deduplicate by sourceId, then by title)
   const sourceMap = new Map<string, SourceMeta>();
   for (const citation of report.citations) {
     if (!sourceMap.has(citation.sourceId)) {
@@ -55,7 +55,16 @@ export async function saveSprint({
       });
     }
   }
-  const sources = Array.from(sourceMap.values());
+  // Further deduplicate by title — same source may have different IDs across sessions
+  const seenTitles = new Set<string>();
+  const sources: SourceMeta[] = [];
+  for (const s of sourceMap.values()) {
+    const key = s.title?.toLowerCase() ?? s.sourceId;
+    if (!seenTitles.has(key)) {
+      seenTitles.add(key);
+      sources.push(s);
+    }
+  }
 
   // 5. Store in MemWal
   console.log("[sprint:save] Storing in MemWal...");
@@ -72,7 +81,7 @@ export async function saveSprint({
 
   // 6. Save to DB
   console.log("[sprint:save] Saving to DB...");
-  const tags = sources.map((s) => s.title).filter(Boolean) as string[];
+  const tags = [...new Set(sources.map((s) => s.title).filter(Boolean))] as string[];
   const sprintRecord = await createSprintBlob({
     chatId,
     userId,

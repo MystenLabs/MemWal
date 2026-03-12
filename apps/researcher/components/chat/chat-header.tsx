@@ -1,10 +1,11 @@
 "use client";
 
-import { BookOpenIcon } from "lucide-react";
+import { BookOpenIcon, BrainIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { memo } from "react";
 import { useWindowSize } from "usehooks-ts";
 import { SidebarToggle } from "../sidebar/sidebar-toggle";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PlusIcon } from "../icons";
 import { useSidebar } from "../ui/sidebar";
@@ -19,6 +20,7 @@ function PureChatHeader({
   onToggleMyStuff,
   memwalKey,
   hasMessages,
+  sprintIds,
 }: {
   chatId: string;
   selectedVisibilityType: VisibilityType;
@@ -26,6 +28,7 @@ function PureChatHeader({
   onToggleMyStuff?: () => void;
   memwalKey: string;
   hasMessages: boolean;
+  sprintIds?: string[];
 }) {
   const router = useRouter();
   const { open } = useSidebar();
@@ -40,7 +43,7 @@ function PureChatHeader({
         <Button
           className="order-2 ml-auto h-8 px-2 md:order-1 md:ml-0 md:h-fit md:px-2"
           onClick={() => {
-            router.push("/");
+            router.push("/research/new");
             router.refresh();
           }}
           variant="outline"
@@ -56,6 +59,18 @@ function PureChatHeader({
           className="order-1 md:order-2"
           selectedVisibilityType={selectedVisibilityType}
         />
+      )}
+
+      {sprintIds && sprintIds.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="secondary" className="order-2 gap-1 md:order-3">
+              <BrainIcon className="size-3" />
+              {sprintIds.length} sprint{sprintIds.length !== 1 ? "s" : ""}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>Sprint context active</TooltipContent>
+        </Tooltip>
       )}
 
       {onToggleMyStuff && (
@@ -92,6 +107,7 @@ export const ChatHeader = memo(PureChatHeader, (prevProps, nextProps) => {
     prevProps.isReadonly === nextProps.isReadonly &&
     prevProps.onToggleMyStuff === nextProps.onToggleMyStuff &&
     prevProps.memwalKey === nextProps.memwalKey &&
-    prevProps.hasMessages === nextProps.hasMessages
+    prevProps.hasMessages === nextProps.hasMessages &&
+    prevProps.sprintIds === nextProps.sprintIds
   );
 });

@@ -2,6 +2,7 @@
 
 import { BookmarkIcon, CheckIcon, LoaderIcon } from "lucide-react";
 import { useState } from "react";
+import { useSWRConfig } from "swr";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSprintStatus } from "@/hooks/use-sprint-status";
@@ -16,6 +17,7 @@ export function SprintSaveButton({
   memwalKey: string;
   hasMessages: boolean;
 }) {
+  const { mutate: globalMutate } = useSWRConfig();
   const { hasSprint, sprintTitle, isLoading, mutate } =
     useSprintStatus(chatId);
   const [isSaving, setIsSaving] = useState(false);
@@ -42,6 +44,7 @@ export function SprintSaveButton({
         description: `Sprint saved: "${result.title}"`,
       });
       mutate();
+      globalMutate("/api/sprint/list");
     } catch (error) {
       toast({
         type: "error",
