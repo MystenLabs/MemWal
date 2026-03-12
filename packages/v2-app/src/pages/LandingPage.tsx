@@ -31,25 +31,17 @@ export default function LandingPage() {
 
     return (
         <>
-            <nav className="nav">
-                <div className="nav-inner">
-                    <div className="nav-brand">
-                        <span>memwal</span>
-                    </div>
-                </div>
-            </nav>
-
             <div className="lp-bg">
                 <div className="lp-sheet">
                     <section className="lp-hero">
                         <div className="lp-copy">
                             <div className="lp-kicker">privacy-preserving AI memory</div>
                             <h1>
-                                Give your AI permanent memory
+                                give your AI permanent memory
                             </h1>
                             <p>
-                                Store memories on Walrus, encrypt with SEAL, and recall with semantic search.
-                                MemWal gives agents long-term context while users keep ownership.
+                                store memories on Walrus, encrypt with SEAL, and recall with semantic search.
+                                memwal gives agents long-term context while users keep ownership.
                             </p>
 
                             {hasEnokiConfig && googleWallet ? (
@@ -57,7 +49,7 @@ export default function LandingPage() {
                                     className="btn lp-btn-main"
                                     onClick={() => connect({ wallet: googleWallet })}
                                 >
-                                    sign in with Google
+                                    sign in with google
                                 </button>
                             ) : (
                                 <div className="lp-connect-fallback">
@@ -75,31 +67,23 @@ export default function LandingPage() {
                         </div>
                     </section>
 
-                    <div className="lp-trust">
-                        <span>walrus</span>
-                        <span>seal</span>
-                        <span>sui</span>
-                        <span>enoki</span>
-                        <span>memwal sdk</span>
-                    </div>
-
                     <section className="lp-services">
                         <div className="lp-grid">
                             <article className="lp-service-card">
-                                <h3>Encrypted storage</h3>
+                                <h3>encrypted storage</h3>
                                 <p>SEAL encryption, persisted to Walrus blobs.</p>
                             </article>
                             <article className="lp-service-card lp-service-card--lime">
-                                <h3>Semantic recall</h3>
-                                <p>Embedding search for relevant memories in milliseconds.</p>
+                                <h3>semantic recall</h3>
+                                <p>embedding search for relevant memories in milliseconds.</p>
                             </article>
                             <article className="lp-service-card lp-service-card--lime">
-                                <h3>Delegate keys</h3>
-                                <p>Low-risk keys for apps, revocable anytime onchain.</p>
+                                <h3>delegate keys</h3>
+                                <p>low-risk keys for apps, revocable anytime onchain.</p>
                             </article>
                             <article className="lp-service-card">
                                 <h3>AI middleware</h3>
-                                <p>Wrap models with memory context using one SDK.</p>
+                                <p>wrap models with memory context using one SDK.</p>
                             </article>
                         </div>
                     </section>
