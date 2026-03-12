@@ -15,6 +15,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
+import type { Citation, SourceMeta } from "@/lib/sprint/types";
 import { ChatbotError } from "../errors";
 import { generateUUID } from "../utils";
 import {
@@ -539,6 +540,7 @@ export async function getChunksByIds({
         content: sourceChunk.content,
         sourceId: sourceChunk.sourceId,
         sourceTitle: source.title,
+        sourceUrl: source.url,
         chunkIndex: sourceChunk.chunkIndex,
         tokenCount: sourceChunk.tokenCount,
       })
@@ -665,6 +667,93 @@ export async function getResearchBlobsByUserId({
     throw new ChatbotError(
       "bad_request:database",
       "Failed to get research blobs by user id"
+    );
+  }
+}
+
+// ============================================================
+// Sprint blob queries
+// ============================================================
+
+export async function createSprintBlob({
+  chatId,
+  userId,
+  blobId,
+  title,
+  summary,
+  reportContent,
+  citations,
+  sources,
+  tags,
+  memoryCount,
+}: {
+  chatId: string;
+  userId: string;
+  blobId: string;
+  title: string;
+  summary?: string;
+  reportContent: string;
+  citations: Citation[];
+  sources: SourceMeta[];
+  tags?: string[];
+  memoryCount: number;
+}) {
+  try {
+    const [created] = await db
+      .insert(researchBlob)
+      .values({
+        blobId,
+        userId,
+        chatId,
+        type: "sprint",
+        title,
+        summary,
+        reportContent,
+        citations,
+        sources,
+        tags,
+        memoryCount,
+      })
+      .returning();
+    return created;
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to create sprint blob"
+    );
+  }
+}
+
+export async function getSprintByChatId({ chatId }: { chatId: string }) {
+  try {
+    const [sprint] = await db
+      .select()
+      .from(researchBlob)
+      .where(
+        and(eq(researchBlob.chatId, chatId), eq(researchBlob.type, "sprint"))
+      );
+    return sprint ?? null;
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get sprint by chat id"
+    );
+  }
+}
+
+export async function getSprintsByUserId({ userId }: { userId: string }) {
+  try {
+    return await db
+      .select()
+      .from(researchBlob)
+      .where(
+        and(eq(researchBlob.userId, userId), eq(researchBlob.type, "sprint"))
+      )
+      .orderBy(desc(researchBlob.createdAt));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get sprints by user id"
     );
   }
 }
