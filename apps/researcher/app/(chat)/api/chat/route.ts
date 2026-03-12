@@ -16,7 +16,8 @@ import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import { allowedModelIds } from "@/lib/ai/models";
-import { researchPrompt } from "@/lib/ai/prompts";
+import { researchPrompt, getSprintResumePrompt } from "@/lib/ai/prompts";
+import { buildSprintContext } from "@/lib/sprint/resume";
 import {
   extractUrlsFromText,
   type SourceInput,
@@ -112,6 +113,8 @@ export async function POST(request: Request) {
         messagesFromDb = await getMessagesByChatId({ id });
       }
     } else if (message?.role === "user") {
+      // Chat is created during sprint preparation for sprint chats,
+      // or here for fresh chats without sprints.
       await saveChat({
         id,
         userId: session.user.id,
@@ -146,7 +149,40 @@ export async function POST(request: Request) {
         !selectedChatModel.includes("non-reasoning"));
 
     const modelMessages = await convertToModelMessages(uiMessages);
-    const researchTools = getResearchTools({ userId: session.user.id });
+
+    // Resolve sprint context — pre-built during preparation and stored on chat record
+    const memwalKey = (requestBody as any).memwalKey || process.env.MEMWAL_KEY;
+    const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
+    const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;
+
+    console.log(`[sprint:context] resolvedSprintIds=${JSON.stringify(resolvedSprintIds)}, memwalKey=${memwalKey ? "present" : "missing"}, prebuiltContext=${prebuiltSprintContext ? `${prebuiltSprintContext.length} chars` : "none"}`);
+
+    let systemPrompt = researchPrompt;
+    if (prebuiltSprintContext) {
+      // Use pre-built context from sprint preparation (LLM-generated queries → MemWal recall)
+      systemPrompt = getSprintResumePrompt(prebuiltSprintContext);
+      console.log(`[sprint:context] Using pre-built sprint context: ${prebuiltSprintContext.length} chars`);
+      console.log(`[sprint:context] Final system prompt length=${systemPrompt.length} chars (base=${researchPrompt.length}, sprint addition=${systemPrompt.length - researchPrompt.length})`);
+    } else if (resolvedSprintIds.length > 0) {
+      // Fallback for chats created before sprint preparation existed — build lightweight metadata context
+      const { systemPromptBlock, sprintCount } = await buildSprintContext({
+        sprintIds: resolvedSprintIds,
+        userId: session.user.id,
+      });
+      console.log(`[sprint:context] Fallback: buildSprintContext returned ${sprintCount} sprints, block length=${systemPromptBlock.length} chars`);
+      if (systemPromptBlock) {
+        systemPrompt = getSprintResumePrompt(systemPromptBlock);
+        console.log(`[sprint:context] Final system prompt length=${systemPrompt.length} chars (base=${researchPrompt.length}, sprint addition=${systemPrompt.length - researchPrompt.length})`);
+      }
+    }
+
+    const hasRecallTool = resolvedSprintIds.length > 0 && !!memwalKey;
+    console.log(`[sprint:tools] recallSprint tool ${hasRecallTool ? "ENABLED" : "disabled"}`);
+
+    const researchTools = getResearchTools({
+      userId: session.user.id,
+      memwalKey: hasRecallTool ? memwalKey : undefined,
+    });
 
     const stream = createUIMessageStream({
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
@@ -235,14 +271,24 @@ export async function POST(request: Request) {
         }
 
         // --- Stream AI response ---
+        const baseTools = [
+          "listSources",
+          "searchSourceContent",
+          "getChunkContent",
+          "getSourceContext",
+        ] as const;
+
+        const activeToolNames =
+          resolvedSprintIds.length > 0 && memwalKey
+            ? ([...baseTools, "recallSprint"] as const)
+            : baseTools;
+
         const result = streamText({
           model: getLanguageModel(selectedChatModel),
-          system: researchPrompt,
+          system: systemPrompt,
           messages: modelMessages,
           stopWhen: stepCountIs(10),
-          experimental_activeTools: isReasoningModel
-            ? []
-            : ["listSources", "searchSourceContent", "getChunkContent", "getSourceContext"],
+          experimental_activeTools: isReasoningModel ? [] : [...activeToolNames],
           tools: researchTools,
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,

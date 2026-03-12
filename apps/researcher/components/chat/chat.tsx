@@ -38,6 +38,7 @@ export function Chat({
   initialVisibilityType,
   isReadonly,
   autoResume,
+  initialSprintIds,
 }: {
   id: string;
   initialMessages: ChatMessage[];
@@ -45,6 +46,7 @@ export function Chat({
   initialVisibilityType: VisibilityType;
   isReadonly: boolean;
   autoResume: boolean;
+  initialSprintIds?: string[];
 }) {
   const router = useRouter();
 
@@ -85,6 +87,7 @@ export function Chat({
   const currentModelIdRef = useRef(currentModelId);
   const useMemWalRef = useRef(useMemWal);
   const memwalKeyRef = useRef(memwalKey);
+  const sprintIdsRef = useRef(initialSprintIds);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
@@ -155,6 +158,7 @@ export function Chat({
             selectedVisibilityType: visibilityType,
             useMemWal: useMemWalRef.current,
             memwalKey: memwalKeyRef.current || undefined,
+            // sprintIds are now set during preparation — no longer sent per-message
             ...request.body,
           },
         };
@@ -200,6 +204,8 @@ export function Chat({
     }
   }, [query, sendMessage, hasAppendedQuery, id]);
 
+  // Sprint chats now go directly to /chat/{id} after preparation — no URL cleanup needed
+
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [myStuffOpen, setMyStuffOpen] = useState(false);
 
@@ -228,6 +234,7 @@ export function Chat({
           memwalKey={memwalKey}
           selectedVisibilityType={initialVisibilityType}
           onToggleMyStuff={() => setMyStuffOpen((prev) => !prev)}
+          sprintIds={initialSprintIds}
         />
 
         <Messages
