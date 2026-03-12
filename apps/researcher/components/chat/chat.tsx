@@ -223,7 +223,9 @@ export function Chat({
       <div className="overscroll-behavior-contain flex h-dvh min-w-0 touch-pan-y flex-col bg-background">
         <ChatHeader
           chatId={id}
+          hasMessages={messages.length > 0}
           isReadonly={isReadonly}
+          memwalKey={memwalKey}
           selectedVisibilityType={initialVisibilityType}
           onToggleMyStuff={() => setMyStuffOpen((prev) => !prev)}
         />

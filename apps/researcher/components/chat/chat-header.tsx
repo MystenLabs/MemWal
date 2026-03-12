@@ -10,17 +10,22 @@ import { PlusIcon } from "../icons";
 import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { VisibilitySelector, type VisibilityType } from "./visibility-selector";
+import { SprintSaveButton } from "./sprint-save-button";
 
 function PureChatHeader({
   chatId,
   selectedVisibilityType,
   isReadonly,
   onToggleMyStuff,
+  memwalKey,
+  hasMessages,
 }: {
   chatId: string;
   selectedVisibilityType: VisibilityType;
   isReadonly: boolean;
   onToggleMyStuff?: () => void;
+  memwalKey: string;
+  hasMessages: boolean;
 }) {
   const router = useRouter();
   const { open } = useSidebar();
@@ -68,6 +73,14 @@ function PureChatHeader({
           <TooltipContent>Sources & Research</TooltipContent>
         </Tooltip>
       )}
+
+      {!isReadonly && (
+        <SprintSaveButton
+          chatId={chatId}
+          hasMessages={hasMessages}
+          memwalKey={memwalKey}
+        />
+      )}
     </header>
   );
 }
@@ -77,6 +90,8 @@ export const ChatHeader = memo(PureChatHeader, (prevProps, nextProps) => {
     prevProps.chatId === nextProps.chatId &&
     prevProps.selectedVisibilityType === nextProps.selectedVisibilityType &&
     prevProps.isReadonly === nextProps.isReadonly &&
-    prevProps.onToggleMyStuff === nextProps.onToggleMyStuff
+    prevProps.onToggleMyStuff === nextProps.onToggleMyStuff &&
+    prevProps.memwalKey === nextProps.memwalKey &&
+    prevProps.hasMessages === nextProps.hasMessages
   );
 });
