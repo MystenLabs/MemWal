@@ -7,8 +7,7 @@ import { generateSourceMetadata } from "./metadata";
 import { createSource, createSourceChunks } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 import type { SourceInput } from "@/lib/ai/source-processing";
-
-export const CHUNK_EXPIRY_DAYS = 7;
+import { CHUNK_TTL_MS } from "@/lib/rag/constants";
 
 export async function processSource({
   source,
@@ -72,9 +71,7 @@ export async function processSource({
   console.log(`[ingest] Embedding complete — ${embeddings.length} embeddings`);
 
   // Create source record
-  const expiresAt = new Date(
-    Date.now() + CHUNK_EXPIRY_DAYS * 24 * 60 * 60 * 1000
-  );
+  const expiresAt = new Date(Date.now() + CHUNK_TTL_MS);
 
   const sourceRecord = await createSource({
     userId,
