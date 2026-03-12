@@ -37,7 +37,12 @@ function PureSprintDetail({
   >("report");
 
   const citations = sprint.citations ?? [];
-  const sources = sprint.sources ?? [];
+
+  // Deduplicate sources by title (same source may have different IDs across sessions)
+  const rawSources = sprint.sources ?? [];
+  const sources = rawSources.filter((s, i, arr) =>
+    arr.findIndex((o) => (o.title ?? o.sourceId) === (s.title ?? s.sourceId)) === i
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -81,7 +86,7 @@ function PureSprintDetail({
         </div>
         {sprint.tags && sprint.tags.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
-            {sprint.tags.map((tag) => (
+            {[...new Set(sprint.tags)].map((tag) => (
               <span
                 key={tag}
                 className="inline-block rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
