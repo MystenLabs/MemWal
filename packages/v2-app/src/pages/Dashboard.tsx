@@ -87,23 +87,16 @@ const result = await generateText({
                 </div>
 
                 {/* Try Demo CTA */}
-                <a href="#playground" style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    background: 'linear-gradient(135deg, rgba(124,58,237,0.15), rgba(139,92,246,0.08))',
-                    border: '1px solid var(--border-accent)',
-                    borderRadius: 'var(--radius-lg)', padding: '16px 24px',
-                    marginBottom: 24, textDecoration: 'none', cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                }}>
+                <a href="#playground" className="dashboard-cta">
                     <div>
-                        <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+                        <div className="dashboard-cta-title">
                             try interactive demo
                         </div>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                        <div className="dashboard-cta-subtitle">
                             test remember, recall & analyze with your live server
                         </div>
                     </div>
-                    <div style={{ color: 'var(--accent)', fontSize: '1.2rem' }}>→</div>
+                    <div className="dashboard-cta-arrow">→</div>
                 </a>
 
                 {/* Stats */}
@@ -131,8 +124,8 @@ const result = await generateText({
 
                     {/* Public Key */}
                     <div className="key-display" style={{ marginBottom: 12 }}>
-                        <div className="key-label" style={{ color: 'var(--text-muted)' }}>public key</div>
-                        <div className="key-value" style={{ color: 'var(--text-secondary)' }}>
+                        <div className="key-label">public key</div>
+                        <div className="key-value">
                             {delegatePublicKey}
                         </div>
                         <div className="key-actions">
@@ -165,7 +158,7 @@ const result = await generateText({
                             </>
                         ) : (
                             <>
-                                <div className="key-value" style={{ color: 'var(--text-muted)' }}>
+                                <div className="key-value">
                                     {'•'.repeat(64)}
                                 </div>
                                 <div className="key-actions">
@@ -227,7 +220,7 @@ const result = await generateText({
                     <div className="card-header">
                         <div><div className="card-title">install</div></div>
                     </div>
-                    <pre className="demo-code-block" style={{ color: 'var(--accent)' }}>
+                    <pre className="demo-code-block install-command">
                         <code>npm install @cmdoss/memwal-v2</code>
                     </pre>
                 </div>

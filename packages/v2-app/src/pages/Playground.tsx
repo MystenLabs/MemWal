@@ -36,6 +36,14 @@ interface DemoStepProps {
     children?: ReactNode
 }
 
+interface ManualDebugClient {
+    embed: (text: string) => Promise<number[]>
+    signedRequest: (method: string, path: string, body: { vector: number[]; limit: number }) => Promise<{
+        results?: Array<{ blob_id: string }>
+    }>
+    walrusDownload: (blobId: string) => Promise<Uint8Array>
+}
+
 function DemoStep({
     number,
     title,
@@ -371,6 +379,7 @@ export default function Playground() {
         setFullRecallError(null)
         try {
             setFullRecallPhase('embed → search → Walrus download → SEAL decrypt (wallet popup)...')
+            const debugClient = memwalManual as unknown as ManualDebugClient
 
             // DEBUG: Step-by-step trace
             console.log('[DEBUG] === recallManual START ===')
@@ -378,24 +387,21 @@ export default function Playground() {
 
             // Step 1: embed (via server)
             console.log('[DEBUG] Step 1: Embedding query...')
-            // @ts-ignore - access private method for debugging
-            const vector = await memwalManual.embed(fullRecallQuery)
+            const vector = await debugClient.embed(fullRecallQuery)
             console.log('[DEBUG] Step 1 OK: vector dims =', vector.length)
 
             // Step 2: search server
             console.log('[DEBUG] Step 2: Searching server...')
-            // @ts-ignore - access private method for debugging
-            const searchResult = await memwalManual.signedRequest('POST', '/api/recall/manual', { vector, limit: 5 })
+            const searchResult = await debugClient.signedRequest('POST', '/api/recall/manual', { vector, limit: 5 })
             console.log('[DEBUG] Step 2 OK: searchResult =', JSON.stringify(searchResult))
 
             // Step 3: Download blobs
-            const hits = (searchResult as any).results || []
+            const hits = searchResult.results || []
             console.log('[DEBUG] Step 3: Downloading', hits.length, 'blobs from Walrus...')
             for (const hit of hits) {
                 try {
                     console.log('[DEBUG]   downloading blob:', hit.blob_id)
-                    // @ts-ignore
-                    const blobData = await memwalManual.walrusDownload(hit.blob_id)
+                    const blobData = await debugClient.walrusDownload(hit.blob_id)
                     console.log('[DEBUG]   OK: blob', hit.blob_id, 'size =', blobData.length, 'bytes')
                 } catch (err) {
                     console.error('[DEBUG]   FAIL: blob', hit.blob_id, err)
@@ -437,7 +443,7 @@ export default function Playground() {
                             onClick={(e) => {
                                 e.preventDefault()
                                 window.location.hash = ''
-                                window.location.reload()
+                                window.scrollTo({ top: 0, behavior: 'smooth' })
                             }}
                         >
                             ← dashboard
@@ -469,13 +475,13 @@ export default function Playground() {
                 {/* Server info */}
                 <div className="demo-server-info">
                     <div className="demo-server-tag">
-                        server: <span style={{ color: 'var(--accent)' }}>{serverUrl}</span>
+                        server: <span className="demo-tag-value demo-tag-value--server">{serverUrl}</span>
                     </div>
                     <div className="demo-server-tag">
-                        key: <span style={{ color: 'var(--text-muted)' }}>{keyPreview}</span>
+                        key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
                     </div>
                     <div className="demo-server-tag">
-                        SDK: <span style={{ color: 'var(--success)' }}>@cmdoss/memwal-v2</span>
+                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@cmdoss/memwal-v2</span>
                     </div>
                 </div>
 
@@ -636,7 +642,7 @@ const data = await memwal.health()
                 </div>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">6</div>
@@ -754,7 +760,7 @@ const { text } = await generateText({
 
 
                 {/* Step 7: Remember (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">7</div>
@@ -836,7 +842,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
                 </div>
 
                 {/* Step 8: Recall (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.5, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">8</div>
