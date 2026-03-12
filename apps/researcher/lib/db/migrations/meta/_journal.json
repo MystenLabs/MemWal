@@ -78,6 +78,20 @@
       "when": 1741772800000,
       "tag": "0010_sprint_save",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1741859200000,
+      "tag": "0011_sprint_recall",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1741945600000,
+      "tag": "0012_sprint_context",
+      "breakpoints": true
     }
   ]
 }
