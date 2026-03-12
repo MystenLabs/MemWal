@@ -56,6 +56,7 @@ interface DelegateKeyContextType extends DelegateKeyState {
 
 const DelegateKeyContext = createContext<DelegateKeyContextType | null>(null)
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useDelegateKey() {
   const ctx = useContext(DelegateKeyContext)
   if (!ctx) throw new Error('useDelegateKey must be used within provider')

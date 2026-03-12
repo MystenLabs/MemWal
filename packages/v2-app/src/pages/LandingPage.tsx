@@ -39,59 +39,71 @@ export default function LandingPage() {
                 </div>
             </nav>
 
-            <div className="hero">
-                <div className="hero-badge">
-                    privacy-preserving AI memory
-                </div>
+            <div className="lp-bg">
+                <div className="lp-sheet">
+                    <section className="lp-hero">
+                        <div className="lp-copy">
+                            <div className="lp-kicker">privacy-preserving AI memory</div>
+                            <h1>
+                                Give your AI permanent memory
+                            </h1>
+                            <p>
+                                Store memories on Walrus, encrypt with SEAL, and recall with semantic search.
+                                MemWal gives agents long-term context while users keep ownership.
+                            </p>
 
-                <h1>
-                    give your AI<br />
-                    <span className="gradient">permanent memory</span>
-                </h1>
+                            {hasEnokiConfig && googleWallet ? (
+                                <button
+                                    className="btn lp-btn-main"
+                                    onClick={() => connect({ wallet: googleWallet })}
+                                >
+                                    sign in with Google
+                                </button>
+                            ) : (
+                                <div className="lp-connect-fallback">
+                                    <ConnectButton />
+                                </div>
+                            )}
+                        </div>
 
-                <p>
-                    memwal stores your AI conversations on Walrus, encrypted with SEAL,
-                    and searchable with embeddings. you own your data — always.
-                </p>
+                        <div className="lp-illustration" aria-hidden="true">
+                            <div className="lp-mega" />
+                            <div className="lp-orbit lp-orbit-a" />
+                            <div className="lp-orbit lp-orbit-b" />
+                            <div className="lp-dot" />
+                            <div className="lp-star">✦</div>
+                        </div>
+                    </section>
 
-                {/* Primary: Google zkLogin via Enoki */}
-                {hasEnokiConfig && googleWallet ? (
-                    <button
-                        className="btn btn-google"
-                        onClick={() => connect({ wallet: googleWallet })}
-                    >
-                        <svg width="20" height="20" viewBox="0 0 24 24">
-                            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
-                            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
-                            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-                        </svg>
-                        sign in with Google
-                    </button>
-                ) : (
-                    /* Fallback: standard dapp-kit ConnectButton for any Sui wallet */
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
-                        <ConnectButton />
+                    <div className="lp-trust">
+                        <span>walrus</span>
+                        <span>seal</span>
+                        <span>sui</span>
+                        <span>enoki</span>
+                        <span>memwal sdk</span>
                     </div>
-                )}
 
-                <div className="hero-features">
-                    <div className="hero-feature">
-                        <div className="hero-feature-icon">encrypted</div>
-                        <div className="hero-feature-desc">AES-256-GCM + SEAL</div>
-                    </div>
-                    <div className="hero-feature">
-                        <div className="hero-feature-icon">decentralized</div>
-                        <div className="hero-feature-desc">stored on Walrus</div>
-                    </div>
-                    <div className="hero-feature">
-                        <div className="hero-feature-icon">semantic</div>
-                        <div className="hero-feature-desc">embedding vectors</div>
-                    </div>
-                    <div className="hero-feature">
-                        <div className="hero-feature-icon">owned</div>
-                        <div className="hero-feature-desc">you own your data</div>
-                    </div>
+                    <section className="lp-services">
+                        <div className="lp-grid">
+                            <article className="lp-service-card">
+                                <h3>Encrypted storage</h3>
+                                <p>SEAL encryption, persisted to Walrus blobs.</p>
+                            </article>
+                            <article className="lp-service-card lp-service-card--lime">
+                                <h3>Semantic recall</h3>
+                                <p>Embedding search for relevant memories in milliseconds.</p>
+                            </article>
+                            <article className="lp-service-card lp-service-card--lime">
+                                <h3>Delegate keys</h3>
+                                <p>Low-risk keys for apps, revocable anytime onchain.</p>
+                            </article>
+                            <article className="lp-service-card">
+                                <h3>AI middleware</h3>
+                                <p>Wrap models with memory context using one SDK.</p>
+                            </article>
+                        </div>
+                    </section>
+
                 </div>
             </div>
         </>
