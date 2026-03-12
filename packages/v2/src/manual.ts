@@ -260,14 +260,14 @@ export class MemWalManual {
         const downloadTasks = searchResult.results.map(async (hit) => {
             try {
                 const data = await this.walrusDownload(hit.blob_id);
-                return { blobId: hit.blob_id, data, distance: hit.distance };
+                return { blob_id: hit.blob_id, data, distance: hit.distance };
             } catch (err) {
                 console.error(`[MemWalManual] Walrus download failed for ${hit.blob_id}:`, err);
                 return null;
             }
         });
         const downloadedBlobs = (await Promise.all(downloadTasks)).filter(
-            (d): d is { blobId: string; data: Uint8Array; distance: number } => d !== null,
+            (d): d is { blob_id: string; data: Uint8Array; distance: number } => d !== null,
         );
 
         if (downloadedBlobs.length === 0) {
@@ -347,9 +347,9 @@ export class MemWalManual {
                     txBytes,
                 });
                 const text = new TextDecoder().decode(plaintext);
-                results.push({ blobId: blob.blobId, text, distance: blob.distance });
+                results.push({ blob_id: blob.blob_id, text, distance: blob.distance });
             } catch (err) {
-                console.error(`[MemWalManual] SEAL decrypt failed for ${blob.blobId}:`, err);
+                console.error(`[MemWalManual] SEAL decrypt failed for ${blob.blob_id}:`, err);
             }
         }
 

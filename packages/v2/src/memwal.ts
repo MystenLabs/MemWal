@@ -85,12 +85,12 @@ export class MemWal {
      * Remember something — server handles: verify → embed → encrypt → Walrus upload → store
      *
      * @param text - The text to remember
-     * @returns RememberResult with id, blobId, owner
+     * @returns RememberResult with id, blob_id, owner
      *
      * @example
      * ```typescript
      * const result = await memwal.remember("I'm allergic to peanuts")
-     * console.log(result.blobId) // "TY8mW0yr..."
+     * console.log(result.blob_id) // "TY8mW0yr..."
      * ```
      */
     async remember(text: string): Promise<RememberResult> {
@@ -132,7 +132,7 @@ export class MemWal {
      *
      * @param opts.blobId - Walrus blob ID (user already uploaded encrypted data)
      * @param opts.vector - Embedding vector (user already generated, e.g. 1536-dim)
-     * @returns RememberManualResult with id, blobId, owner
+     * @returns RememberManualResult with id, blob_id, owner
      *
      * @example
      * ```typescript
@@ -158,7 +158,7 @@ export class MemWal {
      *
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
-     * @returns RecallManualResult with blobId + distance pairs (no decrypted text)
+     * @returns RecallManualResult with blob_id + distance pairs (no decrypted text)
      *
      * @example
      * ```typescript
