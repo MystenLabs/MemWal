@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { tool } from "ai";
 import { searchAndRank } from "../retrieve";
+import { CHUNK_TTL_MS } from "@/lib/rag/constants";
+import { db } from "@/lib/db/drizzle";
+import { sourceChunk } from "@/lib/db/schema";
+import { inArray } from "drizzle-orm";
 
 export function searchSourceContentTool({ userId }: { userId: string }) {
   return tool({
@@ -39,11 +43,20 @@ export function searchSourceContentTool({ userId }: { userId: string }) {
           return {
             results: [],
             message:
-              "No matching content found. Source chunks may have expired (7-day TTL) — user can re-upload the source to refresh.",
+              "No matching content found. Source chunks may have expired (30-day TTL) — user can re-upload the source to refresh.",
           };
         }
 
         console.log(`[tool:searchSourceContent] Returning ${results.length} results`);
+
+        // Extend TTL when full content is accessed
+        if (includeContent && results.length > 0) {
+          const chunkIds = results.map((r) => r.chunkId);
+          await db.update(sourceChunk)
+            .set({ expiresAt: new Date(Date.now() + CHUNK_TTL_MS) })
+            .where(inArray(sourceChunk.id, chunkIds));
+        }
+
         return {
           results: results.map((r) => ({
             chunkId: r.chunkId,

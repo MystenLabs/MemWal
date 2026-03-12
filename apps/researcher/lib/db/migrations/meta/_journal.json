@@ -71,6 +71,13 @@
       "when": 1741686400000,
       "tag": "0009_enhance_rag",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1741772800000,
+      "tag": "0010_sprint_save",
+      "breakpoints": true
     }
   ]
 }
