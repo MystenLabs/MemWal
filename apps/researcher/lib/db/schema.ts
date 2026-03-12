@@ -12,6 +12,7 @@ import {
   vector,
   foreignKey,
 } from "drizzle-orm/pg-core";
+import type { Citation, SourceMeta } from "@/lib/sprint/types";
 
 /** PostgreSQL tsvector type for full-text search */
 const tsvectorType = customType<{ data: string }>({
@@ -99,7 +100,7 @@ export const source = pgTable("Source", {
 
 export type Source = InferSelectModel<typeof source>;
 
-/** Source chunks with embeddings — ephemeral, 7-day TTL */
+/** Source chunks with embeddings — ephemeral, 30-day TTL */
 export const sourceChunk = pgTable("SourceChunk", {
   id: uuid("id").primaryKey().notNull().defaultRandom(),
   sourceId: uuid("sourceId")
@@ -124,10 +125,15 @@ export const researchBlob = pgTable("ResearchBlob", {
   userId: uuid("userId")
     .notNull()
     .references(() => user.id),
+  chatId: uuid("chatId").references(() => chat.id),
   type: varchar("type", { enum: ["sprint"] }).notNull(),
   title: text("title").notNull(),
   summary: text("summary"),
+  reportContent: text("reportContent"),
   tags: json("tags").$type<string[]>(),
+  citations: json("citations").$type<Citation[]>(),
+  sources: json("sources").$type<SourceMeta[]>(),
+  memoryCount: integer("memoryCount").default(0),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
