@@ -43,6 +43,8 @@ export const chat = pgTable("Chat", {
   visibility: varchar("visibility", { enum: ["public", "private"] })
     .notNull()
     .default("private"),
+  sprintIds: json("sprintIds").$type<string[]>(),
+  sprintContext: text("sprintContext"),
 });
 
 export type Chat = InferSelectModel<typeof chat>;
