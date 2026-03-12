@@ -87,11 +87,13 @@ export async function saveChat({
   userId,
   title,
   visibility,
+  sprintIds,
 }: {
   id: string;
   userId: string;
   title: string;
   visibility: VisibilityType;
+  sprintIds?: string[];
 }) {
   try {
     return await db.insert(chat).values({
@@ -100,6 +102,7 @@ export async function saveChat({
       userId,
       title,
       visibility,
+      sprintIds: sprintIds ?? null,
     });
   } catch (_error) {
     throw new ChatbotError("bad_request:database", "Failed to save chat");
@@ -380,6 +383,26 @@ export async function updateChatVisibilityById({
     throw new ChatbotError(
       "bad_request:database",
       "Failed to update chat visibility by id"
+    );
+  }
+}
+
+export async function updateChatSprintContext({
+  chatId,
+  sprintContext,
+}: {
+  chatId: string;
+  sprintContext: string;
+}) {
+  try {
+    return await db
+      .update(chat)
+      .set({ sprintContext })
+      .where(eq(chat.id, chatId));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to update chat sprint context"
     );
   }
 }
@@ -754,6 +777,34 @@ export async function getSprintsByUserId({ userId }: { userId: string }) {
     throw new ChatbotError(
       "bad_request:database",
       "Failed to get sprints by user id"
+    );
+  }
+}
+
+export async function getSprintsByIds({
+  sprintIds,
+  userId,
+}: {
+  sprintIds: string[];
+  userId: string;
+}) {
+  if (sprintIds.length === 0) return [];
+  try {
+    return await db
+      .select()
+      .from(researchBlob)
+      .where(
+        and(
+          inArray(researchBlob.id, sprintIds),
+          eq(researchBlob.userId, userId),
+          eq(researchBlob.type, "sprint")
+        )
+      )
+      .orderBy(desc(researchBlob.createdAt));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get sprints by ids"
     );
   }
 }
