@@ -379,8 +379,11 @@ body {
 /* ========== Landing Rebrand (Positivus-inspired) ========== */
 
 .lp-bg {
-  min-height: calc(100vh - 64px);
-  padding: 28px 22px 56px;
+  min-height: 100vh;
+  padding: 24px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background:
     radial-gradient(circle at 0% 40%, rgba(185, 255, 102, 0.14), transparent 42%),
     radial-gradient(circle at 100% 70%, rgba(77, 162, 255, 0.1), transparent 40%),
@@ -402,6 +405,7 @@ body {
   grid-template-columns: 1.05fr 1fr;
   gap: 28px;
   align-items: center;
+  margin-bottom: 42px;
 }
 
 .lp-copy h1 {
@@ -428,7 +432,6 @@ body {
   border-radius: 10px;
   padding: 5px 11px;
   font-size: 0.75rem;
-  text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 700;
 }
@@ -450,6 +453,10 @@ body {
 
 .lp-connect-fallback {
   display: inline-flex;
+}
+
+.lp-connect-fallback button {
+  text-transform: lowercase;
 }
 
 .lp-illustration {
