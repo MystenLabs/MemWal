@@ -6,7 +6,7 @@ import { auth } from "@/app/(auth)/auth";
 import { Chat } from "@/components/chat/chat";
 import { DataStreamHandler } from "@/components/data/data-stream-handler";
 import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
-import { getChatById, getMessagesByChatId } from "@/lib/db/queries";
+import { getChatById, getMessagesByChatId, getSprintsByIds } from "@/lib/db/queries";
 import { convertToUIMessages } from "@/lib/utils";
 
 export default function Page(props: { params: Promise<{ id: string }> }) {
@@ -52,6 +52,22 @@ async function ChatPage({ params }: { params: Promise<{ id: string }> }) {
 
   const chatModel = chatModelFromCookie?.value ?? DEFAULT_CHAT_MODEL;
 
+  // Fetch sprint data if chat has associated sprints
+  const sprintIds = chat.sprintIds ?? [];
+  const sprintData =
+    sprintIds.length > 0 && session.user
+      ? await getSprintsByIds({ sprintIds, userId: session.user.id })
+      : [];
+
+  const initialSprintData = sprintData.map((s) => ({
+    id: s.id,
+    title: s.title,
+    summary: s.summary,
+    tags: s.tags,
+    sources: s.sources,
+    memoryCount: s.memoryCount,
+  }));
+
   return (
     <>
       <Chat
@@ -61,7 +77,8 @@ async function ChatPage({ params }: { params: Promise<{ id: string }> }) {
         initialMessages={uiMessages}
         initialVisibilityType={chat.visibility}
         isReadonly={session?.user?.id !== chat.userId}
-        initialSprintIds={chat.sprintIds ?? undefined}
+        initialSprintIds={sprintIds.length > 0 ? sprintIds : undefined}
+        initialSprintData={initialSprintData.length > 0 ? initialSprintData : undefined}
       />
       <DataStreamHandler />
     </>

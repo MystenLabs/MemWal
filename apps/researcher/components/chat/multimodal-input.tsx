@@ -68,6 +68,8 @@ function PureMultimodalInput({
   selectedVisibilityType,
   selectedModelId,
   onModelChange,
+  sprintSuggestions,
+  sprintSuggestionsLoading,
   useMemWal,
   onUseMemWalChange,
   memwalKey,
@@ -87,6 +89,8 @@ function PureMultimodalInput({
   selectedVisibilityType: VisibilityType;
   selectedModelId: string;
   onModelChange?: (modelId: string) => void;
+  sprintSuggestions?: string[];
+  sprintSuggestionsLoading?: boolean;
   useMemWal: boolean;
   onUseMemWalChange?: (value: boolean) => void;
   memwalKey: string;
@@ -366,6 +370,8 @@ function PureMultimodalInput({
             chatId={chatId}
             selectedVisibilityType={selectedVisibilityType}
             sendMessage={sendMessage}
+            sprintSuggestions={sprintSuggestions}
+            sprintSuggestionsLoading={sprintSuggestionsLoading}
           />
         )}
 
@@ -506,6 +512,12 @@ export const MultimodalInput = memo(
       return false;
     }
     if (prevProps.memwalKey !== nextProps.memwalKey) {
+      return false;
+    }
+    if (prevProps.sprintSuggestionsLoading !== nextProps.sprintSuggestionsLoading) {
+      return false;
+    }
+    if (!equal(prevProps.sprintSuggestions, nextProps.sprintSuggestions)) {
       return false;
     }
 

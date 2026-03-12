@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
+import { useSprintGreeting } from "@/hooks/use-sprint-greeting";
 import { ChatbotError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
@@ -29,6 +30,7 @@ import { MyStuffPanel } from "../sources/my-stuff-panel";
 import type { SourceCardData } from "../sources/source-card";
 import { getChatHistoryPaginationKey } from "../sidebar/sidebar-history";
 import { toast } from "../toast";
+import type { SprintSummary } from "./sprint-greeting";
 import type { VisibilityType } from "./visibility-selector";
 
 export function Chat({
@@ -39,6 +41,7 @@ export function Chat({
   isReadonly,
   autoResume,
   initialSprintIds,
+  initialSprintData,
 }: {
   id: string;
   initialMessages: ChatMessage[];
@@ -47,6 +50,7 @@ export function Chat({
   isReadonly: boolean;
   autoResume: boolean;
   initialSprintIds?: string[];
+  initialSprintData?: SprintSummary[];
 }) {
   const router = useRouter();
 
@@ -206,6 +210,12 @@ export function Chat({
 
   // Sprint chats now go directly to /chat/{id} after preparation — no URL cleanup needed
 
+  // Fetch LLM-generated greeting + suggestions only for new sprint chats
+  // Use initialMessages (stable server prop) not messages (reactive state)
+  const sprintGreeting = useSprintGreeting(
+    initialMessages.length === 0 ? initialSprintIds : undefined
+  );
+
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [myStuffOpen, setMyStuffOpen] = useState(false);
 
@@ -245,6 +255,9 @@ export function Chat({
           regenerate={regenerate}
           selectedModelId={initialChatModel}
           setMessages={setMessages}
+          sprintData={initialSprintData}
+          sprintGreeting={sprintGreeting.greeting}
+          sprintGreetingLoading={sprintGreeting.isLoading}
           status={status}
         />
 
@@ -262,6 +275,12 @@ export function Chat({
               setAttachments={setAttachments}
               setInput={setInput}
               setMessages={setMessages}
+              sprintSuggestions={
+                sprintGreeting.suggestions.length > 0
+                  ? sprintGreeting.suggestions
+                  : undefined
+              }
+              sprintSuggestionsLoading={sprintGreeting.isLoading}
               status={status}
               stop={stop}
               useMemWal={useMemWal}

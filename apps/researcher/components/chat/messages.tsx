@@ -8,6 +8,7 @@ import { useDataStream } from "../data/data-stream-provider";
 import { Greeting } from "./greeting";
 import { PreviewMessage } from "./message";
 import { ResearchActivity } from "./research-activity";
+import { SprintGreeting, type SprintSummary } from "./sprint-greeting";
 import { useSourceProcessing } from "./source-processing-provider";
 
 type MessagesProps = {
@@ -19,6 +20,9 @@ type MessagesProps = {
   regenerate: UseChatHelpers<ChatMessage>["regenerate"];
   isReadonly: boolean;
   selectedModelId: string;
+  sprintData?: SprintSummary[];
+  sprintGreeting?: string;
+  sprintGreetingLoading?: boolean;
 };
 
 function PureMessages({
@@ -30,6 +34,9 @@ function PureMessages({
   regenerate,
   isReadonly,
   selectedModelId: _selectedModelId,
+  sprintData,
+  sprintGreeting,
+  sprintGreetingLoading,
 }: MessagesProps) {
   const {
     containerRef: messagesContainerRef,
@@ -79,7 +86,16 @@ function PureMessages({
         ref={messagesContainerRef}
       >
         <div className="mx-auto flex min-w-0 max-w-4xl flex-col gap-4 px-2 py-4 md:gap-6 md:px-4">
-          {messages.length === 0 && <Greeting />}
+          {messages.length === 0 &&
+            (sprintData?.length ? (
+              <SprintGreeting
+                greeting={sprintGreeting}
+                isLoading={sprintGreetingLoading}
+                sprints={sprintData}
+              />
+            ) : (
+              <Greeting />
+            ))}
 
           {messages.flatMap((message, index) => {
             const items = [
