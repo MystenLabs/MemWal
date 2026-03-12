@@ -1,10 +1,14 @@
 "use client";
 
-import { BookOpenIcon, XIcon, InboxIcon } from "lucide-react";
-import { memo } from "react";
+import { BookOpenIcon, XIcon, InboxIcon, BookmarkIcon } from "lucide-react";
+import { memo, useState } from "react";
 import { useSources } from "@/hooks/use-sources";
+import { useSprints, type SprintListItem } from "@/hooks/use-sprints";
 import { cn } from "@/lib/utils";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SourceCard, type SourceCardData } from "./source-card";
+import { SprintCard } from "./sprint-card";
+import { SprintDetail } from "./sprint-detail";
 
 function PureMyStuffPanel({
   isOpen,
@@ -15,7 +19,11 @@ function PureMyStuffPanel({
   onClose: () => void;
   onUseSourceInChat?: (source: SourceCardData) => void;
 }) {
-  const { sources, isLoading } = useSources();
+  const { sources, isLoading: sourcesLoading } = useSources();
+  const { sprints, isLoading: sprintsLoading } = useSprints();
+  const [selectedSprint, setSelectedSprint] = useState<SprintListItem | null>(
+    null
+  );
 
   // Split sources into active and expired
   const now = new Date();
@@ -32,9 +40,8 @@ function PureMyStuffPanel({
       claims: s.claims,
       chunkCount: s.chunkCount,
       createdAt: new Date(s.createdAt).toISOString(),
-      // Estimate expiry: createdAt + 7 days (since we don't store expiresAt on source)
       expiresAt: new Date(
-        new Date(s.createdAt).getTime() + 7 * 24 * 60 * 60 * 1000,
+        new Date(s.createdAt).getTime() + 7 * 24 * 60 * 60 * 1000
       ).toISOString(),
     };
 
@@ -59,101 +66,159 @@ function PureMyStuffPanel({
       {/* Panel */}
       <div
         className={cn(
-          "fixed right-0 top-0 z-50 flex h-dvh w-full flex-col border-l bg-background transition-transform duration-300 ease-in-out md:w-[380px]",
-          isOpen ? "translate-x-0" : "translate-x-full",
+          "fixed right-0 top-0 z-50 flex h-dvh w-full flex-col border-l bg-background transition-transform duration-300 ease-in-out md:w-[420px]",
+          isOpen ? "translate-x-0" : "translate-x-full"
         )}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <div className="flex items-center gap-2">
-            <BookOpenIcon className="size-4" />
-            <h2 className="text-sm font-semibold">My Stuff</h2>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <XIcon className="size-4" />
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {/* Research Sprints — Phase 2 placeholder */}
-          <section className="mb-6">
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Research Sprints
-            </h3>
-            <div className="rounded-lg border border-dashed p-4 text-center">
-              <p className="text-sm text-muted-foreground">
-                Coming soon — save research checkpoints to Walrus
-              </p>
+        {/* Sprint detail view — overlays the panel content */}
+        {selectedSprint ? (
+          <SprintDetail
+            sprint={selectedSprint}
+            onBack={() => setSelectedSprint(null)}
+          />
+        ) : (
+          <>
+            {/* Header */}
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div className="flex items-center gap-2">
+                <BookOpenIcon className="size-4" />
+                <h2 className="text-sm font-semibold">My Stuff</h2>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <XIcon className="size-4" />
+              </button>
             </div>
-          </section>
 
-          {/* Sources */}
-          <section>
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Sources
-            </h3>
+            {/* Tabbed content */}
+            <Tabs defaultValue="sources" className="flex flex-1 flex-col">
+              <div className="px-4 pt-3">
+                <TabsList className="w-full">
+                  <TabsTrigger value="sources" className="flex-1">
+                    Sources
+                    {sources.length > 0 && (
+                      <span className="ml-1.5 text-xs text-muted-foreground">
+                        ({sources.length})
+                      </span>
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="sprints" className="flex-1">
+                    Sprints
+                    {sprints.length > 0 && (
+                      <span className="ml-1.5 text-xs text-muted-foreground">
+                        ({sprints.length})
+                      </span>
+                    )}
+                  </TabsTrigger>
+                </TabsList>
+              </div>
 
-            {isLoading ? (
-              <div className="space-y-2">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-16 animate-pulse rounded-lg bg-muted"
-                  />
-                ))}
-              </div>
-            ) : sources.length === 0 ? (
-              <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
-                <InboxIcon className="size-8 text-muted-foreground/50" />
-                <div>
-                  <p className="text-sm font-medium text-muted-foreground">
-                    No sources yet
-                  </p>
-                  <p className="text-xs text-muted-foreground/70">
-                    Add a URL or PDF using the source button
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {activeSources.length > 0 && (
+              {/* Sources tab */}
+              <TabsContent
+                value="sources"
+                className="flex-1 overflow-y-auto px-4 pb-4"
+              >
+                {sourcesLoading ? (
                   <div className="space-y-2">
-                    {activeSources.map((s) => (
-                      <SourceCard
-                        key={s.id}
-                        source={s}
-                        variant="compact"
-                        onUseInChat={onUseSourceInChat}
+                    {[1, 2, 3].map((i) => (
+                      <div
+                        key={i}
+                        className="h-16 animate-pulse rounded-lg bg-muted"
+                      />
+                    ))}
+                  </div>
+                ) : sources.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
+                    <InboxIcon className="size-8 text-muted-foreground/50" />
+                    <div>
+                      <p className="text-sm font-medium text-muted-foreground">
+                        No sources yet
+                      </p>
+                      <p className="text-xs text-muted-foreground/70">
+                        Paste a URL or attach a PDF in the chat
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {activeSources.length > 0 && (
+                      <div className="space-y-2">
+                        {activeSources.map((s) => (
+                          <SourceCard
+                            key={s.id}
+                            source={s}
+                            variant="compact"
+                            onUseInChat={onUseSourceInChat}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {expiredSources.length > 0 && (
+                      <>
+                        <p className="mt-4 text-xs font-medium text-muted-foreground">
+                          Expired ({expiredSources.length})
+                        </p>
+                        <div className="space-y-2">
+                          {expiredSources.map((s) => (
+                            <SourceCard
+                              key={s.id}
+                              source={s}
+                              variant="compact"
+                            />
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </TabsContent>
+
+              {/* Sprints tab */}
+              <TabsContent
+                value="sprints"
+                className="flex-1 overflow-y-auto px-4 pb-4"
+              >
+                {sprintsLoading ? (
+                  <div className="space-y-2">
+                    {[1, 2].map((i) => (
+                      <div
+                        key={i}
+                        className="h-20 animate-pulse rounded-lg bg-muted"
+                      />
+                    ))}
+                  </div>
+                ) : sprints.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
+                    <BookmarkIcon className="size-8 text-muted-foreground/50" />
+                    <div>
+                      <p className="text-sm font-medium text-muted-foreground">
+                        No sprints yet
+                      </p>
+                      <p className="text-xs text-muted-foreground/70">
+                        Click &quot;Save Sprint&quot; in a chat to save your
+                        research findings
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {sprints.map((sprint) => (
+                      <SprintCard
+                        key={sprint.id}
+                        sprint={sprint}
+                        onClick={() => setSelectedSprint(sprint)}
                       />
                     ))}
                   </div>
                 )}
-
-                {expiredSources.length > 0 && (
-                  <>
-                    <p className="mt-4 text-xs font-medium text-muted-foreground">
-                      Expired ({expiredSources.length})
-                    </p>
-                    <div className="space-y-2">
-                      {expiredSources.map((s) => (
-                        <SourceCard
-                          key={s.id}
-                          source={s}
-                          variant="compact"
-                        />
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </section>
-        </div>
+              </TabsContent>
+            </Tabs>
+          </>
+        )}
       </div>
     </>
   );
