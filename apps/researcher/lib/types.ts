@@ -1,6 +1,5 @@
-import type { InferUITool, UIMessage } from "ai";
+import type { UIMessage } from "ai";
 import { z } from "zod";
-import type { getResearchTools } from "./rag/tools";
 
 export type DataPart = { type: "append-message"; message: string };
 
@@ -9,12 +8,6 @@ export const messageMetadataSchema = z.object({
 });
 
 export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
-
-type ResearchTools = ReturnType<typeof getResearchTools>;
-
-export type ChatTools = {
-  [K in keyof ResearchTools]: InferUITool<ResearchTools[K]>;
-};
 
 export type CustomUIDataTypes = {
   appendMessage: string;
@@ -27,8 +20,7 @@ export type CustomUIDataTypes = {
 
 export type ChatMessage = UIMessage<
   MessageMetadata,
-  CustomUIDataTypes,
-  ChatTools
+  CustomUIDataTypes
 >;
 
 export type Attachment = {
