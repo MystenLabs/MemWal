@@ -162,7 +162,7 @@ export default function Playground() {
     const [askQuestion, setAskQuestion] = useState('What do you know about me?')
     const [askLlmKey, setAskLlmKey] = useState('')
     const [askLlmProvider, setAskLlmProvider] = useState<'openai' | 'openrouter'>('openai')
-    const [askResult, setAskResult] = useState<{ answer: string; memories: { text: string; distance: number; blobId?: string }[]; systemPrompt: string } | null>(null)
+    const [askResult, setAskResult] = useState<{ answer: string; memories: { text: string; distance: number; blob_id?: string }[]; systemPrompt: string } | null>(null)
     const [askError, setAskError] = useState<string | null>(null)
     const [askLoading, setAskLoading] = useState(false)
     const [askPhase, setAskPhase] = useState('')
@@ -507,7 +507,7 @@ const data = await memwal.health()
                     code={`const result = await memwal.remember(
   "${rememberText.slice(0, 60)}..."
 )
-// → { id, blobId, owner }`}
+// → { id, blob_id, owner }`}
                     onRun={runRemember}
                     result={rememberResult}
                     resultLabel="stored on Walrus (encrypted)"
@@ -533,7 +533,7 @@ const data = await memwal.health()
                     description="semantic search → download → decrypt"
                     code={`const result = await memwal.recall("${recallQuery}", 5)
 // Server: embed query → cosine search → download → decrypt
-// → { results: [{ text, blobId, distance }], total }`}
+// → { results: [{ text, blob_id, distance }], total }`}
                     onRun={runRecall}
                     result={recallResult}
                     resultLabel="memories found (decrypted)"
@@ -559,7 +559,7 @@ const data = await memwal.health()
   "${analyzeText.slice(0, 50)}..."
 )
 // Server: LLM extracts facts → embed → encrypt → Walrus → store
-// → { facts: [{ text, id, blobId }], total, owner }`}
+// → { facts: [{ text, id, blob_id }], total, owner }`}
                     onRun={runAnalyze}
                     result={analyzeResult}
                     resultLabel="facts extracted & stored"
@@ -877,7 +877,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
 // 3. download encrypted blobs from Walrus
 // 4. SEAL decrypt each result
 const result = await memwal.recallManual("${fullRecallQuery}", 5)
-// → { results: [{ blobId, text, distance }], total }`}</code>
+// → { results: [{ blob_id, text, distance }], total }`}</code>
                     </pre>
 
                     {fullRecallPhase && (

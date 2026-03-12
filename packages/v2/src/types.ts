@@ -23,13 +23,13 @@ export interface MemWalConfig {
 /** Result from remember() */
 export interface RememberResult {
     id: string;
-    blobId: string;
+    blob_id: string;
     owner: string;
 }
 
 /** A single recalled memory */
 export interface RecallMemory {
-    blobId: string;
+    blob_id: string;
     text: string;
     distance: number;
 }
@@ -49,7 +49,7 @@ export interface EmbedResult {
 export interface AnalyzedFact {
     text: string;
     id: string;
-    blobId: string;
+    blob_id: string;
 }
 
 /** Result from analyze() */
@@ -80,7 +80,7 @@ export interface RememberManualOptions {
 /** Result from rememberManual() */
 export interface RememberManualResult {
     id: string;
-    blobId: string;
+    blob_id: string;
     owner: string;
 }
 
@@ -164,7 +164,7 @@ export interface WalletSigner {
 
 /** A recalled memory with decrypted text (from MemWalManual.recallManual) */
 export interface RecallManualMemory {
-    blobId: string;
+    blob_id: string;
     text: string;
     distance: number;
 }

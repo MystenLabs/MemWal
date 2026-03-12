@@ -67,7 +67,7 @@ export function useNoteMemorySave() {
         status: "saved",
         meta: {
           memwalMemoryId: result.id,
-          memwalBlobId: result.blobId,
+          memwalBlobId: result.blob_id,
         },
       });
 
