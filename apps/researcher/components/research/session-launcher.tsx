@@ -1,7 +1,15 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeftIcon, ArrowRightIcon, BrainIcon, SearchIcon, XIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  BrainIcon,
+  MessageSquareIcon,
+  SearchIcon,
+  SparklesIcon,
+  XIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
@@ -105,30 +113,22 @@ export function SessionLauncher({
           exit={{ opacity: 0 }}
           className="flex h-dvh flex-col bg-background"
         >
-          {/* Top bar */}
-          <header className="flex items-center justify-between border-b px-6 py-4">
-            <div className="flex items-center gap-3">
-              <Link
-                href="/"
-                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              >
-                <ArrowLeftIcon className="size-4" />
-              </Link>
-              <BrainIcon className="size-5 text-primary" />
-              <h1 className="text-lg font-semibold">New Research Session</h1>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={handleJustChat}>
-                Just Chat
-                <ArrowRightIcon className="ml-1 size-3.5" />
-              </Button>
-            </div>
+          {/* Header */}
+          <header className="flex items-center gap-3 border-b px-6 py-4">
+            <Link
+              href="/"
+              className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ArrowLeftIcon className="size-4" />
+            </Link>
+            <BrainIcon className="size-5 text-primary" />
+            <h1 className="text-lg font-semibold">New Research Session</h1>
           </header>
 
           {/* Main content */}
           <div className="flex min-h-0 flex-1">
             {/* Left column — sprint selection */}
-            <div className="flex w-full flex-col border-r md:w-[400px] lg:w-[440px]">
+            <div className="flex w-full flex-col border-r md:w-[420px] lg:w-[460px]">
               {/* Search */}
               <div className="border-b px-4 py-3">
                 <div className="relative">
@@ -184,44 +184,95 @@ export function SessionLauncher({
                 )}
               </div>
 
-              {/* Action buttons */}
-              <div className="flex gap-2 border-t px-4 py-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleStartFresh}
-                  disabled={selectedIds.size === 0}
-                  className="flex-1"
-                >
-                  Start Fresh
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={handleStartChat}
-                  disabled={selectedIds.size === 0}
-                  className="flex-1"
-                >
-                  Start Chat
-                  <ArrowRightIcon className="ml-1 size-3.5" />
-                </Button>
+              {/* Bottom actions */}
+              <div className="flex items-center gap-2 border-t px-4 py-3">
+                {selectedIds.size > 0 ? (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleStartFresh}
+                      className="text-muted-foreground"
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleStartChat}
+                      className="flex-1"
+                    >
+                      <SparklesIcon className="mr-1.5 size-3.5" />
+                      Start with {selectedIds.size} sprint{selectedIds.size !== 1 ? "s" : ""}
+                      <ArrowRightIcon className="ml-1.5 size-3.5" />
+                    </Button>
+                  </>
+                ) : (
+                  <p className="flex-1 text-center text-xs text-muted-foreground">
+                    Select sprints above or start a fresh chat
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* Right column — preview */}
-            <div className="hidden flex-1 md:block">
+            {/* Right column — preview or empty state */}
+            <div className="hidden flex-1 md:flex md:flex-col">
               {previewSprint ? (
                 <SprintDetail
                   sprint={previewSprint}
                   onBack={() => setPreviewId(null)}
                 />
               ) : (
-                <div className="flex h-full items-center justify-center">
-                  <p className="text-sm text-muted-foreground">
-                    Click a sprint to preview its details
+                <div className="flex flex-1 flex-col items-center justify-center gap-8 px-8">
+                  {/* Just Chat CTA */}
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="flex size-16 items-center justify-center rounded-2xl border bg-card shadow-sm">
+                      <MessageSquareIcon className="size-7 text-muted-foreground" strokeWidth={1.5} />
+                    </div>
+                    <div className="flex flex-col items-center gap-1.5 text-center">
+                      <h2 className="text-base font-semibold">Start a fresh chat</h2>
+                      <p className="max-w-[280px] text-sm text-muted-foreground">
+                        Jump straight into a new conversation without any sprint context
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      onClick={handleJustChat}
+                      className="gap-2"
+                    >
+                      <MessageSquareIcon className="size-4" />
+                      Just Chat
+                      <ArrowRightIcon className="size-4" />
+                    </Button>
+                  </div>
+
+                  {/* Divider */}
+                  <div className="flex w-full max-w-[240px] items-center gap-3">
+                    <div className="h-px flex-1 bg-border" />
+                    <span className="text-xs text-muted-foreground">or</span>
+                    <div className="h-px flex-1 bg-border" />
+                  </div>
+
+                  {/* Hint */}
+                  <p className="max-w-[280px] text-center text-sm text-muted-foreground">
+                    Select sprints from the left to bring previous research into your new session
                   </p>
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Mobile-only Just Chat button — fixed at bottom for small screens */}
+          <div className="border-t px-4 py-3 md:hidden">
+            <Button
+              variant="outline"
+              onClick={handleJustChat}
+              className="w-full gap-2"
+            >
+              <MessageSquareIcon className="size-4" />
+              Just Chat
+              <ArrowRightIcon className="size-4" />
+            </Button>
           </div>
         </motion.div>
       )}
