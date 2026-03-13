@@ -257,9 +257,9 @@ app.post("/seal/decrypt", async (req, res) => {
 // ============================================================
 app.post("/walrus/upload", async (req, res) => {
     try {
-        const { data, privateKey, owner, epochs = 5 } = req.body;
-        if (!data || !privateKey || !owner) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey, owner" });
+        const { data, privateKey, owner: _ownerIgnored, epochs = 5 } = req.body;
+        if (!data || !privateKey) {
+            return res.status(400).json({ error: "Missing required fields: data, privateKey" });
         }
 
         // Decode signer
@@ -276,7 +276,9 @@ app.post("/walrus/upload", async (req, res) => {
 
             const registerTx = flow.register({
                 epochs,
-                owner,
+                // Force owner = signer to avoid required-signature mismatch
+                // when client owner and server signing key differ.
+                owner: signerAddress,
                 deletable: true,
             });
 
