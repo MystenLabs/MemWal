@@ -51,6 +51,101 @@ const walrusClient = new WalrusClient({
     },
 });
 
+const ENOKI_API_BASE_URL = "https://api.enoki.mystenlabs.com/v1";
+const enokiApiKey = process.env.ENOKI_API_KEY;
+const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "testnet") as
+    | "mainnet"
+    | "testnet"
+    | "devnet";
+
+type EnokiDataWrapper<T> = { data: T };
+type EnokiSponsorResponse = { bytes: string; digest: string };
+type EnokiExecuteResponse = { digest: string };
+const signerUploadQueues = new Map<string, Promise<void>>();
+
+async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
+    if (!enokiApiKey) {
+        throw new Error("ENOKI_API_KEY is not configured");
+    }
+
+    const resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${enokiApiKey}`,
+        },
+        body: JSON.stringify(payload),
+    });
+
+    const text = await resp.text();
+    if (!resp.ok) {
+        throw new Error(`Enoki API error (${resp.status}): ${text}`);
+    }
+
+    const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
+    return parsed.data;
+}
+
+async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair): Promise<string> {
+    if (!enokiApiKey) {
+        const direct = await suiClient.signAndExecuteTransaction({
+            signer,
+            transaction: tx,
+        });
+        return direct.digest;
+    }
+
+    const txKindBytes = await tx.build({
+        client: suiClient as any,
+        onlyTransactionKind: true,
+    });
+
+    const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
+        network: enokiNetwork,
+        transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
+        sender: signer.toSuiAddress(),
+    });
+
+    const signature = await signer.signTransaction(
+        new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
+    );
+
+    const executed = await callEnoki<EnokiExecuteResponse>(
+        `/transaction-blocks/sponsor/${sponsored.digest}`,
+        {
+            digest: sponsored.digest,
+            signature: signature.signature,
+        }
+    );
+
+    return executed.digest;
+}
+
+/**
+ * Queue tasks by signer to avoid coin-object lock conflicts when multiple
+ * Walrus uploads are triggered concurrently for the same signing key.
+ */
+async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promise<T>): Promise<T> {
+    const previous = signerUploadQueues.get(signerAddress) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+    const queued = previous.then(() => current);
+    signerUploadQueues.set(signerAddress, queued);
+
+    await previous;
+    try {
+        return await task();
+    } finally {
+        release();
+        // Cleanup queue map entry once this task is done and no newer task replaced it.
+        if (signerUploadQueues.get(signerAddress) === queued) {
+            signerUploadQueues.delete(signerAddress);
+        }
+    }
+}
+
 // ============================================================
 // Express app
 // ============================================================
@@ -171,33 +266,38 @@ app.post("/walrus/upload", async (req, res) => {
         const { secretKey } = decodeSuiPrivateKey(privateKey);
         const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
-        const blobData = new Uint8Array(Buffer.from(data, "base64"));
-
-        // writeBlobFlow (stateful: encode → register → upload → certify)
-        const flow = walrusClient.writeBlobFlow({ blob: blobData });
-        await flow.encode();
-
         const signerAddress = signer.toSuiAddress();
-        const registerTx = flow.register({
-            epochs,
-            owner: signerAddress,
-            deletable: true,
+        const blob = await runExclusiveBySigner(signerAddress, async () => {
+            const blobData = new Uint8Array(Buffer.from(data, "base64"));
+
+            // writeBlobFlow (stateful: encode → register → upload → certify)
+            const flow = walrusClient.writeBlobFlow({ blob: blobData });
+            await flow.encode();
+
+            const registerTx = flow.register({
+                epochs,
+                owner,
+                deletable: true,
+            });
+
+            // Wait until register tx is confirmed before starting upload/certify.
+            const registerDigest = await executeWithEnokiSponsor(registerTx, signer);
+            await suiClient.waitForTransaction({
+                digest: registerDigest,
+            });
+
+            await flow.upload({ digest: registerDigest });
+
+            const certifyTx = flow.certify();
+            // Wait until certify tx is confirmed before returning this upload.
+            const certifyDigest = await executeWithEnokiSponsor(certifyTx, signer);
+            await suiClient.waitForTransaction({
+                digest: certifyDigest,
+            });
+
+            return flow.getBlob();
         });
 
-        const registerResult = await suiClient.signAndExecuteTransaction({
-            signer,
-            transaction: registerTx,
-        });
-
-        await flow.upload({ digest: registerResult.digest });
-
-        const certifyTx = flow.certify();
-        await suiClient.signAndExecuteTransaction({
-            signer,
-            transaction: certifyTx,
-        });
-
-        const blob = await flow.getBlob();
         res.json({
             blobId: blob.blobId,
             objectId: (blob.blobObject as any)?.id ?? null,
