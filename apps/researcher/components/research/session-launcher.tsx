@@ -56,16 +56,11 @@ export function SessionLauncher({
   const handleStartChat = () => {
     const chatId = generateUUID();
     const sprintTitles = new Map(sprints.map((s) => [s.id, s.title]));
-    const memwalKey =
-      typeof window !== "undefined"
-        ? localStorage.getItem("memwalKey") || undefined
-        : undefined;
 
     preparation.start({
       chatId,
       sprintIds: Array.from(selectedIds),
       sprintTitles,
-      memwalKey,
     });
     setPhase("preparing");
   };

@@ -13,7 +13,6 @@ const QUERY_MODEL = "google/gemini-2.5-flash";
 interface PrepareRequestBody {
   chatId: string;
   sprintIds: string[];
-  memwalKey?: string;
   visibility?: "public" | "private";
 }
 
@@ -46,14 +45,14 @@ export async function POST(request: Request) {
   }
 
   const { chatId, sprintIds, visibility = "private" } = body;
-  const memwalKey = body.memwalKey || process.env.MEMWAL_KEY;
+  const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
   const userId = session.user.id;
 
   if (!memwalKey) {
     return new ChatbotError("bad_request:api", "MemWal key is required for sprint preparation").toResponse();
   }
 
-  console.log(`[sprint:prepare] memwalKey source=${body.memwalKey ? "client" : "env"}, key=${memwalKey.slice(0, 8)}...`);
+  console.log(`[sprint:prepare] memwalKey source=${session.user.privateKey ? "session" : "env"}, key=${memwalKey.slice(0, 8)}...`);
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

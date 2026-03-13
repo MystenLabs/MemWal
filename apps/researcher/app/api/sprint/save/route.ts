@@ -15,7 +15,7 @@ export async function POST(request: Request) {
 
   try {
     const body = await request.json();
-    const { chatId, memwalKey } = body;
+    const { chatId } = body;
 
     if (!chatId || typeof chatId !== "string") {
       return new ChatbotError(
@@ -24,7 +24,7 @@ export async function POST(request: Request) {
       ).toResponse();
     }
 
-    const key = memwalKey || process.env.MEMWAL_KEY;
+    const key = session.user.privateKey || process.env.MEMWAL_KEY;
     if (!key) {
       return new ChatbotError(
         "bad_request:api",

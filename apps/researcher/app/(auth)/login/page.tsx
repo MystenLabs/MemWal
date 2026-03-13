@@ -1,6 +1,6 @@
 "use client";
 
-import { KeyRound, Eye, EyeOff, ArrowRight, Loader2, Shield } from "lucide-react";
+import { KeyRound, Eye, EyeOff, ArrowRight, Loader2, Lock } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "@/components/toast";
@@ -26,25 +26,10 @@ export default function Page() {
     setIsLoading(true);
 
     try {
-      const ed = await import("@noble/ed25519");
-      const { sha512 } = await import("@noble/hashes/sha512");
-
-      if (!ed.etc.sha512Sync) {
-        ed.etc.sha512Sync = (...m: Uint8Array[]) => {
-          const h = sha512.create();
-          for (const msg of m) h.update(msg);
-          return h.digest();
-        };
-      }
-
-      const privKeyBytes = hexToBytes(trimmed);
-      const pubKeyBytes = ed.getPublicKey(privKeyBytes);
-      const publicKey = bytesToHex(pubKeyBytes);
-
       const res = await fetch("/api/auth/key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ publicKey }),
+        body: JSON.stringify({ privateKey: trimmed }),
       });
 
       if (!res.ok) {
@@ -143,24 +128,10 @@ export default function Page() {
 
         {/* Footer note */}
         <div className="mt-4 flex items-center justify-center gap-1.5 text-muted-foreground text-xs">
-          <Shield className="size-3" />
-          <span>Key never leaves your browser</span>
+          <Lock className="size-3" />
+          <span>Encrypted session cookie</span>
         </div>
       </div>
     </div>
   );
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }

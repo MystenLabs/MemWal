@@ -10,11 +10,9 @@ import { toast } from "@/components/toast";
 
 export function SprintSaveButton({
   chatId,
-  memwalKey,
   hasMessages,
 }: {
   chatId: string;
-  memwalKey: string;
   hasMessages: boolean;
 }) {
   const { mutate: globalMutate } = useSWRConfig();
@@ -30,7 +28,7 @@ export function SprintSaveButton({
       const response = await fetch("/api/sprint/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, memwalKey: memwalKey || undefined }),
+        body: JSON.stringify({ chatId }),
       });
 
       if (!response.ok) {

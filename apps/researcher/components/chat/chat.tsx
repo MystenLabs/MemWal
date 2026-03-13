@@ -76,40 +76,12 @@ export function Chat({
   const [input, setInput] = useState<string>("");
   const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
   const [currentModelId, setCurrentModelId] = useState(initialChatModel);
-  const [useMemWal, setUseMemWal] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('useMemWal') !== 'false';
-    }
-    return true;
-  });
-  const [memwalKey, setMemwalKey] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('memwalKey') || '';
-    }
-    return '';
-  });
   const currentModelIdRef = useRef(currentModelId);
-  const useMemWalRef = useRef(useMemWal);
-  const memwalKeyRef = useRef(memwalKey);
   const sprintIdsRef = useRef(initialSprintIds);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
-
-  useEffect(() => {
-    useMemWalRef.current = useMemWal;
-    localStorage.setItem('useMemWal', String(useMemWal));
-  }, [useMemWal]);
-
-  useEffect(() => {
-    memwalKeyRef.current = memwalKey;
-    if (memwalKey) {
-      localStorage.setItem('memwalKey', memwalKey);
-    } else {
-      localStorage.removeItem('memwalKey');
-    }
-  }, [memwalKey]);
 
   const {
     messages,
@@ -160,8 +132,6 @@ export function Chat({
               : { message: lastMessage }),
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
-            useMemWal: useMemWalRef.current,
-            memwalKey: memwalKeyRef.current || undefined,
             // sprintIds are now set during preparation — no longer sent per-message
             ...request.body,
           },
@@ -241,7 +211,6 @@ export function Chat({
           chatId={id}
           hasMessages={messages.length > 0}
           isReadonly={isReadonly}
-          memwalKey={memwalKey}
           selectedVisibilityType={initialVisibilityType}
           onToggleMyStuff={() => setMyStuffOpen((prev) => !prev)}
           sprintIds={initialSprintIds}
@@ -283,10 +252,6 @@ export function Chat({
               sprintSuggestionsLoading={sprintGreeting.isLoading}
               status={status}
               stop={stop}
-              useMemWal={useMemWal}
-              onUseMemWalChange={setUseMemWal}
-              memwalKey={memwalKey}
-              onMemwalKeyChange={setMemwalKey}
             />
           )}
         </div>

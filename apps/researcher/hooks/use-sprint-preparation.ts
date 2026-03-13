@@ -68,7 +68,6 @@ interface StartParams {
   chatId: string;
   sprintIds: string[];
   sprintTitles: Map<string, string>;
-  memwalKey?: string;
   visibility?: "public" | "private";
 }
 
@@ -113,7 +112,6 @@ export function useSprintPreparation() {
         body: JSON.stringify({
           chatId: params.chatId,
           sprintIds: params.sprintIds,
-          memwalKey: params.memwalKey,
           visibility: params.visibility ?? "private",
         }),
         signal: abort.signal,
