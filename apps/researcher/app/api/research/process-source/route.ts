@@ -1,11 +1,11 @@
-import { auth } from "@/app/(auth)/auth";
+import { getSession } from "@/lib/auth/session";
 import { processSource } from "@/lib/rag";
 import { ChatbotError } from "@/lib/errors";
 
 export const maxDuration = 120; // source processing can take a while
 
 export async function POST(request: Request) {
-  const session = await auth();
+  const session = await getSession();
 
   if (!session?.user) {
     return new ChatbotError("unauthorized:chat").toResponse();

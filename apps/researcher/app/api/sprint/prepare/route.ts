@@ -1,6 +1,6 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import { auth } from "@/app/(auth)/auth";
+import { getSession } from "@/lib/auth/session";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getSprintsByIds, saveChat, updateChatSprintContext } from "@/lib/db/queries";
 import { recallFromMemWal } from "@/lib/sprint/memwal";
@@ -30,7 +30,7 @@ const recallQueriesSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const session = await auth();
+  const session = await getSession();
   if (!session?.user) {
     return new ChatbotError("unauthorized:chat").toResponse();
   }

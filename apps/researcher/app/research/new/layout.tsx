@@ -1,15 +1,15 @@
 import { redirect } from "next/navigation";
-import { auth } from "@/app/(auth)/auth";
+import { getSession } from "@/lib/auth/session";
 
 export default async function LauncherLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const session = await auth();
+  const session = await getSession();
 
   if (!session?.user) {
-    redirect("/api/auth/guest");
+    redirect("/login");
   }
 
   return <>{children}</>;

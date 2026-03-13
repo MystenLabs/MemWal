@@ -17,7 +17,6 @@ import {
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import type { Citation, SourceMeta } from "@/lib/sprint/types";
 import { ChatbotError } from "../errors";
-import { generateUUID } from "../utils";
 import {
   type Chat,
   chat,
@@ -33,48 +32,31 @@ import {
   type SourceChunk,
   type ResearchBlob,
 } from "./schema";
-import { generateHashedPassword } from "./utils";
 import { db } from "./drizzle";
 
 // ============================================================
 // User queries
 // ============================================================
 
-export async function getUser(email: string): Promise<User[]> {
+export async function getUserByPublicKey(publicKey: string): Promise<User | null> {
   try {
-    return await db.select().from(user).where(eq(user.email, email));
+    const [found] = await db.select().from(user).where(eq(user.publicKey, publicKey));
+    return found ?? null;
   } catch (_error) {
     throw new ChatbotError(
       "bad_request:database",
-      "Failed to get user by email"
+      "Failed to get user by public key"
     );
   }
 }
 
-export async function createUser(email: string, password: string) {
-  const hashedPassword = generateHashedPassword(password);
-
+export async function createUserByPublicKey(publicKey: string): Promise<User> {
+  const email = `key-${publicKey.slice(0, 8)}@ed25519`;
   try {
-    return await db.insert(user).values({ email, password: hashedPassword });
+    const [created] = await db.insert(user).values({ email, publicKey }).returning();
+    return created;
   } catch (_error) {
     throw new ChatbotError("bad_request:database", "Failed to create user");
-  }
-}
-
-export async function createGuestUser() {
-  const email = `guest-${Date.now()}`;
-  const password = generateHashedPassword(generateUUID());
-
-  try {
-    return await db.insert(user).values({ email, password }).returning({
-      id: user.id,
-      email: user.email,
-    });
-  } catch (_error) {
-    throw new ChatbotError(
-      "bad_request:database",
-      "Failed to create guest user"
-    );
   }
 }
 

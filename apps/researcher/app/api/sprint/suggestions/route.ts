@@ -1,12 +1,12 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import { auth } from "@/app/(auth)/auth";
+import { getSession } from "@/lib/auth/session";
 import { getSprintsByIds } from "@/lib/db/queries";
 import { getTitleModel } from "@/lib/ai/providers";
 import { ChatbotError } from "@/lib/errors";
 
 export async function POST(request: Request) {
-  const session = await auth();
+  const session = await getSession();
   if (!session?.user) {
     return new ChatbotError("unauthorized:chat").toResponse();
   }

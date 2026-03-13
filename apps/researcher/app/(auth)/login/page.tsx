@@ -1,77 +1,166 @@
 "use client";
 
-import Link from "next/link";
+import { KeyRound, Eye, EyeOff, ArrowRight, Loader2, Shield } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useSession } from "next-auth/react";
-import { useActionState, useEffect, useState } from "react";
-
-import { AuthForm } from "@/components/auth/auth-form";
-import { SubmitButton } from "@/components/auth/submit-button";
+import { useState } from "react";
 import { toast } from "@/components/toast";
-import { type LoginActionState, login } from "../actions";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 export default function Page() {
   const router = useRouter();
+  const [privateKey, setPrivateKey] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
-  const [email, setEmail] = useState("");
-  const [isSuccessful, setIsSuccessful] = useState(false);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
 
-  const [state, formAction] = useActionState<LoginActionState, FormData>(
-    login,
-    {
-      status: "idle",
+    const trimmed = privateKey.trim();
+    if (!trimmed) {
+      toast({ type: "error", description: "Please enter your private key." });
+      return;
     }
-  );
 
-  const { update: updateSession } = useSession();
+    setIsLoading(true);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: router and updateSession are stable refs
-  useEffect(() => {
-    if (state.status === "failed") {
-      toast({
-        type: "error",
-        description: "Invalid credentials!",
+    try {
+      const ed = await import("@noble/ed25519");
+      const { sha512 } = await import("@noble/hashes/sha512");
+
+      if (!ed.etc.sha512Sync) {
+        ed.etc.sha512Sync = (...m: Uint8Array[]) => {
+          const h = sha512.create();
+          for (const msg of m) h.update(msg);
+          return h.digest();
+        };
+      }
+
+      const privKeyBytes = hexToBytes(trimmed);
+      const pubKeyBytes = ed.getPublicKey(privKeyBytes);
+      const publicKey = bytesToHex(pubKeyBytes);
+
+      const res = await fetch("/api/auth/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publicKey }),
       });
-    } else if (state.status === "invalid_data") {
-      toast({
-        type: "error",
-        description: "Failed validating your submission!",
-      });
-    } else if (state.status === "success") {
-      setIsSuccessful(true);
-      updateSession();
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Authentication failed");
+      }
+
+      router.push("/");
       router.refresh();
+    } catch (error) {
+      toast({
+        type: "error",
+        description:
+          error instanceof Error ? error.message : "Invalid private key",
+      });
+    } finally {
+      setIsLoading(false);
     }
-  }, [state.status]);
-
-  const handleSubmit = (formData: FormData) => {
-    setEmail(formData.get("email") as string);
-    formAction(formData);
   };
 
   return (
-    <div className="flex h-dvh w-screen items-start justify-center bg-background pt-12 md:items-center md:pt-0">
-      <div className="flex w-full max-w-md flex-col gap-12 overflow-hidden rounded-2xl">
-        <div className="flex flex-col items-center justify-center gap-2 px-4 text-center sm:px-16">
-          <h3 className="font-semibold text-xl dark:text-zinc-50">Sign In</h3>
-          <p className="text-gray-500 text-sm dark:text-zinc-400">
-            Use your email and password to sign in
-          </p>
+    <div className="relative flex h-dvh w-screen items-center justify-center overflow-hidden bg-background">
+      {/* Background decoration */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-[40%] left-1/2 h-[80%] w-[80%] -translate-x-1/2 rounded-full bg-gradient-to-b from-primary/[0.04] to-transparent blur-3xl dark:from-primary/[0.06]" />
+        <div className="absolute -bottom-[20%] left-1/2 h-[60%] w-[60%] -translate-x-1/2 rounded-full bg-gradient-to-t from-primary/[0.03] to-transparent blur-3xl dark:from-primary/[0.04]" />
+      </div>
+
+      <div className="relative z-10 w-full max-w-[400px] px-6">
+        {/* Logo / Brand */}
+        <div className="mb-8 flex flex-col items-center gap-3">
+          <div className="flex size-14 items-center justify-center rounded-2xl border bg-card shadow-sm">
+            <KeyRound className="size-6 text-foreground" strokeWidth={1.5} />
+          </div>
+          <div className="flex flex-col items-center gap-1">
+            <h1 className="font-semibold text-2xl tracking-tight">
+              Researcher
+            </h1>
+            <p className="text-muted-foreground text-sm">
+              Sign in with your ed25519 key
+            </p>
+          </div>
         </div>
-        <AuthForm action={handleSubmit} defaultEmail={email}>
-          <SubmitButton isSuccessful={isSuccessful}>Sign in</SubmitButton>
-          <p className="mt-4 text-center text-gray-600 text-sm dark:text-zinc-400">
-            {"Don't have an account? "}
-            <Link
-              className="font-semibold text-gray-800 hover:underline dark:text-zinc-200"
-              href="/register"
+
+        {/* Card */}
+        <div className="rounded-xl border bg-card p-6 shadow-sm">
+          <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="privateKey">Private Key</Label>
+              <div className="relative">
+                <Input
+                  autoFocus
+                  className="pr-10 font-mono text-sm"
+                  id="privateKey"
+                  onChange={(e) => setPrivateKey(e.target.value)}
+                  placeholder="Enter your private key"
+                  required
+                  type={showKey ? "text" : "password"}
+                  value={privateKey}
+                />
+                <button
+                  className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                  onClick={() => setShowKey(!showKey)}
+                  tabIndex={-1}
+                  type="button"
+                >
+                  {showKey ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <Button
+              className="w-full"
+              disabled={isLoading || !privateKey.trim()}
+              size="lg"
+              type="submit"
             >
-              Sign up
-            </Link>
-            {" for free."}
-          </p>
-        </AuthForm>
+              {isLoading ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  Authenticating...
+                </>
+              ) : (
+                <>
+                  Sign In
+                  <ArrowRight className="size-4" />
+                </>
+              )}
+            </Button>
+          </form>
+        </div>
+
+        {/* Footer note */}
+        <div className="mt-4 flex items-center justify-center gap-1.5 text-muted-foreground text-xs">
+          <Shield className="size-3" />
+          <span>Key never leaves your browser</span>
+        </div>
       </div>
     </div>
   );
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
