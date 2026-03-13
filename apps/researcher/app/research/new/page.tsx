@@ -1,9 +1,10 @@
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/session";
 import { getSprintsByUserId } from "@/lib/db/queries";
 import { SessionLauncher } from "@/components/research/session-launcher";
 
-export default async function LauncherPage() {
+async function LauncherContent() {
   const session = await getSession();
 
   if (!session?.user) {
@@ -31,4 +32,12 @@ export default async function LauncherPage() {
   }));
 
   return <SessionLauncher sprints={serializedSprints} />;
+}
+
+export default function LauncherPage() {
+  return (
+    <Suspense fallback={<div className="flex h-dvh" />}>
+      <LauncherContent />
+    </Suspense>
+  );
 }

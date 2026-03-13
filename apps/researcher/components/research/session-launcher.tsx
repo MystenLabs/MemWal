@@ -5,6 +5,9 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   BrainIcon,
+  ClockIcon,
+  DatabaseIcon,
+  FileTextIcon,
   MessageSquareIcon,
   SearchIcon,
   SparklesIcon,
@@ -20,6 +23,19 @@ import { SprintSelectCard } from "./sprint-select-card";
 import { useSprintPreparation } from "@/hooks/use-sprint-preparation";
 import type { SprintListItem } from "@/hooks/use-sprints";
 import { generateUUID } from "@/lib/utils";
+
+function formatRelativeDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffHours < 1) return "just now";
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
 
 export function SessionLauncher({
   sprints,
@@ -47,6 +63,25 @@ export function SessionLauncher({
   const previewSprint = useMemo(
     () => sprints.find((s) => s.id === previewId) ?? null,
     [sprints, previewId]
+  );
+
+  // Stats
+  const totalSources = useMemo(
+    () => sprints.reduce((sum, s) => sum + (s.sources?.length ?? 0), 0),
+    [sprints]
+  );
+  const totalMemories = useMemo(
+    () => sprints.reduce((sum, s) => sum + (s.memoryCount ?? 0), 0),
+    [sprints]
+  );
+
+  // Recent sprints (last 3, sorted by date)
+  const recentSprints = useMemo(
+    () =>
+      [...sprints]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, 3),
+    [sprints]
   );
 
   const toggleSelect = (id: string) => {
@@ -214,55 +249,130 @@ export function SessionLauncher({
               </div>
             </div>
 
-            {/* Right column — preview or empty state */}
-            <div className="hidden flex-1 md:flex md:flex-col">
+            {/* Right column — preview or knowledge hub */}
+            <div className="hidden min-h-0 flex-1 md:flex md:flex-col">
               {previewSprint ? (
                 <SprintDetail
                   sprint={previewSprint}
                   onBack={() => setPreviewId(null)}
                 />
               ) : (
-                <div className="flex flex-1 flex-col items-center justify-center gap-8 px-8">
-                  {/* Just Chat CTA */}
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex size-16 items-center justify-center rounded-2xl border bg-card shadow-sm">
-                      <MessageSquareIcon className="size-7 text-muted-foreground" strokeWidth={1.5} />
+                <div className="flex flex-1 flex-col overflow-y-auto">
+                  {/* Knowledge stats banner */}
+                  <div className="border-b px-8 py-6">
+                    <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                      Your Research Memory
+                    </h2>
+                    <div className="mt-4 grid grid-cols-3 gap-4">
+                      <div className="rounded-lg border bg-card p-3">
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <BrainIcon className="size-4" />
+                          <span className="text-xs font-medium">Sprints</span>
+                        </div>
+                        <p className="mt-1 text-2xl font-bold">{sprints.length}</p>
+                      </div>
+                      <div className="rounded-lg border bg-card p-3">
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <FileTextIcon className="size-4" />
+                          <span className="text-xs font-medium">Sources</span>
+                        </div>
+                        <p className="mt-1 text-2xl font-bold">{totalSources}</p>
+                      </div>
+                      <div className="rounded-lg border bg-card p-3">
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <DatabaseIcon className="size-4" />
+                          <span className="text-xs font-medium">Memories</span>
+                        </div>
+                        <p className="mt-1 text-2xl font-bold">{totalMemories}</p>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-center gap-1.5 text-center">
-                      <h2 className="text-base font-semibold">Start a fresh chat</h2>
-                      <p className="max-w-[280px] text-sm text-muted-foreground">
-                        Jump straight into a new conversation without any sprint context
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      Your findings are persisted on-chain via MemWal and recalled across sessions.
+                    </p>
+                  </div>
+
+                  {/* Recent research */}
+                  <div className="border-b px-8 py-6">
+                    <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                      <ClockIcon className="size-3.5" />
+                      Recent Research
+                    </h2>
+                    <div className="mt-4 space-y-3">
+                      {recentSprints.map((sprint) => (
+                        <button
+                          key={sprint.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(sprint.id)) {
+                                next.delete(sprint.id);
+                              } else {
+                                next.add(sprint.id);
+                              }
+                              return next;
+                            });
+                          }}
+                          className="group flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-all hover:border-primary/30 hover:bg-primary/5"
+                        >
+                          <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
+                            <BrainIcon className="size-4 text-muted-foreground" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h3 className="truncate text-sm font-medium">
+                              {sprint.title}
+                            </h3>
+                            <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>{formatRelativeDate(sprint.createdAt)}</span>
+                              {(sprint.sources?.length ?? 0) > 0 && (
+                                <span>{sprint.sources?.length} sources</span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="mt-0.5 shrink-0">
+                            {selectedIds.has(sprint.id) ? (
+                              <span className="rounded-full bg-primary px-2 py-0.5 text-[10px] font-medium text-primary-foreground">
+                                Selected
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+                                + Add
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Just Chat CTA */}
+                  <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8 py-6">
+                    <div className="flex flex-col items-center gap-2 text-center">
+                      <div className="flex size-12 items-center justify-center rounded-xl border bg-card shadow-sm">
+                        <MessageSquareIcon className="size-5 text-muted-foreground" strokeWidth={1.5} />
+                      </div>
+                      <p className="text-sm font-medium">Want to start fresh?</p>
+                      <p className="max-w-[260px] text-xs text-muted-foreground">
+                        Start a new conversation without any sprint context
                       </p>
                     </div>
                     <Button
                       variant="outline"
-                      size="lg"
+                      size="sm"
                       onClick={handleJustChat}
                       className="gap-2"
                     >
-                      <MessageSquareIcon className="size-4" />
+                      <MessageSquareIcon className="size-3.5" />
                       Just Chat
-                      <ArrowRightIcon className="size-4" />
+                      <ArrowRightIcon className="size-3.5" />
                     </Button>
                   </div>
-
-                  {/* Divider */}
-                  <div className="flex w-full max-w-[240px] items-center gap-3">
-                    <div className="h-px flex-1 bg-border" />
-                    <span className="text-xs text-muted-foreground">or</span>
-                    <div className="h-px flex-1 bg-border" />
-                  </div>
-
-                  {/* Hint */}
-                  <p className="max-w-[280px] text-center text-sm text-muted-foreground">
-                    Select sprints from the left to bring previous research into your new session
-                  </p>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Mobile-only Just Chat button — fixed at bottom for small screens */}
+          {/* Mobile-only Just Chat button */}
           <div className="border-t px-4 py-3 md:hidden">
             <Button
               variant="outline"
