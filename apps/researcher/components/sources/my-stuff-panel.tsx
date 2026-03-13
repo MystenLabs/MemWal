@@ -94,7 +94,7 @@ function PureMyStuffPanel({
             </div>
 
             {/* Tabbed content */}
-            <Tabs defaultValue="sources" className="flex flex-1 flex-col">
+            <Tabs defaultValue="sources" className="flex min-h-0 flex-1 flex-col">
               <div className="px-4 pt-3">
                 <TabsList className="w-full">
                   <TabsTrigger value="sources" className="flex-1">
@@ -119,7 +119,7 @@ function PureMyStuffPanel({
               {/* Sources tab */}
               <TabsContent
                 value="sources"
-                className="flex-1 overflow-y-auto px-4 pb-4"
+                className="min-h-0 flex-1 overflow-y-auto px-4 pb-4"
               >
                 {sourcesLoading ? (
                   <div className="space-y-2">
@@ -180,7 +180,7 @@ function PureMyStuffPanel({
               {/* Sprints tab */}
               <TabsContent
                 value="sprints"
-                className="flex-1 overflow-y-auto px-4 pb-4"
+                className="min-h-0 flex-1 overflow-y-auto px-4 pb-4"
               >
                 {sprintsLoading ? (
                   <div className="space-y-2">

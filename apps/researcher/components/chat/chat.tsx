@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
 import { ChatHeader } from "./chat-header";
+import { SprintSaveOverlay } from "./sprint-save-overlay";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,6 +21,7 @@ import {
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
 import { useSprintGreeting } from "@/hooks/use-sprint-greeting";
+import { useSprintSave } from "@/hooks/use-sprint-save";
 import { ChatbotError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
@@ -186,6 +188,23 @@ export function Chat({
     initialMessages.length === 0 ? initialSprintIds : undefined
   );
 
+  const sprintSave = useSprintSave();
+
+  const handleSprintSave = useCallback(() => {
+    sprintSave.save(id);
+  }, [sprintSave.save, id]);
+
+  const handleSprintSaveClose = useCallback(() => {
+    sprintSave.reset();
+    // Refresh sprint status and sprint list
+    mutate(`/api/sprint/status?chatId=${id}`);
+    mutate("/api/sprint/list");
+  }, [sprintSave.reset, mutate, id]);
+
+  const handleSprintSaveRetry = useCallback(() => {
+    sprintSave.save(id);
+  }, [sprintSave.save, id]);
+
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [myStuffOpen, setMyStuffOpen] = useState(false);
 
@@ -214,6 +233,7 @@ export function Chat({
           selectedVisibilityType={initialVisibilityType}
           onToggleMyStuff={() => setMyStuffOpen((prev) => !prev)}
           sprintIds={initialSprintIds}
+          onSave={handleSprintSave}
         />
 
         <Messages
@@ -261,6 +281,12 @@ export function Chat({
         isOpen={myStuffOpen}
         onClose={() => setMyStuffOpen(false)}
         onUseSourceInChat={handleUseSourceInChat}
+      />
+
+      <SprintSaveOverlay
+        state={sprintSave.state}
+        onRetry={handleSprintSaveRetry}
+        onClose={handleSprintSaveClose}
       />
 
       <AlertDialog
