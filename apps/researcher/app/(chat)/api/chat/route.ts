@@ -13,8 +13,7 @@ import {
 const checkBotId = isVercel ? require("botid/server").checkBotId : async () => ({ isBot: false });
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
-import { auth, type UserType } from "@/app/(auth)/auth";
-import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { getSession } from "@/lib/auth/session";
 import { allowedModelIds } from "@/lib/ai/models";
 import { researchPrompt, getSprintResumePrompt } from "@/lib/ai/prompts";
 import { buildSprintContext } from "@/lib/sprint/resume";
@@ -70,7 +69,7 @@ export async function POST(request: Request) {
     const { id, message, messages, selectedChatModel, selectedVisibilityType } =
       requestBody;
 
-    const [botResult, session] = await Promise.all([checkBotId(), auth()]);
+    const [botResult, session] = await Promise.all([checkBotId(), getSession()]);
 
     if (botResult.isBot) {
       return new ChatbotError("unauthorized:chat").toResponse();
@@ -88,14 +87,12 @@ export async function POST(request: Request) {
       await checkIpRateLimit(vercelFunctions.ipAddress(request));
     }
 
-    const userType: UserType = session.user.type;
-
     const messageCount = await getMessageCountByUserId({
       id: session.user.id,
       differenceInHours: 1,
     });
 
-    if (messageCount > entitlementsByUserType[userType].maxMessagesPerHour) {
+    if (messageCount > 100) {
       return new ChatbotError("rate_limit:chat").toResponse();
     }
 
@@ -151,7 +148,7 @@ export async function POST(request: Request) {
     const modelMessages = await convertToModelMessages(uiMessages);
 
     // Resolve sprint context — pre-built during preparation and stored on chat record
-    const memwalKey = (requestBody as any).memwalKey || process.env.MEMWAL_KEY;
+    const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
     const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
     const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;
 
@@ -398,7 +395,7 @@ export async function DELETE(request: Request) {
     return new ChatbotError("bad_request:api").toResponse();
   }
 
-  const session = await auth();
+  const session = await getSession();
 
   if (!session?.user) {
     return new ChatbotError("unauthorized:chat").toResponse();

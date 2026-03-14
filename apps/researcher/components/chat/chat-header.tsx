@@ -18,17 +18,17 @@ function PureChatHeader({
   selectedVisibilityType,
   isReadonly,
   onToggleMyStuff,
-  memwalKey,
   hasMessages,
   sprintIds,
+  onSave,
 }: {
   chatId: string;
   selectedVisibilityType: VisibilityType;
   isReadonly: boolean;
   onToggleMyStuff?: () => void;
-  memwalKey: string;
   hasMessages: boolean;
   sprintIds?: string[];
+  onSave: () => void;
 }) {
   const router = useRouter();
   const { open } = useSidebar();
@@ -93,7 +93,7 @@ function PureChatHeader({
         <SprintSaveButton
           chatId={chatId}
           hasMessages={hasMessages}
-          memwalKey={memwalKey}
+          onSave={onSave}
         />
       )}
     </header>
@@ -106,8 +106,8 @@ export const ChatHeader = memo(PureChatHeader, (prevProps, nextProps) => {
     prevProps.selectedVisibilityType === nextProps.selectedVisibilityType &&
     prevProps.isReadonly === nextProps.isReadonly &&
     prevProps.onToggleMyStuff === nextProps.onToggleMyStuff &&
-    prevProps.memwalKey === nextProps.memwalKey &&
     prevProps.hasMessages === nextProps.hasMessages &&
-    prevProps.sprintIds === nextProps.sprintIds
+    prevProps.sprintIds === nextProps.sprintIds &&
+    prevProps.onSave === nextProps.onSave
   );
 });
