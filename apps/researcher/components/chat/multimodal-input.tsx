@@ -3,7 +3,7 @@
 import type { UseChatHelpers } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import equal from "fast-deep-equal";
-import { CheckIcon, KeyIcon, SettingsIcon } from "lucide-react";
+import { CheckIcon } from "lucide-react";
 import {
   type ChangeEvent,
   type Dispatch,
@@ -68,10 +68,8 @@ function PureMultimodalInput({
   selectedVisibilityType,
   selectedModelId,
   onModelChange,
-  useMemWal,
-  onUseMemWalChange,
-  memwalKey,
-  onMemwalKeyChange,
+  sprintSuggestions,
+  sprintSuggestionsLoading,
 }: {
   chatId: string;
   input: string;
@@ -87,10 +85,8 @@ function PureMultimodalInput({
   selectedVisibilityType: VisibilityType;
   selectedModelId: string;
   onModelChange?: (modelId: string) => void;
-  useMemWal: boolean;
-  onUseMemWalChange?: (value: boolean) => void;
-  memwalKey: string;
-  onMemwalKeyChange?: (key: string) => void;
+  sprintSuggestions?: string[];
+  sprintSuggestionsLoading?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
@@ -366,6 +362,8 @@ function PureMultimodalInput({
             chatId={chatId}
             selectedVisibilityType={selectedVisibilityType}
             sendMessage={sendMessage}
+            sprintSuggestions={sprintSuggestions}
+            sprintSuggestionsLoading={sprintSuggestionsLoading}
           />
         )}
 
@@ -458,12 +456,6 @@ function PureMultimodalInput({
               onModelChange={onModelChange}
               selectedModelId={selectedModelId}
             />
-            <MemWalButton
-              useMemWal={useMemWal}
-              onUseMemWalChange={onUseMemWalChange}
-              memwalKey={memwalKey}
-              onMemwalKeyChange={onMemwalKeyChange}
-            />
           </PromptInputTools>
 
           {status === "submitted" ? (
@@ -502,10 +494,10 @@ export const MultimodalInput = memo(
     if (prevProps.selectedModelId !== nextProps.selectedModelId) {
       return false;
     }
-    if (prevProps.useMemWal !== nextProps.useMemWal) {
+    if (prevProps.sprintSuggestionsLoading !== nextProps.sprintSuggestionsLoading) {
       return false;
     }
-    if (prevProps.memwalKey !== nextProps.memwalKey) {
+    if (!equal(prevProps.sprintSuggestions, nextProps.sprintSuggestions)) {
       return false;
     }
 
@@ -638,136 +630,3 @@ function PureStopButton({
 }
 
 const StopButton = memo(PureStopButton);
-
-function PureMemWalButton({
-  useMemWal,
-  onUseMemWalChange,
-  memwalKey,
-  onMemwalKeyChange,
-}: {
-  useMemWal: boolean;
-  onUseMemWalChange?: (value: boolean) => void;
-  memwalKey: string;
-  onMemwalKeyChange?: (key: string) => void;
-}) {
-  const [showKeyInput, setShowKeyInput] = useState(false);
-  const [keyInput, setKeyInput] = useState(memwalKey);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        dropdownRef.current && !dropdownRef.current.contains(event.target as Node) &&
-        buttonRef.current && !buttonRef.current.contains(event.target as Node)
-      ) {
-        setShowKeyInput(false);
-      }
-    }
-    if (showKeyInput) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => document.removeEventListener("mousedown", handleClickOutside);
-    }
-  }, [showKeyInput]);
-
-  useEffect(() => {
-    setKeyInput(memwalKey);
-  }, [memwalKey]);
-
-  const hasKey = !!memwalKey;
-
-  return (
-    <>
-      <div className="flex items-center gap-0">
-        <Button
-          className={cn(
-            "h-8 gap-1.5 rounded-lg px-2 text-xs font-medium transition-all hover:bg-accent",
-            !useMemWal && "opacity-50",
-            useMemWal && "rounded-r-none"
-          )}
-          onClick={() => onUseMemWalChange?.(!useMemWal)}
-          variant="ghost"
-          title={useMemWal ? "Memory enabled" : "Memory disabled"}
-        >
-          <img src="/memwal-icon.png" alt="MemWal" className="size-4" />
-          <span className="hidden sm:inline">{useMemWal ? "Memory" : "No Memory"}</span>
-        </Button>
-        {useMemWal && (
-          <Button
-            ref={buttonRef}
-            className={cn(
-              "h-8 w-6 rounded-lg rounded-l-none px-0 text-xs transition-all hover:bg-accent",
-              !hasKey && "text-amber-500",
-              hasKey && "text-green-500",
-            )}
-            onClick={() => setShowKeyInput(!showKeyInput)}
-            variant="ghost"
-            title={hasKey ? "Key configured" : "Set your MEMWAL key"}
-          >
-            <KeyIcon className="size-3" />
-          </Button>
-        )}
-      </div>
-
-      {showKeyInput && (
-        <div
-          ref={dropdownRef}
-          className="fixed z-[9999] w-[320px] rounded-lg border border-border bg-background p-3 shadow-lg"
-          style={{
-            bottom: (typeof window !== 'undefined' && buttonRef.current)
-              ? window.innerHeight - buttonRef.current.getBoundingClientRect().top + 8
-              : 80,
-            left: (typeof window !== 'undefined' && buttonRef.current)
-              ? buttonRef.current.getBoundingClientRect().left
-              : 0,
-          }}
-        >
-          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            <KeyIcon className="size-3" />
-            memwal key (ed25519 private key hex)
-          </div>
-          <div className="flex gap-1.5">
-            <input
-              type="password"
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              placeholder="Enter your delegate key..."
-              className="flex-1 rounded-md border border-border bg-muted px-2 py-1.5 text-xs font-mono outline-none focus:border-primary"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  onMemwalKeyChange?.(keyInput);
-                  setShowKeyInput(false);
-                }
-              }}
-            />
-            <Button
-              className="h-7 px-2 text-xs"
-              variant="default"
-              onClick={() => {
-                onMemwalKeyChange?.(keyInput);
-                setShowKeyInput(false);
-              }}
-            >
-              Save
-            </Button>
-          </div>
-          {hasKey && (
-            <button
-              type="button"
-              className="mt-2 text-xs text-red-400 hover:text-red-300 transition-colors"
-              onClick={() => {
-                onMemwalKeyChange?.('');
-                setKeyInput('');
-              }}
-            >
-              remove key
-            </button>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-const MemWalButton = memo(PureMemWalButton);

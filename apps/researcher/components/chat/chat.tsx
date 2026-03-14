@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
 import { ChatHeader } from "./chat-header";
+import { SprintSaveOverlay } from "./sprint-save-overlay";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,6 +20,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
+import { useSprintGreeting } from "@/hooks/use-sprint-greeting";
+import { useSprintSave } from "@/hooks/use-sprint-save";
 import { ChatbotError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
@@ -29,6 +32,7 @@ import { MyStuffPanel } from "../sources/my-stuff-panel";
 import type { SourceCardData } from "../sources/source-card";
 import { getChatHistoryPaginationKey } from "../sidebar/sidebar-history";
 import { toast } from "../toast";
+import type { SprintSummary } from "./sprint-greeting";
 import type { VisibilityType } from "./visibility-selector";
 
 export function Chat({
@@ -39,6 +43,7 @@ export function Chat({
   isReadonly,
   autoResume,
   initialSprintIds,
+  initialSprintData,
 }: {
   id: string;
   initialMessages: ChatMessage[];
@@ -47,6 +52,7 @@ export function Chat({
   isReadonly: boolean;
   autoResume: boolean;
   initialSprintIds?: string[];
+  initialSprintData?: SprintSummary[];
 }) {
   const router = useRouter();
 
@@ -72,40 +78,12 @@ export function Chat({
   const [input, setInput] = useState<string>("");
   const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
   const [currentModelId, setCurrentModelId] = useState(initialChatModel);
-  const [useMemWal, setUseMemWal] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('useMemWal') !== 'false';
-    }
-    return true;
-  });
-  const [memwalKey, setMemwalKey] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('memwalKey') || '';
-    }
-    return '';
-  });
   const currentModelIdRef = useRef(currentModelId);
-  const useMemWalRef = useRef(useMemWal);
-  const memwalKeyRef = useRef(memwalKey);
   const sprintIdsRef = useRef(initialSprintIds);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
-
-  useEffect(() => {
-    useMemWalRef.current = useMemWal;
-    localStorage.setItem('useMemWal', String(useMemWal));
-  }, [useMemWal]);
-
-  useEffect(() => {
-    memwalKeyRef.current = memwalKey;
-    if (memwalKey) {
-      localStorage.setItem('memwalKey', memwalKey);
-    } else {
-      localStorage.removeItem('memwalKey');
-    }
-  }, [memwalKey]);
 
   const {
     messages,
@@ -156,8 +134,6 @@ export function Chat({
               : { message: lastMessage }),
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
-            useMemWal: useMemWalRef.current,
-            memwalKey: memwalKeyRef.current || undefined,
             // sprintIds are now set during preparation — no longer sent per-message
             ...request.body,
           },
@@ -206,6 +182,29 @@ export function Chat({
 
   // Sprint chats now go directly to /chat/{id} after preparation — no URL cleanup needed
 
+  // Fetch LLM-generated greeting + suggestions only for new sprint chats
+  // Use initialMessages (stable server prop) not messages (reactive state)
+  const sprintGreeting = useSprintGreeting(
+    initialMessages.length === 0 ? initialSprintIds : undefined
+  );
+
+  const sprintSave = useSprintSave();
+
+  const handleSprintSave = useCallback(() => {
+    sprintSave.save(id);
+  }, [sprintSave.save, id]);
+
+  const handleSprintSaveClose = useCallback(() => {
+    sprintSave.reset();
+    // Refresh sprint status and sprint list
+    mutate(`/api/sprint/status?chatId=${id}`);
+    mutate("/api/sprint/list");
+  }, [sprintSave.reset, mutate, id]);
+
+  const handleSprintSaveRetry = useCallback(() => {
+    sprintSave.save(id);
+  }, [sprintSave.save, id]);
+
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [myStuffOpen, setMyStuffOpen] = useState(false);
 
@@ -231,10 +230,10 @@ export function Chat({
           chatId={id}
           hasMessages={messages.length > 0}
           isReadonly={isReadonly}
-          memwalKey={memwalKey}
           selectedVisibilityType={initialVisibilityType}
           onToggleMyStuff={() => setMyStuffOpen((prev) => !prev)}
           sprintIds={initialSprintIds}
+          onSave={handleSprintSave}
         />
 
         <Messages
@@ -245,6 +244,9 @@ export function Chat({
           regenerate={regenerate}
           selectedModelId={initialChatModel}
           setMessages={setMessages}
+          sprintData={initialSprintData}
+          sprintGreeting={sprintGreeting.greeting}
+          sprintGreetingLoading={sprintGreeting.isLoading}
           status={status}
         />
 
@@ -262,12 +264,14 @@ export function Chat({
               setAttachments={setAttachments}
               setInput={setInput}
               setMessages={setMessages}
+              sprintSuggestions={
+                sprintGreeting.suggestions.length > 0
+                  ? sprintGreeting.suggestions
+                  : undefined
+              }
+              sprintSuggestionsLoading={sprintGreeting.isLoading}
               status={status}
               stop={stop}
-              useMemWal={useMemWal}
-              onUseMemWalChange={setUseMemWal}
-              memwalKey={memwalKey}
-              onMemwalKeyChange={setMemwalKey}
             />
           )}
         </div>
@@ -277,6 +281,12 @@ export function Chat({
         isOpen={myStuffOpen}
         onClose={() => setMyStuffOpen(false)}
         onUseSourceInChat={handleUseSourceInChat}
+      />
+
+      <SprintSaveOverlay
+        state={sprintSave.state}
+        onRetry={handleSprintSaveRetry}
+        onClose={handleSprintSaveClose}
       />
 
       <AlertDialog

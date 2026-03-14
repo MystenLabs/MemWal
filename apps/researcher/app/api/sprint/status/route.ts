@@ -1,9 +1,9 @@
-import { auth } from "@/app/(auth)/auth";
+import { getSession } from "@/lib/auth/session";
 import { getChatById, getSprintByChatId } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
 export async function GET(request: Request) {
-  const session = await auth();
+  const session = await getSession();
 
   if (!session?.user) {
     return new ChatbotError("unauthorized:chat").toResponse();

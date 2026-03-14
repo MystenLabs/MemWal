@@ -1,62 +1,25 @@
 "use client";
 
-import { BookmarkIcon, CheckIcon, LoaderIcon } from "lucide-react";
-import { useState } from "react";
-import { useSWRConfig } from "swr";
+import { BookmarkIcon, CheckIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSprintStatus } from "@/hooks/use-sprint-status";
-import { toast } from "@/components/toast";
 
 export function SprintSaveButton({
   chatId,
-  memwalKey,
   hasMessages,
+  onSave,
 }: {
   chatId: string;
-  memwalKey: string;
   hasMessages: boolean;
+  onSave: () => void;
 }) {
-  const { mutate: globalMutate } = useSWRConfig();
-  const { hasSprint, sprintTitle, isLoading, mutate } =
+  const { hasSprint, sprintTitle, isLoading } =
     useSprintStatus(chatId);
-  const [isSaving, setIsSaving] = useState(false);
 
   if (!hasMessages) return null;
 
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      const response = await fetch("/api/sprint/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, memwalKey: memwalKey || undefined }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || "Failed to save sprint");
-      }
-
-      const result = await response.json();
-      toast({
-        type: "success",
-        description: `Sprint saved: "${result.title}"`,
-      });
-      mutate();
-      globalMutate("/api/sprint/list");
-    } catch (error) {
-      toast({
-        type: "error",
-        description:
-          error instanceof Error ? error.message : "Failed to save sprint",
-      });
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const disabled = hasSprint || isSaving || isLoading;
+  const disabled = hasSprint || isLoading;
 
   return (
     <Tooltip>
@@ -64,22 +27,16 @@ export function SprintSaveButton({
         <Button
           className="order-4 h-8 gap-1.5 px-2 md:h-fit md:px-2"
           disabled={disabled}
-          onClick={handleSave}
-          variant="outline"
+          onClick={onSave}
+          variant={hasSprint ? "outline" : "default"}
         >
-          {isSaving ? (
-            <LoaderIcon className="size-4 animate-spin" />
-          ) : hasSprint ? (
+          {hasSprint ? (
             <CheckIcon className="size-4" />
           ) : (
             <BookmarkIcon className="size-4" />
           )}
           <span className="hidden sm:inline">
-            {isSaving
-              ? "Saving..."
-              : hasSprint
-                ? "Saved"
-                : "Save Sprint"}
+            {hasSprint ? "Saved" : "Save Sprint"}
           </span>
         </Button>
       </TooltipTrigger>
