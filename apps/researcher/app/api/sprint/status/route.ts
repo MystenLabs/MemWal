@@ -21,7 +21,13 @@ export async function GET(request: Request) {
 
   try {
     const chat = await getChatById({ id: chatId });
-    if (!chat || chat.userId !== session.user.id) {
+
+    // Chat doesn't exist yet (new chat, ID generated client-side before first message)
+    if (!chat) {
+      return Response.json({ hasSprint: false, sprintId: null, title: null });
+    }
+
+    if (chat.userId !== session.user.id) {
       return new ChatbotError("forbidden:chat").toResponse();
     }
 
