@@ -1,6 +1,3 @@
-// Vercel-specific — only used when running on Vercel
-const isVercel = !!process.env.VERCEL;
-const vercelFunctions = isVercel ? require("@vercel/functions") : null;
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -9,8 +6,6 @@ import {
   stepCountIs,
   streamText,
 } from "ai";
-// BotId is Vercel-only
-const checkBotId = isVercel ? require("botid/server").checkBotId : async () => ({ isBot: false });
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { getSession } from "@/lib/auth/session";
@@ -37,7 +32,6 @@ import {
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
-import { checkIpRateLimit } from "@/lib/ratelimit";
 import type { ChatMessage } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
@@ -69,11 +63,7 @@ export async function POST(request: Request) {
     const { id, message, messages, selectedChatModel, selectedVisibilityType } =
       requestBody;
 
-    const [botResult, session] = await Promise.all([checkBotId(), getSession()]);
-
-    if (botResult.isBot) {
-      return new ChatbotError("unauthorized:chat").toResponse();
-    }
+    const session = await getSession();
 
     if (!session?.user) {
       return new ChatbotError("unauthorized:chat").toResponse();
@@ -81,10 +71,6 @@ export async function POST(request: Request) {
 
     if (!allowedModelIds.has(selectedChatModel)) {
       return new ChatbotError("bad_request:api").toResponse();
-    }
-
-    if (isVercel) {
-      await checkIpRateLimit(vercelFunctions.ipAddress(request));
     }
 
     const messageCount = await getMessageCountByUserId({
@@ -376,13 +362,11 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    const vercelId = request.headers.get("x-vercel-id");
-
     if (error instanceof ChatbotError) {
       return error.toResponse();
     }
 
-    console.error("Unhandled error in chat API:", error, { vercelId });
+    console.error("Unhandled error in chat API:", error);
     return new ChatbotError("offline:chat").toResponse();
   }
 }
