@@ -5,13 +5,13 @@ RUN npm install -g serve vitepress
 
 WORKDIR /app
 
-# Copy docs source
-COPY docs/ ./docs/
+# Copy full repo (monorepo)
+COPY . .
 
-# Build docs
-RUN npx vitepress build docs
+# Build docs - docs is in apps/app/docs/
+RUN cd apps/app && npx vitepress build docs
 
-# Serve docs on port
+# Serve docs from the built location
 EXPOSE ${PORT:-3000}
 
-CMD ["serve", "-s", "docs/dist", "-l", "${PORT:-3000}"]
+CMD ["serve", "-s", "apps/app/docs/dist", "-l", "${PORT:-3000}"]
