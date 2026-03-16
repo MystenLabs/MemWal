@@ -74,6 +74,7 @@ COPY --from=builder /app/apps/chatbot/node_modules/dotenv       ./node_modules/d
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
 # Run DB migration then start Next.js server
