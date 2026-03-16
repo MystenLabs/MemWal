@@ -3,8 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'MemWal',
   description: 'Privacy-preserving AI memory for agents',
-  base: '/docs/',
-  outDir: './public/docs',
+  base: '/',
   cleanUrls: false,
   themeConfig: {
     siteTitle: 'MemWal',
