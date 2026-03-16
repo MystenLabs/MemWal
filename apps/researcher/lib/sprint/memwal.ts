@@ -1,7 +1,7 @@
 import "server-only";
 
-import { MemWal } from "@cmdoss/memwal-v2";
-import type { RememberResult } from "@cmdoss/memwal-v2";
+import { MemWal } from "@cmdoss/memwal";
+import type { RememberResult } from "@cmdoss/memwal";
 import type { Citation, SourceMeta } from "./types";
 
 function getMemWalClient(key: string) {
@@ -47,7 +47,7 @@ export async function rememberSprintReport({
     `[sprint:memwal] Storing sprint report (${fullText.length} chars)`
   );
   const result = await memwal.remember(fullText);
-  console.log(`[sprint:memwal] Stored. blobId=${result.blobId}`);
+  console.log(`[sprint:memwal] Stored. blobId=${result.blob_id}`);
   return result;
 }
 
