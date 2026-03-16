@@ -1,0 +1,15 @@
+{
+    "$schema": "https://railway.com/railway.schema.json",
+    "build": {
+        "builder": "NIXPACKS",
+        "nixpacks": {
+            "buildCommand": "npm install -g vitepress && npx vitepress build docs",
+            "startCommand": "npx serve -s docs/.vitepress/dist -l ${PORT}"
+        }
+    },
+    "deploy": {
+        "numReplicas": 1,
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+    }
+}
