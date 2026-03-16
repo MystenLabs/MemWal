@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vitepress dev docs",
     "build": "vitepress build docs",
-    "preview": "vitepress preview docs"
+    "preview": "vitepress preview docs",
+    "start": "serve -s docs/.vitepress/dist -l ${PORT:-3000}"
+  },
+  "dependencies": {
+    "serve": "^14.2.0"
   },
   "devDependencies": {
     "vitepress": "^1.6.4"
