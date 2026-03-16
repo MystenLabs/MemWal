@@ -1,0 +1,48 @@
+[package]
+name = "memwal-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Database (PostgreSQL + pgvector)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+pgvector = { version = "0.4", features = ["sqlx"] }
+
+# Auth
+ed25519-dalek = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+
+# SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
+# (no Rust crypto deps needed)
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP client (for Sui RPC onchain verification)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Walrus SDK
+walrus_rs = "0.1"
+
+# Async utilities
+futures = "0.3"
+
+# Utils
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+base64 = "0.22"
