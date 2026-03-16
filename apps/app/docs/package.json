@@ -7,7 +7,7 @@
     "dev": "vitepress dev docs",
     "build": "vitepress build docs",
     "preview": "vitepress preview docs",
-    "start": "serve -s docs/.vitepress/dist -l ${PORT:-3000}"
+    "start": "serve -s dist -l ${PORT:-3000}"
   },
   "dependencies": {
     "serve": "^14.2.0"
