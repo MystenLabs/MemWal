@@ -139,7 +139,11 @@ function AppContent() {
     <>
       {/* Floating Docs Button - always visible */}
       <a
+<<<<<<< HEAD
         href={config.docsUrl}
+=======
+        href="/docs/guide/getting-started.html"
+>>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
         target="_blank"
         rel="noopener noreferrer"
         className="floating-docs-btn"

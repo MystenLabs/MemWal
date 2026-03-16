@@ -45,17 +45,58 @@ export default function LandingPage() {
                             </p>
 
                             {hasEnokiConfig && googleWallet ? (
+<<<<<<< HEAD
                                 <button
                                     className="btn lp-btn-main"
                                     onClick={() => connect({ wallet: googleWallet })}
                                 >
                                     sign in with google
                                 </button>
+=======
+                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
+                                    <button
+                                        className="btn lp-btn-main"
+                                        onClick={() => connect({ wallet: googleWallet })}
+                                    >
+                                        sign in with google
+                                    </button>
+                                    <a
+                                        href="/docs/guide/getting-started.html"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{
+                                            color: 'var(--text-secondary)',
+                                            fontSize: '0.85rem',
+                                            textDecoration: 'none',
+                                        }}
+                                    >
+                                        documentation →
+                                    </a>
+                                </div>
+>>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                             ) : (
                                 <div className="lp-connect-fallback">
                                     <ConnectButton />
                                 </div>
                             )}
+<<<<<<< HEAD
+=======
+
+                            {/* Docs link - always visible */}
+                            <a
+                                href="/docs/guide/getting-started.html"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                    color: 'var(--text-secondary)',
+                                    fontSize: '0.85rem',
+                                    textDecoration: 'none',
+                                    marginTop: 8,
+                                }}
+                            >
+                                documentation →
+                            </a>
+>>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                         </div>
 
                         <div className="lp-illustration" aria-hidden="true">
@@ -89,6 +130,17 @@ export default function LandingPage() {
                     </section>
 
                     <footer className="lp-footer">
+<<<<<<< HEAD
+=======
+                        <a
+                            href="/docs/guide/getting-started.html"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="lp-footer-docs"
+                        >
+                            documentation →
+                        </a>
+>>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                         <span>© 2026 CommandOSS Labs</span>
                     </footer>
 
