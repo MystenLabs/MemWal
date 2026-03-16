@@ -76,7 +76,7 @@ export async function saveSprint({
     sources,
   });
   console.log(
-    `[sprint:save] MemWal stored. blobId=${memwalResult.blobId}`
+    `[sprint:save] MemWal stored. blobId=${memwalResult.blob_id}`
   );
 
   // 6. Save to DB
@@ -85,7 +85,7 @@ export async function saveSprint({
   const sprintRecord = await createSprintBlob({
     chatId,
     userId,
-    blobId: memwalResult.blobId,
+    blobId: memwalResult.blob_id,
     title: report.title,
     summary: report.summary,
     reportContent: report.content,
@@ -96,12 +96,12 @@ export async function saveSprint({
   });
 
   console.log(
-    `[sprint:save] Sprint saved! id=${sprintRecord.id}, blobId=${memwalResult.blobId}`
+    `[sprint:save] Sprint saved! id=${sprintRecord.id}, blobId=${memwalResult.blob_id}`
   );
 
   return {
     sprintId: sprintRecord.id,
     title: report.title,
-    blobId: memwalResult.blobId,
+    blobId: memwalResult.blob_id,
   };
 }

@@ -136,7 +136,7 @@ export async function POST(request: Request) {
           sources,
         });
 
-        console.log(`[sprint:save] MemWal stored. blobId=${memwalResult.blobId}`);
+        console.log(`[sprint:save] MemWal stored. blobId=${memwalResult.blob_id}`);
         send("step", { step: "store-memwal", status: "done", message: "Stored in MemWal" });
 
         // Step 6: Save to database
@@ -147,7 +147,7 @@ export async function POST(request: Request) {
         const sprintRecord = await createSprintBlob({
           chatId,
           userId,
-          blobId: memwalResult.blobId,
+          blobId: memwalResult.blob_id,
           title: report.title,
           summary: report.summary,
           reportContent: report.content,
@@ -157,14 +157,14 @@ export async function POST(request: Request) {
           memoryCount: 1,
         });
 
-        console.log(`[sprint:save] Sprint saved! id=${sprintRecord.id}, blobId=${memwalResult.blobId}`);
+        console.log(`[sprint:save] Sprint saved! id=${sprintRecord.id}, blobId=${memwalResult.blob_id}`);
         send("step", { step: "save-db", status: "done", message: "Saved to database" });
 
         // Done — send ready event
         send("ready", {
           title: report.title,
           sprintId: sprintRecord.id,
-          blobId: memwalResult.blobId,
+          blobId: memwalResult.blob_id,
         });
         console.log(`[sprint:save] SSE save complete for chat=${chatId}`);
       } catch (err) {
