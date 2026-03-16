@@ -1,5 +1,3 @@
-import { registerOTel } from "@vercel/otel";
-
 export function register() {
-  registerOTel({ serviceName: "chatbot" });
+  // OpenTelemetry can be configured here for Railway/other platforms
 }
