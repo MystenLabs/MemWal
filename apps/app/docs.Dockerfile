@@ -14,4 +14,4 @@ RUN cd apps/app && npx vitepress build docs
 # Serve docs from the built location
 EXPOSE ${PORT:-3000}
 
-CMD ["serve", "-s", "apps/app/docs/dist", "-l", "${PORT:-3000}"]
+CMD ["serve", "-s", "apps/app/docs/dist", "-l", "${PORT:-8080}"]
