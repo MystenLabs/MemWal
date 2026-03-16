@@ -5,6 +5,7 @@ export default defineConfig({
   description: 'Privacy-preserving AI memory for agents',
   base: '/docs/',
   outDir: './public/docs',
+  cleanUrls: false,
   themeConfig: {
     siteTitle: 'MemWal',
     nav: [
