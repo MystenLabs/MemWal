@@ -77,5 +77,7 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
-# Run DB migration then start Next.js server
-CMD ["sh", "-c", "node migrate.mjs && node apps/chatbot/server.js"]
+# Run DB migration (best-effort) then start Next.js server
+# Migration runs first; if it fails, log the error but still start the server
+# so health checks can pass. Railway will show migration errors in logs.
+CMD ["sh", "-c", "node migrate.mjs || echo '[WARN] Migration failed, starting server anyway...' ; node apps/chatbot/server.js"]
