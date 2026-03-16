@@ -941,7 +941,7 @@ body {
 /* ========== Key Display ========== */
 
 .key-display {
-  background: #f2f4f3;
+  background: #ffffff;
   border: var(--border);
   border-radius: var(--radius-md);
   padding: 20px;
@@ -1387,7 +1387,7 @@ body {
   }
 
   .key-display {
-    background: var(--bg-card);
+    background: #ffffff;
     border: var(--border-accent);
   }
 
