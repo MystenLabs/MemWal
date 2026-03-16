@@ -61,7 +61,7 @@ export default function LandingPage() {
                                         sign in with google
                                     </button>
                                     <a
-                                        href="/docs/guide/getting-started.html"
+                                        href="https://docs-memwal-staging.up.railway.app/"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         style={{
@@ -84,7 +84,7 @@ export default function LandingPage() {
 
                             {/* Docs link - always visible */}
                             <a
-                                href="/docs/guide/getting-started.html"
+                                href="https://docs-memwal-staging.up.railway.app/"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 style={{
@@ -133,7 +133,7 @@ export default function LandingPage() {
 <<<<<<< HEAD
 =======
                         <a
-                            href="/docs/guide/getting-started.html"
+                            href="https://docs-memwal-staging.up.railway.app/"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="lp-footer-docs"
