@@ -22,6 +22,7 @@ import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
+import walrusIcon from './pages/walrus.jpg'
 
 import '@mysten/dapp-kit/dist/index.css'
 
@@ -134,19 +135,25 @@ function AppContent() {
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
-  if (!currentAccount) {
-    return <LandingPage />
-  }
+  return (
+    <>
+      {/* Floating Docs Button - always visible */}
+      <a
+        href="https://docs-memwal-staging.up.railway.app/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="floating-docs-btn"
+        title="Documentation"
+      >
+        <img src={walrusIcon} alt="Docs" />
+      </a>
 
-  if (!delegateKey) {
-    return <SetupWizard />
-  }
-
-  if (page === 'playground') {
-    return <Playground />
-  }
-
-  return <Dashboard />
+      {!currentAccount && <LandingPage />}
+      {currentAccount && !delegateKey && <SetupWizard />}
+      {page === 'playground' && <Playground />}
+      {currentAccount && delegateKey && page !== 'playground' && <Dashboard />}
+    </>
+  )
 }
 
 // ============================================================

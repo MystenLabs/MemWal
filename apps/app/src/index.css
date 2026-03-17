@@ -3,7 +3,7 @@
 :root {
   --bg-primary: #ffffff;
   --bg-secondary: #fafafa;
-  --bg-card: #f0f1f0;
+  --bg-card: #ffffff;
   --bg-card-hover: #e4e5e4;
   --bg-input: #f0f0ee;
 
@@ -124,6 +124,57 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+/* Floating Docs Button */
+.floating-docs-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: #22d3ee;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  box-shadow: 4px 4px 0 #191a23;
+  z-index: 9999;
+  transition: transform 0.2s, box-shadow 0.2s;
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+}
+
+.floating-docs-btn img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.floating-docs-btn:hover {
+  transform: translate(-3px, -3px);
+  box-shadow: 8px 8px 0 #191a23;
+}
+
+.floating-docs-btn:active {
+  transform: translate(3px, 3px);
+  box-shadow: 3px 3px 0 #191a23;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .floating-docs-btn {
+    background: #22d3ee;
+    box-shadow: 4px 4px 0 rgba(255, 255, 255, 0.15);
+  }
+  .floating-docs-btn:hover {
+    box-shadow: 6px 6px 0 rgba(255, 255, 255, 0.2);
+  }
 }
 
 .container {
@@ -555,6 +606,27 @@ body {
   margin-top: 20px;
 }
 
+.lp-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24px 0;
+  margin-top: 40px;
+  border-top: 1px solid var(--border);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.lp-footer-docs {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.lp-footer-docs:hover {
+  color: var(--text-primary);
+}
+
 .lp-title-row {
   display: flex;
   align-items: center;
@@ -869,7 +941,7 @@ body {
 /* ========== Key Display ========== */
 
 .key-display {
-  background: #f2f4f3;
+  background: #ffffff;
   border: var(--border);
   border-radius: var(--radius-md);
   padding: 20px;
@@ -1310,7 +1382,7 @@ body {
   }
 
   .key-display {
-    background: var(--bg-card);
+    background: #ffffff;
     border: var(--border-accent);
   }
 
