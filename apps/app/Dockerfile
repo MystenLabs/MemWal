@@ -24,11 +24,6 @@ RUN pnpm install
 COPY packages/sdk/ ./packages/sdk/
 RUN pnpm --filter @cmdoss/memwal build
 
-<<<<<<< HEAD
-# Copy app source (docs built together with app via vite.config.ts)
-COPY apps/app/ ./apps/app/
-
-=======
 # Copy app source (including public folder structure) BEFORE building docs
 COPY apps/app/ ./apps/app/
 
@@ -36,7 +31,6 @@ COPY apps/app/ ./apps/app/
 COPY docs/ ./docs/
 RUN pnpm build:docs
 
->>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
 # Vite env vars must be injected at build time
 ARG VITE_MEMWAL_SERVER_URL
 ARG VITE_MEMWAL_PACKAGE_ID=0xb625c403a26c4b985a3f2549e6115c1646b0094d39fa142016807ba015952869
