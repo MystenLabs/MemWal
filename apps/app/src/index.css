@@ -3,7 +3,7 @@
 :root {
   --bg-primary: #ffffff;
   --bg-secondary: #fafafa;
-  --bg-card: #f0f1f0;
+  --bg-card: #ffffff;
   --bg-card-hover: #e4e5e4;
   --bg-input: #f0f0ee;
 
@@ -941,7 +941,7 @@ body {
 /* ========== Key Display ========== */
 
 .key-display {
-  background: #f2f4f3;
+  background: #ffffff;
   border: var(--border);
   border-radius: var(--radius-md);
   padding: 20px;
@@ -1387,7 +1387,7 @@ body {
   }
 
   .key-display {
-    background: var(--bg-card);
+    background: #ffffff;
     border: var(--border-accent);
   }
 
