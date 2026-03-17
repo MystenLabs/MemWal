@@ -139,7 +139,7 @@ function AppContent() {
     <>
       {/* Floating Docs Button - always visible */}
       <a
-        href="https://docs-memwal-staging.up.railway.app/"
+        href={config.docsUrl}
         target="_blank"
         rel="noopener noreferrer"
         className="floating-docs-btn"

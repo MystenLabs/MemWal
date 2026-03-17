@@ -3,7 +3,7 @@
 :root {
   --bg-primary: #ffffff;
   --bg-secondary: #fafafa;
-  --bg-card: #ffffff;
+  --bg-card: #f0f1f0;
   --bg-card-hover: #e4e5e4;
   --bg-input: #f0f0ee;
 
@@ -941,12 +941,17 @@ body {
 /* ========== Key Display ========== */
 
 .key-display {
-  background: #ffffff;
+  background: #f2f4f3;
   border: var(--border);
   border-radius: var(--radius-md);
   padding: 20px;
   position: relative;
   box-shadow: var(--neo-shadow-sm);
+}
+
+/* White key display for dashboard */
+.key-display--white {
+  background: #ffffff;
 }
 
 .key-display .key-label {
@@ -1382,8 +1387,12 @@ body {
   }
 
   .key-display {
-    background: #ffffff;
+    background: var(--bg-card);
     border: var(--border-accent);
+  }
+
+  .key-display--white {
+    background: #1a1a1e;
   }
 
   .demo-code-block {

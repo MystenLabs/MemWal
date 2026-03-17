@@ -110,7 +110,7 @@ const result = await generateText({
                     </div>
 
                     {/* Public Key */}
-                    <div className="key-display" style={{ marginBottom: 12 }}>
+                    <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
                         <div className="key-label">public key</div>
                         <div className="key-value">
                             {delegatePublicKey}
@@ -126,7 +126,7 @@ const result = await generateText({
                     </div>
 
                     {/* Private Key */}
-                    <div className="key-display">
+                    <div className="key-display key-display--white">
                         <div className="key-label">private key</div>
                         {showKey ? (
                             <>
