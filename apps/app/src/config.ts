@@ -10,5 +10,5 @@ export const config = {
         '0x3d46792b7676e6558707982b535092454a46e668b52c0a6d83b9a9fdecd71c46',
     memwalServerUrl: import.meta.env.VITE_MEMWAL_SERVER_URL as string || 'http://localhost:8000',
     suiNetwork: (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') as 'testnet' | 'mainnet',
-    docsUrl: import.meta.env.VITE_DOCS_URL as string || 'https://docs.memwal.ai',
+    docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
 } as const
