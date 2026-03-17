@@ -52,18 +52,6 @@ export default function LandingPage() {
                                     >
                                         sign in with google
                                     </button>
-                                    <a
-                                        href="https://docs-memwal-staging.up.railway.app/"
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        style={{
-                                            color: 'var(--text-secondary)',
-                                            fontSize: '0.85rem',
-                                            textDecoration: 'none',
-                                        }}
-                                    >
-                                        documentation →
-                                    </a>
                                 </div>
                             ) : (
                                 <div className="lp-connect-fallback">
@@ -71,20 +59,6 @@ export default function LandingPage() {
                                 </div>
                             )}
 
-                            {/* Docs link - always visible */}
-                            <a
-                                href="https://docs-memwal-staging.up.railway.app/"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                style={{
-                                    color: 'var(--text-secondary)',
-                                    fontSize: '0.85rem',
-                                    textDecoration: 'none',
-                                    marginTop: 8,
-                                }}
-                            >
-                                documentation →
-                            </a>
                         </div>
 
                         <div className="lp-illustration" aria-hidden="true">
@@ -117,17 +91,6 @@ export default function LandingPage() {
                         </div>
                     </section>
 
-                    <footer className="lp-footer">
-                        <a
-                            href="https://docs-memwal-staging.up.railway.app/"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="lp-footer-docs"
-                        >
-                            documentation →
-                        </a>
-                        <span>© 2026 CommandOSS Labs</span>
-                    </footer>
 
                 </div>
             </div>
