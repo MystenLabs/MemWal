@@ -103,3 +103,7 @@ whole-system-documents/
 .gitnexus
 AGENTS.md
 CLAUDE.md
+
+.codacy
+.github/instructions
+x-wallet

@@ -1,4 +1,4 @@
-# @cmdoss/memwal
+# MemWal
 
 Privacy-first AI memory SDK. Stores encrypted memories on Walrus (decentralized storage) and retrieves them via semantic search. 
 
@@ -47,4 +47,4 @@ const memories = await memwal.recall("What are the user's preferences?");
 
 ## License
 
-MIT
+Apache 2.0
