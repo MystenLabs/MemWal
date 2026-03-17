@@ -89,14 +89,6 @@ export default function LandingPage() {
                     </section>
 
                     <footer className="lp-footer">
-                        <a
-                            href="https://docs-memwal-staging.up.railway.app/"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="lp-footer-docs"
-                        >
-                            documentation →
-                        </a>
                         <span>© 2026 CommandOSS Labs</span>
                     </footer>
 
