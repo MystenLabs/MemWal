@@ -139,7 +139,7 @@ function AppContent() {
     <>
       {/* Floating Docs Button - always visible */}
       <a
-        href="/docs/guide/getting-started.html"
+        href={config.docsUrl}
         target="_blank"
         rel="noopener noreferrer"
         className="floating-docs-btn"

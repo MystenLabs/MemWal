@@ -1,23 +1,35 @@
-# Docs only - build and serve VitePress files
-FROM node:18-alpine
+# ============================================================
+# MemWal Docs — Dockerfile
+# VitePress static site — build + serve
+# Build context: repo root (Railway Root Directory = /)
+# ============================================================
+
+FROM node:22-alpine AS builder
+
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+
+WORKDIR /app
+
+# Copy workspace root + docs
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY docs/ ./docs/
+
+# Install deps (only what docs needs)
+RUN pnpm install
+
+# Build VitePress docs
+RUN pnpm build:docs
+
+# ── Stage 2: Serve static files ─────────────────────────────
+FROM node:22-alpine AS runtime
 
 RUN npm install -g serve
 
 WORKDIR /app
 
-# Copy docs folder (build context is repo root)
-COPY docs/ ./docs/
-COPY docs/package.json ./docs-package.json
+COPY --from=builder /app/docs/dist ./dist
 
-# Install vitepress locally in docs folder
-WORKDIR /app/docs
-RUN npm install vitepress
-
-# Build docs
-WORKDIR /app
-RUN npx vitepress build docs
-
-# Serve docs
+ENV PORT=3000
 EXPOSE 3000
 
-CMD ["sh", "-c", "serve -s docs/dist -l 3000"]
+CMD ["serve", "-s", "-l", "3000", "dist"]

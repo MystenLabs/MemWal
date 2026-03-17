@@ -30,6 +30,9 @@
 
 /* Dark mode */
 .dark {
+  --vp-c-brand: #e0e0e8;
+  --vp-c-brand-light: #f0f0f2;
+  --vp-c-brand-dark: #c0c0cc;
   --vp-c-bg: #1a1a1e;
   --vp-c-bg-alt: #222228;
   --vp-c-bg-soft: #28282f;
@@ -53,6 +56,18 @@
 .VPButton.brand:hover {
   background-color: transparent !important;
   color: var(--vp-c-brand) !important;
+}
+
+.dark .VPButton.brand {
+  background-color: var(--vp-c-brand) !important;
+  color: #1a1a1e !important;
+  border-color: var(--vp-c-brand) !important;
+}
+
+.dark .VPButton.brand:hover {
+  background-color: transparent !important;
+  color: var(--vp-c-text-1) !important;
+  border-color: var(--vp-c-text-1) !important;
 }
 
 .VPButton.alt {
