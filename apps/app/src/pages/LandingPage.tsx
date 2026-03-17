@@ -88,10 +88,6 @@ export default function LandingPage() {
                         </div>
                     </section>
 
-                    <footer className="lp-footer">
-                        <span>© 2026 CommandOSS Labs</span>
-                    </footer>
-
                 </div>
             </div>
         </>
