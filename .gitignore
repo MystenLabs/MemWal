@@ -87,3 +87,13 @@ target/
 
 # Gemini AI
 .gemini/
+
+
+#Ignore vscode AI rules
+.github\instructions\codacy.instructions.md
+
+# Codacy
+.codacy/
+
+# x-wallet
+x-wallet/

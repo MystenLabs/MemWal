@@ -18,13 +18,13 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY apps/app/package.json      ./apps/app/
 
 # Install all workspace deps
-RUN pnpm install --frozen-lockfile
+RUN pnpm install
 
 # Build SDK first (apps/app depends on @cmdoss/memwal via workspace:*)
 COPY packages/sdk/ ./packages/sdk/
 RUN pnpm --filter @cmdoss/memwal build
 
-# Copy app source
+# Copy app source (docs built together with app via vite.config.ts)
 COPY apps/app/ ./apps/app/
 
 # Vite env vars must be injected at build time
@@ -53,7 +53,8 @@ WORKDIR /app
 
 COPY --from=builder /app/apps/app/dist ./dist
 
-ENV PORT=3000
-EXPOSE 3000
+ENV PORT=${PORT}
+EXPOSE ${PORT}
 
-CMD ["serve", "dist", "-l", "3000", "-s"]
+# Serve with single-page-app mode (no custom rewrites)
+CMD sh -c "serve -s -l ${PORT} dist"
