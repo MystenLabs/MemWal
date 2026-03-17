@@ -45,14 +45,6 @@ export default function LandingPage() {
                             </p>
 
                             {hasEnokiConfig && googleWallet ? (
-<<<<<<< HEAD
-                                <button
-                                    className="btn lp-btn-main"
-                                    onClick={() => connect({ wallet: googleWallet })}
-                                >
-                                    sign in with google
-                                </button>
-=======
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
                                     <button
                                         className="btn lp-btn-main"
@@ -73,14 +65,11 @@ export default function LandingPage() {
                                         documentation →
                                     </a>
                                 </div>
->>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                             ) : (
                                 <div className="lp-connect-fallback">
                                     <ConnectButton />
                                 </div>
                             )}
-<<<<<<< HEAD
-=======
 
                             {/* Docs link - always visible */}
                             <a
@@ -96,7 +85,6 @@ export default function LandingPage() {
                             >
                                 documentation →
                             </a>
->>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                         </div>
 
                         <div className="lp-illustration" aria-hidden="true">
@@ -130,8 +118,6 @@ export default function LandingPage() {
                     </section>
 
                     <footer className="lp-footer">
-<<<<<<< HEAD
-=======
                         <a
                             href="https://docs-memwal-staging.up.railway.app/"
                             target="_blank"
@@ -140,7 +126,6 @@ export default function LandingPage() {
                         >
                             documentation →
                         </a>
->>>>>>> 3cfff32 (fix: update Dockerfile build order and point docs to getting-started)
                         <span>© 2026 CommandOSS Labs</span>
                     </footer>
 
