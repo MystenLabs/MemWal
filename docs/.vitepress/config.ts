@@ -30,6 +30,7 @@ export default defineConfig({
           items: [
             { text: 'Basic Usage', link: '/examples/basic-usage' },
             { text: 'Advanced', link: '/examples/advanced' },
+            { text: 'Research Example App', link: '/examples/research-advanced' },
           ],
         },
       ],
