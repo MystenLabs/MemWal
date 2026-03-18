@@ -1104,7 +1104,7 @@ body {
 
 .input:focus {
   outline: none;
-  box-shadow: var(--neo-shadow-sm);
+  box-shadow: none;
 }
 
 /* ========== Spinner ========== */
@@ -1392,7 +1392,8 @@ body {
   }
 
   .key-display--white {
-    background: #ffffff;
+    background: var(--bg-card);
+    border: var(--border-accent);
   }
 
   .demo-code-block {

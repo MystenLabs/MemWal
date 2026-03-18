@@ -33,6 +33,7 @@ import type {
     RememberManualResult,
     RecallManualResult,
     RecallManualMemory,
+    RestoreResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 
@@ -55,6 +56,7 @@ export class MemWalManual {
     private serverUrl: string;
     private config: MemWalManualConfig;
     private walletSigner: WalletSigner | null;
+    private namespace: string;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
@@ -73,6 +75,7 @@ export class MemWalManual {
         this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
         this.walletSigner = config.walletSigner ?? null;
         this.config = config;
+        this.namespace = config.namespace ?? "default";
     }
 
     /**
@@ -212,8 +215,10 @@ export class MemWalManual {
      * 2. SEAL encrypt locally (no wallet signature needed)
      * 3. Send {encrypted_data, vector} to server — server handles Walrus upload relay
      */
-    async rememberManual(text: string): Promise<RememberManualResult> {
+    async rememberManual(text: string, namespace?: string): Promise<RememberManualResult> {
         if (!text) throw new Error("Text cannot be empty");
+
+        const ns = namespace ?? this.namespace;
 
         // Step 1 & 2: Embed + SEAL encrypt concurrently
         const [vector, encrypted] = await Promise.all([
@@ -227,6 +232,7 @@ export class MemWalManual {
         return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
             encrypted_data: encryptedBase64,
             vector,
+            namespace: ns,
         });
     }
 
@@ -237,8 +243,10 @@ export class MemWalManual {
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
      */
-    async recallManual(query: string, limit: number = 10): Promise<RecallManualResult> {
+    async recallManual(query: string, limit: number = 10, namespace?: string): Promise<RecallManualResult> {
         if (!query) throw new Error("Query cannot be empty");
+
+        const ns = namespace ?? this.namespace;
 
         // Step 1: Embed query
         const vector = await this.embed(query);
@@ -247,7 +255,7 @@ export class MemWalManual {
         const searchResult = await this.signedRequest<{ results: { blob_id: string; distance: number }[]; total: number }>(
             "POST",
             "/api/recall/manual",
-            { vector, limit },
+            { vector, limit, namespace: ns },
         );
 
         if (searchResult.results.length === 0) {
@@ -526,5 +534,23 @@ export class MemWalManual {
         }
 
         return res.json() as Promise<T>;
+    }
+
+    // ============================================================
+    // Restore
+    // ============================================================
+
+    /**
+     * Restore a namespace — server downloads all blobs from Walrus,
+     * decrypts with delegate key, re-embeds, and re-indexes.
+     *
+     * @param namespace - Namespace to restore
+     * @returns RestoreResult with count of restored entries
+     */
+    async restore(namespace: string, limit: number = 50): Promise<RestoreResult> {
+        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+            namespace,
+            limit,
+        });
     }
 }

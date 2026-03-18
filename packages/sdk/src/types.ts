@@ -14,6 +14,8 @@ export interface MemWalConfig {
     key: string;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
+    /** Default namespace for memory isolation (default: "default") */
+    namespace?: string;
 }
 
 // ============================================================
@@ -25,6 +27,7 @@ export interface RememberResult {
     id: string;
     blob_id: string;
     owner: string;
+    namespace: string;
 }
 
 /** A single recalled memory */
@@ -75,6 +78,8 @@ export interface RememberManualOptions {
     blobId: string;
     /** Embedding vector (user already generated) */
     vector: number[];
+    /** Namespace (default: config namespace or "default") */
+    namespace?: string;
 }
 
 /** Result from rememberManual() */
@@ -82,6 +87,7 @@ export interface RememberManualResult {
     id: string;
     blob_id: string;
     owner: string;
+    namespace: string;
 }
 
 /** Options for recallManual() on MemWal class */
@@ -90,12 +96,23 @@ export interface RecallManualOptions {
     vector: number[];
     /** Max number of results (default: 10) */
     limit?: number;
+    /** Namespace (default: config namespace or "default") */
+    namespace?: string;
 }
 
 /** A single search hit — raw blobId + distance (no decrypted text) */
 export interface RecallManualHit {
     blob_id: string;
     distance: number;
+}
+
+/** Result from restore() */
+export interface RestoreResult {
+    restored: number;
+    skipped: number;
+    total: number;
+    namespace: string;
+    owner: string;
 }
 
 // ============================================================
@@ -143,6 +160,8 @@ export interface MemWalManualConfig {
     walrusAggregatorUrl?: string;
     /** Walrus publisher URL for direct blob uploads (default: testnet publisher) */
     walrusPublisherUrl?: string;
+    /** Default namespace for memory isolation (default: "default") */
+    namespace?: string;
 }
 
 /**

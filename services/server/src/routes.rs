@@ -116,7 +116,8 @@ pub async fn remember(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let text = &body.text;
-    tracing::info!("remember: text=\"{}...\" owner={}", &text[..text.len().min(50)], owner);
+    let namespace = &body.namespace;
+    tracing::info!("remember: text=\"{}...\" owner={} ns={}", &text[..text.len().min(50)], owner, namespace);
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
@@ -134,23 +135,24 @@ pub async fn remember(
     })?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        &encrypted, 50, owner, sui_key,
+        &encrypted, 50, owner, sui_key, namespace,
     ).await?;
     let blob_id = upload_result.blob_id;
 
-    // Step 3: Store {vector, blobId} in Vector DB
+    // Step 3: Store {vector, blobId, namespace} in Vector DB
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, &blob_id, &vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector).await?;
 
     tracing::info!(
-        "remember complete: blob_id={}, owner={}, dims={}",
-        blob_id, owner, vector.len()
+        "remember complete: blob_id={}, owner={}, ns={}, dims={}",
+        blob_id, owner, namespace, vector.len()
     );
 
     Ok(Json(RememberResponse {
         id,
         blob_id,
         owner: owner.clone(),
+        namespace: namespace.clone(),
     }))
 }
 
@@ -173,7 +175,8 @@ pub async fn recall(
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
-    tracing::info!("recall: query=\"{}...\" owner={}", &body.query[..body.query.len().min(50)], owner);
+    let namespace = &body.namespace;
+    tracing::info!("recall: query=\"{}...\" owner={} ns={}", &body.query[..body.query.len().min(50)], owner, namespace);
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
     let private_key = auth.delegate_key.as_deref()
@@ -186,7 +189,7 @@ pub async fn recall(
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
 
     // Step 2: Search Vector DB
-    let hits = state.db.search_similar(&query_vector, owner, body.limit).await?;
+    let hits = state.db.search_similar(&query_vector, owner, namespace, body.limit).await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
     let db = &state.db;
@@ -267,9 +270,10 @@ pub async fn remember_manual(
     }
 
     let owner = &auth.owner;
+    let namespace = &body.namespace;
     tracing::info!(
-        "remember_manual: vector_dims={} owner={}",
-        body.vector.len(), owner
+        "remember_manual: vector_dims={} owner={} ns={}",
+        body.vector.len(), owner, namespace
     );
 
     // Decode base64 → raw SEAL-encrypted bytes
@@ -289,22 +293,24 @@ pub async fn remember_manual(
         50,
         owner,
         sui_key,
+        namespace,
     )
     .await?;
 
     let blob_id = upload.blob_id;
     tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
 
-    // Store {vector, blobId} in Vector DB
+    // Store {vector, blobId, namespace} in Vector DB
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, &blob_id, &body.vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector).await?;
 
-    tracing::info!("remember_manual complete: id={}, blob_id={}", id, blob_id);
+    tracing::info!("remember_manual complete: id={}, blob_id={}, ns={}", id, blob_id, namespace);
 
     Ok(Json(RememberManualResponse {
         id,
         blob_id,
         owner: owner.clone(),
+        namespace: namespace.clone(),
     }))
 }
 
@@ -324,16 +330,17 @@ pub async fn recall_manual(
     }
 
     let owner = &auth.owner;
+    let namespace = &body.namespace;
     tracing::info!(
-        "recall_manual: vector_dims={} limit={} owner={}",
-        body.vector.len(), body.limit, owner
+        "recall_manual: vector_dims={} limit={} owner={} ns={}",
+        body.vector.len(), body.limit, owner, namespace
     );
 
     // Search Vector DB — return blob IDs + distances only
-    let hits = state.db.search_similar(&body.vector, owner, body.limit).await?;
+    let hits = state.db.search_similar(&body.vector, owner, namespace, body.limit).await?;
     let total = hits.len();
 
-    tracing::info!("recall_manual complete: {} results for owner={}", total, owner);
+    tracing::info!("recall_manual complete: {} results for owner={} ns={}", total, owner, namespace);
 
     Ok(Json(RecallManualResponse {
         results: hits,
@@ -357,7 +364,8 @@ pub async fn analyze(
     }
 
     let owner = &auth.owner;
-    tracing::info!("analyze: text=\"{}...\" owner={}", &body.text[..body.text.len().min(50)], owner);
+    let namespace = &body.namespace;
+    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", &body.text[..body.text.len().min(50)], owner, namespace);
 
     // Step 1: Extract facts using LLM
     let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
@@ -383,6 +391,7 @@ pub async fn analyze(
         let sui_key: Result<String, AppError> = state.key_pool.next()
             .map(|s| s.to_string())
             .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()));
+        let namespace = namespace.clone();
         async move {
             let sui_key = sui_key?;
             // Embed + SEAL encrypt concurrently (independent operations)
@@ -398,12 +407,12 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
-                &encrypted, 50, &owner, &sui_key,
+                &encrypted, 50, &owner, &sui_key, &namespace,
             ).await?;
 
-            // Store in Vector DB
+            // Store in Vector DB with namespace
             let id = uuid::Uuid::new_v4().to_string();
-            state.db.insert_vector(&id, &owner, &upload_result.blob_id, &vector).await?;
+            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector).await?;
 
             Ok::<AnalyzedFact, AppError>(AnalyzedFact {
                 text: fact_text,
@@ -576,12 +585,13 @@ pub async fn ask(
     }
 
     let owner = &auth.owner;
+    let namespace = &body.namespace;
     let limit = body.limit.unwrap_or(5);
-    tracing::info!("ask: question=\"{}...\" owner={}", &body.question[..body.question.len().min(50)], owner);
+    tracing::info!("ask: question=\"{}...\" owner={} ns={}", &body.question[..body.question.len().min(50)], owner, namespace);
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
-    let hits = state.db.search_similar(&query_vector, owner, limit).await?;
+    let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
     let private_key = auth.delegate_key.as_deref()
@@ -721,4 +731,208 @@ async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str) {
             );
         }
     }
+}
+
+// ============================================================
+// Restore Flow
+// ============================================================
+
+/// POST /api/restore
+///
+/// Restore a namespace from Walrus:
+/// 1. Get all blob_ids for owner+namespace from DB
+/// 2. Download each blob from Walrus
+/// 3. SEAL decrypt with delegate key
+/// 4. Re-embed decrypted text
+/// 5. Clear old vector entries and re-index
+pub async fn restore(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RestoreRequest>,
+) -> Result<Json<RestoreResponse>, AppError> {
+    if body.namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+    let limit = body.limit;
+    tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
+
+    // Use delegate key for SEAL decryption
+    let private_key = auth.delegate_key.as_deref()
+        .or(state.config.sui_private_key.as_deref())
+        .ok_or_else(|| {
+            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for restore".into())
+        })?
+        .to_string();
+
+    // Step 1: Discover all blob_ids from on-chain (source of truth)
+    tracing::info!("restore: querying chain for blobs owner={} ns={}", owner, namespace);
+    let on_chain_blobs = walrus::query_blobs_by_owner(
+        &state.http_client,
+        &state.config.sidecar_url,
+        owner,
+        Some(namespace),
+    ).await?;
+    let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
+    let total = all_blob_ids.len();
+
+    if total == 0 {
+        return Ok(Json(RestoreResponse {
+            restored: 0,
+            skipped: 0,
+            total: 0,
+            namespace: namespace.clone(),
+            owner: owner.clone(),
+        }));
+    }
+
+    // Step 2: Check which blobs already exist in local DB → only restore missing ones
+    let existing_blob_ids = state.db.get_blobs_by_namespace(owner, namespace).await?;
+    let existing_set: std::collections::HashSet<&str> = existing_blob_ids.iter().map(|s| s.as_str()).collect();
+    let all_missing: Vec<String> = all_blob_ids.iter()
+        .filter(|id| !existing_set.contains(id.as_str()))
+        .cloned()
+        .collect();
+    // Apply limit — take the most recent N missing blobs (last N from chain query)
+    let missing_blob_ids: Vec<String> = if all_missing.len() > limit {
+        all_missing[all_missing.len() - limit..].to_vec()
+    } else {
+        all_missing
+    };
+    let skipped = total - missing_blob_ids.len();
+    tracing::info!(
+        "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",
+        total, existing_blob_ids.len(), missing_blob_ids.len(), limit, namespace
+    );
+
+    if missing_blob_ids.is_empty() {
+        return Ok(Json(RestoreResponse {
+            restored: 0,
+            skipped,
+            total,
+            namespace: namespace.clone(),
+            owner: owner.clone(),
+        }));
+    }
+
+    // Step 3: Download all missing blobs from Walrus concurrently
+    let db = &state.db;
+    let download_tasks: Vec<_> = missing_blob_ids.iter().map(|blob_id| {
+        let walrus_client = &state.walrus_client;
+        let blob_id = blob_id.clone();
+        async move {
+            match walrus::download_blob(walrus_client, &blob_id).await {
+                Ok(data) => Some((blob_id, data)),
+                Err(AppError::BlobNotFound(msg)) => {
+                    tracing::warn!("restore: blob expired, skipping: {}", msg);
+                    cleanup_expired_blob(db, &blob_id).await;
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("restore: download failed for {}: {}", blob_id, e);
+                    None
+                }
+            }
+        }
+    }).collect();
+
+    let downloaded: Vec<(String, Vec<u8>)> = futures::future::join_all(download_tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if downloaded.is_empty() {
+        return Ok(Json(RestoreResponse {
+            restored: 0,
+            skipped,
+            total,
+            namespace: namespace.clone(),
+            owner: owner.clone(),
+        }));
+    }
+
+    tracing::info!("restore: downloaded {}/{} blobs, decrypting (3 concurrent)...", downloaded.len(), missing_blob_ids.len());
+
+    // Step 4: SEAL decrypt with bounded concurrency (3 at a time)
+    use futures::stream::{self, StreamExt};
+    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
+        .map(|(blob_id, encrypted_data)| {
+            let http_client = &state.http_client;
+            let sidecar_url = state.config.sidecar_url.clone();
+            let private_key = private_key.clone();
+            let package_id = state.config.package_id.clone();
+            let account_id = auth.account_id.clone();
+            async move {
+                match seal::seal_decrypt(
+                    http_client, &sidecar_url, &encrypted_data,
+                    &private_key, &package_id, &account_id,
+                ).await {
+                    Ok(plaintext) => {
+                        match String::from_utf8(plaintext) {
+                            Ok(text) => Some((blob_id, text)),
+                            Err(e) => {
+                                tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("restore: decrypt failed for {}: {}", blob_id, e);
+                        None
+                    }
+                }
+            }
+        })
+        .buffer_unordered(3)
+        .collect()
+        .await;
+
+    let decrypted_texts: Vec<(String, String)> = decrypt_results.into_iter().flatten().collect();
+    tracing::info!("restore: decrypted {}/{} blobs", decrypted_texts.len(), missing_blob_ids.len());
+
+    // Step 5: Re-embed all decrypted texts concurrently
+    let embed_tasks: Vec<_> = decrypted_texts.iter().map(|(blob_id, text)| {
+        let http_client = &state.http_client;
+        let config = state.config.clone();
+        let blob_id = blob_id.clone();
+        let text = text.clone();
+        async move {
+            match generate_embedding(http_client, &config, &text).await {
+                Ok(vector) => Some((blob_id, vector)),
+                Err(e) => {
+                    tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
+                    None
+                }
+            }
+        }
+    }).collect();
+
+    let results: Vec<(String, Vec<f32>)> = futures::future::join_all(embed_tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Step 6: Insert only new entries (no delete!)
+    let restored = results.len();
+    for (blob_id, vector) in &results {
+        let id = uuid::Uuid::new_v4().to_string();
+        state.db.insert_vector(&id, owner, namespace, blob_id, vector).await?;
+    }
+
+    tracing::info!(
+        "restore complete: restored={} skipped={} total={} owner={} ns={}",
+        restored, skipped, total, owner, namespace
+    );
+
+    Ok(Json(RestoreResponse {
+        restored,
+        skipped,
+        total,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
 }
