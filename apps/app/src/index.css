@@ -1387,12 +1387,12 @@ body {
   }
 
   .key-display {
-    background: #ffffff;
+    background: var(--bg-card);
     border: var(--border-accent);
   }
 
   .key-display--white {
-    background: #1a1a1e;
+    background: #ffffff;
   }
 
   .demo-code-block {
