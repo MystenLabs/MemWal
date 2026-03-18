@@ -36,13 +36,6 @@ interface DemoStepProps {
     children?: ReactNode
 }
 
-interface ManualDebugClient {
-    embed: (text: string) => Promise<number[]>
-    signedRequest: (method: string, path: string, body: { vector: number[]; limit: number }) => Promise<{
-        results?: Array<{ blob_id: string }>
-    }>
-    walrusDownload: (blobId: string) => Promise<Uint8Array>
-}
 
 function DemoStep({
     number,
@@ -135,15 +128,19 @@ export default function Playground() {
     // SDK Instance — created from delegate key
     // ============================================================
 
+    const [namespace, setNamespace] = useState('default')
+
     const memwal = useMemo(() => {
         if (!delegateKey) return null
         return MemWal.create({
             key: delegateKey,
             serverUrl,
+            namespace: namespace || undefined,
         })
-    }, [delegateKey, serverUrl])
+    }, [delegateKey, serverUrl, namespace])
 
     // Step states
+
     const [healthResult, setHealthResult] = useState<string | null>(null)
     const [healthError, setHealthError] = useState<string | null>(null)
     const [healthLoading, setHealthLoading] = useState(false)
@@ -189,6 +186,10 @@ export default function Playground() {
     const [fullRecallError, setFullRecallError] = useState<string | null>(null)
     const [fullRecallLoading, setFullRecallLoading] = useState(false)
     const [fullRecallPhase, setFullRecallPhase] = useState('')
+
+    const [restoreResult, setRestoreResult] = useState<string | null>(null)
+    const [restoreError, setRestoreError] = useState<string | null>(null)
+    const [restoreLoading, setRestoreLoading] = useState(false)
 
 
     const handleLogout = useCallback(async () => {
@@ -257,6 +258,21 @@ export default function Playground() {
             setAnalyzeLoading(false)
         }
     }, [memwal, analyzeText])
+
+    const runRestore = useCallback(async () => {
+        if (!memwal) return
+        setRestoreLoading(true)
+        setRestoreResult(null)
+        setRestoreError(null)
+        try {
+            const data = await memwal.restore(namespace || 'default')
+            setRestoreResult(JSON.stringify(data, null, 2))
+        } catch (err: unknown) {
+            setRestoreError(err instanceof Error ? err.message : String(err))
+        } finally {
+            setRestoreLoading(false)
+        }
+    }, [memwal, namespace])
 
     const runAsk = useCallback(async () => {
         if (!memwal) return
@@ -379,45 +395,11 @@ export default function Playground() {
         setFullRecallError(null)
         try {
             setFullRecallPhase('embed → search → Walrus download → SEAL decrypt (wallet popup)...')
-            const debugClient = memwalManual as unknown as ManualDebugClient
-
-            // DEBUG: Step-by-step trace
-            console.log('[DEBUG] === recallManual START ===')
-            console.log('[DEBUG] query:', fullRecallQuery)
-
-            // Step 1: embed (via server)
-            console.log('[DEBUG] Step 1: Embedding query...')
-            const vector = await debugClient.embed(fullRecallQuery)
-            console.log('[DEBUG] Step 1 OK: vector dims =', vector.length)
-
-            // Step 2: search server
-            console.log('[DEBUG] Step 2: Searching server...')
-            const searchResult = await debugClient.signedRequest('POST', '/api/recall/manual', { vector, limit: 5 })
-            console.log('[DEBUG] Step 2 OK: searchResult =', JSON.stringify(searchResult))
-
-            // Step 3: Download blobs
-            const hits = searchResult.results || []
-            console.log('[DEBUG] Step 3: Downloading', hits.length, 'blobs from Walrus...')
-            for (const hit of hits) {
-                try {
-                    console.log('[DEBUG]   downloading blob:', hit.blob_id)
-                    const blobData = await debugClient.walrusDownload(hit.blob_id)
-                    console.log('[DEBUG]   OK: blob', hit.blob_id, 'size =', blobData.length, 'bytes')
-                } catch (err) {
-                    console.error('[DEBUG]   FAIL: blob', hit.blob_id, err)
-                }
-            }
-
-            // Now run the actual SDK method
-            console.log('[DEBUG] Running actual recallManual...')
             const data = await memwalManual.recallManual(fullRecallQuery, 5)
-            console.log('[DEBUG] recallManual result:', JSON.stringify(data))
-            console.log('[DEBUG] === recallManual END ===')
 
             setFullRecallPhase('')
             setFullRecallResult(JSON.stringify(data, null, 2))
         } catch (err: unknown) {
-            console.error('[DEBUG] recallManual THREW:', err)
             setFullRecallPhase('')
             setFullRecallError(err instanceof Error ? err.message : String(err))
         } finally {
@@ -485,6 +467,23 @@ export default function Playground() {
                     </div>
                 </div>
 
+                {/* Namespace selector */}
+                <div className="demo-server-info" style={{ marginTop: 8 }}>
+                    <div className="demo-server-tag" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px' }}>
+                        namespace:
+                        <input
+                            className="input"
+                            value={namespace}
+                            onChange={(e) => setNamespace(e.target.value)}
+                            placeholder="default"
+                            style={{ width: 200, padding: '10px 20px', fontSize: '0.78rem' }}
+                        />
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            isolates memories per app / tenant
+                        </span>
+                    </div>
+                </div>
+
                 {/* Step 1: Health */}
                 <DemoStep
                     number={1}
@@ -495,6 +494,7 @@ export default function Playground() {
 const memwal = MemWal.create({
   key: "${keyPreview}",
   serverUrl: "${serverUrl}",
+  namespace: "${namespace || 'default'}",
 })
 
 const data = await memwal.health()
@@ -513,7 +513,8 @@ const data = await memwal.health()
                     code={`const result = await memwal.remember(
   "${rememberText.slice(0, 60)}..."
 )
-// → { id, blob_id, owner }`}
+// namespace: "${namespace || 'default'}"
+// → { id, blob_id, owner, namespace }`}
                     onRun={runRemember}
                     result={rememberResult}
                     resultLabel="stored on Walrus (encrypted)"
@@ -539,6 +540,7 @@ const data = await memwal.health()
                     description="semantic search → download → decrypt"
                     code={`const result = await memwal.recall("${recallQuery}", 5)
 // Server: embed query → cosine search → download → decrypt
+// namespace: "${namespace || 'default'}" — only searches within this namespace
 // → { results: [{ text, blob_id, distance }], total }`}
                     onRun={runRecall}
                     result={recallResult}
@@ -584,11 +586,29 @@ const data = await memwal.health()
                     </div>
                 </DemoStep>
 
+                {/* Step 5: Restore */}
+                <DemoStep
+                    number={5}
+                    title="restore"
+                    description="re-index all memories from Walrus → rebuild local DB (supports zero-state restore from chain)"
+                    code={`// Restore from Walrus: download → decrypt → re-embed → re-index
+// If DB is empty, queries Sui chain for user's Walrus Blob objects
+// with memwal_namespace metadata → zero-state restore!
+const result = await memwal.restore("${namespace || 'default'}")
+// → { restored: N, namespace, owner }`}
+                    onRun={runRestore}
+                    result={restoreResult}
+                    resultLabel="restore result"
+                    error={restoreError}
+                    loading={restoreLoading}
+                    highlight
+                />
+
                 {/* Step 5: Configure LLM API Key */}
                 <div className="card demo-step">
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>5</div>
+                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>
                             <div>
                                 <div className="card-title">configure your LLM</div>
                                 <div className="card-subtitle">
@@ -627,13 +647,13 @@ const data = await memwal.health()
                             />
                         </div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                            required for steps 6–8. your key stays in this browser tab — never sent to memwal.
+                            required for steps 7–9. your key stays in this browser tab — never sent to memwal.
                         </div>
                     </div>
 
                     <pre className="demo-code-block">
                         <code>{`// memwal doesn't include an LLM — you choose your own.
-// steps 6–8 use this key for:
+// steps 7–9 use this key for:
 //   • ask AI: recalls memories → injects into your LLM prompt
 //   • full client-side: embeds text via your OpenAI / OpenRouter key
 //
@@ -645,7 +665,7 @@ const data = await memwal.health()
                 <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">6</div>
+                            <div className="demo-step-badge demo-step-badge--highlight">7</div>
                             <div>
                                 <div className="card-title">ask AI (with memory)</div>
                                 <div className="card-subtitle">
@@ -763,7 +783,7 @@ const { text } = await generateText({
                 <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">7</div>
+                            <div className="demo-step-badge demo-step-badge--highlight">8</div>
                             <div>
                                 <div className="card-title">remember (hybrid)</div>
                                 <div className="card-subtitle">
@@ -846,7 +866,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
                 <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">8</div>
+                            <div className="demo-step-badge demo-step-badge--highlight">9</div>
                             <div>
                                 <div className="card-title">recall (full client-side)</div>
                                 <div className="card-subtitle">

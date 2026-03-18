@@ -260,11 +260,118 @@ app.post("/seal/decrypt", async (req, res) => {
 });
 
 // ============================================================
+// POST /seal/decrypt-batch
+// Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
+// Avoids "Not enough shares" errors when decrypting many blobs at once.
+// ============================================================
+app.post("/seal/decrypt-batch", async (req, res) => {
+    try {
+        const { items, privateKey, packageId, accountId } = req.body;
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
+        }
+        if (!privateKey || !packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
+        }
+
+        // Decode delegate keypair
+        let keypair: Ed25519Keypair;
+        if (privateKey.startsWith("suiprivkey")) {
+            const { secretKey } = decodeSuiPrivateKey(privateKey);
+            keypair = Ed25519Keypair.fromSecretKey(secretKey);
+        } else {
+            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
+            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        }
+        const signerAddress = keypair.getPublicKey().toSuiAddress();
+
+        // Parse all encrypted objects and collect unique SEAL IDs
+        const parsedItems: { index: number; encryptedData: Uint8Array; fullId: string }[] = [];
+        const errors: { index: number; error: string }[] = [];
+
+        for (let i = 0; i < items.length; i++) {
+            try {
+                const encryptedData = new Uint8Array(Buffer.from(items[i], "base64"));
+                const parsed = EncryptedObject.parse(encryptedData);
+                parsedItems.push({ index: i, encryptedData, fullId: parsed.id });
+            } catch (err: any) {
+                errors.push({ index: i, error: `parse failed: ${err.message}` });
+            }
+        }
+
+        if (parsedItems.length === 0) {
+            return res.json({ results: [], errors });
+        }
+
+        // Collect all unique IDs
+        const allIds = [...new Set(parsedItems.map(p => p.fullId))];
+
+        // Create ONE SessionKey
+        const sessionKey = await SessionKey.create({
+            address: signerAddress,
+            packageId,
+            ttlMin: 30,
+            signer: keypair,
+            suiClient: suiClient as any,
+        });
+
+        // Build ONE PTB with seal_approve for ALL IDs
+        const tx = new Transaction();
+        for (const id of allIds) {
+            const idBytes = Array.from(
+                Uint8Array.from(id.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
+            );
+            tx.moveCall({
+                target: `${packageId}::account::seal_approve`,
+                arguments: [
+                    tx.pure("vector<u8>", idBytes),
+                    tx.object(accountId),
+                ],
+            });
+        }
+        const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
+
+        // ONE fetchKeys call for ALL IDs
+        await sealClient.fetchKeys({
+            ids: allIds,
+            txBytes,
+            sessionKey,
+            threshold: 1,
+        });
+
+        // Decrypt each blob using the shared sessionKey
+        const results: { index: number; decryptedData: string }[] = [];
+
+        for (const item of parsedItems) {
+            try {
+                const decrypted = await sealClient.decrypt({
+                    data: item.encryptedData,
+                    sessionKey,
+                    txBytes,
+                });
+                results.push({
+                    index: item.index,
+                    decryptedData: Buffer.from(decrypted).toString("base64"),
+                });
+            } catch (err: any) {
+                errors.push({ index: item.index, error: `decrypt failed: ${err.message}` });
+            }
+        }
+
+        console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
+        res.json({ results, errors });
+    } catch (err: any) {
+        console.error(`[seal/decrypt-batch] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
 // POST /walrus/upload
 // ============================================================
 app.post("/walrus/upload", async (req, res) => {
     try {
-        const { data, privateKey, owner: _ownerIgnored, epochs = 50 } = req.body;
+        const { data, privateKey, owner, namespace, epochs = 50 } = req.body;
         if (!data || !privateKey) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey" });
         }
@@ -283,10 +390,14 @@ app.post("/walrus/upload", async (req, res) => {
 
             const registerTx = flow.register({
                 epochs,
-                // Force owner = signer to avoid required-signature mismatch
-                // when client owner and server signing key differ.
+                // Server owns the blob initially (needed for certify step)
                 owner: signerAddress,
                 deletable: true,
+                // Store namespace + owner as on-chain metadata (queryable for restore)
+                attributes: {
+                    ...(namespace ? { memwal_namespace: namespace } : {}),
+                    ...(owner ? { memwal_owner: owner } : {}),
+                },
             });
 
             // Wait until register tx is confirmed before starting upload/certify.
@@ -307,12 +418,172 @@ app.post("/walrus/upload", async (req, res) => {
             return flow.getBlob();
         });
 
+        // Extract objectId — handle both { id: "0x..." } and { id: { id: "0x..." } }
+        let blobObjectId: string | null = null;
+        const rawId = (blob.blobObject as any)?.id;
+        if (typeof rawId === 'string') {
+            blobObjectId = rawId;
+        } else if (rawId && typeof rawId === 'object' && typeof rawId.id === 'string') {
+            blobObjectId = rawId.id;
+        }
+
+        // Walrus testnet package for Move calls
+        const WALRUS_PKG = "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66";
+
+        // Set on-chain metadata + transfer blob to user in a single transaction
+        if (owner && owner !== signerAddress && blobObjectId) {
+            try {
+                const metaTx = new Transaction();
+                const blobArg = metaTx.object(blobObjectId);
+
+                // Set memwal_namespace metadata on-chain
+                metaTx.moveCall({
+                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_namespace"),
+                        metaTx.pure.string(namespace || "default"),
+                    ],
+                    typeArguments: [],
+                });
+
+                // Set memwal_owner
+                metaTx.moveCall({
+                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_owner"),
+                        metaTx.pure.string(owner),
+                    ],
+                    typeArguments: [],
+                });
+
+                // Transfer blob to user
+                metaTx.transferObjects([blobArg], owner);
+
+                const metaDigest = await executeWithEnokiSponsor(metaTx, signer);
+                await suiClient.waitForTransaction({ digest: metaDigest });
+                console.error(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
+            } catch (metaErr: any) {
+                // Non-fatal: blob is uploaded but metadata/transfer failed
+                console.error(`[walrus/upload] metadata+transfer failed: ${metaErr.message}`);
+            }
+        }
+
         res.json({
             blobId: blob.blobId,
-            objectId: (blob.blobObject as any)?.id ?? null,
+            objectId: blobObjectId,
         });
     } catch (err: any) {
         console.error(`[walrus/upload] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
+// POST /walrus/query-blobs
+// Query user's Walrus Blob objects from Sui chain, filter by namespace
+// ============================================================
+app.post("/walrus/query-blobs", async (req, res) => {
+    try {
+        const { owner, namespace } = req.body;
+        if (!owner) {
+            return res.status(400).json({ error: "Missing required field: owner" });
+        }
+
+
+        // Walrus testnet Blob type (from actual on-chain data)
+        const WALRUS_BLOB_TYPE = "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66::blob::Blob";
+
+        // Query all Walrus Blob objects owned by the user
+        const blobs: { blobId: string; objectId: string; namespace: string }[] = [];
+        let cursor: string | null | undefined = undefined;
+        let hasMore = true;
+
+        while (hasMore) {
+            const result = await suiClient.getOwnedObjects({
+                owner,
+                filter: {
+                    StructType: WALRUS_BLOB_TYPE,
+                },
+                options: {
+                    showContent: true,
+                },
+                cursor: cursor ?? undefined,
+                limit: 50,
+            });
+
+
+            for (const obj of result.data) {
+                if (!obj.data?.content || obj.data.content.dataType !== "moveObject") continue;
+                const fields = (obj.data.content as any).fields;
+                if (!fields) continue;
+
+                // Extract blob_id (may be numeric or string) and convert to base64url
+                const rawBlobId = fields.blob_id ?? fields.blobId ?? null;
+                const objectId = obj.data.objectId;
+
+                // Read metadata from dynamic field (Walrus stores metadata as dynamic field on Blob UID)
+                let blobNamespace = "default";
+                let blobOwner = "";
+
+                try {
+                    // getDynamicFieldObject: key type is "vector<u8>", value is b"metadata"
+                    const dynField = await suiClient.getDynamicFieldObject({
+                        parentId: objectId,
+                        name: {
+                            type: "vector<u8>",
+                            value: [109, 101, 116, 97, 100, 97, 116, 97], // b"metadata"
+                        },
+                    });
+
+                    if (dynField.data?.content && dynField.data.content.dataType === "moveObject") {
+                        const dynFields = (dynField.data.content as any).fields;
+                        // Path: fields.value.fields.metadata.fields.contents[]
+                        const contents = dynFields?.value?.fields?.metadata?.fields?.contents;
+                        if (Array.isArray(contents)) {
+                            for (const entry of contents) {
+                                const key = entry?.fields?.key;
+                                const value = entry?.fields?.value;
+                                if (key === "memwal_namespace") blobNamespace = value;
+                                if (key === "memwal_owner") blobOwner = value;
+                            }
+                        }
+                    }
+                } catch {
+                    // No dynamic field = no metadata = use defaults
+                }
+
+
+                // Filter by namespace if specified
+                if (namespace && blobNamespace !== namespace) continue;
+
+                if (rawBlobId) {
+                    // blob_id from chain is a big integer (U256) — convert to base64url (little-endian!)
+                    let blobIdStr = String(rawBlobId);
+                    if (/^\d+$/.test(blobIdStr) && blobIdStr.length > 20) {
+                        try {
+                            const bigInt = BigInt(blobIdStr);
+                            const hex = bigInt.toString(16).padStart(64, '0');
+                            // Convert hex to bytes (big-endian), then REVERSE to little-endian
+                            const bytesBE = hex.match(/.{2}/g)!.map(b => parseInt(b, 16));
+                            const bytesLE = new Uint8Array(bytesBE.reverse());
+                            blobIdStr = Buffer.from(bytesLE).toString('base64url');
+                        } catch {
+                            // Keep as-is if conversion fails
+                        }
+                    }
+                    blobs.push({ blobId: blobIdStr, objectId, namespace: blobNamespace });
+                }
+            }
+
+            hasMore = result.hasNextPage;
+            cursor = result.nextCursor;
+        }
+
+        res.json({ blobs, total: blobs.length });
+    } catch (err: any) {
+        console.error(`[walrus/query-blobs] error: ${err.message || err}`);
         res.status(500).json({ error: err.message || String(err) });
     }
 });

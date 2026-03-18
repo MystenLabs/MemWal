@@ -138,6 +138,9 @@ impl Config {
 #[derive(Debug, Deserialize)]
 pub struct RememberRequest {
     pub text: String,
+    /// Namespace for memory isolation (default: "default")
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,20 +148,27 @@ pub struct RememberResponse {
     pub id: String,
     pub blob_id: String,
     pub owner: String,
+    pub namespace: String,
 }
 
 /// POST /api/recall
 /// Phase 2: Server does search → download → decrypt → return plaintext
 /// Owner is derived from delegate key via onchain verification (auth middleware)
+fn default_limit() -> usize {
+    10
+}
+
+fn default_namespace() -> String {
+    "default".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecallRequest {
     pub query: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
-}
-
-fn default_limit() -> usize {
-    10
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +199,8 @@ pub struct SearchHit {
 pub struct AnalyzeRequest {
     /// Conversation text to analyze for memorable facts
     pub text: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -212,6 +224,8 @@ pub struct AnalyzeResponse {
 pub struct RememberManualRequest {
     pub encrypted_data: String,  // base64-encoded SEAL-encrypted bytes
     pub vector: Vec<f32>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -219,6 +233,7 @@ pub struct RememberManualResponse {
     pub id: String,
     pub blob_id: String,
     pub owner: String,
+    pub namespace: String,
 }
 
 /// POST /api/recall/manual
@@ -229,6 +244,8 @@ pub struct RecallManualRequest {
     pub vector: Vec<f32>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +262,8 @@ pub struct AskRequest {
     pub question: String,
     /// Max memories to inject (default: 5)
     pub limit: Option<usize>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,6 +271,29 @@ pub struct AskResponse {
     pub answer: String,
     pub memories_used: usize,
     pub memories: Vec<RecallResult>,
+}
+
+/// POST /api/restore
+/// Restore a namespace: download blobs from Walrus, decrypt, re-embed, re-index
+fn default_restore_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreRequest {
+    pub namespace: String,
+    /// Max blobs to restore (default: 50)
+    #[serde(default = "default_restore_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreResponse {
+    pub restored: usize,
+    pub skipped: usize,
+    pub total: usize,
+    pub namespace: String,
+    pub owner: String,
 }
 
 /// Health check

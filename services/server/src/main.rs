@@ -117,6 +117,7 @@ async fn main() {
 
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
+        .route("/api/restore", post(routes::restore))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,

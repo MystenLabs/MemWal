@@ -10,6 +10,27 @@ pub struct UploadResult {
     pub object_id: Option<String>,
 }
 
+/// A blob discovered from on-chain query
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct OnChainBlob {
+    /// Walrus blob ID
+    #[serde(rename = "blobId")]
+    pub blob_id: String,
+    /// Sui object ID
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    /// Namespace from on-chain metadata
+    pub namespace: String,
+}
+
+/// Response from sidecar query-blobs endpoint
+#[derive(Debug, serde::Deserialize)]
+struct QueryBlobsResponse {
+    blobs: Vec<OnChainBlob>,
+    total: usize,
+}
+
 /// Request/response types for sidecar HTTP API
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +38,7 @@ struct WalrusUploadRequest {
     data: String,
     private_key: String,
     owner: String,
+    namespace: String,
     epochs: u64,
 }
 
@@ -32,8 +54,9 @@ struct WalrusUploadResponse {
 /// Calls the long-lived sidecar server at `POST /walrus/upload` which uses
 /// `@mysten/walrus` SDK with the multi-step writeBlobFlow.
 ///
-/// The server wallet pays for gas + storage, and the blob is
-/// registered under the signer's address.
+/// The server wallet pays for gas + storage. After certify, the blob object
+/// is transferred to `owner_address`. Namespace + owner are stored as
+/// on-chain metadata attributes for discoverability.
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
@@ -41,6 +64,7 @@ pub async fn upload_blob(
     epochs: u64,
     owner_address: &str,
     sui_private_key: &str,
+    namespace: &str,
 ) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -51,6 +75,7 @@ pub async fn upload_blob(
             data: data_b64,
             private_key: sui_private_key.to_string(),
             owner: owner_address.to_string(),
+            namespace: namespace.to_string(),
             epochs,
         })
         .send()
@@ -72,16 +97,61 @@ pub async fn upload_blob(
     })?;
 
     tracing::info!(
-        "walrus upload via sidecar ok: blob_id={}, object_id={:?}, owner={}",
+        "walrus upload via sidecar ok: blob_id={}, object_id={:?}, owner={}, ns={}",
         result.blob_id,
         result.object_id,
-        owner_address
+        owner_address,
+        namespace
     );
 
     Ok(UploadResult {
         blob_id: result.blob_id,
         object_id: result.object_id,
     })
+}
+
+/// Query user's Walrus Blob objects from the Sui chain via sidecar.
+///
+/// This enables restore-from-zero: even if the local DB is empty,
+/// we can discover all blob_ids by querying the user's on-chain objects
+/// and reading the `memwal_namespace` metadata attribute.
+pub async fn query_blobs_by_owner(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    owner_address: &str,
+    namespace: Option<&str>,
+) -> Result<Vec<OnChainBlob>, AppError> {
+    let url = format!("{}/walrus/query-blobs", sidecar_url);
+
+    let mut body = serde_json::json!({ "owner": owner_address });
+    if let Some(ns) = namespace {
+        body["namespace"] = serde_json::json!(ns);
+    }
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
+        })?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!("walrus query-blobs failed: {}", body)));
+    }
+
+    let result: QueryBlobsResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse query-blobs response: {}", e))
+    })?;
+
+    tracing::info!(
+        "walrus query-blobs ok: {} blobs for owner={}, ns={:?}",
+        result.total, owner_address, namespace
+    );
+
+    Ok(result.blobs)
 }
 
 /// Download a blob from Walrus via the walrus_rs SDK (Aggregator HTTP API).
@@ -93,21 +163,28 @@ pub async fn download_blob(
     walrus_client: &walrus_rs::WalrusClient,
     blob_id: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let bytes = walrus_client
-        .read_blob_by_id(blob_id)
-        .await
-        .map_err(|e| {
+    // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
+    let download_fut = walrus_client.read_blob_by_id(blob_id);
+    let bytes = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        download_fut,
+    ).await {
+        Ok(Ok(data)) => data,
+        Ok(Err(e)) => {
             let err_str = e.to_string();
-            // Detect expired / missing blobs (walrus_rs surfaces HTTP 404 as error string)
             let is_not_found = err_str.contains("404")
                 || err_str.to_lowercase().contains("not found")
                 || err_str.to_lowercase().contains("blob not found");
             if is_not_found {
-                AppError::BlobNotFound(format!("Blob {} expired or not found: {}", blob_id, err_str))
+                return Err(AppError::BlobNotFound(format!("Blob {} expired or not found: {}", blob_id, err_str)));
             } else {
-                AppError::Internal(format!("Walrus download failed: {}", err_str))
+                return Err(AppError::Internal(format!("Walrus download failed: {}", err_str)));
             }
-        })?;
+        }
+        Err(_) => {
+            return Err(AppError::Internal(format!("Walrus download timed out after 10s for blob {}", blob_id)));
+        }
+    };
 
     tracing::info!(
         "walrus download ok: blob_id={}, {} bytes",
@@ -116,3 +193,4 @@ pub async fn download_blob(
     );
     Ok(bytes)
 }
+

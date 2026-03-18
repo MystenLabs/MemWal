@@ -17,12 +17,18 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
-        // Run migration
-        let migration_sql = include_str!("../migrations/001_init.sql");
-        sqlx::raw_sql(migration_sql)
+        // Run migrations
+        let migration_001 = include_str!("../migrations/001_init.sql");
+        sqlx::raw_sql(migration_001)
             .execute(&pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migrations: {}", e)))?;
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
+
+        let migration_002 = include_str!("../migrations/002_add_namespace.sql");
+        sqlx::raw_sql(migration_002)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -34,24 +40,26 @@ impl VectorDb {
         &self,
         id: &str,
         owner: &str,
+        namespace: &str,
         blob_id: &str,
         vector: &[f32],
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         sqlx::query(
-            "INSERT INTO vector_entries (id, owner, blob_id, embedding)
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(id)
         .bind(owner)
+        .bind(namespace)
         .bind(blob_id)
         .bind(embedding)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
-        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}", id, blob_id, owner);
+        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}", id, blob_id, owner, namespace);
         Ok(())
     }
 
@@ -61,6 +69,7 @@ impl VectorDb {
         &self,
         query_vector: &[f32],
         owner: &str,
+        namespace: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
@@ -68,12 +77,13 @@ impl VectorDb {
         let rows: Vec<(String, f64)> = sqlx::query_as(
             "SELECT blob_id, (embedding <=> $1)::float8 AS distance
              FROM vector_entries
-             WHERE owner = $2
+             WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
-             LIMIT $3",
+             LIMIT $4",
         )
         .bind(embedding)
         .bind(owner)
+        .bind(namespace)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
@@ -85,6 +95,46 @@ impl VectorDb {
             .collect();
 
         Ok(results)
+    }
+
+    /// Get all blob_ids for a given owner + namespace (used by restore flow)
+    pub async fn get_blobs_by_namespace(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT blob_id FROM vector_entries
+             WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get blobs by namespace: {}", e)))?;
+
+        Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
+    }
+
+    /// Delete all vector entries for a given owner + namespace
+    #[allow(dead_code)]
+    pub async fn delete_by_namespace(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
+
+        let rows = result.rows_affected();
+        tracing::info!("deleted {} entries for owner={}, ns={}", rows, owner, namespace);
+        Ok(rows)
     }
 
     /// Delete a vector entry by blob_id (used for expired blob cleanup).

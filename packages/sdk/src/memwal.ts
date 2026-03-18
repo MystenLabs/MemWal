@@ -38,6 +38,7 @@ import type {
     RememberManualResult,
     RecallManualOptions,
     RecallManualResult,
+    RestoreResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 
@@ -61,10 +62,12 @@ export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
     private serverUrl: string;
+    private namespace: string;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = hexToBytes(config.key);
         this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
+        this.namespace = config.namespace ?? "default";
     }
 
     /**
@@ -93,9 +96,10 @@ export class MemWal {
      * console.log(result.blob_id) // "TY8mW0yr..."
      * ```
      */
-    async remember(text: string): Promise<RememberResult> {
+    async remember(text: string, namespace?: string): Promise<RememberResult> {
         return this.signedRequest<RememberResult>("POST", "/api/remember", {
             text,
+            namespace: namespace ?? this.namespace,
         });
     }
 
@@ -115,10 +119,11 @@ export class MemWal {
      * }
      * ```
      */
-    async recall(query: string, limit: number = 10): Promise<RecallResult> {
+    async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
         return this.signedRequest<RecallResult>("POST", "/api/recall", {
             query,
             limit,
+            namespace: namespace ?? this.namespace,
         });
     }
 
@@ -148,6 +153,7 @@ export class MemWal {
         return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
             blob_id: opts.blobId,
             vector: opts.vector,
+            namespace: opts.namespace ?? this.namespace,
         });
     }
 
@@ -180,6 +186,7 @@ export class MemWal {
         return this.signedRequest<RecallManualResult>("POST", "/api/recall/manual", {
             vector: opts.vector,
             limit: opts.limit ?? 10,
+            namespace: opts.namespace ?? this.namespace,
         });
     }
 
@@ -206,9 +213,30 @@ export class MemWal {
      * console.log(result.facts) // ["User loves coffee", "User lives in Tokyo"]
      * ```
      */
-    async analyze(text: string): Promise<AnalyzeResult> {
+    async analyze(text: string, namespace?: string): Promise<AnalyzeResult> {
         return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", {
             text,
+            namespace: namespace ?? this.namespace,
+        });
+    }
+
+    /**
+     * Restore a namespace — server downloads all blobs from Walrus,
+     * decrypts with delegate key, re-embeds, and re-indexes.
+     *
+     * @param namespace - Namespace to restore
+     * @returns RestoreResult with count of restored entries
+     *
+     * @example
+     * ```typescript
+     * const result = await memwal.restore("my-app")
+     * console.log(`Restored ${result.restored} memories`)
+     * ```
+     */
+    async restore(namespace: string, limit: number = 50): Promise<RestoreResult> {
+        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+            namespace,
+            limit,
         });
     }
 

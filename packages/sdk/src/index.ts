@@ -24,5 +24,6 @@ export type {
     AnalyzeResult,
     AnalyzedFact,
     HealthResult,
+    RestoreResult,
 } from "./types.js";
 
