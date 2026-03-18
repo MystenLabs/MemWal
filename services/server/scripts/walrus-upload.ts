@@ -39,7 +39,7 @@ function parseArgs(): {
     let data: string | undefined;
     let privateKey: string | undefined;
     let owner: string | undefined;
-    let epochs = 5;
+    let epochs = 50;
 
     for (let i = 0; i < args.length; i++) {
         switch (args[i]) {

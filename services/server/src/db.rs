@@ -87,6 +87,22 @@ impl VectorDb {
         Ok(results)
     }
 
+    /// Delete a vector entry by blob_id (used for expired blob cleanup).
+    /// Called reactively when Walrus returns 404 during blob download.
+    pub async fn delete_by_blob_id(&self, blob_id: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1")
+            .bind(blob_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)))?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!("deleted expired blob from DB: blob_id={}, rows={}", blob_id, rows);
+        }
+        Ok(rows)
+    }
+
     // ============================================================
     // Delegate Key Cache
     // ============================================================

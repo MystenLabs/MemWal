@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::seal;
 use crate::walrus;
 use crate::types::*;
+use crate::db::VectorDb;
 
 
 // ============================================================
@@ -133,7 +134,7 @@ pub async fn remember(
     })?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        &encrypted, 10, owner, sui_key,
+        &encrypted, 50, owner, sui_key,
     ).await?;
     let blob_id = upload_result.blob_id;
 
@@ -186,6 +187,7 @@ pub async fn recall(
     let hits = state.db.search_similar(&query_vector, owner, body.limit).await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
+    let db = &state.db;
     let tasks: Vec<_> = hits.iter().map(|hit| {
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
@@ -199,6 +201,12 @@ pub async fn recall(
             // Download encrypted blob from Walrus (native Rust)
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
+                Err(AppError::BlobNotFound(msg)) => {
+                    // Blob expired on Walrus — clean up from DB reactively
+                    tracing::warn!("Blob expired, cleaning up: {}", msg);
+                    cleanup_expired_blob(db, &blob_id).await;
+                    return None;
+                }
                 Err(e) => {
                     tracing::warn!("Failed to download blob {}: {}", blob_id, e);
                     return None;
@@ -276,7 +284,7 @@ pub async fn remember_manual(
         &state.http_client,
         &state.config.sidecar_url,
         &encrypted_bytes,
-        10,
+        50,
         owner,
         sui_key,
     )
@@ -388,7 +396,7 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
-                &encrypted, 10, &owner, &sui_key,
+                &encrypted, 50, &owner, &sui_key,
             ).await?;
 
             // Store in Vector DB
@@ -579,6 +587,7 @@ pub async fn ask(
     })?;
 
     // Download + SEAL decrypt all memories concurrently
+    let db = &state.db;
     let tasks: Vec<_> = hits.iter().map(|hit| {
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
@@ -591,6 +600,12 @@ pub async fn ask(
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
+                Err(AppError::BlobNotFound(msg)) => {
+                    // Blob expired on Walrus — clean up from DB reactively
+                    tracing::warn!("Blob expired, cleaning up: {}", msg);
+                    cleanup_expired_blob(db, &blob_id).await;
+                    return None;
+                }
                 Err(e) => {
                     tracing::warn!("Download failed for {}: {}", blob_id, e);
                     return None;
@@ -678,4 +693,28 @@ pub async fn ask(
     tracing::info!("ask complete: answer length={} chars", answer.len());
 
     Ok(Json(AskResponse { answer, memories_used, memories }))
+}
+
+// ============================================================
+// Expired Blob Cleanup
+// ============================================================
+
+/// Reactively delete an expired blob from the vector DB.
+/// Called when Walrus returns 404 (blob expired / not found).
+/// Errors are logged but not propagated — cleanup is best-effort.
+async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str) {
+    match db.delete_by_blob_id(blob_id).await {
+        Ok(rows) => {
+            tracing::info!(
+                "reactive cleanup: deleted {} vector entries for expired blob_id={}",
+                rows, blob_id
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "reactive cleanup failed for blob_id={}: {}",
+                blob_id, e
+            );
+        }
+    }
 }

@@ -442,7 +442,7 @@ export class MemWalManual {
         // Direct HTTP PUT to Walrus publisher (works in both browser and Node.js,
         // unlike @mysten/walrus SDK which uses WASM and requires Node.js)
         const publisherUrl = this.config.walrusPublisherUrl ?? "https://publisher.walrus-testnet.walrus.space";
-        const epochs = this.config.walrusEpochs ?? 5;
+        const epochs = this.config.walrusEpochs ?? 50;
 
         const resp = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}&deletable=true`, {
             method: "PUT",
