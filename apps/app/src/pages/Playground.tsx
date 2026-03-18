@@ -118,7 +118,7 @@ function DemoStep({
 export default function Playground() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { delegateKey, clearDelegateKeys } = useDelegateKey()
+    const { delegateKey, clearDelegateKeys, accountObjectId } = useDelegateKey()
 
     const address = currentAccount?.address || ''
     const serverUrl = config.memwalServerUrl
@@ -345,7 +345,7 @@ export default function Playground() {
                 embeddingApiKey: askLlmKey.trim(),
                 embeddingApiBase,
                 packageId: config.memwalPackageId,
-                registryId: config.memwalRegistryId,
+                accountId: accountObjectId || '',
                 suiNetwork: config.suiNetwork,
             })
         } catch {
@@ -809,7 +809,7 @@ const memwal = MemWalManual.create({
   embeddingApiKey: "sk-or-v1-...",
   embeddingApiBase: "https://openrouter.ai/api/v1",
   packageId: "${config.memwalPackageId.slice(0, 10)}...",
-  registryId: "${config.memwalRegistryId.slice(0, 10)}...",
+  accountId: "${(accountObjectId || '').slice(0, 10)}...",
 })
 
 // client does:

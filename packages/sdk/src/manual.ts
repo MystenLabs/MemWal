@@ -16,7 +16,7 @@
  *     suiPrivateKey: process.env.SUI_PRIVATE_KEY!, // suiprivkey1... for SEAL + Walrus
  *     embeddingApiKey: process.env.OPENAI_API_KEY!,
  *     packageId: "0x...",
- *     registryId: "0x...",
+ *     accountId: "0x...",
  * })
  *
  * // Remember — all client-side: embed → SEAL encrypt → Walrus upload → register
@@ -85,7 +85,7 @@ export class MemWalManual {
      * @param config.walletSigner - Connected wallet signer from dapp-kit (OR suiPrivateKey)
      * @param config.embeddingApiKey - OpenAI/OpenRouter API key for embeddings
      * @param config.packageId - MemWal contract package ID
-     * @param config.registryId - AccountRegistry object ID
+     * @param config.accountId - MemWalAccount object ID (for SEAL seal_approve)
      */
     static create(config: MemWalManualConfig): MemWalManual {
         return new MemWalManual(config);
@@ -325,7 +325,7 @@ export class MemWalManual {
                     target: `${this.config.packageId}::account::seal_approve`,
                     arguments: [
                         tx.pure("vector<u8>", idBytes),
-                        tx.object(this.config.registryId),
+                        tx.object(this.config.accountId),
                     ],
                 });
                 const txBytes = await tx.build({ client: suiClient, onlyTransactionKind: true });

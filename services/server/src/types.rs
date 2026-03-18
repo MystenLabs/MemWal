@@ -272,6 +272,10 @@ pub struct AuthInfo {
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)
     pub owner: String,
+    /// MemWalAccount object ID (set after onchain verification)
+    pub account_id: String,
+    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
+    pub delegate_key: Option<String>,
 }
 
 // ============================================================

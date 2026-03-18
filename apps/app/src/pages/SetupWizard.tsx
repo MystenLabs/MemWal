@@ -35,6 +35,7 @@ export default function SetupWizard() {
     const [confirmed, setConfirmed] = useState(false)
     const [txStatus, setTxStatus] = useState('')
     const [error, setError] = useState('')
+    const [suiAddress, setSuiAddress] = useState('')
 
     const address = currentAccount?.address || ''
 
@@ -47,6 +48,7 @@ export default function SetupWizard() {
 
         try {
             const ed = await import('@noble/ed25519')
+            const { blake2b } = await import('@noble/hashes/blake2.js')
             const privateKey = new Uint8Array(32)
             crypto.getRandomValues(privateKey)
             const publicKey = await ed.getPublicKeyAsync(privateKey)
@@ -54,8 +56,16 @@ export default function SetupWizard() {
             const privHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('')
             const pubHex = Array.from(publicKey).map(b => b.toString(16).padStart(2, '0')).join('')
 
+            // Derive Sui address: blake2b256(0x00 || public_key)
+            const input = new Uint8Array(33)
+            input[0] = 0x00 // Ed25519 scheme flag
+            input.set(publicKey, 1)
+            const addressBytes = blake2b(input, { dkLen: 32 })
+            const suiAddr = '0x' + Array.from(new Uint8Array(addressBytes)).map((b: number) => b.toString(16).padStart(2, '0')).join('')
+
             setPrivateKeyHex(privHex)
             setPublicKeyHex(pubHex)
+            setSuiAddress(suiAddr)
             setStep('show-key')
         } catch (err) {
             console.error('Key generation failed:', err)
@@ -72,55 +82,74 @@ export default function SetupWizard() {
         setError('')
 
         try {
-            // Check if user already has a MemWalAccount
+            // Check if user already has a MemWalAccount via registry lookup
             setTxStatus('checking existing account...')
-            const ownedObjects = await suiClient.getOwnedObjects({
-                owner: address,
-                filter: {
-                    StructType: `${config.memwalPackageId}::account::MemWalAccount`,
-                },
-                options: { showContent: true },
-            })
+            let knownAccountId: string | null = null
+
+            try {
+                // First, get the registry object to find the Table's inner ID
+                // (Move Table stores dynamic fields on its own UID, not the parent's)
+                const registryObj = await suiClient.getObject({
+                    id: config.memwalRegistryId,
+                    options: { showContent: true },
+                })
+                if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
+                    const fields = registryObj.data.content.fields as any
+                    const tableId = fields?.accounts?.fields?.id?.id
+                    if (tableId) {
+                        const dynField = await suiClient.getDynamicFieldObject({
+                            parentId: tableId,
+                            name: { type: 'address', value: address },
+                        })
+                        if (dynField?.data?.content && 'fields' in dynField.data.content) {
+                            knownAccountId = (dynField.data.content.fields as any).value as string
+                        }
+                    }
+                }
+            } catch {
+                // Dynamic field not found → no account yet
+            }
 
             const pubKeyBytes = Array.from(
                 { length: publicKeyHex.length / 2 },
                 (_, i) => parseInt(publicKeyHex.slice(i * 2, i * 2 + 2), 16)
             )
 
-            const tx = new Transaction()
-            let knownAccountId: string | null = null
-
-            if (ownedObjects.data.length > 0) {
-                // Account exists — just add delegate key
-                knownAccountId = ownedObjects.data[0].data!.objectId
+            if (knownAccountId) {
+                // Account exists — add user delegate key
                 setTxStatus('account found! adding delegate key...')
+                const tx = new Transaction()
 
                 tx.moveCall({
                     target: `${config.memwalPackageId}::account::add_delegate_key`,
                     arguments: [
                         tx.object(knownAccountId),
                         tx.pure('vector<u8>', pubKeyBytes),
+                        tx.pure('address', suiAddress),
                         tx.pure('string', 'Web App'),
+                        tx.object('0x6'),
                     ],
                 })
 
                 const result = await signAndExecute({ transaction: tx })
                 await suiClient.waitForTransaction({ digest: result.digest })
             } else {
-                // Step A: Create account first (entry fn — transfers object internally)
+                // Step A: Create account first (now creates a shared object)
                 setTxStatus('creating account...')
+                const tx = new Transaction()
 
                 tx.moveCall({
                     target: `${config.memwalPackageId}::account::create_account`,
                     arguments: [
                         tx.object(config.memwalRegistryId),
+                        tx.object('0x6'),
                     ],
                 })
 
                 const createResult = await signAndExecute({ transaction: tx })
                 await suiClient.waitForTransaction({ digest: createResult.digest })
 
-                // Find the created MemWalAccount object
+                // Find the created MemWalAccount object (now shared)
                 const txDetails = await suiClient.getTransactionBlock({
                     digest: createResult.digest,
                     options: { showObjectChanges: true },
@@ -134,7 +163,7 @@ export default function SetupWizard() {
                     knownAccountId = createdObj.objectId
                 }
 
-                // Step B: Add delegate key to the new account
+                // Step B: Add user's delegate key
                 setTxStatus('adding delegate key...')
                 const tx2 = new Transaction()
                 tx2.moveCall({
@@ -142,7 +171,9 @@ export default function SetupWizard() {
                     arguments: [
                         tx2.object(knownAccountId!),
                         tx2.pure('vector<u8>', pubKeyBytes),
+                        tx2.pure('address', suiAddress),
                         tx2.pure('string', 'Web App'),
+                        tx2.object('0x6'),
                     ],
                 })
 
@@ -161,7 +192,7 @@ export default function SetupWizard() {
             setError(message)
             setStep('show-key') // Go back to key display
         }
-    }, [address, publicKeyHex, privateKeyHex, suiClient, signAndExecute, setDelegateKeys])
+    }, [address, publicKeyHex, privateKeyHex, suiAddress, suiClient, signAndExecute, setDelegateKeys])
 
     const copyKey = useCallback(async () => {
         await navigator.clipboard.writeText(privateKeyHex)

@@ -175,10 +175,12 @@ pub async fn recall(
     let owner = &auth.owner;
     tracing::info!("recall: query=\"{}...\" owner={}", &body.query[..body.query.len().min(50)], owner);
 
-    // Need admin private key for SEAL decryption
-    let private_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
-    })?;
+    // Use delegate key from SDK for SEAL decryption (falls back to server key)
+    let private_key = auth.delegate_key.as_deref()
+        .or(state.config.sui_private_key.as_deref())
+        .ok_or_else(|| {
+            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+        })?;
 
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
@@ -196,7 +198,7 @@ pub async fn recall(
         let distance = hit.distance;
         let private_key = private_key.to_string();
         let package_id = state.config.package_id.clone();
-        let registry_id = state.config.registry_id.clone();
+        let account_id = auth.account_id.clone();
         async move {
             // Download encrypted blob from Walrus (native Rust)
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
@@ -213,7 +215,7 @@ pub async fn recall(
                 }
             };
             // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &registry_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -581,10 +583,12 @@ pub async fn ask(
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
     let hits = state.db.search_similar(&query_vector, owner, limit).await?;
 
-    // Need admin private key for SEAL decryption
-    let private_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
-    })?;
+    // Use delegate key from SDK for SEAL decryption (falls back to server key)
+    let private_key = auth.delegate_key.as_deref()
+        .or(state.config.sui_private_key.as_deref())
+        .ok_or_else(|| {
+            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+        })?;
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
@@ -596,7 +600,7 @@ pub async fn ask(
         let distance = hit.distance;
         let private_key = private_key.to_string();
         let package_id = state.config.package_id.clone();
-        let registry_id = state.config.registry_id.clone();
+        let account_id = auth.account_id.clone();
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
@@ -611,7 +615,7 @@ pub async fn ask(
                     return None;
                 }
             };
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &registry_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),

@@ -73,6 +73,7 @@ export async function apiCall(
         'x-public-key': publicKey,
         'x-signature': signature,
         'x-timestamp': timestamp,
+        'x-delegate-key': privateKeyHex,
     }
     if (accountId) {
         headers['x-account-id'] = accountId

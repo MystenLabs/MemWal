@@ -189,15 +189,22 @@ app.post("/seal/encrypt", async (req, res) => {
 // ============================================================
 app.post("/seal/decrypt", async (req, res) => {
     try {
-        const { data, privateKey, packageId, registryId } = req.body;
-        if (!data || !privateKey || !packageId || !registryId) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey, packageId, registryId" });
+        const { data, privateKey, packageId, accountId } = req.body;
+        if (!data || !privateKey || !packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: data, privateKey, packageId, accountId" });
         }
 
-        // Decode admin wallet
-        const { secretKey } = decodeSuiPrivateKey(privateKey);
-        const keypair = Ed25519Keypair.fromSecretKey(secretKey);
-        const adminAddress = keypair.getPublicKey().toSuiAddress();
+        // Decode delegate keypair — supports both bech32 (suiprivkey1...) and raw hex
+        let keypair: Ed25519Keypair;
+        if (privateKey.startsWith("suiprivkey")) {
+            const { secretKey } = decodeSuiPrivateKey(privateKey);
+            keypair = Ed25519Keypair.fromSecretKey(secretKey);
+        } else {
+            // Raw hex private key (32 bytes = 64 hex chars)
+            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
+            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        }
+        const signerAddress = keypair.getPublicKey().toSuiAddress();
 
         // Parse encrypted object to get key ID
         const encryptedData = new Uint8Array(Buffer.from(data, "base64"));
@@ -211,20 +218,20 @@ app.post("/seal/decrypt", async (req, res) => {
 
         // Create session key
         const sessionKey = await SessionKey.create({
-            address: adminAddress,
+            address: signerAddress,
             packageId,
             ttlMin: 30,
             signer: keypair,
             suiClient: suiClient as any,
         });
 
-        // Build seal_approve PTB
+        // Build seal_approve PTB — pass MemWalAccount (owned object) instead of AccountRegistry
         const tx = new Transaction();
         tx.moveCall({
             target: `${packageId}::account::seal_approve`,
             arguments: [
                 tx.pure("vector<u8>", idBytes),
-                tx.object(registryId),
+                tx.object(accountId),
             ],
         });
         const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
