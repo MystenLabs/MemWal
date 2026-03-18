@@ -35,15 +35,15 @@ const memories = await memwal.recall("What are the user's preferences?");
 
 | Entry | Description |
 |---|---|
-| `@cmdoss/memwal` | Default client (`MemWal`). Server handles everything: embedding, SEAL encryption, Walrus upload/download, and decryption — all inside a TEE. |
-| `@cmdoss/memwal/manual` | Manual mode (`MemWalManual`). You handle SEAL encryption, embedding, and Walrus upload client-side. Server only stores the vector ↔ blobId mapping and returns matching blobIds on recall. Full client-side privacy. |
+| `@cmdoss/memwal` | Default client (`MemWal`). The relayer handles embedding, SEAL encryption, Walrus upload/download, and decryption. |
+| `@cmdoss/memwal/manual` | Manual mode (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
 | `@cmdoss/memwal/ai` | Vercel AI SDK integration — wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
 ## How It Works
 
-1. **Send** — Text is sent to the server (runs inside a TEE)
+1. **Send** — Text is sent to the relayer
 2. **Store** — Server embeds → encrypts with SEAL → uploads to Walrus; vector stored with pgvector
-3. **Recall** — Query is embedded, similar memories fetched, decrypted inside TEE, returned as plaintext
+3. **Recall** — Query is embedded, similar memories fetched, decrypted by the relayer flow, and returned as plaintext
 
 ## License
 

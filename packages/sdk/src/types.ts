@@ -2,7 +2,7 @@
  * MemWal V2 — Core Types
  *
  * Ed25519 delegate key based SDK that communicates with
- * the MemWal Rust server (TEE).
+ * the MemWal Rust server relayer.
  */
 
 // ============================================================

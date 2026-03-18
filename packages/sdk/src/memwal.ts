@@ -2,7 +2,7 @@
  * MemWal V2 — SDK Client
  *
  * Ed25519 delegate key based client that communicates with the MemWal
- * Rust server (TEE). All data processing (encryption, embedding, Walrus)
+ * Rust server relayer. All data processing (encryption, embedding, Walrus)
  * happens server-side — the SDK just signs requests and sends text.
  *
  * The SDK only needs a single Ed25519 private key (the "delegate key").

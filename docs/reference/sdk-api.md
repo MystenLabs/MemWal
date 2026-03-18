@@ -40,7 +40,7 @@ Check relayer health.
 
 Return the derived public key as hex.
 
-## Full Client-Side Manual Client
+## Manual Client
 
 Import:
 
@@ -54,7 +54,8 @@ High-level methods:
 - `recallManual(query, limit?, namespace?)`
 - `restore(namespace, limit?)`
 
-Use this client when embedding, SEAL, and Walrus handling should happen client-side.
+Use this client when embedding calls and local SEAL handling should happen client-side, while the
+relayer still handles registration, search, restore, and upload relay.
 
 ## AI Integration
 

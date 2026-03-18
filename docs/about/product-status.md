@@ -15,7 +15,7 @@ MemWal is currently in **beta**.
 - `MemWal.create(...)` for the default SDK client
 - `remember`, `recall`, `analyze`, and `restore`
 - namespace-aware storage and retrieval
-- `MemWalManual` for the full client-side manual flow
+- `MemWalManual` for the manual client flow
 - relayer-backed integration using a delegate key
 
 ## What Still Needs Judgment
