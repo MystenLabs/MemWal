@@ -158,3 +158,27 @@
 .VPFooter {
   border-top: 1px solid var(--vp-c-divider) !important;
 }
+
+/* Mermaid diagrams */
+.vp-doc pre.mermaid {
+  padding: 1.25rem !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 16px !important;
+  text-align: left;
+}
+
+.vp-doc pre.mermaid svg {
+  display: inline-block;
+  width: auto;
+  min-width: 100%;
+  max-width: none;
+  height: auto;
+  margin: 0 auto;
+}
+
+.vp-doc pre.mermaid .label,
+.vp-doc pre.mermaid .messageText,
+.vp-doc pre.mermaid text {
+  font-family: var(--vp-font-family-base) !important;
+}

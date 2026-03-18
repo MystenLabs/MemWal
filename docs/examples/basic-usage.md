@@ -1,65 +1,50 @@
 # Basic Usage
 
-## Installation
+This page shows the happy path for integrating the current SDK with the relayer.
 
-First, install the MemWal SDK:
+## 1. Install the SDK
+
+Install the package:
 
 ```bash
 pnpm add @cmdoss/memwal
 ```
 
-## Initialize
+## 2. Initialize the Client
 
 ```typescript
-import { MemWal } from '@cmdoss/memwal'
+import { MemWal } from "@cmdoss/memwal"
 
-const memwal = new MemWal({
-  network: 'testnet',
-  packageId: '0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090ee3f',
-  registryId: '0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05',
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
 })
 ```
 
-## Connect Wallet
+## 3. Check the Relayer
 
 ```typescript
-// Using Enoki zkLogin (Google)
-await memwal.connectEnoki()
-
-// Or using Sui wallet
-await memwal.connectWallet()
+await memwal.health()
 ```
 
-## Store Memory
+## 4. Store a Memory
 
 ```typescript
-const memory = await memwal.addMemory({
-  content: 'Your memory content here',
-  metadata: {
-    type: 'note',
-    tags: ['important', 'work']
-  }
-})
-
-console.log('Memory ID:', memory.id)
+const result = await memwal.remember("User prefers dark mode and works in TypeScript.")
+console.log(result.blob_id)
 ```
 
-## Search Memories
+## 5. Recall Similar Memories
 
 ```typescript
-const results = await memwal.search('search query', {
-  limit: 10
-})
-
-results.forEach(memory => {
-  console.log(memory.content)
-})
+const result = await memwal.recall("What do we know about this user?", 5)
+for (const hit of result.results) {
+  console.log(hit.text, hit.distance)
+}
 ```
 
-## Get All Memories
+## Next Steps
 
-```typescript
-const allMemories = await memwal.getMemories()
-
-console.log(`Found ${allMemories.length} memories`)
-```
+- [Advanced Usage](/examples/advanced-usage)
+- [SDK Usage](/sdk/usage)
+- [SDK API Reference](/reference/sdk-api)
