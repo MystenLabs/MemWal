@@ -53,18 +53,6 @@ examples, and implementation contributions are all welcome.
 
 If you spot rough edges or missing guidance, please open an issue or send a PR.
 
-## Run Docs Locally
-
-From the repository root:
-
-```bash
-pnpm install
-pnpm dev:docs
-```
-
-For broader local setup guidance, see:
-
-- [Run the Repo Locally](docs/contributing/run-repo-locally.md)
 
 ## Exports
 
