@@ -280,6 +280,7 @@ export class MemWal {
                 "x-public-key": bytesToHex(publicKey),
                 "x-signature": bytesToHex(signature),
                 "x-timestamp": timestamp,
+                "x-delegate-key": bytesToHex(this.privateKey),
             },
             body: bodyStr,
         });

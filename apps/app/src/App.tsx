@@ -149,8 +149,8 @@ function AppContent() {
       </a>
 
       {!currentAccount && <LandingPage />}
-      {currentAccount && !delegateKey && <SetupWizard />}
-      {page === 'playground' && <Playground />}
+      {currentAccount && !delegateKey && page !== 'playground' && <SetupWizard />}
+      {currentAccount && page === 'playground' && <Playground />}
       {currentAccount && delegateKey && page !== 'playground' && <Dashboard />}
     </>
   )

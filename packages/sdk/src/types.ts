@@ -133,8 +133,8 @@ export interface MemWalManualConfig {
     embeddingModel?: string;
     /** MemWal contract package ID on Sui */
     packageId: string;
-    /** AccountRegistry object ID */
-    registryId: string;
+    /** MemWalAccount object ID (for SEAL seal_approve) */
+    accountId: string;
     /** Sui network (default: testnet) */
     suiNetwork?: "testnet" | "mainnet";
     /** Walrus storage epochs (default: 50) */

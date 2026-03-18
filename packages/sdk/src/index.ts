@@ -11,6 +11,9 @@
 // Core client (server-mode: server handles SEAL + Walrus + embedding)
 export { MemWal } from "./memwal.js";
 
+// Delegate key utilities
+export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
+
 // Types (server-mode only — no manual types here)
 export type {
     MemWalConfig,
@@ -22,3 +25,4 @@ export type {
     AnalyzedFact,
     HealthResult,
 } from "./types.js";
+

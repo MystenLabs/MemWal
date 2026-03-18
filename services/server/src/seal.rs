@@ -22,7 +22,7 @@ struct SealDecryptRequest {
     data: String,
     private_key: String,
     package_id: String,
-    registry_id: String,
+    account_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -85,11 +85,11 @@ pub async fn seal_encrypt(
     Ok(encrypted_bytes)
 }
 
-/// Decrypt SEAL-encrypted data using admin wallet via HTTP sidecar.
+/// Decrypt SEAL-encrypted data using a delegate keypair via HTTP sidecar.
 ///
 /// Calls the long-lived sidecar server at `POST /seal/decrypt`.
-/// The admin wallet (TEE server) is authorized in the AccountRegistry
-/// to decrypt any user's data via `seal_approve`.
+/// The delegate keypair must be registered in the user's MemWalAccount
+/// as a delegate key to be authorized for `seal_approve`.
 ///
 /// Returns: decrypted plaintext bytes
 pub async fn seal_decrypt(
@@ -98,7 +98,7 @@ pub async fn seal_decrypt(
     encrypted_data: &[u8],
     private_key: &str,
     package_id: &str,
-    registry_id: &str,
+    account_id: &str,
 ) -> Result<Vec<u8>, AppError> {
     let url = format!("{}/seal/decrypt", sidecar_url);
     let data_b64 = BASE64.encode(encrypted_data);
@@ -109,7 +109,7 @@ pub async fn seal_decrypt(
             data: data_b64,
             private_key: private_key.to_string(),
             package_id: package_id.to_string(),
-            registry_id: registry_id.to_string(),
+            account_id: account_id.to_string(),
         })
         .send()
         .await

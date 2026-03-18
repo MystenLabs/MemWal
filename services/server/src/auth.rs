@@ -57,6 +57,12 @@ pub async fn verify_signature(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    // Optional delegate private key (hex) for SEAL decrypt
+    let delegate_key_hex = headers
+        .get("x-delegate-key")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
     // Validate timestamp (5 minute window)
     let timestamp: i64 = timestamp_str
         .parse()
@@ -120,6 +126,8 @@ pub async fn verify_signature(
     parts.extensions.insert(AuthInfo {
         public_key: public_key_hex,
         owner,
+        account_id,
+        delegate_key: delegate_key_hex,
     });
 
     // Rebuild request with the body re-injected
