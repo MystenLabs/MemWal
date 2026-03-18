@@ -94,12 +94,13 @@ sequenceDiagram
 
 ### Default SDK Mode
 
-`MemWal` sends signed requests to the relayer and lets the backend handle most of the workflow.
+`MemWal` sends signed requests to the relayer and lets the backend handle embedding, encryption,
+upload, retrieval, and restore.
 
-### Full Client-Side Manual Mode
+### Manual Client Flow
 
-`MemWalManual` lets the client handle SEAL encryption, Walrus downloads, and embedding calls
-directly while still using the relayer for registration and search.
+`MemWalManual` lets the client handle embedding calls and local SEAL operations. The relayer still
+participates in registration, search, restore, and upload relay during manual remember.
 
 ## New Restore Shape
 

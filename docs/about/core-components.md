@@ -7,7 +7,7 @@ MemWal is a stack, not a single package.
 There are three main SDK surfaces:
 
 - `MemWal` from `@cmdoss/memwal` for the default relayer-backed flow
-- `MemWalManual` from `@cmdoss/memwal/manual` for the full client-side manual flow
+- `MemWalManual` from `@cmdoss/memwal/manual` for the manual client flow
 - `withMemWal` from `@cmdoss/memwal/ai` for AI SDK middleware integration
 
 For the default path, the main methods are:

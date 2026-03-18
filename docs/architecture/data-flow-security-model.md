@@ -22,7 +22,7 @@
 ## Operational Note
 
 The current docs describe the production beta model as implemented now, while leaving room for
-future hardening such as TEE-focused deployment guidance.
+future hardening and clearer deployment guidance.
 
 That means this page should be read as a description of the current supported flow, not as a claim
 that every future deployment will use exactly the same trust and runtime boundaries.

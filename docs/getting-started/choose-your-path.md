@@ -14,10 +14,10 @@ Walrus, the Rust server, and the sidecar yourself yet.
 
 Go to: [Public Relayer](/relayer/public-relayer)
 
-## Path 3: Full Client-Side Manual Flow
+## Path 3: Manual Client Flow
 
-Use `@cmdoss/memwal/manual` when you want the client to handle SEAL encryption,
-Walrus downloads, and embedding calls directly.
+Use `@cmdoss/memwal/manual` when you want the client to handle embedding calls and local SEAL
+operations, while still using the relayer for registration, search, restore, and upload relay.
 
 Go to: [SDK Usage](/sdk/usage)
 

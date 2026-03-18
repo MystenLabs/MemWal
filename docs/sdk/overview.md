@@ -22,7 +22,7 @@ Primary methods:
 
 ## 2. `@cmdoss/memwal/manual`
 
-This is the full client-side manual flow.
+This is the manual client flow.
 
 ```ts
 import { MemWalManual } from "@cmdoss/memwal/manual";
@@ -30,11 +30,11 @@ import { MemWalManual } from "@cmdoss/memwal/manual";
 
 Use it when the client should handle:
 
-- embedding calls
+- embedding provider calls
 - SEAL encryption and decryption
-- Walrus downloads
+- Walrus downloads during recall
 
-while still using the relayer for registration and search.
+while still using the relayer for registration, search, restore, and upload relay during manual remember.
 
 ## 3. `@cmdoss/memwal/ai`
 
@@ -55,4 +55,4 @@ The clearest beta path is:
 1. start with `MemWal`
 2. set a namespace explicitly
 3. validate `remember`, `recall`, `analyze`, and `restore`
-4. move to `MemWalManual` only if your product really needs client-side control
+4. move to `MemWalManual` only if your product needs client-managed embedding and local SEAL handling

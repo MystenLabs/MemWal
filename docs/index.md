@@ -29,7 +29,7 @@ very welcome while we harden the protocol and developer experience.
 
 ## What MemWal Includes
 
-- **SDK**: Delegate-key clients for relayer-backed memory and full client-side manual flow
+- **SDK**: Delegate-key clients for relayer-backed memory and a manual client flow
 - **Relayer Backend**: Signed API that verifies access, enforces namespace boundaries, and runs memory workflows
 - **Smart Contract**: Onchain account and delegate-key model on Sui
 - **Indexer**: Event listener that syncs onchain account data into PostgreSQL for fast lookup

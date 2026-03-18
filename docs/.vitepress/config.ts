@@ -64,7 +64,6 @@ export default defineConfig({
             { text: 'Explaining MemWal', link: '/concepts/explaining-memwal' },
             { text: 'Storage Structure', link: '/concepts/storage-structure' },
             { text: 'Namespace', link: '/concepts/namespace' },
-            { text: 'Memory Space', link: '/concepts/memory-space' },
             { text: 'Ownership and Access', link: '/concepts/ownership-and-access' },
             { text: 'Security Model', link: '/concepts/security-model' },
           ],

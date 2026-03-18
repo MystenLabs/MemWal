@@ -30,13 +30,14 @@ Checks whether the relayer is reachable.
 
 Returns the public key derived from the current delegate key.
 
-## Full Client-Side Manual Client: `MemWalManual`
+## Manual Client: `MemWalManual`
 
-Use `MemWalManual` when the client should control embedding, SEAL, and Walrus interactions directly.
+Use `MemWalManual` when the client should control embedding calls and local SEAL operations,
+while still relying on the relayer for registration, search, restore, and upload relay.
 
 ### `rememberManual(text, namespace?)`
 
-Embeds and encrypts locally, then sends encrypted payload plus vector to the relayer for upload and registration.
+Embeds and encrypts locally, then sends encrypted payload plus vector to the relayer for upload relay and registration.
 
 ### `recallManual(query, limit?, namespace?)`
 
