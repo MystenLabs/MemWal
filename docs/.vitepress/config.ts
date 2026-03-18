@@ -6,21 +6,120 @@ export default defineConfig({
   base: '/',
   outDir: './dist',
   cleanUrls: false,
+  markdown: {
+    config(md) {
+      const defaultFence =
+        md.renderer.rules.fence?.bind(md.renderer.rules) ??
+        ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
+
+      md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+        const token = tokens[idx]
+        const info = token.info.trim()
+
+        if (info === 'mermaid') {
+          return `<pre class="mermaid">${md.utils.escapeHtml(token.content)}</pre>\n`
+        }
+
+        return defaultFence(tokens, idx, options, env, self)
+      }
+    },
+  },
   themeConfig: {
     siteTitle: 'MemWal',
     nav: [
-      { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'About', link: '/about/what-is-memwal' },
+      { text: 'Getting Started', link: '/getting-started/for-developers' },
+      { text: 'Concepts', link: '/concepts/explaining-memwal' },
+      { text: 'Architecture', link: '/architecture/system-overview' },
+      { text: 'SDK', link: '/sdk/overview' },
+      { text: 'Relayer', link: '/relayer/overview' },
       { text: 'Examples', link: '/examples/basic-usage' },
-      { text: 'API Reference', link: '/api/reference' },
+      { text: 'Reference', link: '/reference/sdk-api' },
     ],
     sidebar: {
-      '/guide/': [
+      '/about/': [
         {
-          text: 'Guide',
+          text: 'About',
           items: [
-            { text: 'Getting Started', link: '/guide/getting-started' },
-            { text: 'Installation', link: '/guide/installation' },
-            { text: 'Quick Start', link: '/guide/quick-start' },
+            { text: 'What Is MemWal?', link: '/about/what-is-memwal' },
+            { text: 'Product Status', link: '/about/product-status' },
+            { text: 'Core Components', link: '/about/core-components' },
+          ],
+        },
+      ],
+      '/getting-started/': [
+        {
+          text: 'Getting Started',
+          items: [
+            { text: 'For Developers', link: '/getting-started/for-developers' },
+            { text: 'Installation', link: '/getting-started/installation' },
+            { text: 'Choose Your Path', link: '/getting-started/choose-your-path' },
+          ],
+        },
+      ],
+      '/concepts/': [
+        {
+          text: 'Concepts',
+          items: [
+            { text: 'Explaining MemWal', link: '/concepts/explaining-memwal' },
+            { text: 'Storage Structure', link: '/concepts/storage-structure' },
+            { text: 'Namespace', link: '/concepts/namespace' },
+            { text: 'Memory Space', link: '/concepts/memory-space' },
+            { text: 'Ownership and Access', link: '/concepts/ownership-and-access' },
+            { text: 'Security Model', link: '/concepts/security-model' },
+          ],
+        },
+      ],
+      '/architecture/': [
+        {
+          text: 'Architecture',
+          items: [
+            { text: 'System Overview', link: '/architecture/system-overview' },
+            { text: 'Component Responsibilities', link: '/architecture/component-responsibilities' },
+            { text: 'Core Flows', link: '/architecture/core-flows' },
+            { text: 'Data Flow Security Model', link: '/architecture/data-flow-security-model' },
+          ],
+        },
+      ],
+      '/sdk/': [
+        {
+          text: 'SDK',
+          items: [
+            { text: 'Overview', link: '/sdk/overview' },
+            { text: 'Quick Start', link: '/sdk/quick-start' },
+            { text: 'Usage', link: '/sdk/usage' },
+            { text: 'AI Integration', link: '/sdk/ai-integration' },
+          ],
+        },
+      ],
+      '/relayer/': [
+        {
+          text: 'Relayer Backend',
+          items: [
+            { text: 'Overview', link: '/relayer/overview' },
+            { text: 'Public Relayer', link: '/relayer/public-relayer' },
+            { text: 'Self-Hosting', link: '/relayer/self-hosting' },
+            { text: 'Installation and Setup', link: '/relayer/installation-and-setup' },
+          ],
+        },
+      ],
+      '/contract/': [
+        {
+          text: 'Smart Contract',
+          items: [
+            { text: 'Overview', link: '/contract/overview' },
+            { text: 'Delegate Key Management', link: '/contract/delegate-key-management' },
+            { text: 'Ownership and Permissions', link: '/contract/ownership-and-permissions' },
+          ],
+        },
+      ],
+      '/indexer/': [
+        {
+          text: 'Indexer',
+          items: [
+            { text: 'Purpose', link: '/indexer/purpose' },
+            { text: 'Onchain Events', link: '/indexer/onchain-events' },
+            { text: 'Database Sync', link: '/indexer/database-sync' },
           ],
         },
       ],
@@ -29,16 +128,28 @@ export default defineConfig({
           text: 'Examples',
           items: [
             { text: 'Basic Usage', link: '/examples/basic-usage' },
-            { text: 'Advanced', link: '/examples/advanced' },
-            { text: 'Research Example App', link: '/examples/research-advanced' },
+            { text: 'Advanced Usage', link: '/examples/advanced-usage' },
+            { text: 'Research App Example', link: '/examples/research-app-example' },
+            { text: 'Example Map', link: '/examples/example-map' },
           ],
         },
       ],
-      '/api/': [
+      '/reference/': [
         {
-          text: 'API Reference',
+          text: 'Reference',
           items: [
-            { text: 'Reference', link: '/api/reference' },
+            { text: 'SDK API', link: '/reference/sdk-api' },
+            { text: 'Relayer API', link: '/reference/relayer-api' },
+          ],
+        },
+      ],
+      '/contributing/': [
+        {
+          text: 'Local Development and Contributing',
+          items: [
+            { text: 'Run Docs Locally', link: '/contributing/run-docs-locally' },
+            { text: 'Run the Repo Locally', link: '/contributing/run-repo-locally' },
+            { text: 'Docs Workflow', link: '/contributing/docs-workflow' },
           ],
         },
       ],

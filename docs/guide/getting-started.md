@@ -1,22 +1,7 @@
 # Getting Started
 
-Welcome to MemWal! This guide will help you get started with privacy-preserving AI memory.
+This legacy guide entry has moved.
 
-## Prerequisites
-
-- Node.js 18+
-- pnpm (or npm/yarn)
-- A Sui wallet (for testnet)
-
-## Quick Overview
-
-MemWal allows you to:
-
-1. **Store memories** on Walrus with SEAL encryption
-2. **Search semantically** using embedding vectors
-3. **Delegate access** to AI agents with revocable keys
-
-## Next Steps
-
-- [Installation](./installation.md)
-- [Quick Start](./quick-start.md)
+- New starting page: [For Developers](/getting-started/for-developers)
+- Installation: [Installation](/getting-started/installation)
+- Path selection: [Choose Your Path](/getting-started/choose-your-path)
