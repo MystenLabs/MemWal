@@ -284,6 +284,8 @@ pub enum AppError {
     #[allow(dead_code)]
     Unauthorized(String),
     Internal(String),
+    /// Walrus blob not found (expired or deleted) — triggers cleanup
+    BlobNotFound(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -292,6 +294,7 @@ impl std::fmt::Display for AppError {
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
+            AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
         }
     }
 }
@@ -305,6 +308,7 @@ impl axum::response::IntoResponse for AppError {
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 msg.clone(),
             ),
+            AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
         };
 
         let body = serde_json::json!({ "error": message });

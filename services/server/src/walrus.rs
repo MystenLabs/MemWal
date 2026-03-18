@@ -86,6 +86,9 @@ pub async fn upload_blob(
 
 /// Download a blob from Walrus via the walrus_rs SDK (Aggregator HTTP API).
 /// Note: this is already native Rust — no sidecar needed.
+///
+/// Returns `AppError::BlobNotFound` when the blob has expired or doesn't exist
+/// (HTTP 404 from the aggregator). Callers can use this to trigger DB cleanup.
 pub async fn download_blob(
     walrus_client: &walrus_rs::WalrusClient,
     blob_id: &str,
@@ -93,7 +96,18 @@ pub async fn download_blob(
     let bytes = walrus_client
         .read_blob_by_id(blob_id)
         .await
-        .map_err(|e| AppError::Internal(format!("Walrus download failed: {}", e)))?;
+        .map_err(|e| {
+            let err_str = e.to_string();
+            // Detect expired / missing blobs (walrus_rs surfaces HTTP 404 as error string)
+            let is_not_found = err_str.contains("404")
+                || err_str.to_lowercase().contains("not found")
+                || err_str.to_lowercase().contains("blob not found");
+            if is_not_found {
+                AppError::BlobNotFound(format!("Blob {} expired or not found: {}", blob_id, err_str))
+            } else {
+                AppError::Internal(format!("Walrus download failed: {}", err_str))
+            }
+        })?;
 
     tracing::info!(
         "walrus download ok: blob_id={}, {} bytes",

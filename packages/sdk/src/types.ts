@@ -137,7 +137,7 @@ export interface MemWalManualConfig {
     registryId: string;
     /** Sui network (default: testnet) */
     suiNetwork?: "testnet" | "mainnet";
-    /** Walrus storage epochs (default: 5) */
+    /** Walrus storage epochs (default: 50) */
     walrusEpochs?: number;
     /** Walrus aggregator URL for direct blob downloads (default: testnet aggregator) */
     walrusAggregatorUrl?: string;
