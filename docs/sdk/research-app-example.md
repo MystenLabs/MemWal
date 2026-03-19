@@ -17,4 +17,4 @@ Structured summaries usually recall better than raw transcripts because they kee
 
 ## Read Next
 
-- [AI Research Assistant with Remember & Recall](/examples/research-advanced)
+- [AI Research Assistant with Remember & Recall](/sdk/advanced-usage)

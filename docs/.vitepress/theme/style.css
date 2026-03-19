@@ -151,6 +151,11 @@
   text-decoration: underline !important;
 }
 
+.vp-doc a.overview-card,
+.vp-doc a.overview-card:hover {
+  text-decoration: none !important;
+}
+
 /* Content */
 .vp-doc h1,
 .vp-doc h2,

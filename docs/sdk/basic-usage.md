@@ -39,6 +39,6 @@ console.log(recalled.results);
 
 ## Read Next
 
-- [Advanced Usage](/examples/advanced-usage)
+- [Advanced Usage](/sdk/advanced-usage)
 - [SDK Usage](/sdk/usage)
 - [SDK API Reference](/reference/sdk-api)

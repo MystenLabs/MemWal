@@ -31,6 +31,6 @@ ownership, storage, and access model.
 
 ## Read Next
 
-- [Product Status](/about/product-status)
-- [Core Components](/about/core-components)
+- [Product Status](/getting-started/product-status)
+- [Core Components](/getting-started/core-components)
 - [Build Your First Integration](/getting-started/for-developers)
