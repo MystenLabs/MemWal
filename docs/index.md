@@ -19,21 +19,16 @@ hero:
 
 ## Beta Notice
 
-MemWal is currently released as a **beta**. The docs focus on the supported path for
-integrating the SDK, using the relayer, and understanding the protocol design as it
-exists in this repository today.
+MemWal is in beta. It works today, but the protocol, SDK, and relayer flow may still change as the
+system hardens. Feedback and contributions are welcome.
 
-We want to emphasize that this means the system works and is ready to evaluate, but it may
-still have bugs, rough edges, or evolving operational guidance. Feedback and contributions are
-very welcome while we harden the protocol and developer experience.
+## What You Get
 
-## What MemWal Includes
-
-- **SDK**: Delegate-key clients for relayer-backed memory and a manual client flow
-- **Relayer Backend**: Signed API that verifies access, enforces namespace boundaries, and runs memory workflows
-- **Smart Contract**: Onchain account and delegate-key model on Sui
-- **Indexer**: Event listener that syncs onchain account data into PostgreSQL for fast lookup
-- **Walrus + SEAL**: Encrypted blob storage and access control for memory payloads, including restore discovery by metadata
+- **SDK**: `MemWal`, `MemWalManual`, and `withMemWal`
+- **Relayer**: signed API for memory workflows
+- **Contract**: owner and delegate-key model on Sui
+- **Indexer**: account sync into PostgreSQL
+- **Walrus + SEAL**: encrypted blob storage plus access workflow
 
 ## Start Here
 
@@ -43,11 +38,10 @@ very welcome while we harden the protocol and developer experience.
 - Running the backend: [Relayer Overview](/relayer/overview)
 - Looking for APIs: [SDK API Reference](/reference/sdk-api)
 
-## Features
+## Core Ideas
 
-- **Encrypted Storage**: Memory payloads are stored as encrypted blobs on Walrus
-- **Semantic Recall**: Query memories by meaning instead of exact keywords
-- **Namespaces**: Isolate memory by product or context instead of one flat pool
-- **Incremental Restore**: Re-index missing namespace entries from Walrus metadata and blob state
-- **Delegate Keys**: Lightweight keys for app access without exposing the owner's wallet
-- **Protocol Components**: SDK, relayer, smart contract, and indexer work together as one stack
+- **Namespace**: isolate memory by app, tenant, or environment
+- **Owner + Namespace**: the main storage and retrieval boundary
+- **Default Path**: use `MemWal` with a relayer first
+- **Manual Path**: use `MemWalManual` when the client must handle embeddings and local SEAL work
+- **Restore**: rebuild missing indexed entries for one namespace

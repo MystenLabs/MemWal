@@ -1,58 +1,44 @@
 # SDK Overview
 
-MemWal currently exposes three developer-facing SDK surfaces.
+MemWal exposes three SDK surfaces.
 
-## 1. `@cmdoss/memwal`
+## `@cmdoss/memwal`
 
-This is the default, relayer-backed client and the recommended starting point.
+Use this first.
+
+- relayer-backed
+- best path for most teams
+- main methods: `remember`, `recall`, `analyze`, `restore`, `health`
 
 ```ts
 import { MemWal } from "@cmdoss/memwal";
 ```
 
-Use it when you want the backend to handle most of the workflow.
+## `@cmdoss/memwal/manual`
 
-Primary methods:
+Use this when the client must handle embeddings and local SEAL operations.
 
-- `remember(text, namespace?)`
-- `recall(query, limit?, namespace?)`
-- `analyze(text, namespace?)`
-- `restore(namespace, limit?)`
-- `health()`
-
-## 2. `@cmdoss/memwal/manual`
-
-This is the manual client flow.
+- relayer still handles upload relay, registration, search, and restore
 
 ```ts
 import { MemWalManual } from "@cmdoss/memwal/manual";
 ```
 
-Use it when the client should handle:
+## `@cmdoss/memwal/ai`
 
-- embedding provider calls
-- SEAL encryption and decryption
-- Walrus downloads during recall
-
-while still using the relayer for registration, search, restore, and upload relay during manual remember.
-
-## 3. `@cmdoss/memwal/ai`
-
-This wraps an AI SDK model with recall-before-generation and auto-save-after-generation behavior.
+Use this when you already use the AI SDK.
 
 ```ts
 import { withMemWal } from "@cmdoss/memwal/ai";
 ```
 
-## Namespace Behavior
+## Namespace
 
-Both SDK configs support a default namespace. If you do not provide one, it defaults to `"default"`.
+Both clients support a default namespace. If you omit it, it falls back to `"default"`.
 
-## Beta Note
-
-The clearest beta path is:
+## Recommended Path
 
 1. start with `MemWal`
 2. set a namespace explicitly
 3. validate `remember`, `recall`, `analyze`, and `restore`
-4. move to `MemWalManual` only if your product needs client-managed embedding and local SEAL handling
+4. move to `MemWalManual` only if you need client-managed embeddings and local SEAL work

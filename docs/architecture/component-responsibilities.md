@@ -2,46 +2,33 @@
 
 ## SDK
 
-- signs requests with an Ed25519 delegate key
-- carries the default namespace for memory isolation
-- exposes the default `MemWal` client, the `MemWalManual` client, and AI middleware
-- does not own the user's onchain account model
+- signs requests with a delegate key
+- carries the default namespace
+- exposes `MemWal`, `MemWalManual`, and `withMemWal`
 
 ## Relayer
 
-- verifies delegate-key access
+- verifies delegate access
 - resolves owner and account context
-- stores and searches vectors by owner plus namespace
 - runs `remember`, `recall`, `analyze`, `ask`, and `restore`
-- starts a TypeScript sidecar for SEAL and Walrus-related operations
+- stores and searches vectors by `owner + namespace`
 
 ## Sidecar
 
-- performs backend SEAL encrypt and decrypt calls
+- performs backend SEAL operations
 - uploads blobs to Walrus
-- queries owner blob objects and namespace metadata from chain
-- supports restore flows that need blob discovery outside the local DB
+- discovers blobs and metadata for restore flows
 
-## Smart Contract
+## Contract
 
-- defines ownership and delegate-key authorization onchain
-- anchors the account model independently from the SDK and relayer
+- defines ownership and delegate authorization onchain
 
 ## Indexer
 
 - listens for account events
-- syncs onchain account data into PostgreSQL
-- helps the relayer resolve ownership quickly without repeated full chain scans
+- syncs account data into PostgreSQL
 
-## Walrus and SEAL
+## Storage
 
 - Walrus stores encrypted blobs
-- SEAL provides the encryption and decryption model
-- Walrus metadata contributes to restore and namespace discovery
-
-## PostgreSQL and pgvector
-
-- stores vector entries used for semantic search
-- stores owner plus namespace mappings to blob IDs
-- stores cached account and delegate data
-- supports incremental restore decisions by comparing local and on-chain state
+- PostgreSQL stores searchable vector metadata and caches

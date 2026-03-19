@@ -165,14 +165,15 @@
   overflow-x: auto;
   overflow-y: hidden;
   border-radius: 16px !important;
-  text-align: left;
+  text-align: center;
+  background-color: var(--vp-c-bg-soft) !important;
 }
 
 .vp-doc pre.mermaid svg {
   display: inline-block;
-  width: auto;
-  min-width: 100%;
-  max-width: none;
+  width: 70%;
+  min-width: 0;
+  max-width: 100%;
   height: auto;
   margin: 0 auto;
 }
@@ -181,4 +182,78 @@
 .vp-doc pre.mermaid .messageText,
 .vp-doc pre.mermaid text {
   font-family: var(--vp-font-family-base) !important;
+  fill: var(--vp-c-text-1) !important;
+  font-weight: 600 !important;
+}
+
+.vp-doc pre.mermaid .node rect,
+.vp-doc pre.mermaid .node circle,
+.vp-doc pre.mermaid .node ellipse,
+.vp-doc pre.mermaid .node polygon,
+.vp-doc pre.mermaid .node path,
+.vp-doc pre.mermaid .actor,
+.vp-doc pre.mermaid .actor-line {
+  stroke: var(--vp-c-text-1) !important;
+  stroke-width: 2.5px !important;
+}
+
+.vp-doc pre.mermaid .edgePath path,
+.vp-doc pre.mermaid .flowchart-link,
+.vp-doc pre.mermaid .messageLine0,
+.vp-doc pre.mermaid .messageLine1,
+.vp-doc pre.mermaid .loopLine {
+  stroke: var(--vp-c-text-1) !important;
+  stroke-width: 2.5px !important;
+}
+
+.vp-doc pre.mermaid marker path,
+.vp-doc pre.mermaid .marker {
+  fill: var(--vp-c-text-1) !important;
+  stroke: var(--vp-c-text-1) !important;
+}
+
+.vp-doc pre.mermaid .note,
+.vp-doc pre.mermaid .labelBox,
+.vp-doc pre.mermaid .cluster rect {
+  stroke: var(--vp-c-text-1) !important;
+  stroke-width: 2px !important;
+  fill: var(--vp-c-bg) !important;
+}
+
+.dark .vp-doc pre.mermaid {
+  background-color: #202028 !important;
+}
+
+.dark .vp-doc pre.mermaid .label,
+.dark .vp-doc pre.mermaid .messageText,
+.dark .vp-doc pre.mermaid text {
+  fill: #f4f4f8 !important;
+}
+
+.dark .vp-doc pre.mermaid .node rect,
+.dark .vp-doc pre.mermaid .node circle,
+.dark .vp-doc pre.mermaid .node ellipse,
+.dark .vp-doc pre.mermaid .node polygon,
+.dark .vp-doc pre.mermaid .node path,
+.dark .vp-doc pre.mermaid .actor,
+.dark .vp-doc pre.mermaid .actor-line,
+.dark .vp-doc pre.mermaid .edgePath path,
+.dark .vp-doc pre.mermaid .flowchart-link,
+.dark .vp-doc pre.mermaid .messageLine0,
+.dark .vp-doc pre.mermaid .messageLine1,
+.dark .vp-doc pre.mermaid .loopLine {
+  stroke: #f4f4f8 !important;
+}
+
+.dark .vp-doc pre.mermaid marker path,
+.dark .vp-doc pre.mermaid .marker {
+  fill: #f4f4f8 !important;
+  stroke: #f4f4f8 !important;
+}
+
+.dark .vp-doc pre.mermaid .note,
+.dark .vp-doc pre.mermaid .labelBox,
+.dark .vp-doc pre.mermaid .cluster rect {
+  fill: #2a2a33 !important;
+  stroke: #f4f4f8 !important;
 }

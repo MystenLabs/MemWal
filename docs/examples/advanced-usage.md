@@ -1,22 +1,31 @@
 # Advanced Usage
 
-This page highlights the more advanced surfaces exposed by the current SDK.
+## Use This When
 
-## Manual Registration Flow
+- you already have a vector or encrypted payload
+- you want fact extraction with `analyze()`
+- you want memory inside an AI SDK pipeline
 
-Use `rememberManual()` when you already have:
+## Manual Registration
 
-- a Walrus blob ID
-- a pre-computed embedding vector
+Use:
 
-Use `recallManual()` when you already have a query vector and want matching blob IDs back.
+- `rememberManual()` when you already have encrypted payload plus vector
+- `recallManual()` when you already have a query vector
 
-## Analyze Flow
+## Analyze
 
-Use `analyze()` when you want the relayer to extract candidate facts from text and store them as
+Use `analyze()` when you want the relayer to extract facts from longer text and store them as
 memories.
 
 ## AI Middleware
 
-Use `withMemWal` when you want memory retrieval and optional fact saving to sit inside an LLM
-pipeline.
+Use `withMemWal` when you want:
+
+- recall before generation
+- optional auto-save after generation
+
+## Read Next
+
+- [SDK Usage](/sdk/usage)
+- [AI Integration](/sdk/ai-integration)

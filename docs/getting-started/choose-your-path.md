@@ -1,44 +1,36 @@
 # Choose Your Path
 
-## Path 1: Default SDK
+## 1. Default SDK
 
-Use `@cmdoss/memwal` when you want the fastest route to a working integration.
-The relayer handles embedding, encryption, Walrus upload, retrieval, and restore.
+Use `@cmdoss/memwal` when you want the fastest working integration.
+
+- relayer handles embedding, encryption, retrieval, and restore
+- best starting point for most teams
 
 Go to: [SDK Overview](/sdk/overview)
 
-## Path 2: Public Relayer
+## 2. Public Relayer
 
-Use this when you are evaluating MemWal during beta and do not want to run PostgreSQL,
-Walrus, the Rust server, and the sidecar yourself yet.
+Use this when you want to evaluate MemWal without running the backend yourself.
 
 Go to: [Public Relayer](/relayer/public-relayer)
 
-## Path 3: Manual Client Flow
+## 3. Manual Client Flow
 
-Use `@cmdoss/memwal/manual` when you want the client to handle embedding calls and local SEAL
-operations, while still using the relayer for registration, search, restore, and upload relay.
+Use `@cmdoss/memwal/manual` when the client must handle embeddings and local SEAL operations.
+
+- relayer still handles upload relay, registration, search, and restore
 
 Go to: [SDK Usage](/sdk/usage)
 
-## Path 4: AI Middleware
+## 4. AI Middleware
 
-Use `@cmdoss/memwal/ai` when you already have an AI SDK pipeline and want recall plus
-auto-save behavior around generation.
+Use `@cmdoss/memwal/ai` when you already use the AI SDK and want recall plus auto-save behavior.
 
 Go to: [AI Integration](/sdk/ai-integration)
 
-## Path 5: Self-Host the Relayer
+## 5. Self-Host the Relayer
 
-Use this when you need tighter operational control or want your own deployment for the beta.
+Use this when you need your own infra, credentials, and rollout control.
 
 Go to: [Self-Hosting](/relayer/self-hosting)
-
-## Recommended Order
-
-For most teams, the best order is:
-
-1. start with the default SDK
-2. use a dedicated namespace
-3. validate the public relayer path
-4. move to self-hosting only when your product needs it

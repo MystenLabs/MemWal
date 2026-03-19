@@ -1,19 +1,20 @@
 # Research App Example
 
-This example shows how a research-oriented application can use MemWal for persistent memory across
-conversations.
+## Use This When
 
-## Core Pattern
+- you want to store structured research findings
+- you want to recall them in later sessions
 
-- save a structured research summary with `remember()`
-- generate one or more targeted queries for later retrieval
-- use `recall()` to bring relevant findings back into a new session
+## Pattern
 
-## Why This Pattern Works
+1. save a structured summary with `remember()`
+2. generate targeted queries later
+3. use `recall()` to pull relevant findings back into context
 
-Structured summaries recall better than raw chat transcripts because they keep the signal high and
-the noise low.
+## Why This Works
 
-For a deeper walkthrough, see the legacy page:
+Structured summaries usually recall better than raw transcripts because they keep the signal high.
+
+## Read Next
 
 - [AI Research Assistant with Remember & Recall](/examples/research-advanced)

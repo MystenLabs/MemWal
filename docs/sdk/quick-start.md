@@ -12,7 +12,6 @@ const memwal = MemWal.create({
 });
 
 await memwal.health();
-
 await memwal.remember("I live in Hanoi and prefer dark mode.");
 
 const recall = await memwal.recall("What do we know about this user?");
@@ -24,23 +23,29 @@ const analyzed = await memwal.analyze(
 console.log(analyzed.facts);
 ```
 
+## Good Namespace Examples
+
+- `chatbot-prod`
+- `researcher-staging`
+- `support-agent`
+
+Avoid keeping everything in `"default"` after early testing.
+
 ## What Happens
 
-- the SDK signs each request with your delegate key
-- the relayer verifies the key against the onchain account model
-- memories are stored under the current namespace
+- the SDK signs each request
+- the relayer verifies delegate access
+- data is stored and searched by `owner + namespace`
 - the relayer coordinates embeddings, SEAL, Walrus, and vector indexing
 
 ## Restore Example
-
-If local vector state needs to be rebuilt for a namespace, the SDK also exposes:
 
 ```ts
 const result = await memwal.restore("demo");
 console.log(result);
 ```
 
-Restore is incremental. It restores missing blobs for that namespace instead of rebuilding everything.
+Use restore when the relayer needs to rebuild missing indexed state for one namespace.
 
 ## Next Steps
 

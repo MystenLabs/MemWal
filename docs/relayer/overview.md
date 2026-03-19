@@ -1,20 +1,18 @@
 # Relayer Overview
 
-The relayer is the backend service that turns signed SDK calls into memory operations.
+The relayer turns signed SDK calls into memory operations.
 
 ## What It Does
 
-- verifies delegate-key access against the onchain account model
+- verifies delegate-key access
 - resolves owner and account context
-- stores and searches vectors by owner plus namespace
-- coordinates SEAL and Walrus operations through a sidecar
-- powers `remember`, `recall`, `analyze`, `ask`, and `restore`
+- stores and searches vectors by `owner + namespace`
+- coordinates SEAL and Walrus operations through the sidecar
+- runs `remember`, `recall`, `analyze`, `ask`, and `restore`
 
 ## Current Trust Boundary
 
-The beta relayer is an active execution surface. It is not just a thin proxy.
-
-In the default SDK path, the relayer currently participates in:
+In the default SDK path, the relayer currently handles:
 
 - embedding generation
 - encryption and decryption orchestration
@@ -22,31 +20,26 @@ In the default SDK path, the relayer currently participates in:
 - fact extraction for `analyze`
 - restore and re-index flows
 
-That trust boundary should be documented plainly.
+## Namespace Behavior
 
-## Namespace-Aware Behavior
+- vector entries are stored by `owner + namespace`
+- Walrus uploads carry `memwal_namespace` metadata
+- restore runs one namespace at a time
 
-Namespace runs through the relayer's main storage and retrieval paths. The backend:
-
-- stores vector entries by owner plus namespace
-- writes namespace metadata to Walrus uploads
-- uses namespace during restore discovery and re-indexing
+Namespace is recorded onchain through Walrus blob metadata during upload. It is not a separate
+MemWal contract object.
 
 ## Restore Behavior
 
-The current restore route is incremental:
+Restore is incremental:
 
-1. query blobs for owner and namespace
-2. compare them to local DB state
-3. download and decrypt only missing blobs
-4. re-embed and insert only the missing entries
+1. query blobs for one owner and namespace
+2. compare with local DB state
+3. restore only missing entries
 
-## Public Routes
+## Routes
 
 - `GET /health`
-
-## Protected Routes
-
 - `POST /api/remember`
 - `POST /api/recall`
 - `POST /api/remember/manual`

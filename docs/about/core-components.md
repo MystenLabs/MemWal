@@ -4,13 +4,11 @@ MemWal is a stack, not a single package.
 
 ## SDK
 
-There are three main SDK surfaces:
+- `MemWal`: default relayer-backed client
+- `MemWalManual`: manual client flow
+- `withMemWal`: AI middleware
 
-- `MemWal` from `@cmdoss/memwal` for the default relayer-backed flow
-- `MemWalManual` from `@cmdoss/memwal/manual` for the manual client flow
-- `withMemWal` from `@cmdoss/memwal/ai` for AI SDK middleware integration
-
-For the default path, the main methods are:
+Main `MemWal` methods:
 
 - `remember(text, namespace?)`
 - `recall(query, limit?, namespace?)`
@@ -18,11 +16,11 @@ For the default path, the main methods are:
 - `restore(namespace, limit?)`
 - `health()`
 
-## Relayer Backend
+## Relayer
 
-The relayer verifies signed requests and runs the main memory workflows.
+The relayer verifies signed requests and runs the main workflows.
 
-The current Rust server exposes:
+Routes:
 
 - `POST /api/remember`
 - `POST /api/recall`
@@ -33,29 +31,17 @@ The current Rust server exposes:
 - `POST /api/restore`
 - `GET /health`
 
-It also starts a TypeScript sidecar for SEAL and Walrus operations.
+## Contract
 
-## Smart Contract
-
-The onchain contract represents the MemWal account model, including ownership and delegate-key
-authorization on Sui.
+- owner and delegate-key model on Sui
 
 ## Indexer
 
-The indexer syncs account data into PostgreSQL so the backend can resolve owners and accounts faster.
+- syncs account data into PostgreSQL
+- helps the backend resolve owners and accounts faster
 
-## Walrus and SEAL
+## Storage and Search
 
-- Walrus stores encrypted memory blobs
-- SEAL handles encryption and decryption
-- Walrus metadata is also used during restore to discover blobs by owner and namespace
-
-## PostgreSQL and pgvector
-
-PostgreSQL is the coordination and search layer for:
-
-- vector similarity search
-- owner plus namespace lookup
-- blob-to-vector mappings
-- account and delegate caches
-- indexer state
+- Walrus stores encrypted blobs
+- SEAL supports encryption and decryption flows
+- PostgreSQL + pgvector stores searchable vector metadata
