@@ -78,6 +78,11 @@
   --ifm-navbar-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.1);
 }
 
+/* Announcement bar */
+div[class*='announcementBar'] {
+  font-size: 1rem;
+}
+
 /* Navbar title accent color */
 .navbar__title {
   color: var(--memwal-title-accent) !important;
