@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal V2 App — Dockerfile
+# memwal App — Dockerfile
 # Vite React SPA — build + serve static files
 # Build context: repo root (Railway Root Directory = /)
 # ============================================================

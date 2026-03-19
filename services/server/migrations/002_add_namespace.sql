@@ -1,4 +1,4 @@
--- MemWal V2 — Add namespace to vector_entries
+-- memwal — Add namespace to vector_entries
 -- Supports multi-tenant/multi-app memory isolation
 
 ALTER TABLE vector_entries

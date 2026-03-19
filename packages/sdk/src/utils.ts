@@ -1,5 +1,5 @@
 /**
- * MemWal V2 — Shared Utilities
+ * memwal — Shared Utilities
  *
  * Common crypto and encoding helpers used across the SDK.
  */

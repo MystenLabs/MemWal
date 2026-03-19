@@ -1,4 +1,4 @@
-name: memwal-v2-noter
+name: memwal-noter
 
 services:
   postgres:

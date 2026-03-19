@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E2E test for MemWal V2 Server — Full Ed25519 keypair flow.
+E2E test for memwal Server — Full Ed25519 keypair flow.
 
 Tests:
 1. Generate Ed25519 keypair
@@ -208,7 +208,7 @@ def test_expired_timestamp(signing_key: SigningKey):
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  MemWal V2 Server — E2E Test Suite")
+    print("  memwal Server — E2E Test Suite")
     print("=" * 50)
     print()
     
