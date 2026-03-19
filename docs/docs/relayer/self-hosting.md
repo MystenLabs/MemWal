@@ -77,6 +77,8 @@ You also need:
 
 The sidecar uses this comma-separated list of object IDs for backend SEAL encrypt and decrypt.
 
+For testnet setup, use https://seal-docs.wal.app/Pricing to get the current SEAL key server object IDs.
+
 ## Commands
 
 Install sidecar dependencies:

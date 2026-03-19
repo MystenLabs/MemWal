@@ -5,7 +5,7 @@ This monorepo contains:
 - TypeScript applications under `apps/`
 - the SDK under `packages/sdk`
 - Rust backend services under `services/`
-- VitePress docs under `docs/`
+- Docusaurus docs under `docs/`
 
 ## Common Local Entry Points
 
@@ -30,3 +30,10 @@ For relayer-oriented local work you will typically need:
 - Sui RPC access
 - Walrus endpoints
 - embedding provider credentials
+
+## Relayer Setup
+
+If you want to run the backend locally, start with the Relayer docs:
+
+- [Installation and Setup](/relayer/installation-and-setup)
+- [Operate Your Own Relayer](/relayer/self-hosting)
