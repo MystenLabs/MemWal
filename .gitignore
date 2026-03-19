@@ -88,9 +88,9 @@ target/
 # Gemini AI
 .gemini/
 
-# VitePress generated files
-docs/.vitepress/cache/
-docs/.vitepress/.temp/
+# Docusaurus generated files
+docs/.docusaurus/
+docs/build/
 
 
 #Ignore vscode AI rules

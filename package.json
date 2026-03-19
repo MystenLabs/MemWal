@@ -10,9 +10,9 @@
     "dev:chatbot": "pnpm --filter chatbot dev",
     "dev:app": "pnpm --filter app dev",
     "dev:researcher": "pnpm --filter researcher dev",
-    "dev:docs": "vitepress dev docs",
-    "build:docs": "vitepress build docs",
-    "preview:docs": "vitepress preview apps/app/docs",
+    "dev:docs": "pnpm --filter memwal-docs dev",
+    "build:docs": "pnpm --filter memwal-docs build",
+    "preview:docs": "pnpm --filter memwal-docs serve",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules",
     "changeset": "changeset",
     "changeset:add": "changeset add",
@@ -22,10 +22,8 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
-    "mermaid": "^11.13.0",
     "tsx": "^4.21.0",
-    "typescript": "^5",
-    "vitepress": "^1.6.4"
+    "typescript": "^5"
   },
   "packageManager": "pnpm@9.12.3"
 }

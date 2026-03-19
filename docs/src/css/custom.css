@@ -1,0 +1,172 @@
+/* Custom styles for MemWal docs */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --memwal-title-accent: #98efe4;
+
+  /* Docusaurus color overrides */
+  --ifm-font-family-base: 'Space Grotesk', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Brand colors */
+  --ifm-color-primary: #191a23;
+  --ifm-color-primary-dark: #101117;
+  --ifm-color-primary-darker: #0a0b0f;
+  --ifm-color-primary-darkest: #000000;
+  --ifm-color-primary-light: #3d4252;
+  --ifm-color-primary-lighter: #505566;
+  --ifm-color-primary-lightest: #6b7088;
+
+  /* Background */
+  --ifm-background-color: #ffffff;
+  --ifm-background-surface-color: #fafafa;
+
+  /* Text */
+  --ifm-font-color-base: #191a23;
+  --ifm-font-color-secondary: #3d4252;
+
+  /* Borders */
+  --ifm-toc-border-color: rgba(25, 26, 35, 0.18);
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+
+  /* Code blocks */
+  --ifm-code-border-radius: 6px;
+  --ifm-code-background: #f0f1f0;
+  --ifm-pre-border-radius: 12px;
+  --ifm-pre-background: #f0f1f0;
+
+  /* Headings */
+  --ifm-heading-font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --ifm-heading-font-weight: 700;
+
+  /* Links */
+  --ifm-link-color: #191a23;
+  --ifm-link-hover-decoration: underline;
+
+  /* Navbar */
+  --ifm-navbar-background-color: #ffffff;
+  --ifm-navbar-shadow: 0 1px 0 0 rgba(25, 26, 35, 0.18);
+}
+
+/* Dark mode */
+[data-theme='dark'] {
+  --ifm-color-primary: #e0e0e8;
+  --ifm-color-primary-dark: #c0c0cc;
+  --ifm-color-primary-darker: #b0b0bc;
+  --ifm-color-primary-darkest: #8888a0;
+  --ifm-color-primary-light: #f0f0f2;
+  --ifm-color-primary-lighter: #f5f5f6;
+  --ifm-color-primary-lightest: #ffffff;
+
+  --ifm-background-color: #1a1a1e;
+  --ifm-background-surface-color: #222228;
+
+  --ifm-font-color-base: #f0f0f2;
+  --ifm-font-color-secondary: #b0b0bc;
+
+  --ifm-toc-border-color: rgba(255, 255, 255, 0.1);
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 255, 0.1);
+
+  --ifm-code-background: #28282f;
+  --ifm-pre-background: #28282f;
+
+  --ifm-link-color: #f0f0f2;
+
+  --ifm-navbar-background-color: #1a1a1e;
+  --ifm-navbar-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Navbar title accent color */
+.navbar__title {
+  color: var(--memwal-title-accent) !important;
+  font-weight: 700;
+}
+
+/* Sidebar styling */
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--ifm-toc-border-color) !important;
+}
+
+/* Code block styling */
+.prism-code {
+  border: none !important;
+}
+
+/* Inline code */
+code {
+  border: none !important;
+}
+
+/* Mermaid diagram styling */
+.docusaurus-mermaid-container {
+  text-align: center;
+}
+
+.docusaurus-mermaid-container svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Overview page card grid */
+.overview-hero {
+  text-align: center;
+  padding: 2rem 0 1rem;
+}
+
+.overview-title {
+  font-size: 2.5rem;
+  border-bottom: none;
+  margin: 0;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.overview-card {
+  padding: 1.25rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 8px;
+  transition:
+    border-color 0.25s,
+    box-shadow 0.25s;
+}
+
+.overview-card:hover {
+  border-color: var(--ifm-color-primary);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+.overview-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.overview-card ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.overview-card li {
+  font-size: 0.875rem;
+  color: var(--ifm-font-color-secondary);
+  line-height: 1.75;
+}
+
+.overview-card a,
+.overview-card a:hover {
+  text-decoration: none !important;
+}
+
+@media (max-width: 640px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
