@@ -1,5 +1,11 @@
 # Choose Your Path
 
+MemWal supports several integration modes depending on how much control you need. Pick the one that fits your use case.
+
+:::tip
+These paths aren't mutually exclusive. You can combine them — for example, use the **Default SDK** with the **AI Middleware**, or start with the **Public Relayer** and move to **Self-Hosting** later. They all share the same backend and data layer.
+:::
+
 ## 1. Default SDK
 
 Use `@cmdoss/memwal` when you want the fastest working integration.

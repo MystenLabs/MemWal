@@ -89,6 +89,11 @@ div[class*='announcementBar'] {
   font-weight: 700;
 }
 
+/* Underline links in doc content only */
+.markdown a {
+  text-decoration: underline;
+}
+
 /* Sidebar styling */
 .theme-doc-sidebar-container {
   border-right: 1px solid var(--ifm-toc-border-color) !important;
