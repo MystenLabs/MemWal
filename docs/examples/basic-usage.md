@@ -15,8 +15,8 @@ import { MemWal } from '@cmdoss/memwal'
 
 const memwal = new MemWal({
   network: 'testnet',
-  packageId: '0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090ee3f',
-  registryId: '0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05',
+  packageId: '0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6',
+  registryId: '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437',
 })
 ```
 

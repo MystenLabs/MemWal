@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal V2 Indexer — Dockerfile
+# memwal Indexer — Dockerfile
 # Pure Rust binary — indexes Sui on-chain events
 # ============================================================
 

@@ -1,10 +1,10 @@
 #[test_only]
 #[allow(implicit_const_copy)]
-module memwal_v2::account_tests {
+module memwal::account_tests {
     use std::string;
     use sui::test_scenario;
     use sui::clock;
-    use memwal_v2::account::{Self, MemWalAccount, AccountRegistry};
+    use memwal::account::{Self, MemWalAccount, AccountRegistry};
 
     const OWNER: address = @0xCAFE;
     const OTHER: address = @0xBEEF;

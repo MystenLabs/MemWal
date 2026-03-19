@@ -135,7 +135,7 @@ pub async fn remember(
     })?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        &encrypted, 50, owner, sui_key, namespace,
+        &encrypted, 50, owner, sui_key, namespace, &state.config.package_id,
     ).await?;
     let blob_id = upload_result.blob_id;
 
@@ -294,6 +294,7 @@ pub async fn remember_manual(
         owner,
         sui_key,
         namespace,
+        &state.config.package_id,
     )
     .await?;
 
@@ -407,7 +408,7 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
-                &encrypted, 50, &owner, &sui_key, &namespace,
+                &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
             ).await?;
 
             // Store in Vector DB with namespace
@@ -774,9 +775,17 @@ pub async fn restore(
         &state.config.sidecar_url,
         owner,
         Some(namespace),
+        Some(&state.config.package_id),
     ).await?;
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
     let total = all_blob_ids.len();
+
+    // Build blob_id → package_id lookup from on-chain metadata
+    // Each blob may have been encrypted with a different package_id (e.g. after contract upgrades)
+    let blob_package_ids: std::collections::HashMap<String, String> = on_chain_blobs.iter()
+        .filter(|b| !b.package_id.is_empty())
+        .map(|b| (b.blob_id.clone(), b.package_id.clone()))
+        .collect();
 
     if total == 0 {
         return Ok(Json(RestoreResponse {
@@ -857,13 +866,17 @@ pub async fn restore(
     tracing::info!("restore: downloaded {}/{} blobs, decrypting (3 concurrent)...", downloaded.len(), missing_blob_ids.len());
 
     // Step 4: SEAL decrypt with bounded concurrency (3 at a time)
+    // Use per-blob package_id from on-chain metadata, fall back to current server config
     use futures::stream::{self, StreamExt};
     let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
             let private_key = private_key.clone();
-            let package_id = state.config.package_id.clone();
+            // Use the package_id that was stored with this blob (supports contract upgrades)
+            let package_id = blob_package_ids.get(&blob_id)
+                .cloned()
+                .unwrap_or_else(|| state.config.package_id.clone());
             let account_id = auth.account_id.clone();
             async move {
                 match seal::seal_decrypt(
