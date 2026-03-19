@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal V2 Server — Dockerfile
+# memwal Server — Dockerfile
 # Multi-stage build: Rust binary + Node.js sidecar scripts
 # ============================================================
 

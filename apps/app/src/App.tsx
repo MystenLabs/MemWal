@@ -1,5 +1,5 @@
 /**
- * MemWal V2 — Web App
+ * memwal — Web App
  *
  * Enoki zkLogin integration with @mysten/dapp-kit
  * Flow: Landing → Sign in with Google (Enoki) → Setup Wizard → Dashboard

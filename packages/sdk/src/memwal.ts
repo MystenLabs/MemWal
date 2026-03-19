@@ -1,5 +1,5 @@
 /**
- * MemWal V2 — SDK Client
+ * memwal — SDK Client
  *
  * Ed25519 delegate key based client that communicates with the MemWal
  * Rust server (TEE). All data processing (encryption, embedding, Walrus)

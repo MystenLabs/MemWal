@@ -29,7 +29,7 @@ async fn main() {
 
     // Load config
     let config = Config::from_env();
-    tracing::info!("starting memwal v2 server on port {}", config.port);
+    tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
     tracing::info!("  package id: {}", config.package_id);
     tracing::info!("  registry id: {}", config.registry_id);
@@ -140,7 +140,7 @@ async fn main() {
         .await
         .expect("Failed to bind address");
 
-    tracing::info!("memwal v2 server listening on {}", addr);
+    tracing::info!("memwal server listening on {}", addr);
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 

@@ -1,4 +1,4 @@
--- MemWal V2 Server — PostgreSQL Schema
+-- memwal Server — PostgreSQL Schema
 -- Requires: pgvector extension
 
 CREATE EXTENSION IF NOT EXISTS vector;

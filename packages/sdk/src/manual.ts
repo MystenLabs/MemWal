@@ -1,5 +1,5 @@
 /**
- * MemWal V2 — Manual Client (Full Client-Side)
+ * memwal — Manual Client (Full Client-Side)
  *
  * User-side flow where the SDK handles everything locally:
  * - SEAL encrypt/decrypt via @mysten/seal (user's own Sui wallet)

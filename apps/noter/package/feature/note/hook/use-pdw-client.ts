@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * MemWal V2 Status Hook
+ * memwal Status Hook
  *
  * Simple hook to check if MemWal is configured (MEMWAL_KEY set).
  * No client-side SDK needed — all operations go through server.
