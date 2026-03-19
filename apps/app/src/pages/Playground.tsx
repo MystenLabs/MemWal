@@ -363,6 +363,7 @@ export default function Playground() {
                 packageId: config.memwalPackageId,
                 accountId: accountObjectId || '',
                 suiNetwork: config.suiNetwork,
+                ...(config.sealKeyServers.length > 0 ? { sealKeyServers: [...config.sealKeyServers] } : {}),
             })
         } catch {
             return null

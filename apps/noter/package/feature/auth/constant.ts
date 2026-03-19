@@ -45,7 +45,7 @@ export const WALLET_NAMES: Record<WalletType, string> = {
 // zkLogin configuration
 export const ZKLOGIN_CONFIG = {
   // Sui network (testnet or mainnet)
-  network: (process.env.NEXT_PUBLIC_SUI_NETWORK || "testnet") as "testnet" | "mainnet",
+  network: (process.env.NEXT_PUBLIC_SUI_NETWORK || "mainnet") as "testnet" | "mainnet",
 
   // Mysten Labs prover service URL
   proverUrl: process.env.NEXT_PUBLIC_ZK_PROVER_URL || "https://prover-dev.mystenlabs.com/v1",

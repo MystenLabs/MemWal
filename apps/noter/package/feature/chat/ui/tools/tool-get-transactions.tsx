@@ -45,7 +45,7 @@ function shortenAddress(address: string): string {
 }
 
 export function ToolGetTransactions({ output }: ToolGetTransactionsProps) {
-  const explorerUrl = "https://suiscan.xyz/testnet/tx";
+  const explorerUrl = "https://suiscan.xyz/mainnet/tx";
 
   return (
     <div className="">

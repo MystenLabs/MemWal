@@ -4,7 +4,6 @@ edition = "2024"
 authors = ["CommandOSS"]
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet-v1.59.0" }
 
 [addresses]
 memwal = "0x0"
