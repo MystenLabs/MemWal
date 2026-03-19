@@ -2,6 +2,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
+  --memwal-title-accent: #98efe4;
   /* Override VitePress fonts */
   --vp-font-family-base: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', monospace;
@@ -96,6 +97,10 @@
   font-weight: 700 !important;
 }
 
+.VPNavBarTitle .title {
+  color: var(--memwal-title-accent) !important;
+}
+
 /* Sidebar */
 .VPSidebar {
   border-right: 1px solid var(--vp-c-divider) !important;
@@ -106,7 +111,17 @@
 .VPHero .name {
   font-family: var(--vp-font-family-base) !important;
   font-weight: 700 !important;
-  color: var(--vp-c-text-1) !important;
+  color: var(--memwal-title-accent) !important;
+}
+
+.VPHero .name.clip,
+.VPHero .clip {
+  -webkit-text-fill-color: var(--memwal-title-accent) !important;
+  background: none !important;
+  background-image: none !important;
+  -webkit-background-clip: initial !important;
+  background-clip: initial !important;
+  color: var(--memwal-title-accent) !important;
 }
 
 .VPHero .tagline {
