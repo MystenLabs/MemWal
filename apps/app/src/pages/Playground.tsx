@@ -465,22 +465,15 @@ export default function Playground() {
                     <div className="demo-server-tag">
                         SDK: <span className="demo-tag-value demo-tag-value--sdk">@cmdoss/memwal</span>
                     </div>
-                </div>
-
-                {/* Namespace selector */}
-                <div className="demo-server-info" style={{ marginTop: 8 }}>
-                    <div className="demo-server-tag" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px' }}>
-                        namespace:
+                    <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
+                        <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
                         <input
-                            className="input"
                             value={namespace}
                             onChange={(e) => setNamespace(e.target.value)}
                             placeholder="default"
-                            style={{ width: 200, padding: '10px 20px', fontSize: '0.78rem' }}
+                            size={Math.max(namespace.length, 7)}
+                            style={{ padding: '8px 12px 8px 6px', fontSize: '0.8rem', fontFamily: 'var(--font-mono)', background: 'transparent', border: 'none', outline: 'none', color: 'var(--text-primary)', fontWeight: 600, width: 'auto', minWidth: 0 }}
                         />
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                            isolates memories per app / tenant
-                        </span>
                     </div>
                 </div>
 
@@ -779,6 +772,16 @@ const { text } = await generateText({
 
 
 
+                {/* Divider — Manual / Hybrid mode */}
+                <div style={{ margin: '40px 0 32px', textAlign: 'center' }}>
+                    <hr style={{ border: 'none', borderTop: '2px dashed var(--border-light)', margin: '0 0 16px' }} />
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                        <strong style={{ color: 'var(--text-primary)' }}>manual mode</strong> — client handles embedding & encryption, server handles storage.
+                        <br />
+                        your data never leaves your browser unencrypted. requires an LLM API key (step 6).
+                    </div>
+                </div>
+
                 {/* Step 7: Remember (full client-side) */}
                 <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
                     <div className="card-header">
@@ -898,11 +901,13 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
                     </div>
 
                     <pre className={`demo-code-block${fullRecallResult || fullRecallError || fullRecallPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`// SDK handles ALL 4 steps client-side:
-// 1. embed query (OpenAI)
-// 2. search server for matching vectors
-// 3. download encrypted blobs from Walrus
-// 4. SEAL decrypt each result
+                        <code>{`// client does:
+//   1. embed query via OpenAI
+//   2. SEAL decrypt each result (wallet popup)
+// server then:
+//   3. cosine search for matching vectors
+//   4. download encrypted blobs from Walrus
+//   5. return encrypted results to client
 const result = await memwal.recallManual("${fullRecallQuery}", 5)
 // → { results: [{ blob_id, text, distance }], total }`}</code>
                     </pre>
