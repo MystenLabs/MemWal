@@ -13,7 +13,6 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         "getting-started/what-is-memwal",
-        "getting-started/product-status",
         "getting-started/core-components",
         "getting-started/for-developers",
         "getting-started/installation",

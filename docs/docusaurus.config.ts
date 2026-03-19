@@ -42,6 +42,13 @@ const config: Config = {
   ],
 
   themeConfig: {
+    announcementBar: {
+      id: 'beta',
+      content: '<strong>MemWal is in active beta.</strong> APIs and features may evolve between releases.',
+      backgroundColor: '#98efe4',
+      textColor: '#191a23',
+      isCloseable: false,
+    },
     navbar: {
       title: "MemWal",
       items: [
