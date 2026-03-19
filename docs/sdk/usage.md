@@ -1,65 +1,126 @@
 # Usage
 
-## Default Client: `MemWal`
+This page lists the current public SDK surface in one place.
+
+## Namespace Rules
+
+- set a default namespace in `create(...)` when one app or tenant uses one boundary
+- pass `namespace` per call when one client needs multiple boundaries
+- if omitted, namespace falls back to client config, then to `"default"`
+
+## `MemWal`
 
 Use `MemWal` when you want the relayer to handle the main workflow.
 
-### `remember(text, namespace?)`
+### Create
 
-Stores text as memory through the relayer workflow.
-If `namespace` is omitted, the SDK uses the config namespace.
+```ts
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  namespace: "chatbot-prod",
+});
+```
 
-### `recall(query, limit?, namespace?)`
+Config:
 
-Searches for similar memories and returns decrypted plaintext results for the owner and namespace.
+- `key`
+- `serverUrl?`
+- `namespace?`
 
-### `analyze(text, namespace?)`
+### Main Methods
 
-Sends longer text to the relayer, which extracts memorable facts and stores them as memories.
+- `remember(text, namespace?)`: store text as memory
+- `recall(query, limit?, namespace?)`: return decrypted matches
+- `analyze(text, namespace?)`: extract facts and store them
+- `restore(namespace, limit?)`: rebuild missing indexed entries for one namespace
+- `health()`: check relayer health
+- `getPublicKeyHex()`: return the current public key
 
-### `restore(namespace, limit?)`
+### Lower-Level Methods
 
-Triggers incremental restore for a namespace. The relayer discovers blobs by owner and namespace,
-compares them against local state, and re-indexes only missing entries.
+- `rememberManual({ blobId, vector, namespace? })`
+- `recallManual({ vector, limit?, namespace? })`
+- `embed(text)`
 
-### `health()`
+### Restore
 
-Checks whether the relayer is reachable.
+```ts
+const result = await memwal.restore("chatbot-prod", 50);
+console.log(result);
+```
 
-### `getPublicKeyHex()`
+Restore is:
 
-Returns the public key derived from the current delegate key.
+- incremental
+- namespace-scoped
+- meant to repair PostgreSQL vector state from Walrus-backed memory
 
-## Manual Client: `MemWalManual`
+## `MemWalManual`
 
-Use `MemWalManual` when the client should control embedding calls and local SEAL operations,
-while still relying on the relayer for registration, search, restore, and upload relay.
+Use `MemWalManual` when the client must handle embeddings and local SEAL operations.
 
-### `rememberManual(text, namespace?)`
+### Create
 
-Embeds and encrypts locally, then sends encrypted payload plus vector to the relayer for upload relay and registration.
+```ts
+const manual = MemWalManual.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  suiPrivateKey: process.env.SUI_PRIVATE_KEY!,
+  embeddingApiKey: process.env.OPENAI_API_KEY!,
+  packageId: process.env.MEMWAL_PACKAGE_ID!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  namespace: "chatbot-prod",
+});
+```
 
-### `recallManual(query, limit?, namespace?)`
+Key config fields:
 
-Embeds locally, searches through the relayer, downloads blobs from Walrus, and decrypts them locally.
+- `key`
+- `serverUrl?`
+- `suiPrivateKey?` or `walletSigner?`
+- `embeddingApiKey`
+- `embeddingApiBase?`
+- `embeddingModel?`
+- `packageId`
+- `accountId`
+- `namespace?`
 
-### `restore(namespace, limit?)`
+### Main Methods
 
-Calls the same relayer restore endpoint for a namespace.
+- `rememberManual(text, namespace?)`: embed locally, encrypt locally, then send encrypted payload plus vector to the relayer
+- `recallManual(query, limit?, namespace?)`: embed locally, search through the relayer, download blobs, and decrypt locally
+- `restore(namespace, limit?)`: call the same relayer restore endpoint
+- `isWalletMode`: tells you whether the client uses a connected wallet signer
 
-## AI Middleware: `withMemWal`
+## `withMemWal`
 
-Use `withMemWal` when your app already uses the AI SDK and you want:
+Use `withMemWal(model, options)` when your app already uses the AI SDK.
 
-- memory recall before generation
-- memory context injected into the prompt
-- optional auto-save via `analyze()` after generation
+```ts
+const model = withMemWal(openai("gpt-4o"), {
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  namespace: "chatbot-prod",
+});
+```
 
-## Important Beta Caveat
+Behavior:
 
-The source tree still contains some lower-level helper methods on `MemWal`. The clearest
-supported beta paths in this repo are:
+- recall before generation
+- inject memory context
+- optional `analyze()` after generation
 
-- `MemWal` for relayer-backed memory operations
-- `MemWalManual` for full client-side manual flow
-- `withMemWal` for AI middleware
+Options:
+
+- `key`, `serverUrl?`, `namespace?`
+- `maxMemories?`
+- `autoSave?`
+- `minRelevance?`
+- `debug?`
+
+## Recommended Paths
+
+- `MemWal`: best default for most integrations
+- `MemWalManual`: use when you need client-managed embeddings and local SEAL work
+- `withMemWal`: use when you already run the AI SDK

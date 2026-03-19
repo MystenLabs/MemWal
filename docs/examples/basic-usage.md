@@ -1,49 +1,43 @@
 # Basic Usage
 
-This page shows the happy path for integrating the current SDK with the relayer.
+## Use This When
 
-## 1. Install the SDK
+- you want the shortest working MemWal example
+- you are using the default relayer-backed SDK
 
-Install the package:
+## Code
 
-```bash
-pnpm add @cmdoss/memwal
-```
-
-## 2. Initialize the Client
-
-```typescript
-import { MemWal } from "@cmdoss/memwal"
+```ts
+import { MemWal } from "@cmdoss/memwal";
 
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
   serverUrl: process.env.MEMWAL_SERVER_URL,
-})
+  namespace: "demo",
+});
+
+await memwal.health();
+
+const stored = await memwal.remember(
+  "User prefers dark mode and works in TypeScript."
+);
+
+const recalled = await memwal.recall(
+  "What do we know about this user?",
+  5
+);
+
+console.log(stored.blob_id);
+console.log(recalled.results);
 ```
 
-## 3. Check the Relayer
+## What You Should See
 
-```typescript
-await memwal.health()
-```
+- `health()` succeeds
+- `remember()` returns a `blob_id`
+- `recall()` returns plaintext results for the same namespace
 
-## 4. Store a Memory
-
-```typescript
-const result = await memwal.remember("User prefers dark mode and works in TypeScript.")
-console.log(result.blob_id)
-```
-
-## 5. Recall Similar Memories
-
-```typescript
-const result = await memwal.recall("What do we know about this user?", 5)
-for (const hit of result.results) {
-  console.log(hit.text, hit.distance)
-}
-```
-
-## Next Steps
+## Read Next
 
 - [Advanced Usage](/examples/advanced-usage)
 - [SDK Usage](/sdk/usage)

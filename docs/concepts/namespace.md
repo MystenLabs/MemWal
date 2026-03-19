@@ -1,10 +1,24 @@
 # Namespace
 
-Namespace is the top-level boundary for memory isolation in MemWal.
+Namespace is the top-level isolation boundary in MemWal.
 
-## Namespace Diagram
+## In Practice
+
+- `owner`: which user or account owns the memory
+- `namespace`: which app, tenant, or product surface the memory belongs to
+
+Together, `owner + namespace` define the active storage and retrieval boundary.
+
 
 ```mermaid
+%%{init: {
+  "themeVariables": { "fontSize": "24px" },
+  "flowchart": {
+    "nodeSpacing": 82,
+    "rankSpacing": 105,
+    "padding": 40
+  }
+}}%%
 flowchart TB
     Owner[One owner]
     NS1[Namespace: chatbot-prod]
@@ -19,39 +33,66 @@ flowchart TB
     Owner --> NS3 --> M3
 ```
 
-## Where Namespace Shows Up
+## Where It Shows Up
 
-In the current codebase, namespace exists in all of these places:
-
-- `MemWalConfig.namespace` in the SDK
+- `MemWalConfig.namespace`
 - request payloads for `remember`, `recall`, `analyze`, `ask`, and `restore`
 - PostgreSQL vector entries
 - Walrus blob metadata as `memwal_namespace`
-- restore queries that recover blobs by owner and namespace
+- restore discovery by owner and namespace
 
-If you do nothing, it defaults to `"default"`.
+## What It Is Not
 
-## Why It Matters
+Namespace is not:
 
-- it prevents unrelated products from sharing one flat memory pool
-- it gives recall and restore a clear boundary
-- it makes blob discovery and re-indexing predictable
-- it keeps beta integrations easier to reason about operationally
+- a separate MemWal contract object
+- a separate delegate registration flow
+- a contract-level permission primitive
+- part of the `seal_approve` policy itself
 
-## Recommended Mental Model
+It is written onchain through Walrus blob metadata, but the MemWal contract still centers on owner
+and delegate authorization.
 
-Think of a namespace as an app-level memory partition.
+## Why It Exists
+
+Use namespace to avoid one flat memory pool.
 
 Examples:
 
-- `chatbot-prod`
-- `research-assistant`
-- `playground`
-- `support-agent`
+- one namespace per app
+- one namespace per tenant boundary
+- one namespace per environment like `staging` and `prod`
 
-Inside a namespace, you can still build narrower retrieval behaviors at the application layer,
-but MemWal's core storage and restore boundaries start at namespace.
+## How It Affects The System
 
-## Recommendation
+- **SDK**: passes namespace with each request or falls back to the configured default
+- **Relayer**: stores and searches by `owner + namespace`
+- **Walrus**: stores `memwal_namespace` metadata on uploads
+- **Restore**: rebuilds one namespace at a time
+- **Contract**: still stays account-level, not namespace-level
 
-Choose a namespace intentionally and keep it stable. Do not rely on `"default"` past quick testing.
+## Good Usage
+
+- keep namespace stable
+- set it explicitly
+- use one namespace per product surface
+
+Avoid:
+
+- relying on `"default"` after early testing
+- mixing unrelated apps into one namespace
+- changing namespace values casually after data already exists
+
+## Example
+
+```ts
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  namespace: "researcher-prod",
+});
+
+await memwal.remember("User prefers weekly sprint summaries.");
+await memwal.recall("What reporting style does this user prefer?");
+await memwal.restore("researcher-prod");
+```

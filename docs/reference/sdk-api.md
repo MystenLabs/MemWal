@@ -6,41 +6,54 @@
 MemWal.create(config: MemWalConfig): MemWal
 ```
 
-### `MemWalConfig`
+Config:
 
-| Property | Type | Description |
+| Property | Type | Notes |
 | --- | --- | --- |
 | `key` | `string` | Ed25519 private key in hex |
-| `serverUrl?` | `string` | Relayer URL, defaults to `http://localhost:8000` |
-| `namespace?` | `string` | Default namespace, defaults to `"default"` |
+| `serverUrl?` | `string` | Relayer URL |
+| `namespace?` | `string` | Default namespace, fallback is `"default"` |
 
-## Default Client Methods
+## `MemWal`
 
 ### `remember(text, namespace?)`
 
-Store text as memory through the relayer workflow.
+- Store one memory through the relayer
+- Returns: `id`, `blob_id`, `owner`
 
 ### `recall(query, limit?, namespace?)`
 
-Search for similar memories and return plaintext results.
+- Search one owner-and-namespace boundary
+- Returns plaintext matches
 
 ### `analyze(text, namespace?)`
 
-Extract memorable facts from text and store them as memories.
+- Extract memorable facts from text
+- Stores each fact as memory
 
 ### `restore(namespace, limit?)`
 
-Incrementally restore missing entries for a namespace.
+- Rebuild missing indexed entries for one namespace
+- Use when local vector state is incomplete
 
 ### `health()`
 
-Check relayer health.
+- Check relayer health
 
 ### `getPublicKeyHex()`
 
-Return the derived public key as hex.
+- Return the public key for the current delegate key
 
-## Manual Client
+### Lower-Level `MemWal` Methods
+
+- `rememberManual({ blobId, vector, namespace? })`
+- `recallManual({ vector, limit?, namespace? })`
+- `embed(text)`
+
+These exist on the current SDK surface, but the main beta path is still `remember`, `recall`,
+`analyze`, and `restore`.
+
+## `MemWalManual`
 
 Import:
 
@@ -48,25 +61,25 @@ Import:
 import { MemWalManual } from "@cmdoss/memwal/manual";
 ```
 
-High-level methods:
+Main methods:
 
 - `rememberManual(text, namespace?)`
 - `recallManual(query, limit?, namespace?)`
 - `restore(namespace, limit?)`
+- `isWalletMode`
 
-Use this client when embedding calls and local SEAL handling should happen client-side, while the
-relayer still handles registration, search, restore, and upload relay.
+Use this client when the app must handle embedding calls and local SEAL operations.
 
-## AI Integration
+## `withMemWal`
 
-Use `withMemWal` from `@cmdoss/memwal/ai` to wrap an AI SDK model with recall-before-generation
-and optional auto-save behavior.
+Import:
 
-## Beta Caveat
+```ts
+import { withMemWal } from "@cmdoss/memwal/ai";
+```
 
-The source tree still contains some lower-level helper APIs beyond the main flows above.
-For external docs, the primary supported surfaces in this repo are:
+Use it to add:
 
-- `MemWal`
-- `MemWalManual`
-- `withMemWal`
+- recall before generation
+- memory context injection
+- optional auto-save after generation

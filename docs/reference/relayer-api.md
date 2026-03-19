@@ -1,12 +1,14 @@
 # Relayer API Reference
 
-The current Rust server exposes these routes in `services/server/src/main.rs`.
+The current Rust server exposes these routes from `services/server/src/main.rs`.
 
-## Public Route
+## Public
 
 ### `GET /health`
 
-Returns:
+- Use for a simple service check
+
+Example response:
 
 ```json
 {
@@ -15,13 +17,11 @@ Returns:
 }
 ```
 
-## Protected Memory Routes
+## Protected
 
 ### `POST /api/remember`
 
-Store text as memory for the authenticated owner and namespace.
-
-Request body:
+- Store text for the authenticated owner and namespace
 
 ```json
 {
@@ -32,9 +32,7 @@ Request body:
 
 ### `POST /api/recall`
 
-Recall similar memories and return plaintext results.
-
-Request body:
+- Search and return plaintext results
 
 ```json
 {
@@ -46,27 +44,26 @@ Request body:
 
 ### `POST /api/remember/manual`
 
-Register an encrypted payload plus precomputed vector.
-In the current backend contract, this route expects `encrypted_data`, not a pre-existing `blob_id`.
+- Register encrypted payload plus precomputed vector
+- Current backend expects `encrypted_data`, not a pre-existing `blob_id`
 
 ### `POST /api/recall/manual`
 
-Search with a precomputed vector and receive `{ blob_id, distance }` hits back.
+- Search with a precomputed vector
+- Returns `{ blob_id, distance }` hits
 
 ### `POST /api/analyze`
 
-Extract memorable facts from text and store them as memories.
+- Extract facts from text and store them as memories
 
 ### `POST /api/ask`
 
-Recall memories, inject them into an LLM prompt, and return an answer.
+- Recall memories, inject them into an LLM prompt, and return an answer
 
 ### `POST /api/restore`
 
-Incrementally restore missing vector entries for an owner and namespace by discovering blobs
-from chain metadata, downloading them, decrypting them, and re-indexing them.
-
-Request body:
+- Rebuild missing vector entries for one owner and namespace
+- Uses chain metadata plus blob discovery
 
 ```json
 {
@@ -75,7 +72,7 @@ Request body:
 }
 ```
 
-## Signed Request Headers
+## Signed Headers
 
 The SDK signs requests and sends headers such as:
 
@@ -83,5 +80,5 @@ The SDK signs requests and sends headers such as:
 - `x-signature`
 - `x-timestamp`
 
-The current default SDK client also sends `x-delegate-key` for flows that may require
-delegate-key-backed decrypt or restore behavior on the backend.
+The default SDK also sends `x-delegate-key` for backend flows that may require delegate-key-backed
+decrypt or restore behavior.
