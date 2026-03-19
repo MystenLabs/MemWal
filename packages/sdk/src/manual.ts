@@ -45,7 +45,7 @@ import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 // Users can override via SEAL_KEY_SERVERS in their environment
 const DEFAULT_KEY_SERVERS: Record<string, string[]> = {
     mainnet: [
-        "0x1afb3a57211ceff8f6781757821847e3ddae73f64e78ec8cd9349914ad985475", // NodeInfra (Open)
+        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open)
     ],
     testnet: [
         "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
@@ -184,7 +184,7 @@ export class MemWalManual {
             const { SealClient } = await import("@mysten/seal");
             const suiClient = await this.getSuiClient();
             const network = this.config.suiNetwork ?? "mainnet";
-            const keyServers = DEFAULT_KEY_SERVERS[network] ?? [];
+            const keyServers = this.config.sealKeyServers ?? DEFAULT_KEY_SERVERS[network] ?? [];
             if (keyServers.length === 0) {
                 throw new Error(
                     `MemWalManual: no SEAL key servers configured for network "${network}". ` +
