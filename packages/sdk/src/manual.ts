@@ -468,7 +468,11 @@ export class MemWalManual {
     private async walrusUpload(data: Uint8Array): Promise<string> {
         // Direct HTTP PUT to Walrus publisher (works in both browser and Node.js,
         // unlike @mysten/walrus SDK which uses WASM and requires Node.js)
-        const publisherUrl = this.config.walrusPublisherUrl ?? "https://publisher.walrus-mainnet.walrus.space";
+        const network = this.config.suiNetwork ?? "mainnet";
+        const defaultPublisher = network === "testnet"
+            ? "https://publisher.walrus-testnet.walrus.space"
+            : "https://publisher.walrus-mainnet.walrus.space";
+        const publisherUrl = this.config.walrusPublisherUrl ?? defaultPublisher;
         const epochs = this.config.walrusEpochs ?? 50;
 
         const resp = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}&deletable=true`, {
@@ -497,7 +501,11 @@ export class MemWalManual {
     private async walrusDownload(blobId: string): Promise<Uint8Array> {
         // Direct HTTP fetch to Walrus aggregator (works in both browser and Node.js,
         // unlike @mysten/walrus SDK which requires Node.js APIs)
-        const aggregatorUrl = this.config.walrusAggregatorUrl ?? "https://aggregator.walrus-mainnet.walrus.space";
+        const network = this.config.suiNetwork ?? "mainnet";
+        const defaultAggregator = network === "testnet"
+            ? "https://aggregator.walrus-testnet.walrus.space"
+            : "https://aggregator.walrus-mainnet.walrus.space";
+        const aggregatorUrl = this.config.walrusAggregatorUrl ?? defaultAggregator;
         const resp = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
         if (!resp.ok) {
             throw new Error(`Walrus download failed (${resp.status}): ${await resp.text()}`);
