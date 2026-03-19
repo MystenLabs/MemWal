@@ -1,12 +1,13 @@
-# Self-Hosting
+# Operate Your Own Relayer
 
-Self-host the relayer when you need your own backend, secrets, and rollout control.
+Run your own relayer when you need your own backend, secrets, and rollout control.
 
 ## Use It When
 
 - you want your own deployment environment
 - you want your own database and credentials
 - you want to control relayer upgrades and uptime
+- you want the server to use your own embedding provider credentials
 
 ## What Runs
 
@@ -43,8 +44,16 @@ Then check:
 curl http://localhost:8000/health
 ```
 
-Use this quick start for local evaluation. For production self-hosting, review the full env setup
+Use this quick start for local evaluation. For production operation, review the full env setup
 and key configuration below.
+
+If you want the relayer to create real embeddings, set:
+
+- `OPENAI_API_KEY`
+- `OPENAI_API_BASE`
+
+The relayer uses these values to call an OpenAI-compatible `/embeddings` API during `remember`,
+`recall`, `analyze`, `ask`, and restore re-indexing.
 
 ## Commands
 
@@ -90,7 +99,8 @@ cargo run
 
 ## Recommended But Context-Dependent
 
-- `OPENAI_API_KEY`: needed for production embeddings, `analyze`, and `ask`
+- `OPENAI_API_KEY`: lets the relayer call your embedding provider for real embeddings
+- `OPENAI_API_BASE`: use this when your provider is not the default OpenAI base URL
 - indexer: recommended for fast account lookup, especially outside quick local testing
 
 ## Docker Path

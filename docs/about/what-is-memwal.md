@@ -1,4 +1,4 @@
-# What Is MemWal?
+# Overview
 
 MemWal is a beta protocol and SDK stack for private, user-owned AI memory.
 
@@ -33,4 +33,4 @@ ownership, storage, and access model.
 
 - [Product Status](/about/product-status)
 - [Core Components](/about/core-components)
-- [For Developers](/getting-started/for-developers)
+- [Build Your First Integration](/getting-started/for-developers)

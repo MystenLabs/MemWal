@@ -27,23 +27,28 @@ export default defineConfig({
   themeConfig: {
     siteTitle: 'MemWal',
     nav: [
-      { text: 'About', link: '/about/what-is-memwal' },
-      { text: 'Getting Started', link: '/getting-started/for-developers' },
-      { text: 'Concepts', link: '/concepts/explaining-memwal' },
-      { text: 'Architecture', link: '/architecture/system-overview' },
+      { text: 'Getting Started', link: '/about/what-is-memwal' },
+      { text: 'System', link: '/concepts/explaining-memwal' },
       { text: 'SDK', link: '/sdk/overview' },
       { text: 'Relayer', link: '/relayer/overview' },
-      { text: 'Examples', link: '/examples/basic-usage' },
       { text: 'Reference', link: '/reference/sdk-api' },
     ],
     sidebar: {
       '/about/': [
         {
-          text: 'About',
+          text: 'Getting Started',
           items: [
-            { text: 'What Is MemWal?', link: '/about/what-is-memwal' },
+            { text: 'Overview', link: '/about/what-is-memwal' },
             { text: 'Product Status', link: '/about/product-status' },
             { text: 'Core Components', link: '/about/core-components' },
+          ],
+        },
+        {
+          text: 'Build Your First Integration',
+          items: [
+            { text: 'Build Your First Integration', link: '/getting-started/for-developers' },
+            { text: 'Installation', link: '/getting-started/installation' },
+            { text: 'Choose Your Path', link: '/getting-started/choose-your-path' },
           ],
         },
       ],
@@ -51,7 +56,15 @@ export default defineConfig({
         {
           text: 'Getting Started',
           items: [
-            { text: 'For Developers', link: '/getting-started/for-developers' },
+            { text: 'Overview', link: '/about/what-is-memwal' },
+            { text: 'Product Status', link: '/about/product-status' },
+            { text: 'Core Components', link: '/about/core-components' },
+          ],
+        },
+        {
+          text: 'Build Your First Integration',
+          items: [
+            { text: 'Build Your First Integration', link: '/getting-started/for-developers' },
             { text: 'Installation', link: '/getting-started/installation' },
             { text: 'Choose Your Path', link: '/getting-started/choose-your-path' },
           ],
@@ -61,15 +74,34 @@ export default defineConfig({
         {
           text: 'Concepts',
           items: [
-            { text: 'Explaining MemWal', link: '/concepts/explaining-memwal' },
+            { text: 'Concepts', link: '/concepts/explaining-memwal' },
             { text: 'Storage Structure', link: '/concepts/storage-structure' },
             { text: 'Namespace', link: '/concepts/namespace' },
             { text: 'Ownership and Access', link: '/concepts/ownership-and-access' },
             { text: 'Security Model', link: '/concepts/security-model' },
           ],
         },
+        {
+          text: 'Architecture',
+          items: [
+            { text: 'System Overview', link: '/architecture/system-overview' },
+            { text: 'Component Responsibilities', link: '/architecture/component-responsibilities' },
+            { text: 'Core Flows', link: '/architecture/core-flows' },
+            { text: 'Data Flow Security Model', link: '/architecture/data-flow-security-model' },
+          ],
+        },
       ],
       '/architecture/': [
+        {
+          text: 'Concepts',
+          items: [
+            { text: 'Concepts', link: '/concepts/explaining-memwal' },
+            { text: 'Storage Structure', link: '/concepts/storage-structure' },
+            { text: 'Namespace', link: '/concepts/namespace' },
+            { text: 'Ownership and Access', link: '/concepts/ownership-and-access' },
+            { text: 'Security Model', link: '/concepts/security-model' },
+          ],
+        },
         {
           text: 'Architecture',
           items: [
@@ -85,20 +117,29 @@ export default defineConfig({
           text: 'SDK',
           items: [
             { text: 'Overview', link: '/sdk/overview' },
-            { text: 'Quick Start', link: '/sdk/quick-start' },
+            { text: 'Quickstart', link: '/sdk/quick-start' },
             { text: 'Usage', link: '/sdk/usage' },
             { text: 'AI Integration', link: '/sdk/ai-integration' },
+          ],
+        },
+        {
+          text: 'Examples',
+          items: [
+            { text: 'Basic Usage', link: '/examples/basic-usage' },
+            { text: 'Advanced Usage', link: '/examples/advanced-usage' },
+            { text: 'Research App Example', link: '/examples/research-app-example' },
+            { text: 'Example Map', link: '/examples/example-map' },
           ],
         },
       ],
       '/relayer/': [
         {
-          text: 'Relayer Backend',
+          text: 'Relayer',
           items: [
             { text: 'Overview', link: '/relayer/overview' },
             { text: 'Public Relayer', link: '/relayer/public-relayer' },
-            { text: 'Self-Hosting', link: '/relayer/self-hosting' },
             { text: 'Installation and Setup', link: '/relayer/installation-and-setup' },
+            { text: 'Operate Your Own Relayer', link: '/relayer/self-hosting' },
           ],
         },
       ],
@@ -124,6 +165,15 @@ export default defineConfig({
       ],
       '/examples/': [
         {
+          text: 'SDK',
+          items: [
+            { text: 'Overview', link: '/sdk/overview' },
+            { text: 'Quickstart', link: '/sdk/quick-start' },
+            { text: 'Usage', link: '/sdk/usage' },
+            { text: 'AI Integration', link: '/sdk/ai-integration' },
+          ],
+        },
+        {
           text: 'Examples',
           items: [
             { text: 'Basic Usage', link: '/examples/basic-usage' },
@@ -139,6 +189,8 @@ export default defineConfig({
           items: [
             { text: 'SDK API', link: '/reference/sdk-api' },
             { text: 'Relayer API', link: '/reference/relayer-api' },
+            { text: 'Configuration', link: '/reference/configuration' },
+            { text: 'Environment Variables', link: '/reference/environment-variables' },
           ],
         },
       ],

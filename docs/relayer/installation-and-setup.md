@@ -29,11 +29,20 @@ The relayer is configured through environment variables and starts its sidecar a
 
 1. create `services/server/.env`
 2. set `DATABASE_URL`
-3. set contract and network values
-4. set Walrus endpoints
-5. set one server key or a key pool
-6. install `services/server/scripts` dependencies
-7. run `cargo run` in `services/server`
+3. set `OPENAI_API_KEY` and, if needed, `OPENAI_API_BASE`
+4. set contract and network values
+5. set Walrus endpoints
+6. set one server key or a key pool
+7. install `services/server/scripts` dependencies
+8. run `cargo run` in `services/server`
+
+## Embedding Provider
+
+- `OPENAI_API_KEY` is the server-side key used for embedding and fact extraction
+- `OPENAI_API_BASE` lets you point the relayer to an OpenAI-compatible provider such as OpenRouter
+- when these are set, the relayer calls the provider directly during `remember`, `recall`, `analyze`,
+  `ask`, and restore re-indexing
+- without `OPENAI_API_KEY`, the relayer falls back to mock embeddings for local testing
 
 ## Notes On Keys
 
@@ -58,4 +67,5 @@ The relayer is configured through environment variables and starts its sidecar a
 - `/health` is the basic service check
 - API routes live under `/api/*`
 - account lookup improves when the indexer is running
+- `OPENAI_API_KEY` + `OPENAI_API_BASE` control which embedding API the relayer calls
 - without `OPENAI_API_KEY`, the server can fall back to mock embeddings, but that is not the normal production path

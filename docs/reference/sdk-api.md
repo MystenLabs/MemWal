@@ -1,5 +1,10 @@
 # SDK API Reference
 
+See also:
+
+- [Configuration](/reference/configuration)
+- [Relayer API](/reference/relayer-api)
+
 ## `MemWal.create(config)`
 
 ```ts
@@ -13,6 +18,8 @@ Config:
 | `key` | `string` | Ed25519 private key in hex |
 | `serverUrl?` | `string` | Relayer URL |
 | `namespace?` | `string` | Default namespace, fallback is `"default"` |
+
+For the full config surface, see [Configuration](/reference/configuration).
 
 ## `MemWal`
 
@@ -83,3 +90,5 @@ Use it to add:
 - recall before generation
 - memory context injection
 - optional auto-save after generation
+
+See [Configuration](/reference/configuration) for middleware options.

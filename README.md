@@ -40,7 +40,8 @@ await memwal.restore("demo");
 
 - Docs source of truth: `docs/`
 - Docs site entry points:
-  - [For Developers](docs/getting-started/for-developers.md)
+  - [Overview](docs/about/what-is-memwal.md)
+  - [Build Your First Integration](docs/getting-started/for-developers.md)
   - [SDK Overview](docs/sdk/overview.md)
   - [Relayer Overview](docs/relayer/overview.md)
   - [SDK API Reference](docs/reference/sdk-api.md)
