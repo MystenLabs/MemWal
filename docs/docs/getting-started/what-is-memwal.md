@@ -1,36 +1,40 @@
-# Overview
+# What is MemWal?
 
-MemWal is a beta protocol and SDK stack for private, user-owned AI memory.
+MemWal is a privacy-preserving, decentralized memory protocol for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
 
-## In One View
+## Motivation
 
-- apps integrate through a TypeScript SDK
-- requests are signed with an Ed25519 delegate key
-- a relayer runs the memory workflow
-- encrypted payloads live on Walrus
-- ownership and delegate authorization live on Sui
+AI agents today lose context between sessions — every conversation starts from scratch. When memory does exist, it's locked inside platform-specific databases that the user doesn't control. MemWal solves this by giving agents:
 
-## What Problem It Solves
+- **Persistent memory** — context that carries across sessions and apps
+- **Decentralized, highly available storage** — with end-to-end encryption baked in
+- **Provable ownership** — cryptographically enforced, not just a policy promise
+- **Fine-grained access control** — users decide who can read, write, or delegate access
 
-MemWal is for apps that need memory without turning one operator-owned database into the entire
-ownership, storage, and access model.
+## What's Included
 
-## What MemWal Splits Apart
+- **TypeScript SDK**: integrate memory into any app with a few lines of code
+- **Relayer**: handles encryption, storage, and retrieval behind a simple API
+- **Smart Contract**: enforces ownership and delegate access onchain
+- **Indexer**: keeps onchain state synced for fast lookups
+- **Dashboard**: manage accounts, memory, and delegate keys visually
 
-- **Ownership**: Sui account model
-- **Storage**: encrypted Walrus blobs
-- **Search**: PostgreSQL + pgvector
-- **Access**: SDK + relayer
+## Use Cases
 
-## What You Get
+MemWal fits any app or protocol that needs to store, retrieve, and update memory persistently:
 
-- SDK surfaces: `MemWal`, `MemWalManual`, `withMemWal`
-- relayer-backed memory workflows
-- onchain account and delegate-key model
-- indexer support for fast owner/account lookup
+- **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
+- **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory
+- **Multi-agent workflows** — share a common data layer between agents for task lists, knowledge bases, and coordination state
+- **Personal AI assistants** — build agents that learn and adapt over time without losing what they've learned
+- **Cross-app memory** — let users carry their memory between different apps and services, owned by them
 
-## Read Next
+And many more — check out the example apps below to see MemWal in action.
 
-- [Product Status](/getting-started/product-status)
-- [Core Components](/getting-started/core-components)
-- [Build Your First Integration](/getting-started/for-developers)
+## Example Apps
+
+The repo ships with ready-to-run apps in the [`/apps`](https://github.com/CommandOSSLabs/memwal/tree/main/apps) directory:
+
+- **Chatbot** — AI chat app with persistent memory across sessions
+- **Noter** — note-taking tool that stores knowledge as encrypted memory
+- **Researcher** — research assistant that builds and recalls a knowledge base
