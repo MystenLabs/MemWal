@@ -22,20 +22,43 @@ import { WalrusClient } from "@mysten/walrus";
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
 // ============================================================
+// ============================================================
+// Environment-driven network config
+// ============================================================
 
-const TESTNET_KEY_SERVERS = [
-    "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
-    "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
-];
+const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+
+// SEAL key server object IDs (comma-separated via env var)
+const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+if (SEAL_KEY_SERVERS.length === 0) {
+    console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
+}
+
+// Walrus package ID (for on-chain Move calls: metadata, blob type queries)
+const WALRUS_PACKAGE_ID = process.env.WALRUS_PACKAGE_ID || (
+    SUI_NETWORK === "testnet"
+        ? "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66"
+        : "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77"
+);
+
+const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
+    SUI_NETWORK === "testnet"
+        ? "https://upload-relay.testnet.walrus.space"
+        : "https://upload-relay.mainnet.walrus.space"
+);
 
 const suiClient = new SuiJsonRpcClient({
-    url: getJsonRpcFullnodeUrl("testnet"),
-    network: "testnet",
+    url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+    network: SUI_NETWORK,
 });
 
 const sealClient = new SealClient({
     suiClient: suiClient as any,
-    serverConfigs: TESTNET_KEY_SERVERS.map((id) => ({
+    serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
         objectId: id,
         weight: 1,
     })),
@@ -43,17 +66,17 @@ const sealClient = new SealClient({
 });
 
 const walrusClient = new WalrusClient({
-    network: "testnet",
+    network: SUI_NETWORK,
     suiClient: suiClient as any,
     uploadRelay: {
-        host: "https://upload-relay.testnet.walrus.space",
+        host: WALRUS_UPLOAD_RELAY_URL,
         sendTip: { max: 10_000_000 },
     },
 });
 
 const ENOKI_API_BASE_URL = "https://api.enoki.mystenlabs.com/v1";
 const enokiApiKey = process.env.ENOKI_API_KEY;
-const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "testnet") as
+const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "mainnet") as
     | "mainnet"
     | "testnet"
     | "devnet";
@@ -427,8 +450,8 @@ app.post("/walrus/upload", async (req, res) => {
             blobObjectId = rawId.id;
         }
 
-        // Walrus testnet package for Move calls
-        const WALRUS_PKG = "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66";
+        // Walrus package for on-chain Move calls (from env-driven WALRUS_PACKAGE_ID)
+        const WALRUS_PKG = WALRUS_PACKAGE_ID;
 
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (owner && owner !== signerAddress && blobObjectId) {
@@ -492,8 +515,8 @@ app.post("/walrus/query-blobs", async (req, res) => {
         }
 
 
-        // Walrus testnet Blob type (from actual on-chain data)
-        const WALRUS_BLOB_TYPE = "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66::blob::Blob";
+        // Walrus Blob type (derived from env-driven WALRUS_PACKAGE_ID)
+        const WALRUS_BLOB_TYPE = `${WALRUS_PACKAGE_ID}::blob::Blob`;
 
         // Query all Walrus Blob objects owned by the user
         const blobs: { blobId: string; objectId: string; namespace: string }[] = [];

@@ -41,10 +41,17 @@ import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 // Constants
 // ============================================================
 
-const TESTNET_KEY_SERVERS = [
-    "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
-    "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
-];
+// Default SEAL key server object IDs per network
+// Users can override via SEAL_KEY_SERVERS in their environment
+const DEFAULT_KEY_SERVERS: Record<string, string[]> = {
+    mainnet: [
+        "0x1afb3a57211ceff8f6781757821847e3ddae73f64e78ec8cd9349914ad985475", // NodeInfra (Open)
+    ],
+    testnet: [
+        "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
+        "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+    ],
+};
 
 // ============================================================
 // MemWalManual Client
@@ -123,13 +130,13 @@ export class MemWalManual {
                         "(e.g. from dapp-kit's useSuiClient())"
                     );
                 }
-                const network = this.config.suiNetwork ?? "testnet";
+                const network = this.config.suiNetwork ?? "mainnet";
                 const urls: Record<string, string> = {
                     testnet: "https://fullnode.testnet.sui.io:443",
                     mainnet: "https://fullnode.mainnet.sui.io:443",
                 };
                 this._suiClient = new SuiClient({
-                    url: urls[network] ?? urls.testnet,
+                    url: urls[network] ?? urls.mainnet,
                 });
             }
         }
@@ -176,9 +183,17 @@ export class MemWalManual {
             // @ts-ignore — optional peer dependency
             const { SealClient } = await import("@mysten/seal");
             const suiClient = await this.getSuiClient();
+            const network = this.config.suiNetwork ?? "mainnet";
+            const keyServers = DEFAULT_KEY_SERVERS[network] ?? [];
+            if (keyServers.length === 0) {
+                throw new Error(
+                    `MemWalManual: no SEAL key servers configured for network "${network}". ` +
+                    "Please provide sealKeyServers in config or set SEAL_KEY_SERVERS env var."
+                );
+            }
             this._sealClient = new SealClient({
                 suiClient,
-                serverConfigs: TESTNET_KEY_SERVERS.map((id) => ({
+                serverConfigs: keyServers.map((id) => ({
                     objectId: id,
                     weight: 1,
                 })),
@@ -193,11 +208,15 @@ export class MemWalManual {
             // @ts-ignore — optional peer dependency
             const { WalrusClient } = await import("@mysten/walrus");
             const suiClient = await this.getSuiClient();
+            const network = this.config.suiNetwork ?? "mainnet";
+            const uploadRelayHost = network === "testnet"
+                ? "https://upload-relay.testnet.walrus.space"
+                : "https://upload-relay.mainnet.walrus.space";
             this._walrusClient = new WalrusClient({
-                network: (this.config.suiNetwork ?? "testnet") as any,
+                network: network as any,
                 suiClient,
                 uploadRelay: {
-                    host: "https://upload-relay.testnet.walrus.space",
+                    host: uploadRelayHost,
                     sendTip: { max: 10_000_000 },
                 },
             });
@@ -449,7 +468,7 @@ export class MemWalManual {
     private async walrusUpload(data: Uint8Array): Promise<string> {
         // Direct HTTP PUT to Walrus publisher (works in both browser and Node.js,
         // unlike @mysten/walrus SDK which uses WASM and requires Node.js)
-        const publisherUrl = this.config.walrusPublisherUrl ?? "https://publisher.walrus-testnet.walrus.space";
+        const publisherUrl = this.config.walrusPublisherUrl ?? "https://publisher.walrus-mainnet.walrus.space";
         const epochs = this.config.walrusEpochs ?? 50;
 
         const resp = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}&deletable=true`, {
@@ -478,7 +497,7 @@ export class MemWalManual {
     private async walrusDownload(blobId: string): Promise<Uint8Array> {
         // Direct HTTP fetch to Walrus aggregator (works in both browser and Node.js,
         // unlike @mysten/walrus SDK which requires Node.js APIs)
-        const aggregatorUrl = this.config.walrusAggregatorUrl ?? "https://aggregator.walrus-testnet.walrus.space";
+        const aggregatorUrl = this.config.walrusAggregatorUrl ?? "https://aggregator.walrus-mainnet.walrus.space";
         const resp = await fetch(`${aggregatorUrl}/v1/blobs/${blobId}`);
         if (!resp.ok) {
             throw new Error(`Walrus download failed (${resp.status}): ${await resp.text()}`);
