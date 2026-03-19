@@ -1,4 +1,4 @@
-/// MemWal V2 — Account & SEAL Access Control
+/// MemWal — Account & SEAL Access Control
 ///
 /// Core on-chain module for managing MemWal accounts and delegate keys.
 /// Delegate keys are Ed25519 Sui keypairs that can sign transactions
@@ -9,7 +9,7 @@
 /// - MemWalAccount: owned object — stores owner + delegate_keys
 /// - DelegateKey: struct with public_key, sui_address, label, created_at
 /// - seal_approve: SEAL policy — authorizes owner OR delegate key holder to decrypt
-module memwal_v2::account {
+module memwal::account {
     use std::string::String;
     use sui::event;
     use sui::table::{Self, Table};

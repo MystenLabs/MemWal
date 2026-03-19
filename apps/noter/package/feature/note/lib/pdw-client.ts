@@ -1,5 +1,5 @@
 /**
- * MEMWAL V2 CLIENT — Server-side MemWal SDK wrapper
+ * memwal CLIENT — Server-side MemWal SDK wrapper
  * Uses Ed25519 delegate key auth — no wallet/zkLogin needed.
  * Server handles: embed → encrypt → Walrus upload → store
  *

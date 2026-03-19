@@ -22,6 +22,9 @@ pub struct OnChainBlob {
     pub object_id: String,
     /// Namespace from on-chain metadata
     pub namespace: String,
+    /// MemWal package ID from on-chain metadata
+    #[serde(rename = "packageId", default)]
+    pub package_id: String,
 }
 
 /// Response from sidecar query-blobs endpoint
@@ -39,6 +42,7 @@ struct WalrusUploadRequest {
     private_key: String,
     owner: String,
     namespace: String,
+    package_id: String,
     epochs: u64,
 }
 
@@ -65,6 +69,7 @@ pub async fn upload_blob(
     owner_address: &str,
     sui_private_key: &str,
     namespace: &str,
+    package_id: &str,
 ) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -76,6 +81,7 @@ pub async fn upload_blob(
             private_key: sui_private_key.to_string(),
             owner: owner_address.to_string(),
             namespace: namespace.to_string(),
+            package_id: package_id.to_string(),
             epochs,
         })
         .send()
@@ -120,12 +126,16 @@ pub async fn query_blobs_by_owner(
     sidecar_url: &str,
     owner_address: &str,
     namespace: Option<&str>,
+    package_id: Option<&str>,
 ) -> Result<Vec<OnChainBlob>, AppError> {
     let url = format!("{}/walrus/query-blobs", sidecar_url);
 
     let mut body = serde_json::json!({ "owner": owner_address });
     if let Some(ns) = namespace {
         body["namespace"] = serde_json::json!(ns);
+    }
+    if let Some(pkg) = package_id {
+        body["packageId"] = serde_json::json!(pkg);
     }
 
     let resp = client

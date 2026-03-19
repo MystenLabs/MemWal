@@ -7,7 +7,6 @@ authors = ["CommandOSS"]
 
 [addresses]
 memwal = "0x0"
-memwal_v2 = "0x0"
 
 [dev-addresses]
 

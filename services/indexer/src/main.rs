@@ -1,7 +1,7 @@
-/// MemWal V2 Indexer
+/// MemWal Indexer
 ///
 /// Polls Sui blockchain events and indexes MemWal accounts into PostgreSQL.
-/// This eliminates the need for the v2-server to scan the on-chain registry
+/// This eliminates the need for the server to scan the on-chain registry
 /// during auth, providing O(1) account lookups instead.
 ///
 /// Indexed events:
@@ -99,12 +99,12 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "memwal_v2_indexer=debug".into()),
+                .unwrap_or_else(|_| "memwal_indexer=debug".into()),
         )
         .init();
 
     let config = Config::from_env();
-    tracing::info!("starting memwal v2 indexer");
+    tracing::info!("starting memwal indexer");
     tracing::info!("  database: {}", redact_url(&config.database_url));
     tracing::info!("  sui rpc: {}", config.sui_rpc_url);
     tracing::info!("  package: {}", config.package_id);

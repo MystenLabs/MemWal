@@ -394,7 +394,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
 // ============================================================
 app.post("/walrus/upload", async (req, res) => {
     try {
-        const { data, privateKey, owner, namespace, epochs = 50 } = req.body;
+        const { data, privateKey, owner, namespace, packageId, epochs = 50 } = req.body;
         if (!data || !privateKey) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey" });
         }
@@ -420,6 +420,7 @@ app.post("/walrus/upload", async (req, res) => {
                 attributes: {
                     ...(namespace ? { memwal_namespace: namespace } : {}),
                     ...(owner ? { memwal_owner: owner } : {}),
+                    ...(packageId ? { memwal_package_id: packageId } : {}),
                 },
             });
 
@@ -481,6 +482,19 @@ app.post("/walrus/upload", async (req, res) => {
                     typeArguments: [],
                 });
 
+                // Set memwal_package_id
+                if (packageId) {
+                    metaTx.moveCall({
+                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                        arguments: [
+                            blobArg,
+                            metaTx.pure.string("memwal_package_id"),
+                            metaTx.pure.string(packageId),
+                        ],
+                        typeArguments: [],
+                    });
+                }
+
                 // Transfer blob to user
                 metaTx.transferObjects([blobArg], owner);
 
@@ -509,7 +523,7 @@ app.post("/walrus/upload", async (req, res) => {
 // ============================================================
 app.post("/walrus/query-blobs", async (req, res) => {
     try {
-        const { owner, namespace } = req.body;
+        const { owner, namespace, packageId } = req.body;
         if (!owner) {
             return res.status(400).json({ error: "Missing required field: owner" });
         }
@@ -519,7 +533,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
         const WALRUS_BLOB_TYPE = `${WALRUS_PACKAGE_ID}::blob::Blob`;
 
         // Query all Walrus Blob objects owned by the user
-        const blobs: { blobId: string; objectId: string; namespace: string }[] = [];
+        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string }[] = [];
         let cursor: string | null | undefined = undefined;
         let hasMore = true;
 
@@ -549,6 +563,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
                 // Read metadata from dynamic field (Walrus stores metadata as dynamic field on Blob UID)
                 let blobNamespace = "default";
                 let blobOwner = "";
+                let blobPackageId = "";
 
                 try {
                     // getDynamicFieldObject: key type is "vector<u8>", value is b"metadata"
@@ -570,6 +585,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
                                 const value = entry?.fields?.value;
                                 if (key === "memwal_namespace") blobNamespace = value;
                                 if (key === "memwal_owner") blobOwner = value;
+                                if (key === "memwal_package_id") blobPackageId = value;
                             }
                         }
                     }
@@ -580,6 +596,9 @@ app.post("/walrus/query-blobs", async (req, res) => {
 
                 // Filter by namespace if specified
                 if (namespace && blobNamespace !== namespace) continue;
+
+                // Filter by packageId if specified
+                if (packageId && blobPackageId !== packageId) continue;
 
                 if (rawBlobId) {
                     // blob_id from chain is a big integer (U256) — convert to base64url (little-endian!)
@@ -596,7 +615,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
                             // Keep as-is if conversion fails
                         }
                     }
-                    blobs.push({ blobId: blobIdStr, objectId, namespace: blobNamespace });
+                    blobs.push({ blobId: blobIdStr, objectId, namespace: blobNamespace, packageId: blobPackageId });
                 }
             }
 
@@ -607,6 +626,63 @@ app.post("/walrus/query-blobs", async (req, res) => {
         res.json({ blobs, total: blobs.length });
     } catch (err: any) {
         console.error(`[walrus/query-blobs] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
+// POST /sponsor — Create Enoki-sponsored transaction for frontend
+// Frontend sends TransactionKind bytes + sender → returns sponsored { bytes, digest }
+// ============================================================
+app.post("/sponsor", async (req, res) => {
+    try {
+        const { transactionBlockKindBytes, sender } = req.body;
+        if (!transactionBlockKindBytes || !sender) {
+            return res.status(400).json({ error: "Missing required fields: transactionBlockKindBytes, sender" });
+        }
+        if (!enokiApiKey) {
+            return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
+        }
+
+        console.log(`[sponsor] creating sponsored tx for sender=${sender}`);
+        const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
+            network: enokiNetwork,
+            transactionBlockKindBytes,
+            sender,
+        });
+
+        console.log(`[sponsor] sponsored tx created, digest=${sponsored.digest}`);
+        res.json(sponsored); // { bytes, digest }
+    } catch (err: any) {
+        console.error(`[sponsor] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
+// POST /sponsor/execute — Execute signed sponsored transaction
+// Frontend sends { digest, signature } after user wallet signs → returns { digest }
+// ============================================================
+app.post("/sponsor/execute", async (req, res) => {
+    try {
+        const { digest, signature } = req.body;
+        if (!digest || !signature) {
+            return res.status(400).json({ error: "Missing required fields: digest, signature" });
+        }
+        if (!enokiApiKey) {
+            return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
+        }
+
+        console.log(`[sponsor/execute] executing sponsored tx digest=${digest}`);
+        const executed = await callEnoki<EnokiExecuteResponse>(
+            `/transaction-blocks/sponsor/${digest}`,
+            { digest, signature }
+        );
+
+        console.log(`[sponsor/execute] tx executed, final digest=${executed.digest}`);
+        res.json(executed); // { digest }
+    } catch (err: any) {
+        console.error(`[sponsor/execute] error: ${err.message || err}`);
         res.status(500).json({ error: err.message || String(err) });
     }
 });
