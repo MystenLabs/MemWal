@@ -1,0 +1,158 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "MemWal",
+  "description": "Privacy-preserving decentralized memory protocol for humans and AI agents",
+  "favicon": "/favicon.ico",
+  "colors": {
+    "primary": "#191a23",
+    "light": "#98efe4",
+    "dark": "#191a23"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "banner": {
+    "content": "**MemWal is in active beta.** APIs and features may evolve between releases.",
+    "dismissible": false
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/CommandOSSLabs/personal-data-wallet"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/CommandOSSLabs/personal-data-wallet"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Get Started",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "getting-started/what-is-memwal",
+              "getting-started/quick-start",
+              "getting-started/choose-your-path"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Concepts",
+        "groups": [
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/explaining-memwal",
+              "concepts/storage-structure",
+              "concepts/namespace",
+              "concepts/ownership-and-access",
+              "concepts/security-model"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "concepts/system-overview",
+              "concepts/component-responsibilities",
+              "concepts/core-flows",
+              "concepts/data-flow-security-model"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK",
+        "groups": [
+          {
+            "group": "SDK",
+            "pages": [
+              "sdk/overview",
+              "sdk/quick-start",
+              "sdk/usage",
+              "sdk/ai-integration",
+              "sdk/basic-usage",
+              "sdk/advanced-usage",
+              "sdk/research-app-example",
+              "sdk/example-map"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Relayer",
+        "groups": [
+          {
+            "group": "Relayer",
+            "pages": [
+              "relayer/overview",
+              "relayer/public-relayer",
+              "relayer/installation-and-setup",
+              "relayer/self-hosting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contract",
+        "groups": [
+          {
+            "group": "Smart Contract",
+            "pages": [
+              "contract/overview",
+              "contract/delegate-key-management",
+              "contract/ownership-and-permissions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Indexer",
+        "groups": [
+          {
+            "group": "Indexer",
+            "pages": [
+              "indexer/purpose",
+              "indexer/onchain-events",
+              "indexer/database-sync"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/sdk-api",
+              "reference/relayer-api",
+              "reference/configuration",
+              "reference/environment-variables"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contributing",
+        "groups": [
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/run-docs-locally",
+              "contributing/run-repo-locally",
+              "contributing/docs-workflow"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
