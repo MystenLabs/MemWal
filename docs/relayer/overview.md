@@ -13,15 +13,19 @@ The relayer turns signed SDK calls into memory operations.
 - runs `remember`, `recall`, `analyze`, `ask`, and `restore`
 - uses env-driven network config for RPC, Walrus, and SEAL sidecar behavior
 
-## Current Trust Boundary
+## Trust Boundary
 
-In the default SDK path, the relayer currently handles:
+In the default SDK path, the relayer sees plaintext data because it handles encryption and embedding on your behalf. This is a deliberate trade-off for developer experience — it means Web2 developers don't need to manage cryptographic operations.
+
+The relayer currently handles:
 
 - embedding generation
 - encryption and decryption orchestration
 - Walrus upload and download orchestration
 - fact extraction for `analyze`
 - restore and re-index flows
+
+If you need to minimize this trust, you can [self-host](/relayer/self-hosting) the relayer or use the [manual client flow](/sdk/usage) to handle encryption and embedding entirely on the client side. See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for the full breakdown.
 
 ## Network and Sidecar Config
 

@@ -25,9 +25,10 @@ Go to: [Public Relayer](/relayer/public-relayer)
 
 ## 3. Manual Client Flow
 
-Use `@cmdoss/memwal/manual` when the client must handle embeddings and local SEAL operations.
+Use `@cmdoss/memwal/manual` when you want full client-side control over encryption and embeddings. Recommended for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
 
-- relayer still handles upload relay, registration, search, and restore
+- client handles embeddings and SEAL encryption locally
+- relayer only sees encrypted payloads and vectors
 
 Go to: [SDK Usage](/sdk/usage)
 
@@ -39,6 +40,6 @@ Go to: [AI Integration](/sdk/ai-integration)
 
 ## 5. Self-Host the Relayer
 
-Use this when you need your own infra, credentials, and rollout control.
+Use this when you need full control over the trust boundary — your infrastructure, your credentials, no third party sees your data.
 
 Go to: [Self-Hosting](/relayer/self-hosting)

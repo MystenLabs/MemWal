@@ -45,25 +45,21 @@
         ]
       },
       {
-        "tab": "Concepts",
+        "tab": "Fundamentals",
         "groups": [
           {
             "group": "Concepts",
             "pages": [
-              "concepts/explaining-memwal",
-              "concepts/storage-structure",
-              "concepts/namespace",
-              "concepts/ownership-and-access",
-              "concepts/security-model"
+              "fundamentals/concepts/memory-space",
+              "fundamentals/concepts/ownership-and-access"
             ]
           },
           {
             "group": "Architecture",
             "pages": [
-              "concepts/system-overview",
-              "concepts/component-responsibilities",
-              "concepts/core-flows",
-              "concepts/data-flow-security-model"
+              "fundamentals/architecture/core-components",
+              "fundamentals/architecture/how-storage-works",
+              "fundamentals/architecture/data-flow-security-model"
             ]
           }
         ]

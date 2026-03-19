@@ -29,6 +29,53 @@ AI agents today lose context between sessions — every conversation starts from
 - **Provable ownership** — cryptographically enforced, not just a policy promise
 - **Fine-grained access control** — users decide who can read, write, or delegate access
 
+## Features
+
+### Memory Operations
+
+<CardGroup cols={2}>
+  <Card title="Remember" icon="floppy-disk">
+    Store memories with semantic understanding. The relayer generates vector embeddings so your data is searchable by meaning, not just keywords.
+  </Card>
+  <Card title="Recall" icon="magnifying-glass">
+    Retrieve relevant memories using natural language queries. Finds the closest matches based on meaning, scoped to your memory space.
+  </Card>
+  <Card title="Analyze" icon="microscope">
+    Extract structured facts from text automatically. Each fact is stored as a separate memory for more precise recall later.
+  </Card>
+  <Card title="Ask" icon="comments">
+    Query your memories and get an AI-generated answer with the relevant context attached. Combines recall with LLM reasoning.
+  </Card>
+</CardGroup>
+
+### Security & Access Control
+
+<CardGroup cols={2}>
+  <Card title="End-to-End Encryption" icon="lock">
+    All content is encrypted via SEAL before it reaches Walrus. Only the owner and authorized delegates can decrypt it.
+  </Card>
+  <Card title="Decentralized Storage" icon="globe">
+    Encrypted blobs stored on Walrus — no single point of failure, no central operator holding your data.
+  </Card>
+  <Card title="Onchain Ownership" icon="key">
+    Ownership and access enforced by Sui smart contracts. Cryptographic and tamper-proof.
+  </Card>
+  <Card title="Delegate Access" icon="user-group">
+    Grant scoped access to other users, agents, or services — all managed onchain by the owner.
+  </Card>
+</CardGroup>
+
+### Infrastructure
+
+<CardGroup cols={2}>
+  <Card title="Restore" icon="rotate">
+    Rebuild your index from Walrus if it's ever lost. Rediscovers blobs by owner and namespace, re-embeds only missing entries.
+  </Card>
+  <Card title="AI Middleware" icon="wand-magic-sparkles">
+    Drop-in memory for Vercel AI SDK apps. Automatically saves and recalls context around AI conversations.
+  </Card>
+</CardGroup>
+
 ## What's Included
 
 - **TypeScript SDK**: integrate memory into any app with a few lines of code
@@ -60,10 +107,10 @@ The repo ships with ready-to-run apps in the [`/apps`](https://github.com/Comman
 ## Explore the Docs
 
 <CardGroup cols={2}>
-  <Card title="Concepts" icon="lightbulb" href="/concepts/explaining-memwal">
-    Storage structure, namespaces, ownership and access, security model
+  <Card title="Concepts" icon="lightbulb" href="/fundamentals/concepts/memory-space">
+    Memory spaces, ownership and delegates
   </Card>
-  <Card title="Architecture" icon="building" href="/concepts/system-overview">
+  <Card title="Architecture" icon="building" href="/fundamentals/architecture/core-components">
     System overview, component responsibilities, core flows, data flow security
   </Card>
   <Card title="SDK" icon="box" href="/sdk/overview">
