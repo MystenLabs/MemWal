@@ -844,6 +844,16 @@ body {
   padding: 40px 0;
 }
 
+.dashboard > .card {
+  background: #f0f0ee;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dashboard > .card {
+    background: #1e1e24;
+  }
+}
+
 .dashboard-header {
   margin-bottom: 32px;
 }
@@ -1099,12 +1109,13 @@ body {
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: 0.875rem;
+  box-shadow: var(--neo-shadow-xs);
   transition: box-shadow 0.15s ease;
 }
 
 .input:focus {
   outline: none;
-  box-shadow: none;
+  box-shadow: var(--neo-shadow-xs);
 }
 
 /* ========== Spinner ========== */
