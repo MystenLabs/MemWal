@@ -30,11 +30,12 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 
-// SEAL testnet key server object IDs
-const TESTNET_KEY_SERVERS = [
-    "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
-    "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
-];
+// Network config from env vars
+const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
 // ============================================================
 // Parse CLI arguments
@@ -97,8 +98,8 @@ async function main() {
     const { data, privateKey, packageId, registryId } = parseArgs();
 
     const suiClient = new SuiJsonRpcClient({
-        url: getJsonRpcFullnodeUrl("testnet"),
-        network: "testnet",
+        url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+        network: SUI_NETWORK,
     });
 
     // Decode admin wallet (TEE server wallet = deployer)
@@ -109,7 +110,7 @@ async function main() {
     // Initialize SEAL client
     const sealClient = new SealClient({
         suiClient: suiClient as any,
-        serverConfigs: TESTNET_KEY_SERVERS.map((id) => ({
+        serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
             objectId: id,
             weight: 1,
         })),

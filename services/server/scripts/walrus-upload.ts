@@ -89,18 +89,26 @@ async function main() {
     const { secretKey } = decodeSuiPrivateKey(privateKey);
     const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
+    // Network config from env vars
+    const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+    const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
+        SUI_NETWORK === "testnet"
+            ? "https://upload-relay.testnet.walrus.space"
+            : "https://upload-relay.mainnet.walrus.space"
+    );
+
     // Create Sui JSON-RPC client
     const suiClient = new SuiJsonRpcClient({
-        url: getJsonRpcFullnodeUrl("testnet"),
-        network: "testnet",
+        url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+        network: SUI_NETWORK,
     });
 
     // Create WalrusClient with upload relay
     const walrusClient = new WalrusClient({
-        network: "testnet",
+        network: SUI_NETWORK,
         suiClient: suiClient as any,
         uploadRelay: {
-            host: "https://upload-relay.testnet.walrus.space",
+            host: WALRUS_UPLOAD_RELAY_URL,
             sendTip: { max: 10_000_000 },
         },
     });

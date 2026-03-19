@@ -29,7 +29,7 @@ impl Config {
             database_url: std::env::var("DATABASE_URL")
                 .expect("DATABASE_URL must be set"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
-                .unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string()),
+                .unwrap_or_else(|_| "https://fullnode.mainnet.sui.io:443".to_string()),
             package_id: std::env::var("MEMWAL_PACKAGE_ID")
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             poll_interval_secs: std::env::var("POLL_INTERVAL_SECS")

@@ -80,11 +80,11 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let network = std::env::var("SUI_NETWORK")
-            .unwrap_or_else(|_| "testnet".to_string());
+            .unwrap_or_else(|_| "mainnet".to_string());
         let default_rpc = match network.as_str() {
-            "mainnet" => "https://fullnode.mainnet.sui.io:443",
+            "testnet" => "https://fullnode.testnet.sui.io:443",
             "devnet" => "https://fullnode.devnet.sui.io:443",
-            _ => "https://fullnode.testnet.sui.io:443",
+            _ => "https://fullnode.mainnet.sui.io:443",
         };
 
         Self {
@@ -101,9 +101,9 @@ impl Config {
             openai_api_base: std::env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             walrus_publisher_url: std::env::var("WALRUS_PUBLISHER_URL")
-                .unwrap_or_else(|_| "https://publisher.walrus-testnet.walrus.space".to_string()),
+                .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string()),
             walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
-                .unwrap_or_else(|_| "https://aggregator.walrus-testnet.walrus.space".to_string()),
+                .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
             sui_private_keys: {
                 // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).

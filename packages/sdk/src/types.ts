@@ -152,13 +152,13 @@ export interface MemWalManualConfig {
     packageId: string;
     /** MemWalAccount object ID (for SEAL seal_approve) */
     accountId: string;
-    /** Sui network (default: testnet) */
+    /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
     /** Walrus storage epochs (default: 50) */
     walrusEpochs?: number;
-    /** Walrus aggregator URL for direct blob downloads (default: testnet aggregator) */
+    /** Walrus aggregator URL for direct blob downloads (default: mainnet aggregator) */
     walrusAggregatorUrl?: string;
-    /** Walrus publisher URL for direct blob uploads (default: testnet publisher) */
+    /** Walrus publisher URL for direct blob uploads (default: mainnet publisher) */
     walrusPublisherUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
