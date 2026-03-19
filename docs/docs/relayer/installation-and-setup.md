@@ -74,6 +74,7 @@ Notes:
 - the sidecar uses this list for backend SEAL encrypt and decrypt operations
 - the server no longer relies on hardcoded testnet key server IDs
 - make sure the list matches the selected `SUI_NETWORK`
+- for testnet setup, use https://seal-docs.wal.app/Pricing to find the current SEAL key server object IDs
 
 ## Notes On Keys
 

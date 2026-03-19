@@ -7,7 +7,7 @@ pnpm install
 pnpm dev:docs
 ```
 
-This starts the VitePress site using the docs in this repository.
+This starts the Docusaurus site using the docs in this repository.
 
 ## Build the Docs
 
