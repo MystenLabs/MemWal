@@ -9,6 +9,7 @@ The relayer turns signed SDK calls into memory operations.
 - stores and searches vectors by `owner + namespace`
 - coordinates SEAL and Walrus operations through the sidecar
 - runs `remember`, `recall`, `analyze`, `ask`, and `restore`
+- uses env-driven network config for RPC, Walrus, and SEAL sidecar behavior
 
 ## Current Trust Boundary
 
@@ -19,6 +20,13 @@ In the default SDK path, the relayer currently handles:
 - Walrus upload and download orchestration
 - fact extraction for `analyze`
 - restore and re-index flows
+
+## Network and Sidecar Config
+
+- the relayer now defaults to `mainnet` network settings
+- `SUI_NETWORK` drives the default RPC URL and Walrus service endpoints
+- `SEAL_KEY_SERVERS` tells the sidecar which SEAL key server objects to use
+- self-hosted deployments can override Walrus package and upload relay defaults through env vars
 
 ## Namespace Behavior
 

@@ -46,10 +46,11 @@ Walrus and network fields:
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `suiNetwork` | no | `testnet` or `mainnet`. Default: `testnet` |
+| `suiNetwork` | no | `testnet` or `mainnet`. Default: `mainnet` |
+| `sealKeyServers` | no | Override built-in SEAL key server object IDs for the selected network |
 | `walrusEpochs` | no | Default: `50` |
-| `walrusAggregatorUrl` | no | Walrus download endpoint |
-| `walrusPublisherUrl` | no | Walrus upload endpoint |
+| `walrusAggregatorUrl` | no | Walrus download endpoint. Defaults follow `suiNetwork` |
+| `walrusPublisherUrl` | no | Walrus upload endpoint. Defaults follow `suiNetwork` |
 
 ## `WithMemWalOptions`
 
@@ -68,3 +69,5 @@ Walrus and network fields:
 - `MemWal` is the default relayer-handled path.
 - `MemWalManual` is the manual client path, but it still uses the relayer for registration, search, and restore.
 - `withMemWal` builds on top of `MemWal`, so it uses the same relayer-backed config shape.
+- `MemWalManual` now defaults to `mainnet` network settings unless you pass `suiNetwork: "testnet"`.
+- `sealKeyServers` lets the client override the built-in SEAL key server list for the selected network.

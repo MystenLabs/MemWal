@@ -47,6 +47,22 @@ curl http://localhost:8000/health
 Use this quick start for local evaluation. For production operation, review the full env setup
 and key configuration below.
 
+## Testnet Contract IDs
+
+If you want to run your own relayer on testnet, use these server env vars:
+
+```env
+SUI_NETWORK=testnet
+MEMWAL_PACKAGE_ID=0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090ee3f
+MEMWAL_REGISTRY_ID=0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05
+```
+
+Important:
+
+- use `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` in `services/server/.env`
+- `VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are for the app or playground, not for the relayer
+- the current server config still requires `MEMWAL_REGISTRY_ID`
+
 If you want the relayer to create real embeddings, set:
 
 - `OPENAI_API_KEY`
@@ -54,6 +70,12 @@ If you want the relayer to create real embeddings, set:
 
 The relayer uses these values to call an OpenAI-compatible `/embeddings` API during `remember`,
 `recall`, `analyze`, `ask`, and restore re-indexing.
+
+You also need:
+
+- `SEAL_KEY_SERVERS`
+
+The sidecar uses this comma-separated list of object IDs for backend SEAL encrypt and decrypt.
 
 ## Commands
 
@@ -101,6 +123,7 @@ cargo run
 
 - `OPENAI_API_KEY`: lets the relayer call your embedding provider for real embeddings
 - `OPENAI_API_BASE`: use this when your provider is not the default OpenAI base URL
+- `SEAL_KEY_SERVERS`: required for backend SEAL encrypt and decrypt
 - indexer: recommended for fast account lookup, especially outside quick local testing
 
 ## Docker Path
