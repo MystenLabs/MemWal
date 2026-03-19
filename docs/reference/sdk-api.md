@@ -77,6 +77,11 @@ Main methods:
 
 Use this client when the app must handle embedding calls and local SEAL operations.
 
+Important config notes:
+
+- `suiNetwork` now defaults to `mainnet`
+- `sealKeyServers?` lets the client override the built-in SEAL key server list
+
 ## `withMemWal`
 
 Import:

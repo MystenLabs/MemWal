@@ -79,12 +79,20 @@ Key config fields:
 - `key`
 - `serverUrl?`
 - `suiPrivateKey?` or `walletSigner?`
+- `suiNetwork?`
+- `sealKeyServers?`
 - `embeddingApiKey`
 - `embeddingApiBase?`
 - `embeddingModel?`
 - `packageId`
 - `accountId`
 - `namespace?`
+
+Manual mode notes:
+
+- `suiNetwork` defaults to `mainnet`
+- `sealKeyServers` lets the client override the built-in SEAL key server object IDs
+- Walrus publisher, aggregator, and upload relay defaults now follow `suiNetwork`
 
 ### Main Methods
 
