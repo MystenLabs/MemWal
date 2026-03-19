@@ -32,8 +32,9 @@ system hardens. Feedback and contributions are welcome.
 
 ## Start Here
 
-- New to MemWal: [Getting Started](/getting-started/for-developers)
-- Need the mental model: [Explain MemWal](/concepts/explaining-memwal)
+- New to MemWal: [Overview](/about/what-is-memwal)
+- Ready to integrate: [Build Your First Integration](/getting-started/for-developers)
+ - Need the mental model: [Concepts & Architecture](/concepts/explaining-memwal)
 - Integrating the SDK: [SDK Overview](/sdk/overview)
 - Running the backend: [Relayer Overview](/relayer/overview)
 - Looking for APIs: [SDK API Reference](/reference/sdk-api)

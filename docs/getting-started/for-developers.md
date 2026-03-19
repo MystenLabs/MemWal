@@ -1,4 +1,4 @@
-# For Developers
+# Build Your First Integration
 
 This is the fastest supported path to a working MemWal integration.
 

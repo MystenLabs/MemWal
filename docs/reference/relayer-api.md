@@ -2,6 +2,11 @@
 
 The current Rust server exposes these routes from `services/server/src/main.rs`.
 
+See also:
+
+- [Environment Variables](/reference/environment-variables)
+- [Configuration](/reference/configuration)
+
 ## Public
 
 ### `GET /health`
