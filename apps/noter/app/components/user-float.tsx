@@ -21,6 +21,7 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const { user, suiAddress, logout } = useAuth();
   const [copied, setCopied] = useState(false);
   const [memwalKey, setMemwalKey] = useState("");
+  const [memwalAccountId, setMemwalAccountId] = useState("");
   const [memwalStatus, setMemwalStatus] = useState<"idle" | "checking" | "connected" | "error">("idle");
 
   // Always check MemWal status on mount (key may come from .env or localStorage)
@@ -28,6 +29,10 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
     const savedKey = localStorage.getItem("memwal_key");
     if (savedKey) {
       setMemwalKey(savedKey);
+    }
+    const savedAccountId = localStorage.getItem("memwal_account_id");
+    if (savedAccountId) {
+      setMemwalAccountId(savedAccountId);
     }
     // Always check health — server may have key from .env
     checkMemwalConnection();
@@ -47,13 +52,16 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const handleSaveKey = async () => {
     if (!memwalKey.trim()) return;
     localStorage.setItem("memwal_key", memwalKey.trim());
+    if (memwalAccountId.trim()) {
+      localStorage.setItem("memwal_account_id", memwalAccountId.trim());
+    }
 
     // Save key to server-side via API
     try {
       const res = await fetch("/api/memory/set-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: memwalKey.trim() }),
+        body: JSON.stringify({ key: memwalKey.trim(), accountId: memwalAccountId.trim() || undefined }),
       });
       if (res.ok) {
         setMemwalStatus("connected");
@@ -67,12 +75,14 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
 
   const handleClearKey = () => {
     setMemwalKey("");
+    setMemwalAccountId("");
     localStorage.removeItem("memwal_key");
+    localStorage.removeItem("memwal_account_id");
     setMemwalStatus("idle");
     fetch("/api/memory/set-key", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "" }),
+      body: JSON.stringify({ key: "", accountId: "" }),
     });
   };
 
@@ -177,7 +187,16 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
                   onChange={(e) => setMemwalKey(e.target.value)}
                   className="flex-1 text-xs bg-secondary px-2 py-2 rounded border border-border outline-none focus:ring-1 focus:ring-ring font-mono"
                 />
-                {memwalKey ? (
+              </div>
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  placeholder="Account ID (0x...)"
+                  value={memwalAccountId}
+                  onChange={(e) => setMemwalAccountId(e.target.value)}
+                  className="flex-1 text-xs bg-secondary px-2 py-2 rounded border border-border outline-none focus:ring-1 focus:ring-ring font-mono"
+                />
+                {(memwalKey || memwalAccountId) ? (
                   <div className="flex gap-0.5">
                     <Tooltip>
                       <TooltipTrigger asChild>

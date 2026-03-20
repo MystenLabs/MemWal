@@ -73,19 +73,26 @@ export function getArtifactModel() {
  * Wrap a language model with MemWal memory layer.
  * Requires MEMWAL_KEY env var. Falls back to base model if not configured.
  */
-export function getMemWalModel(modelId: string, memwalKey?: string) {
+export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccountId?: string) {
   const baseModel = getLanguageModel(modelId);
 
   const key = memwalKey || process.env.MEMWAL_KEY;
   const memwalServerUrl = process.env.MEMWAL_SERVER_URL;
+  const accountId = memwalAccountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!key) {
     console.warn("[MemWal] MEMWAL_KEY not set — memory layer disabled");
     return baseModel;
   }
 
+  if (!accountId) {
+    console.warn("[MemWal] MEMWAL_ACCOUNT_ID not set — memory layer disabled");
+    return baseModel;
+  }
+
   return withMemWal(baseModel, {
     key,
+    accountId,
     serverUrl: memwalServerUrl || "http://localhost:8000",
     maxMemories: 5,
     autoSave: true,

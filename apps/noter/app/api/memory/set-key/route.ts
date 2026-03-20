@@ -6,13 +6,13 @@ import { setMemWalKey } from "@/feature/note/lib/pdw-client";
 
 export async function POST(req: Request) {
     try {
-        const { key } = await req.json();
+        const { key, accountId } = await req.json();
 
         if (typeof key !== "string") {
             return Response.json({ error: "key must be a string" }, { status: 400 });
         }
 
-        setMemWalKey(key || null);
+        setMemWalKey(key || null, accountId || null);
 
         if (!key) {
             return Response.json({ status: "cleared" });

@@ -7,7 +7,7 @@ const COOKIE_NAME = "session";
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
 export async function getSession(): Promise<{
-  user: { id: string; publicKey: string; privateKey: string };
+  user: { id: string; publicKey: string; privateKey: string; accountId: string };
 } | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
@@ -19,6 +19,7 @@ export async function getSession(): Promise<{
         id: payload.userId as string,
         publicKey: payload.publicKey as string,
         privateKey: payload.privateKey as string,
+        accountId: (payload.accountId as string) || '',
       },
     };
   } catch {
@@ -29,9 +30,10 @@ export async function getSession(): Promise<{
 export async function createSession(
   userId: string,
   publicKey: string,
-  privateKey: string
+  privateKey: string,
+  accountId: string
 ): Promise<void> {
-  const token = await new SignJWT({ userId, publicKey, privateKey })
+  const token = await new SignJWT({ userId, publicKey, privateKey, accountId })
     .setProtectedHeader({ alg: "HS256" })
     .setExpirationTime("30d")
     .sign(secret);

@@ -12,6 +12,8 @@
 export interface MemWalConfig {
     /** Ed25519 private key (hex string). This is the delegate key from app.memwal.com */
     key: string;
+    /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
+    accountId: string;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */

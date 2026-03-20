@@ -65,7 +65,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { id, message, messages, selectedChatModel, selectedVisibilityType, useMemWal, memwalKey } =
+    const { id, message, messages, selectedChatModel, selectedVisibilityType, useMemWal, memwalKey, memwalAccountId } =
       requestBody;
 
     const [botResult, session] = await Promise.all([checkBotId(), auth()]);
@@ -159,7 +159,7 @@ export async function POST(request: Request) {
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
         const result = streamText({
-          model: useMemWal !== false ? getMemWalModel(selectedChatModel, memwalKey) : getLanguageModel(selectedChatModel),
+          model: useMemWal !== false ? getMemWalModel(selectedChatModel, memwalKey, memwalAccountId) : getLanguageModel(selectedChatModel),
           system: systemPrompt({ selectedChatModel, requestHints }),
           messages: modelMessages,
           stopWhen: stepCountIs(5),

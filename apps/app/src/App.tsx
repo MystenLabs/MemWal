@@ -22,7 +22,7 @@ import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
-import walrusIcon from './pages/walrus.jpg'
+
 
 import '@mysten/dapp-kit/dist/index.css'
 
@@ -137,16 +137,6 @@ function AppContent() {
 
   return (
     <>
-      {/* Floating Docs Button - always visible */}
-      <a
-        href={config.docsUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="floating-docs-btn"
-        title="Documentation"
-      >
-        <img src={walrusIcon} alt="Docs" />
-      </a>
 
       {!currentAccount && <LandingPage />}
       {currentAccount && !delegateKey && page !== 'playground' && <SetupWizard />}

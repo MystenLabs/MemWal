@@ -28,7 +28,7 @@
  * })
  *
  * // Now use the delegate key with the SDK
- * const memwal = MemWal.create({ key: delegate.privateKey })
+ * const memwal = MemWal.create({ key: delegate.privateKey, accountId: account.accountId })
  * ```
  */
 
@@ -319,7 +319,7 @@ export async function removeDelegateKey(
  * console.log(delegate.suiAddress)  // 0x... — use in addDelegateKey
  *
  * // Use with SDK
- * const memwal = MemWal.create({ key: delegate.privateKey })
+ * const memwal = MemWal.create({ key: delegate.privateKey, accountId: "0x..." })
  * ```
  */
 export async function generateDelegateKey(): Promise<{

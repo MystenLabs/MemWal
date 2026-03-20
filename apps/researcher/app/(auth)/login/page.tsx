@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 export default function Page() {
   const router = useRouter();
   const [privateKey, setPrivateKey] = useState("");
+  const [accountId, setAccountId] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showKey, setShowKey] = useState(false);
 
@@ -18,6 +19,11 @@ export default function Page() {
     e.preventDefault();
 
     const trimmed = privateKey.trim();
+    const trimmedAccountId = accountId.trim();
+    if (!trimmedAccountId) {
+      toast({ type: "error", description: "Please enter your account ID." });
+      return;
+    }
     if (!trimmed) {
       toast({ type: "error", description: "Please enter your private key." });
       return;
@@ -29,7 +35,7 @@ export default function Page() {
       const res = await fetch("/api/auth/key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ privateKey: trimmed }),
+        body: JSON.stringify({ privateKey: trimmed, accountId: trimmedAccountId }),
       });
 
       if (!res.ok) {
@@ -78,10 +84,22 @@ export default function Page() {
         <div className="rounded-xl border bg-card p-6 shadow-sm">
           <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
             <div className="flex flex-col gap-2">
+              <Label htmlFor="accountId">Account ID</Label>
+              <Input
+                autoFocus
+                className="font-mono text-sm"
+                id="accountId"
+                onChange={(e) => setAccountId(e.target.value)}
+                placeholder="0x..."
+                required
+                value={accountId}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
               <Label htmlFor="privateKey">Private Key</Label>
               <div className="relative">
                 <Input
-                  autoFocus
                   className="pr-10 font-mono text-sm"
                   id="privateKey"
                   onChange={(e) => setPrivateKey(e.target.value)}
@@ -107,7 +125,7 @@ export default function Page() {
 
             <Button
               className="w-full"
-              disabled={isLoading || !privateKey.trim()}
+              disabled={isLoading || !privateKey.trim() || !accountId.trim()}
               size="lg"
               type="submit"
             >
