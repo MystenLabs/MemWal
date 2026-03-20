@@ -10,13 +10,15 @@ import { MemWal } from "@cmdoss/memwal";
 
 let _memwal: MemWal | null = null;
 let _runtimeKey: string | null = null;
+let _runtimeAccountId: string | null = null;
 
 /**
  * Set the MemWal key at runtime (from user input in profile panel).
  * Clears the existing client so it gets re-created with the new key.
  */
-export const setMemWalKey = (key: string | null) => {
+export const setMemWalKey = (key: string | null, accountId?: string | null) => {
   _runtimeKey = key;
+  _runtimeAccountId = accountId ?? null;
   _memwal = null; // Force re-create on next call
 };
 
@@ -32,8 +34,14 @@ export const getMemWalClient = (): MemWal => {
     throw new Error("[MemWal] No key configured — set MEMWAL_KEY in Profile or .env");
   }
 
+  const accountId = _runtimeAccountId || process.env.MEMWAL_ACCOUNT_ID;
+  if (!accountId) {
+    throw new Error("[MemWal] No accountId configured — set MEMWAL_ACCOUNT_ID in Profile or .env");
+  }
+
   _memwal = MemWal.create({
     key,
+    accountId,
     serverUrl: process.env.MEMWAL_SERVER_URL || "http://localhost:8000",
   });
 

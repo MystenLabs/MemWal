@@ -72,6 +72,8 @@ function PureMultimodalInput({
   onUseMemWalChange,
   memwalKey,
   onMemwalKeyChange,
+  memwalAccountId,
+  onMemwalAccountIdChange,
 }: {
   chatId: string;
   input: string;
@@ -91,6 +93,8 @@ function PureMultimodalInput({
   onUseMemWalChange?: (value: boolean) => void;
   memwalKey: string;
   onMemwalKeyChange?: (key: string) => void;
+  memwalAccountId: string;
+  onMemwalAccountIdChange?: (id: string) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
@@ -401,6 +405,8 @@ function PureMultimodalInput({
               onUseMemWalChange={onUseMemWalChange}
               memwalKey={memwalKey}
               onMemwalKeyChange={onMemwalKeyChange}
+              memwalAccountId={memwalAccountId}
+              onMemwalAccountIdChange={onMemwalAccountIdChange}
             />
           </PromptInputTools>
 
@@ -444,6 +450,9 @@ export const MultimodalInput = memo(
       return false;
     }
     if (prevProps.memwalKey !== nextProps.memwalKey) {
+      return false;
+    }
+    if (prevProps.memwalAccountId !== nextProps.memwalAccountId) {
       return false;
     }
 
@@ -582,14 +591,19 @@ function PureMemWalButton({
   onUseMemWalChange,
   memwalKey,
   onMemwalKeyChange,
+  memwalAccountId,
+  onMemwalAccountIdChange,
 }: {
   useMemWal: boolean;
   onUseMemWalChange?: (value: boolean) => void;
   memwalKey: string;
   onMemwalKeyChange?: (key: string) => void;
+  memwalAccountId: string;
+  onMemwalAccountIdChange?: (id: string) => void;
 }) {
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [keyInput, setKeyInput] = useState(memwalKey);
+  const [accountIdInput, setAccountIdInput] = useState(memwalAccountId);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -612,6 +626,10 @@ function PureMemWalButton({
   useEffect(() => {
     setKeyInput(memwalKey);
   }, [memwalKey]);
+
+  useEffect(() => {
+    setAccountIdInput(memwalAccountId);
+  }, [memwalAccountId]);
 
   const hasKey = !!memwalKey;
 
@@ -665,7 +683,7 @@ function PureMemWalButton({
             <KeyIcon className="size-3" />
             memwal key (ed25519 private key hex)
           </div>
-          <div className="flex gap-1.5">
+          <div className="flex gap-1.5 mb-2">
             <input
               type="password"
               value={keyInput}
@@ -675,6 +693,26 @@ function PureMemWalButton({
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   onMemwalKeyChange?.(keyInput);
+                  onMemwalAccountIdChange?.(accountIdInput);
+                  setShowKeyInput(false);
+                }
+              }}
+            />
+          </div>
+          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            account ID (MemWalAccount object ID)
+          </div>
+          <div className="flex gap-1.5">
+            <input
+              type="text"
+              value={accountIdInput}
+              onChange={(e) => setAccountIdInput(e.target.value)}
+              placeholder="0x..."
+              className="flex-1 rounded-md border border-border bg-muted px-2 py-1.5 text-xs font-mono outline-none focus:border-primary"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  onMemwalKeyChange?.(keyInput);
+                  onMemwalAccountIdChange?.(accountIdInput);
                   setShowKeyInput(false);
                 }
               }}
@@ -684,6 +722,7 @@ function PureMemWalButton({
               variant="default"
               onClick={() => {
                 onMemwalKeyChange?.(keyInput);
+                onMemwalAccountIdChange?.(accountIdInput);
                 setShowKeyInput(false);
               }}
             >
@@ -696,7 +735,9 @@ function PureMemWalButton({
               className="mt-2 text-xs text-red-400 hover:text-red-300 transition-colors"
               onClick={() => {
                 onMemwalKeyChange?.('');
+                onMemwalAccountIdChange?.('');
                 setKeyInput('');
+                setAccountIdInput('');
               }}
             >
               remove key

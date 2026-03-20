@@ -20,9 +20,11 @@ export type ResearchToolName = (typeof ALL_TOOL_NAMES)[number];
 export function getResearchTools({
   userId,
   memwalKey,
+  accountId,
 }: {
   userId: string;
   memwalKey?: string;
+  accountId?: string;
 }) {
   const tools: Record<string, any> = {
     listSources: listSourcesTool({ userId }),
@@ -32,7 +34,7 @@ export function getResearchTools({
   };
 
   if (memwalKey) {
-    tools.recallSprint = recallSprintTool({ memwalKey });
+    tools.recallSprint = recallSprintTool({ memwalKey, accountId });
   }
 
   return tools;

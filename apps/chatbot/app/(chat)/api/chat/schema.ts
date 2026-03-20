@@ -36,6 +36,7 @@ export const postRequestBodySchema = z.object({
   selectedVisibilityType: z.enum(["public", "private"]),
   useMemWal: z.boolean().optional(),
   memwalKey: z.string().optional(),
+  memwalAccountId: z.string().optional(),
 });
 
 export type PostRequestBody = z.infer<typeof postRequestBodySchema>;

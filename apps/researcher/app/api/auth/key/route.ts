@@ -32,7 +32,7 @@ function bytesToHex(bytes: Uint8Array): string {
 
 export async function POST(request: Request) {
   try {
-    const { privateKey } = await request.json();
+    const { privateKey, accountId } = await request.json();
 
     if (!privateKey || typeof privateKey !== "string" || !PRIVATE_KEY_REGEX.test(privateKey)) {
       return Response.json(
@@ -48,7 +48,7 @@ export async function POST(request: Request) {
     const existing = await getUserByPublicKey(publicKey);
     const user = existing ?? (await createUserByPublicKey(publicKey));
 
-    await createSession(user.id, publicKey, privateKey);
+    await createSession(user.id, publicKey, privateKey, accountId || '');
 
     return Response.json({ success: true });
   } catch (error) {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { tool } from "ai";
 import { recallFromMemWal } from "@/lib/sprint/memwal";
 
-export function recallSprintTool({ memwalKey }: { memwalKey: string }) {
+export function recallSprintTool({ memwalKey, accountId }: { memwalKey: string; accountId?: string }) {
   console.log(`[tool:recallSprint] Tool created with memwalKey=${memwalKey ? memwalKey.slice(0, 8) + "..." : "MISSING"}`);
 
   return tool({
@@ -25,7 +25,7 @@ export function recallSprintTool({ memwalKey }: { memwalKey: string }) {
       );
       try {
         const startTime = Date.now();
-        const results = await recallFromMemWal(memwalKey, query, limit);
+        const results = await recallFromMemWal(memwalKey, query, limit, accountId);
         const elapsed = Date.now() - startTime;
 
         console.log(

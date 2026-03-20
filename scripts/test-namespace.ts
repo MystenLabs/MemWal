@@ -29,6 +29,7 @@ async function main() {
 
     const memwal = MemWal.create({
         key: DELEGATE_KEY,
+        accountId: process.env.MEMWAL_ACCOUNT_ID || '0x_YOUR_ACCOUNT_ID',
         serverUrl: SERVER_URL,
         namespace: NAMESPACE,
     });

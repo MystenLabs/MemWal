@@ -13,12 +13,14 @@ function getMemWalClient(key: string) {
 
 export async function rememberSprintReport({
   key,
+  accountId,
   title,
   content,
   citations,
   sources,
 }: {
   key: string;
+  accountId?: string;
   title: string;
   content: string;
   citations: Citation[];
@@ -54,7 +56,8 @@ export async function rememberSprintReport({
 export async function recallFromMemWal(
   key: string,
   query: string,
-  limit: number = 5
+  limit: number = 5,
+  accountId?: string
 ) {
   const memwal = getMemWalClient(key);
   const { results } = await memwal.recall(query, limit);
