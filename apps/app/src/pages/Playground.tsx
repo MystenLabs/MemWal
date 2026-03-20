@@ -9,10 +9,10 @@ import { useState, useCallback, useMemo, type ReactNode } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
-    useSignAndExecuteTransaction,
     useSignPersonalMessage,
     useSuiClient,
 } from '@mysten/dapp-kit'
+import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { MemWal } from '@cmdoss/memwal'
 import { MemWalManual } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
@@ -120,7 +120,7 @@ export default function Playground() {
         : '...'
 
     // Wallet signing hooks (for full client-side mode)
-    const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction()
+    const { mutateAsync: signAndExecuteTransaction } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
     const suiClient = useSuiClient()
 
