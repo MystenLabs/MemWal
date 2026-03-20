@@ -6,10 +6,10 @@ import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
-    useSignAndExecuteTransaction,
     useSignPersonalMessage,
     useSuiClient,
 } from '@mysten/dapp-kit'
+import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/memwal'
 import type { WalletSigner } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
@@ -33,7 +33,7 @@ interface OnChainDelegateKey {
 export default function Dashboard() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { mutateAsync: signAndExecuteTx } = useSignAndExecuteTransaction()
+    const { mutateAsync: signAndExecuteTx } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
     const suiClient = useSuiClient()
     const { delegateKey, delegatePublicKey, accountObjectId, clearDelegateKeys } = useDelegateKey()
