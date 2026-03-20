@@ -135,6 +135,7 @@ export async function POST(request: Request) {
 
     // Resolve sprint context — pre-built during preparation and stored on chat record
     const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
+    const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
     const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
     const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;
 
@@ -165,6 +166,7 @@ export async function POST(request: Request) {
     const researchTools = getResearchTools({
       userId: session.user.id,
       memwalKey: hasRecallTool ? memwalKey : undefined,
+      accountId: hasRecallTool ? memwalAccountId : undefined,
     });
 
     const stream = createUIMessageStream({

@@ -35,6 +35,7 @@ export async function POST(request: Request) {
   }
 
   const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
+  const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   if (!memwalKey) {
     return new ChatbotError(
       "bad_request:api",
@@ -130,6 +131,7 @@ export async function POST(request: Request) {
 
         const memwalResult = await rememberSprintReport({
           key: memwalKey,
+          accountId: memwalAccountId,
           title: report.title,
           content: report.content,
           citations: report.citations,

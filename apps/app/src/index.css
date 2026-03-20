@@ -515,12 +515,46 @@ body {
   background: #101117;
 }
 
+.lp-btn-docs {
+  background: transparent;
+  color: #191a23;
+  border: 2px solid #191a23;
+}
+
+.lp-btn-docs:hover {
+  background: #191a23;
+  color: #f5f7fb;
+  transform: translateY(-1px);
+}
+
 .lp-connect-fallback {
   display: inline-flex;
 }
 
 .lp-connect-fallback button {
   text-transform: lowercase;
+}
+
+.lp-cta-row {
+  display: flex;
+  align-items: stretch;
+  gap: 20px;
+}
+
+.lp-cta-row > button.btn {
+  background: #191a23;
+  color: #f5f7fb;
+  border: 2px solid #191a23;
+  border-radius: 12px;
+  font-size: 0.94rem;
+  font-weight: 600;
+  padding: 8px 24px;
+  cursor: pointer;
+  text-transform: lowercase;
+  font-family: var(--font-sans);
+  line-height: 1.4;
+  box-sizing: border-box;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .lp-illustration {
@@ -835,6 +869,22 @@ body {
   .lp-service-card--dark h3,
   .lp-service-card--dark p {
     color: #f0f0f0;
+  }
+
+  .lp-btn-docs {
+    color: #f0f0f0;
+    border-color: #f0f0f0;
+  }
+
+  .lp-btn-docs:hover {
+    background: #f0f0f0;
+    color: #191a23;
+  }
+
+  .lp-cta-row > button.btn {
+    background: #444444;
+    color: #f0f0f0;
+    border-color: #555555;
   }
 }
 

@@ -45,17 +45,29 @@ export default function LandingPage() {
                             </p>
 
                             {hasEnokiConfig && googleWallet ? (
-                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
+                                <div className="lp-cta-row">
                                     <button
                                         className="btn lp-btn-main"
                                         onClick={() => connect({ wallet: googleWallet })}
                                     >
-                                        sign in with google
+                                        playground
+                                    </button>
+                                    <button
+                                        className="btn lp-btn-main"
+                                        onClick={() => window.open(config.docsUrl, '_blank', 'noopener,noreferrer')}
+                                    >
+                                        view docs
                                     </button>
                                 </div>
                             ) : (
-                                <div className="lp-connect-fallback">
-                                    <ConnectButton />
+                                <div className="lp-cta-row">
+                                    <ConnectButton connectText="playground" />
+                                    <button
+                                        className="btn lp-btn-main"
+                                        onClick={() => window.open(config.docsUrl, '_blank', 'noopener,noreferrer')}
+                                    >
+                                        view docs
+                                    </button>
                                 </div>
                             )}
 

@@ -46,6 +46,7 @@ export async function POST(request: Request) {
 
   const { chatId, sprintIds, visibility = "private" } = body;
   const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
+  const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   const userId = session.user.id;
 
   if (!memwalKey) {
@@ -155,7 +156,7 @@ Sprint metadata:
           for (const query of queryResult.queries) {
             try {
               console.log(`[sprint:prepare] Sprint[${i}] recall query="${query}"`);
-              const results = await recallFromMemWal(memwalKey, query, 5);
+              const results = await recallFromMemWal(memwalKey, query, 5, memwalAccountId);
               console.log(`[sprint:prepare] Sprint[${i}] recall returned ${results.length} results for "${query}"`);
 
               for (const r of results) {

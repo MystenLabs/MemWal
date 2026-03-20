@@ -201,6 +201,7 @@ export default function Dashboard() {
 
 const memwal = MemWal.create({
   key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
+  accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -217,6 +218,7 @@ import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
   key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
+  accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -275,6 +277,24 @@ const result = await generateText({
                             <div className="card-subtitle">your Ed25519 key for SDK authentication</div>
                         </div>
                     </div>
+
+                    {/* Account ID */}
+                    {accountObjectId && (
+                        <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
+                            <div className="key-label">account ID</div>
+                            <div className="key-value" style={{ fontSize: '0.78rem' }}>
+                                {accountObjectId}
+                            </div>
+                            <div className="key-actions">
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => copyToClipboard(accountObjectId, 'acct')}
+                                >
+                                    {copied === 'acct' ? 'copied!' : 'copy'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Public Key */}
                     <div className="key-display key-display--white" style={{ marginBottom: 12 }}>

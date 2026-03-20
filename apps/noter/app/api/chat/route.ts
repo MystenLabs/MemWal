@@ -28,6 +28,7 @@ function getModel(modelId: string) {
 
   return withMemWal(baseModel, {
     key: memwalKey,
+    accountId: process.env.MEMWAL_ACCOUNT_ID || "",
     serverUrl: process.env.MEMWAL_SERVER_URL || "http://localhost:8000",
     maxMemories: 5,
     autoSave: true,

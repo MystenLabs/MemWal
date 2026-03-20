@@ -15,6 +15,7 @@
  *
  * const memwal = MemWal.create({
  *     key: process.env.MEMWAL_PRIVATE_KEY,  // Ed25519 private key (hex)
+ *     accountId: process.env.MEMWAL_ACCOUNT_ID, // MemWalAccount object ID
  * })
  *
  * // Remember — server: verify → embed → encrypt → Walrus → store
@@ -63,9 +64,11 @@ export class MemWal {
     private publicKey: Uint8Array | null = null;
     private serverUrl: string;
     private namespace: string;
+    private accountId: string;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = hexToBytes(config.key);
+        this.accountId = config.accountId;
         this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
         this.namespace = config.namespace ?? "default";
     }
@@ -309,6 +312,7 @@ export class MemWal {
                 "x-signature": bytesToHex(signature),
                 "x-timestamp": timestamp,
                 "x-delegate-key": bytesToHex(this.privateKey),
+                "x-account-id": this.accountId,
             },
             body: bodyStr,
         });
