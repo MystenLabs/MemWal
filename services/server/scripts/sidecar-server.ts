@@ -118,30 +118,40 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair):
         return direct.digest;
     }
 
-    const txKindBytes = await tx.build({
-        client: suiClient as any,
-        onlyTransactionKind: true,
-    });
+    try {
+        const txKindBytes = await tx.build({
+            client: suiClient as any,
+            onlyTransactionKind: true,
+        });
 
-    const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
-        network: enokiNetwork,
-        transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
-        sender: signer.toSuiAddress(),
-    });
+        const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
+            network: enokiNetwork,
+            transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
+            sender: signer.toSuiAddress(),
+        });
 
-    const signature = await signer.signTransaction(
-        new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
-    );
+        const signature = await signer.signTransaction(
+            new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
+        );
 
-    const executed = await callEnoki<EnokiExecuteResponse>(
-        `/transaction-blocks/sponsor/${sponsored.digest}`,
-        {
-            digest: sponsored.digest,
-            signature: signature.signature,
-        }
-    );
+        const executed = await callEnoki<EnokiExecuteResponse>(
+            `/transaction-blocks/sponsor/${sponsored.digest}`,
+            {
+                digest: sponsored.digest,
+                signature: signature.signature,
+            }
+        );
 
-    return executed.digest;
+        return executed.digest;
+    } catch (err: any) {
+        // Fallback to direct signing if Enoki rejects (e.g. GasCoin usage in Walrus txs)
+        console.warn(`[enoki-sponsor] sponsor failed, falling back to direct signing: ${err.message}`);
+        const direct = await suiClient.signAndExecuteTransaction({
+            signer,
+            transaction: tx,
+        });
+        return direct.digest;
+    }
 }
 
 /**
@@ -175,6 +185,17 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
+
+// CORS — allow frontend (any origin) to call sponsor endpoints
+app.use((_req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (_req.method === "OPTIONS") {
+        return res.sendStatus(204);
+    }
+    next();
+});
 
 // Health check
 app.get("/health", (_req, res) => {
@@ -425,19 +446,17 @@ app.post("/walrus/upload", async (req, res) => {
             });
 
             // Wait until register tx is confirmed before starting upload/certify.
-            const registerDigest = await executeWithEnokiSponsor(registerTx, signer);
-            await suiClient.waitForTransaction({
-                digest: registerDigest,
-            });
+            // NOTE: Walrus register uses GasCoin internally — always direct sign (no Enoki sponsor)
+            const registerResult = await suiClient.signAndExecuteTransaction({ signer, transaction: registerTx });
+            await suiClient.waitForTransaction({ digest: registerResult.digest });
 
-            await flow.upload({ digest: registerDigest });
+            await flow.upload({ digest: registerResult.digest });
 
             const certifyTx = flow.certify();
             // Wait until certify tx is confirmed before returning this upload.
-            const certifyDigest = await executeWithEnokiSponsor(certifyTx, signer);
-            await suiClient.waitForTransaction({
-                digest: certifyDigest,
-            });
+            // NOTE: Walrus certify uses unlisted system methods — always direct sign
+            const certifyResult = await suiClient.signAndExecuteTransaction({ signer, transaction: certifyTx });
+            await suiClient.waitForTransaction({ digest: certifyResult.digest });
 
             return flow.getBlob();
         });
@@ -498,8 +517,9 @@ app.post("/walrus/upload", async (req, res) => {
                 // Transfer blob to user
                 metaTx.transferObjects([blobArg], owner);
 
-                const metaDigest = await executeWithEnokiSponsor(metaTx, signer);
-                await suiClient.waitForTransaction({ digest: metaDigest });
+                // NOTE: Transfer to user address can't be Enoki-sponsored — always direct sign
+                const metaResult = await suiClient.signAndExecuteTransaction({ signer, transaction: metaTx });
+                await suiClient.waitForTransaction({ digest: metaResult.digest });
                 console.error(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
             } catch (metaErr: any) {
                 // Non-fatal: blob is uploaded but metadata/transfer failed
