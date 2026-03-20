@@ -24,7 +24,7 @@
         "@ai-sdk/openai": "^3.0.41",
         "@ai-sdk/provider": "^3.0.3",
         "@ai-sdk/react": "3.0.39",
-        "@cmdoss/memwal": "2.0.0-alpha.2",
+        "@cmdoss/memwal": "2.0.0-alpha.5",
         "@codemirror/lang-javascript": "^6.2.2",
         "@codemirror/lang-python": "^6.1.6",
         "@codemirror/state": "^6.5.0",
