@@ -10,7 +10,7 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/memwal'
+import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/memwal/account'
 import type { WalletSigner } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
