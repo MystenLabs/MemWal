@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { createAccount, addDelegateKey, generateDelegateKey } from "@cmdoss/memwal"
+ * import { createAccount, addDelegateKey, generateDelegateKey } from "@cmdoss/memwal/account"
  *
  * // Generate a delegate keypair
  * const delegate = await generateDelegateKey()

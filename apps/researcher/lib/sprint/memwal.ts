@@ -4,9 +4,10 @@ import { MemWal } from "@cmdoss/memwal";
 import type { RememberResult } from "@cmdoss/memwal";
 import type { Citation, SourceMeta } from "./types";
 
-function getMemWalClient(key: string) {
+function getMemWalClient(key: string, accountId?: string) {
   return MemWal.create({
     key,
+    accountId: accountId || process.env.MEMWAL_ACCOUNT_ID!,
     serverUrl: process.env.MEMWAL_SERVER_URL,
   });
 }
@@ -26,7 +27,7 @@ export async function rememberSprintReport({
   citations: Citation[];
   sources: SourceMeta[];
 }): Promise<RememberResult> {
-  const memwal = getMemWalClient(key);
+  const memwal = getMemWalClient(key, accountId);
 
   const references = citations
     .map(
@@ -59,7 +60,7 @@ export async function recallFromMemWal(
   limit: number = 5,
   accountId?: string
 ) {
-  const memwal = getMemWalClient(key);
+  const memwal = getMemWalClient(key, accountId);
   const { results } = await memwal.recall(query, limit);
   return results.map((r) => ({
     text: r.text,
