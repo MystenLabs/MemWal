@@ -199,3 +199,74 @@ export interface RecallManualResult {
     results: (RecallManualHit | RecallManualMemory)[];
     total: number;
 }
+
+// ============================================================
+// Account Management Types
+// ============================================================
+
+/** Base options for on-chain account transactions */
+interface AccountTxOpts {
+    /** MemWal contract package ID on Sui */
+    packageId: string;
+    /**
+     * Sui private key (bech32 suiprivkey1...) for signing.
+     * Provide EITHER this OR `walletSigner` — not both.
+     */
+    suiPrivateKey?: string;
+    /**
+     * Connected wallet signer (e.g. from dapp-kit).
+     * Provide EITHER this OR `suiPrivateKey` — not both.
+     */
+    walletSigner?: WalletSigner;
+    /**
+     * Pre-configured Sui client instance.
+     * If omitted, the SDK will create one internally.
+     */
+    suiClient?: any;
+    /** Sui network (default: mainnet) */
+    suiNetwork?: "testnet" | "mainnet";
+}
+
+/** Options for createAccount() */
+export interface CreateAccountOpts extends AccountTxOpts {
+    /** AccountRegistry shared object ID */
+    registryId: string;
+}
+
+/** Result from createAccount() */
+export interface CreateAccountResult {
+    /** Created MemWalAccount object ID */
+    accountId: string;
+    /** Owner Sui address */
+    owner: string;
+    /** Transaction digest */
+    digest: string;
+}
+
+/** Options for addDelegateKey() */
+export interface AddDelegateKeyOpts extends AccountTxOpts {
+    /** MemWalAccount object ID */
+    accountId: string;
+    /** Ed25519 public key (32 bytes Uint8Array or hex string) */
+    publicKey: Uint8Array | string;
+    /** Human-readable label (e.g. "MacBook Pro", "Production Server") */
+    label: string;
+}
+
+/** Result from addDelegateKey() */
+export interface AddDelegateKeyResult {
+    /** Transaction digest */
+    digest: string;
+    /** Public key hex */
+    publicKey: string;
+    /** Derived Sui address for this delegate key */
+    suiAddress: string;
+}
+
+/** Options for removeDelegateKey() */
+export interface RemoveDelegateKeyOpts extends AccountTxOpts {
+    /** MemWalAccount object ID */
+    accountId: string;
+    /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
+    publicKey: Uint8Array | string;
+}

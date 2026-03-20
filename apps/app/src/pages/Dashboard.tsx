@@ -1,23 +1,68 @@
 /**
- * Dashboard — Account info, delegate keys, SDK integration guide
+ * Dashboard — Account info, delegate keys management, SDK integration guide
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
+    useSignAndExecuteTransaction,
+    useSignPersonalMessage,
+    useSuiClient,
 } from '@mysten/dapp-kit'
+import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/memwal'
+import type { WalletSigner } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+
+// ============================================================
+// Types
+// ============================================================
+
+interface OnChainDelegateKey {
+    publicKey: string
+    suiAddress: string
+    label: string
+    createdAt: number
+}
+
+// ============================================================
+// Dashboard Component
+// ============================================================
 
 export default function Dashboard() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { delegateKey, delegatePublicKey, clearDelegateKeys } = useDelegateKey()
+    const { mutateAsync: signAndExecuteTx } = useSignAndExecuteTransaction()
+    const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
+    const suiClient = useSuiClient()
+    const { delegateKey, delegatePublicKey, accountObjectId, clearDelegateKeys } = useDelegateKey()
 
     const address = currentAccount?.address || ''
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
+
+    // Delegate key management state
+    const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
+    const [loadingKeys, setLoadingKeys] = useState(false)
+    const [addingKey, setAddingKey] = useState(false)
+    const [removingKey, setRemovingKey] = useState<string | null>(null)
+    const [showAddForm, setShowAddForm] = useState(false)
+    const [newKeyLabel, setNewKeyLabel] = useState('New Key')
+    const [keyError, setKeyError] = useState('')
+    const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
+
+    // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
+    const walletSigner = useMemo<WalletSigner | null>(() => {
+        if (!currentAccount) return null
+        return {
+            address: currentAccount.address,
+            signAndExecuteTransaction: ({ transaction }) =>
+                signAndExecuteTx({ transaction }),
+            signPersonalMessage: ({ message }) =>
+                signPersonalMsg({ message }),
+        }
+    }, [currentAccount, signAndExecuteTx, signPersonalMsg])
 
     const copyToClipboard = useCallback(async (text: string, label: string) => {
         await navigator.clipboard.writeText(text)
@@ -29,6 +74,128 @@ export default function Dashboard() {
         clearDelegateKeys()
         await disconnect()
     }, [clearDelegateKeys, disconnect])
+
+    // ============================================================
+    // Fetch on-chain delegate keys
+    // ============================================================
+
+    const fetchOnChainKeys = useCallback(async () => {
+        if (!accountObjectId) return
+        setLoadingKeys(true)
+        try {
+            const obj = await suiClient.getObject({
+                id: accountObjectId,
+                options: { showContent: true },
+            })
+            if (obj?.data?.content && 'fields' in obj.data.content) {
+                const fields = obj.data.content.fields as any
+                const keys = fields?.delegate_keys ?? []
+                const parsed: OnChainDelegateKey[] = keys.map((k: any) => {
+                    const f = k.fields ?? k
+                    const pkBytes: number[] = f.public_key ?? []
+                    const pkHex = pkBytes.map((b: number) => b.toString(16).padStart(2, '0')).join('')
+                    return {
+                        publicKey: pkHex,
+                        suiAddress: f.sui_address ?? '',
+                        label: f.label ?? '',
+                        createdAt: Number(f.created_at ?? 0),
+                    }
+                })
+                setOnChainKeys(parsed)
+            }
+        } catch (err) {
+            console.error('Failed to fetch on-chain keys:', err)
+        } finally {
+            setLoadingKeys(false)
+        }
+    }, [accountObjectId, suiClient])
+
+    useEffect(() => {
+        fetchOnChainKeys()
+    }, [fetchOnChainKeys])
+
+    // ============================================================
+    // Generate + add a new delegate key (via SDK)
+    // ============================================================
+
+    const handleAddKey = useCallback(async () => {
+        if (!walletSigner) return
+        setAddingKey(true)
+        setKeyError('')
+        setNewPrivateKey(null)
+        try {
+            // Generate keypair via SDK
+            const delegate = await generateDelegateKey()
+
+            // Register on-chain via SDK
+            await addDelegateKey({
+                packageId: config.memwalPackageId,
+                accountId: accountObjectId!,
+                publicKey: delegate.publicKey,
+                label: newKeyLabel || 'New Key',
+                walletSigner,
+                suiClient,
+                suiNetwork: config.suiNetwork,
+            })
+
+            setNewPrivateKey(delegate.privateKey)
+            setShowAddForm(false)
+            setNewKeyLabel('New Key')
+
+            // Copy private key to clipboard automatically
+            await navigator.clipboard.writeText(delegate.privateKey)
+
+            // Refresh key list
+            await fetchOnChainKeys()
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'failed to add key'
+            setKeyError(msg)
+        } finally {
+            setAddingKey(false)
+        }
+    }, [walletSigner, accountObjectId, newKeyLabel, suiClient, fetchOnChainKeys])
+
+    // ============================================================
+    // Remove a delegate key (via SDK)
+    // ============================================================
+
+    const handleRemoveKey = useCallback(async (publicKeyHex: string) => {
+        if (!walletSigner) return
+        if (!confirm('remove this delegate key? this cannot be undone.')) return
+        setRemovingKey(publicKeyHex)
+        setKeyError('')
+        setNewPrivateKey(null)
+        try {
+            await removeDelegateKey({
+                packageId: config.memwalPackageId,
+                accountId: accountObjectId!,
+                publicKey: publicKeyHex,
+                walletSigner,
+                suiClient,
+                suiNetwork: config.suiNetwork,
+            })
+
+            // key removed successfully
+
+            // If we removed our own key, clear local state
+            if (publicKeyHex === delegatePublicKey) {
+                clearDelegateKeys()
+            }
+
+            // Refresh key list
+            await fetchOnChainKeys()
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'failed to remove key'
+            setKeyError(msg)
+        } finally {
+
+            setRemovingKey(null)
+        }
+    }, [walletSigner, accountObjectId, delegatePublicKey, suiClient, fetchOnChainKeys, clearDelegateKeys])
+
+    // ============================================================
+    // SDK code snippets
+    // ============================================================
 
     const sdkSnippet = `import { MemWal } from "@cmdoss/memwal"
 
@@ -100,11 +267,11 @@ const result = await generateText({
                 </a>
 
 
-                {/* Delegate Key */}
+                {/* Current Delegate Key */}
                 <div className="card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
-                            <div className="card-title">delegate key</div>
+                            <div className="card-title">your delegate key</div>
                             <div className="card-subtitle">your Ed25519 key for SDK authentication</div>
                         </div>
                     </div>
@@ -156,6 +323,180 @@ const result = await generateText({
                             </>
                         )}
                     </div>
+                </div>
+
+                {/* On-Chain Delegate Keys Management */}
+                <div className="card" style={{ marginBottom: 24 }}>
+                    <div className="card-header">
+                        <div>
+                            <div className="card-title">delegate keys (on-chain)</div>
+                            <div className="card-subtitle">
+                                all Ed25519 keys registered on your MemWalAccount
+                            </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={fetchOnChainKeys}
+                                disabled={loadingKeys}
+                            >
+                                {loadingKeys ? '...' : 'refresh'}
+                            </button>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => setShowAddForm(true)}
+                                disabled={showAddForm || addingKey}
+                            >
+                                + add key
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Status messages */}
+                    {keyError && (
+                        <div style={{
+                            background: 'rgba(248,113,113,0.08)',
+                            border: '1px solid rgba(248,113,113,0.2)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: '10px 14px',
+                            marginBottom: 12,
+                            color: 'var(--danger)',
+                            fontSize: '0.82rem',
+                        }}>
+                            {keyError}
+                        </div>
+                    )}
+                    {newPrivateKey && (
+                        <div style={{ marginBottom: 12 }}>
+                            <div className="warning-box" style={{ marginBottom: 12 }}>
+                                <p>
+                                    <strong>save this private key now!</strong> it has been copied to your clipboard.
+                                    store it securely — it cannot be recovered.
+                                </p>
+                            </div>
+                            <div className="key-display key-display--white">
+                                <div className="key-label">new private key (keep secret)</div>
+                                <div className="key-value">{newPrivateKey}</div>
+                                <div className="key-actions">
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => copyToClipboard(newPrivateKey, 'new-priv')}
+                                    >
+                                        {copied === 'new-priv' ? 'copied!' : 'copy'}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => setNewPrivateKey(null)}
+                                    >
+                                        done
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Add Key Form */}
+                    {showAddForm && (
+                        <div style={{
+                            background: 'rgba(255,255,255,0.03)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: 16,
+                            marginBottom: 12,
+                        }}>
+                            <div style={{ marginBottom: 12 }}>
+                                <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                                    key label
+                                </label>
+                                <input
+                                    type="text"
+                                    value={newKeyLabel}
+                                    onChange={(e) => setNewKeyLabel(e.target.value)}
+                                    placeholder="e.g. MacBook Pro, Production Server"
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        background: 'var(--bg-secondary)',
+                                        border: '1px solid var(--border)',
+                                        borderRadius: 'var(--radius-sm)',
+                                        color: 'var(--text-primary)',
+                                        fontSize: '0.85rem',
+                                        outline: 'none',
+                                    }}
+                                />
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => { setShowAddForm(false); setKeyError('') }}
+                                    disabled={addingKey}
+                                >
+                                    cancel
+                                </button>
+                                <button
+                                    className="btn btn-primary btn-sm"
+                                    onClick={handleAddKey}
+                                    disabled={addingKey}
+                                >
+                                    {addingKey ? 'generating & registering...' : 'generate & register on-chain'}
+                                </button>
+                            </div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+                                a new Ed25519 keypair will be generated. the private key will be copied to your clipboard.
+                                save it securely — it cannot be recovered.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Key List */}
+                    {loadingKeys ? (
+                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            loading keys...
+                        </div>
+                    ) : onChainKeys.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            no delegate keys found on-chain
+                        </div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {onChainKeys.map((k) => {
+                                const isCurrentKey = k.publicKey === delegatePublicKey
+                                const isRemoving = removingKey === k.publicKey
+                                return (
+                                    <div
+                                        key={k.publicKey}
+                                        className="key-display key-display--white"
+                                    >
+                                        <div className="key-label">
+                                            {k.label || 'Untitled'}
+                                            {isCurrentKey && ' · current'}
+                                            <span style={{ fontWeight: 400, marginLeft: 8 }}>
+                                                {new Date(k.createdAt).toLocaleDateString()}
+                                            </span>
+                                        </div>
+                                        <div className="key-value">
+                                            {k.publicKey}
+                                        </div>
+                                        <div className="key-actions">
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => copyToClipboard(k.publicKey, `pk-${k.publicKey.slice(0,8)}`)}
+                                            >
+                                                {copied === `pk-${k.publicKey.slice(0,8)}` ? 'copied!' : 'copy public key'}
+                                            </button>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => handleRemoveKey(k.publicKey)}
+                                                disabled={isRemoving}
+                                            >
+                                                {isRemoving ? '...' : 'remove'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    )}
                 </div>
 
                 {/* Quick Start: SDK */}
