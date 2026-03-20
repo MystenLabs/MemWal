@@ -1,4 +1,6 @@
 use axum::{extract::State, Extension, Json};
+use axum::body::Body;
+use axum::response::Response;
 use base64::Engine as _;
 use std::sync::Arc;
 
@@ -948,4 +950,60 @@ pub async fn restore(
         namespace: namespace.clone(),
         owner: owner.clone(),
     }))
+}
+
+// ============================================================
+// Enoki Sponsor Proxy — forwards FE requests to internal sidecar
+// ============================================================
+
+/// POST /sponsor — proxy to sidecar POST /sponsor
+pub async fn sponsor_proxy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Response<Body>, AppError> {
+    let url = format!("{}/sponsor", state.config.sidecar_url);
+    let resp = state.http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
+
+    let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let resp_body = resp.bytes().await
+        .map_err(|e| AppError::Internal(format!("Sponsor proxy read failed: {}", e)))?;
+
+    Ok(Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Body::from(resp_body))
+        .unwrap())
+}
+
+/// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
+pub async fn sponsor_execute_proxy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Response<Body>, AppError> {
+    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
+    let resp = state.http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;
+
+    let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let resp_body = resp.bytes().await
+        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+
+    Ok(Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Body::from(resp_body))
+        .unwrap())
 }

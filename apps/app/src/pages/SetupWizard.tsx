@@ -12,10 +12,10 @@ import { useState, useCallback } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
-    useSignAndExecuteTransaction,
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
+import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 
@@ -24,7 +24,7 @@ type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done'
 export default function SetupWizard() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+    const { mutateAsync: signAndExecute } = useSponsoredTransaction()
     const suiClient = useSuiClient()
     const { setDelegateKeys } = useDelegateKey()
 

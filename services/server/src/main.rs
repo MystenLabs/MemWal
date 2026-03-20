@@ -125,7 +125,9 @@ async fn main() {
 
     // Public routes
     let public_routes = Router::new()
-        .route("/health", get(routes::health));
+        .route("/health", get(routes::health))
+        .route("/sponsor", post(routes::sponsor_proxy))
+        .route("/sponsor/execute", post(routes::sponsor_execute_proxy));
 
     let app = Router::new()
         .merge(protected_routes)
