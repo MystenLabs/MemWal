@@ -1,35 +1,30 @@
 # ============================================================
 # MemWal Docs — Dockerfile
-# VitePress static site — build + serve
-# Build context: repo root (Railway Root Directory = /)
+# Mintlify docs site — install + serve
+# Build context: repo root
 # ============================================================
 
-FROM node:22-alpine AS builder
+FROM node:22-alpine
 
 RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
 
 WORKDIR /app
 
-# Copy workspace root + docs
+# Copy only the docs workspace inputs first for better layer caching
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY docs/package.json ./docs/package.json
+
+# Install workspace dependencies, including Mintlify
+RUN pnpm install --frozen-lockfile
+
+# Copy the full docs site after dependencies are in place
 COPY docs/ ./docs/
 
-# Install deps (only what docs needs)
-RUN pnpm install
+WORKDIR /app/docs
 
-# Build VitePress docs
-RUN pnpm build:docs
-
-# ── Stage 2: Serve static files ─────────────────────────────
-FROM node:22-alpine AS runtime
-
-RUN npm install -g serve
-
-WORKDIR /app
-
-COPY --from=builder /app/docs/dist ./dist
-
+ENV HOST=0.0.0.0
 ENV PORT=3000
+
 EXPOSE 3000
 
-CMD ["serve", "-s", "-l", "3000", "dist"]
+CMD ["pnpm", "exec", "mintlify", "dev", "--host", "0.0.0.0", "--port", "3000"]
