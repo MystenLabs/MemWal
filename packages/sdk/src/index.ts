@@ -11,6 +11,9 @@
 // Core client (server-mode: server handles SEAL + Walrus + embedding)
 export { MemWal } from "./memwal.js";
 
+// Account management (on-chain: create account, add/remove delegate keys)
+export { createAccount, addDelegateKey, removeDelegateKey, generateDelegateKey } from "./account.js";
+
 // Delegate key utilities
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 
@@ -25,5 +28,11 @@ export type {
     AnalyzedFact,
     HealthResult,
     RestoreResult,
+    // Account management types
+    CreateAccountOpts,
+    CreateAccountResult,
+    AddDelegateKeyOpts,
+    AddDelegateKeyResult,
+    RemoveDelegateKeyOpts,
 } from "./types.js";
 
