@@ -1,6 +1,6 @@
 {
     "name": "@cmdoss/memwal",
-    "version": "2.0.0-alpha.2",
+    "version": "2.0.0-alpha.5",
     "description": "MemWal — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "main": "./dist/index.js",
@@ -9,6 +9,10 @@
         ".": {
             "import": "./dist/index.js",
             "types": "./dist/index.d.ts"
+        },
+        "./account": {
+            "import": "./dist/account-entry.js",
+            "types": "./dist/account-entry.d.ts"
         },
         "./manual": {
             "import": "./dist/manual-entry.js",
