@@ -92,9 +92,16 @@ export function Chat({
     }
     return '';
   });
+  const [memwalAccountId, setMemwalAccountId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('memwalAccountId') || '';
+    }
+    return '';
+  });
   const currentModelIdRef = useRef(currentModelId);
   const useMemWalRef = useRef(useMemWal);
   const memwalKeyRef = useRef(memwalKey);
+  const memwalAccountIdRef = useRef(memwalAccountId);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
@@ -113,6 +120,15 @@ export function Chat({
       localStorage.removeItem('memwalKey');
     }
   }, [memwalKey]);
+
+  useEffect(() => {
+    memwalAccountIdRef.current = memwalAccountId;
+    if (memwalAccountId) {
+      localStorage.setItem('memwalAccountId', memwalAccountId);
+    } else {
+      localStorage.removeItem('memwalAccountId');
+    }
+  }, [memwalAccountId]);
 
   const {
     messages,
@@ -165,6 +181,7 @@ export function Chat({
             selectedVisibilityType: visibilityType,
             useMemWal: useMemWalRef.current,
             memwalKey: memwalKeyRef.current || undefined,
+            memwalAccountId: memwalAccountIdRef.current || undefined,
             ...request.body,
           },
         };
@@ -271,6 +288,8 @@ export function Chat({
               onUseMemWalChange={setUseMemWal}
               memwalKey={memwalKey}
               onMemwalKeyChange={setMemwalKey}
+              memwalAccountId={memwalAccountId}
+              onMemwalAccountIdChange={setMemwalAccountId}
             />
           )}
         </div>

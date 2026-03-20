@@ -131,13 +131,14 @@ export default function Playground() {
     const [namespace, setNamespace] = useState('default')
 
     const memwal = useMemo(() => {
-        if (!delegateKey) return null
+        if (!delegateKey || !accountObjectId) return null
         return MemWal.create({
             key: delegateKey,
+            accountId: accountObjectId,
             serverUrl,
             namespace: namespace || undefined,
         })
-    }, [delegateKey, serverUrl, namespace])
+    }, [delegateKey, accountObjectId, serverUrl, namespace])
 
     // Step states
 
@@ -487,6 +488,7 @@ export default function Playground() {
 
 const memwal = MemWal.create({
   key: "${keyPreview}",
+  accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${serverUrl}",
   namespace: "${namespace || 'default'}",
 })
@@ -699,6 +701,7 @@ import { generateText } from "ai"
 // wrap your model with memwal — that's it
 const model = withMemWal(openai("gpt-4o-mini"), {
   key: delegateKeyHex,
+  accountId: "0x...",
   serverUrl: "${serverUrl}"
 })
 

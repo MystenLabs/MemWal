@@ -3,6 +3,7 @@ import { MemWal } from "../packages/sdk/src/memwal.js";
 async function main() {
     const m = MemWal.create({
         key: '4b382d411833a58ed4ab2171472c8d17605f9d5f3530fdc57c44ce3f12d7e4db',
+        accountId: process.env.MEMWAL_ACCOUNT_ID || '0x_YOUR_ACCOUNT_ID',
         serverUrl: 'http://localhost:8000',
     });
 
