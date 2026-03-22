@@ -1,16 +1,15 @@
 /**
- * Config parsing, validation, and per-agent key resolution.
+ * Config parsing, validation, and namespace resolution.
  */
 
-import type { PluginConfig, AgentKeyConfig } from "./types.js";
+import type { PluginConfig } from "./types.js";
 
 // ============================================================================
 // Defaults
 // ============================================================================
 
-const DEFAULTS: Omit<PluginConfig, "privateKey" | "accountId" | "serverUrl"> = {
-  agentKeys: {},
-  mock: false,
+const DEFAULTS = {
+  defaultNamespace: "default",
   autoRecall: true,
   autoCapture: true,
   maxRecallResults: 5,
@@ -40,46 +39,25 @@ export function parseConfig(raw: unknown): PluginConfig {
   }
   const cfg = raw as Record<string, unknown>;
 
-  // Mock mode — relax requirements
-  const mock = cfg.mock === true;
-
-  // Required fields (relaxed in mock mode)
   const privateKey = typeof cfg.privateKey === "string" && cfg.privateKey
     ? resolveEnvVar(cfg.privateKey)
-    : mock
-      ? "mock-default-key"
-      : (() => { throw new Error("memory-memwal: privateKey is required"); })();
+    : (() => { throw new Error("memory-memwal: privateKey is required"); })();
 
   const accountId = typeof cfg.accountId === "string" && cfg.accountId
     ? resolveEnvVar(cfg.accountId)
-    : mock
-      ? "mock-account-id"
-      : (() => { throw new Error("memory-memwal: accountId is required"); })();
+    : (() => { throw new Error("memory-memwal: accountId is required"); })();
 
   const serverUrl = typeof cfg.serverUrl === "string" && cfg.serverUrl
     ? resolveEnvVar(cfg.serverUrl)
-    : mock
-      ? "http://mock"
-      : (() => { throw new Error("memory-memwal: serverUrl is required"); })();
-
-  // Resolve env vars in agent keys (each entry has key + accountId)
-  const rawAgentKeys = (cfg.agentKeys ?? {}) as Record<string, any>;
-  const agentKeys: Record<string, AgentKeyConfig> = {};
-  for (const [name, val] of Object.entries(rawAgentKeys)) {
-    if (val && typeof val === "object" && typeof val.key === "string" && typeof val.accountId === "string") {
-      agentKeys[name] = {
-        key: mock ? val.key : resolveEnvVar(val.key),
-        accountId: mock ? val.accountId : resolveEnvVar(val.accountId),
-      };
-    }
-  }
+    : (() => { throw new Error("memory-memwal: serverUrl is required"); })();
 
   return {
     privateKey,
     accountId,
     serverUrl,
-    agentKeys,
-    mock,
+    defaultNamespace: typeof cfg.defaultNamespace === "string"
+      ? cfg.defaultNamespace
+      : DEFAULTS.defaultNamespace,
     autoRecall: typeof cfg.autoRecall === "boolean" ? cfg.autoRecall : DEFAULTS.autoRecall,
     autoCapture: typeof cfg.autoCapture === "boolean" ? cfg.autoCapture : DEFAULTS.autoCapture,
     maxRecallResults: typeof cfg.maxRecallResults === "number"
@@ -95,34 +73,24 @@ export function parseConfig(raw: unknown): PluginConfig {
 }
 
 // ============================================================================
-// Key Resolution
+// Namespace Resolution
 // ============================================================================
 
-export interface ResolvedKey {
-  key: string;
-  accountId: string;
-}
-
 /**
- * Resolve which Ed25519 key + accountId to use based on the current agent.
+ * Resolve namespace from OpenClaw's sessionKey.
  *
- * Parses agent name from OpenClaw's sessionKey format: "agent:<name>:<uuid>"
- * Looks up in agentKeys map, falls back to default privateKey + accountId.
- *
- * Isolation depends on HOW keys were generated:
- * - Keys from same MemWalAccount → shared memory (same owner on server)
- * - Keys from different MemWalAccounts → isolated memory (different owners)
+ * Parses agent name from format "agent:<name>:<uuid>".
+ * Each agent gets its own namespace for memory isolation.
+ * Falls back to defaultNamespace for main agent or unknown sessions.
  */
-export function resolveKey(config: PluginConfig, sessionKey?: string): ResolvedKey {
-  if (!sessionKey) return { key: config.privateKey, accountId: config.accountId };
+export function resolveNamespace(defaultNamespace: string, sessionKey?: string): string {
+  if (!sessionKey) return defaultNamespace;
 
   const match = sessionKey.match(/^agent:([^:]+):/);
   const agentName = match?.[1];
 
-  if (!agentName || agentName === "main") return { key: config.privateKey, accountId: config.accountId };
-  if (config.agentKeys[agentName]) return config.agentKeys[agentName];
-
-  return { key: config.privateKey, accountId: config.accountId };
+  if (!agentName || agentName === "main") return defaultNamespace;
+  return agentName;
 }
 
 /**
@@ -138,6 +106,5 @@ export function resolveAgentName(sessionKey?: string): string {
  * Format key for safe logging (first 4 + last 4 chars).
  */
 export function keyPreview(key: string): string {
-  if (key.startsWith("mock")) return "mock";
   return key.length > 8 ? `${key.slice(0, 4)}...${key.slice(-4)}` : "****";
 }
