@@ -2,30 +2,25 @@
  * OpenClaw Memory Plugin — MemWal
  *
  * Encrypted, decentralized long-term memory via MemWal + Walrus.
- * Supports mock mode for demo/testing without a real server.
  *
  * Components:
  *   hooks.ts   — before_prompt_build (auto-recall), agent_end (auto-capture)
  *   tools.ts   — memory_search, memory_store
- *   cli.ts     — openclaw memwal search/stats/keys/list
- *   client.ts  — MemWal SDK client factory (mock or real)
- *   config.ts  — Config parsing, validation, per-agent key resolution
+ *   cli.ts     — openclaw memwal search/stats/list
+ *   config.ts  — Config parsing, namespace resolution
  *   format.ts  — Memory formatting, tag injection/stripping, prompt safety
- *   mock.ts    — In-memory mock client for demo/testing
  *   types.ts   — Shared TypeScript types
  *
- * Per-agent isolation:
- *   Each agent can have its own Ed25519 key via agentKeys config.
- *   Keys from different MemWalAccounts = cryptographic memory isolation.
- *   Default privateKey used for agents without a specific key.
+ * Per-agent isolation via namespaces:
+ *   Each OpenClaw agent gets its own namespace derived from ctx.sessionKey.
+ *   Same key, same account — isolation scoped at the server level.
  */
 
-import { parseConfig } from "./config.js";
-import { createClient } from "./client.js";
+import { MemWal } from "@cmdoss/memwal";
+import { parseConfig, keyPreview } from "./config.js";
 import { registerHooks } from "./hooks.js";
 import { registerTools } from "./tools.js";
 import { registerCli } from "./cli.js";
-import type { PluginConfig } from "./types.js";
 
 export default {
   id: "memory-memwal",
@@ -35,35 +30,31 @@ export default {
 
   register(api: any) {
     const config = parseConfig(api.pluginConfig);
-    const mode = config.mock ? "MOCK" : "live";
-    const agentList = Object.keys(config.agentKeys);
+
+    const client = MemWal.create({
+      key: config.privateKey,
+      accountId: config.accountId,
+      serverUrl: config.serverUrl,
+    });
 
     api.logger.info(
-      `memory-memwal: registered (${mode}, server: ${config.serverUrl}, ` +
-      `agents: [${agentList.join(", ") || "default only"}])`,
+      `memory-memwal: registered (server: ${config.serverUrl}, ` +
+      `key: ${keyPreview(config.privateKey)}, ` +
+      `namespace: ${config.defaultNamespace})`,
     );
 
-    if (config.mock) {
-      api.logger.warn(
-        "memory-memwal: MOCK MODE — memories stored in-memory, will be lost on restart. " +
-        "Set mock: false and configure a real server for production.",
-      );
-    }
-
-    // Register all components
-    registerHooks(api, config);
-    registerTools(api, config);
-    registerCli(api, config);
+    registerHooks(api, client, config);
+    registerTools(api, client, config);
+    registerCli(api, client, config);
 
     // Health check service
     api.registerService({
       id: "memory-memwal",
       async start() {
         try {
-          const client = await createClient(config.privateKey, config.accountId, config);
           const health = await client.health();
           api.logger.info(
-            `memory-memwal: connected (${mode}, status: ${health.status}, version: ${health.version})`,
+            `memory-memwal: connected (status: ${health.status}, version: ${health.version})`,
           );
         } catch (err) {
           api.logger.warn(

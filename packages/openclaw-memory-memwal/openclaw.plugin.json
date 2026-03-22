@@ -9,31 +9,19 @@
     "properties": {
       "privateKey": {
         "type": "string",
-        "description": "Default Ed25519 private key (hex). Supports ${ENV_VAR}."
+        "description": "Ed25519 private key (hex). Supports ${ENV_VAR}."
       },
       "accountId": {
         "type": "string",
-        "description": "Default MemWalAccount object ID on Sui (0x...)"
+        "description": "MemWalAccount object ID on Sui (0x...)"
       },
       "serverUrl": {
         "type": "string",
         "description": "MemWal server URL"
       },
-      "agentKeys": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "object",
-          "properties": {
-            "key": { "type": "string" },
-            "accountId": { "type": "string" }
-          },
-          "required": ["key", "accountId"]
-        },
-        "description": "Per-agent key+account mapping. Keys from different MemWalAccounts = isolated memory."
-      },
-      "mock": {
-        "type": "boolean",
-        "description": "Enable mock mode (in-memory storage, no real server)"
+      "defaultNamespace": {
+        "type": "string",
+        "description": "Default namespace for memory scoping (default: 'default')"
       },
       "autoRecall": {
         "type": "boolean",
@@ -62,14 +50,14 @@
         "description": "Recent messages window for auto-capture"
       }
     },
-    "required": []
+    "required": ["privateKey", "accountId", "serverUrl"]
   },
   "uiHints": {
     "privateKey": {
       "label": "Ed25519 Private Key",
       "sensitive": true,
       "placeholder": "64-character hex string or ${ENV_VAR}",
-      "help": "Default key for all agents. Supports ${ENV_VAR} syntax."
+      "help": "Get from app.memwal.com. Supports ${ENV_VAR} syntax."
     },
     "accountId": {
       "label": "MemWalAccount ID",
@@ -78,15 +66,12 @@
     },
     "serverUrl": {
       "label": "MemWal Server URL",
-      "placeholder": "https://memwal.example.com"
+      "placeholder": "https://staging-api-dev.up.railway.app"
     },
-    "mock": {
-      "label": "Mock Mode",
-      "help": "Use in-memory storage instead of real MemWal server. For demo/testing."
-    },
-    "agentKeys": {
-      "label": "Per-Agent Keys",
-      "help": "Map agent names to Ed25519 keys for memory isolation.",
+    "defaultNamespace": {
+      "label": "Default Namespace",
+      "placeholder": "default",
+      "help": "Memory scope for the main agent. Other agents auto-scope by name.",
       "advanced": true
     },
     "autoRecall": {
