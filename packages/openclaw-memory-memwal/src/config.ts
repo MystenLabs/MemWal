@@ -73,33 +73,29 @@ export function parseConfig(raw: unknown): PluginConfig {
 }
 
 // ============================================================================
-// Namespace Resolution
+// Agent + Namespace Resolution
 // ============================================================================
 
+export interface ResolvedAgent {
+  namespace: string;
+  agentName: string;
+}
+
 /**
- * Resolve namespace from OpenClaw's sessionKey.
+ * Resolve agent name and namespace from OpenClaw's sessionKey.
  *
  * Parses agent name from format "agent:<name>:<uuid>".
  * Each agent gets its own namespace for memory isolation.
  * Falls back to defaultNamespace for main agent or unknown sessions.
  */
-export function resolveNamespace(defaultNamespace: string, sessionKey?: string): string {
-  if (!sessionKey) return defaultNamespace;
+export function resolveAgent(defaultNamespace: string, sessionKey?: string): ResolvedAgent {
+  if (!sessionKey) return { namespace: defaultNamespace, agentName: "main" };
 
   const match = sessionKey.match(/^agent:([^:]+):/);
-  const agentName = match?.[1];
+  const name = match?.[1];
 
-  if (!agentName || agentName === "main") return defaultNamespace;
-  return agentName;
-}
-
-/**
- * Get agent name from session key for logging.
- */
-export function resolveAgentName(sessionKey?: string): string {
-  if (!sessionKey) return "main";
-  const match = sessionKey.match(/^agent:([^:]+):/);
-  return match?.[1] ?? "main";
+  if (!name || name === "main") return { namespace: defaultNamespace, agentName: "main" };
+  return { namespace: name, agentName: name };
 }
 
 /**
