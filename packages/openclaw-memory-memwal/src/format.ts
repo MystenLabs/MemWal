@@ -52,6 +52,40 @@ export function stripMemoryTags(text: string): string {
   return text.replace(MEMORY_TAG_REGEX, "").trim();
 }
 
+/**
+ * Extract text content from OpenClaw messages array.
+ * Handles both string content and content blocks array format.
+ * Strips injected memory tags to prevent feedback loops.
+ */
+export function extractMessageTexts(
+  messages: any[],
+  maxCount: number,
+  roles: string[] = ["user", "assistant"],
+): string[] {
+  const texts: string[] = [];
+  for (const msg of messages.slice(-maxCount)) {
+    if (!msg || typeof msg !== "object") continue;
+    if (!roles.includes(msg.role)) continue;
+
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          text += block.text + "\n";
+        }
+      }
+    }
+
+    text = stripMemoryTags(text).trim();
+    if (text.length > 10) {
+      texts.push(text);
+    }
+  }
+  return texts;
+}
+
 /** Standard error response for tool failures. */
 export function toolError(message: string, err: unknown) {
   return {

@@ -1,21 +1,13 @@
 /**
  * CLI commands — openclaw memwal <command>
  *
- * Memory operations: search, stats, list
+ * Memory operations: search, stats
  * Agent scoping via --agent flag → namespace
  */
 
 import type { MemWal } from "@cmdoss/memwal";
-import { keyPreview } from "./config.js";
+import { resolveAgent, keyPreview } from "./config.js";
 import type { PluginConfig } from "./types.js";
-
-/**
- * Resolve namespace for CLI --agent flag.
- */
-function resolveCliNamespace(config: PluginConfig, agentName?: string): string {
-  if (!agentName || agentName === "main") return config.defaultNamespace;
-  return agentName;
-}
 
 export function registerCli(api: any, client: MemWal, config: PluginConfig): void {
   api.registerCli(
@@ -32,7 +24,7 @@ export function registerCli(api: any, client: MemWal, config: PluginConfig): voi
         .option("--limit <n>", "Max results", "5")
         .option("--agent <name>", "Search a specific agent's memory (namespace)")
         .action(async (query: string, opts: any) => {
-          const namespace = resolveCliNamespace(config, opts.agent);
+          const { namespace } = resolveAgent(config.defaultNamespace, opts.agent ? `agent:${opts.agent}:cli` : undefined);
           const limit = parseInt(opts.limit, 10);
 
           try {
@@ -54,7 +46,7 @@ export function registerCli(api: any, client: MemWal, config: PluginConfig): voi
         .description("Show memory status")
         .option("--agent <name>", "Show stats for a specific agent (namespace)")
         .action(async (opts: any) => {
-          const namespace = resolveCliNamespace(config, opts.agent);
+          const { namespace } = resolveAgent(config.defaultNamespace, opts.agent ? `agent:${opts.agent}:cli` : undefined);
 
           try {
             const health = await client.health();
@@ -70,21 +62,6 @@ export function registerCli(api: any, client: MemWal, config: PluginConfig): voi
           } catch (err) {
             console.error(`Stats failed: ${String(err)}`);
           }
-        });
-
-      // openclaw memwal list
-      cmd
-        .command("list")
-        .description("List stored memories")
-        .option("--agent <name>", "List a specific agent's memories (namespace)")
-        .action(async (opts: any) => {
-          const namespace = resolveCliNamespace(config, opts.agent);
-
-          console.log(
-            "Memory listing requires server support (coming in Phase 2). " +
-            "Use 'openclaw memwal search <query>' to find specific memories.",
-          );
-          console.log(`Namespace: ${namespace}`);
         });
     },
     { commands: ["memwal"] },
