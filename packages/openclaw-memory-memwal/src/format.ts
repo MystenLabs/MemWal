@@ -59,3 +59,21 @@ export function toolError(message: string, err: unknown) {
     details: { error: String(err) },
   };
 }
+
+/**
+ * Retry an async operation with delay between attempts.
+ * On final failure, throws the last error.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries: number = 1,
+  delayMs: number = 2000,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (retries <= 0) throw err;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return withRetry(fn, retries - 1, delayMs);
+  }
+}

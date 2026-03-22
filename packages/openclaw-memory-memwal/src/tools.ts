@@ -1,14 +1,18 @@
 /**
  * Agent-callable tools — memory_search and memory_store.
  * Require tools.allow config to be visible to the LLM.
+ *
+ * Tools accept an optional namespace parameter. The before_prompt_build hook
+ * injects the current agent's namespace into the system prompt, guiding the
+ * LLM to pass the correct namespace. Falls back to defaultNamespace if omitted.
  */
 
+import type { MemWal } from "@cmdoss/memwal";
 import { Type } from "@sinclair/typebox";
-import { createClient } from "./client.js";
 import { toolError } from "./format.js";
 import type { PluginConfig } from "./types.js";
 
-export function registerTools(api: any, config: PluginConfig): void {
+export function registerTools(api: any, client: MemWal, config: PluginConfig): void {
   // memory_search — semantic recall
   api.registerTool(
     {
@@ -16,32 +20,37 @@ export function registerTools(api: any, config: PluginConfig): void {
       label: "Memory Search",
       description:
         "Search long-term memory for relevant past information, facts, " +
-        "preferences, and decisions. Returns memories ranked by relevance.",
+        "preferences, and decisions. Returns memories ranked by relevance. " +
+        "Pass the namespace parameter to scope the search to the current agent's memory.",
       parameters: Type.Object({
         query: Type.String({ description: "Search query" }),
         limit: Type.Optional(
           Type.Number({ description: "Max results (default: 5)" }),
         ),
+        namespace: Type.Optional(
+          Type.String({
+            description: "Memory namespace to search (use the namespace from system context)",
+          }),
+        ),
       }),
       async execute(_id: string, params: any) {
-        const { query, limit = 5 } = params;
+        const { query, limit = 5, namespace } = params;
+        const ns = namespace || config.defaultNamespace;
 
         try {
-          // Tools don't receive ctx — use default key
-          const client = await createClient(config.privateKey, config.accountId, config);
-          const result = await client.recall(query, limit);
+          const result = await client.recall(query, limit, ns);
 
           if (!result.results?.length) {
             return {
               content: [
                 { type: "text", text: "No relevant memories found." },
               ],
-              details: { count: 0 },
+              details: { count: 0, namespace: ns },
             };
           }
 
           const formatted = result.results
-            .map((r, i) => {
+            .map((r: any, i: number) => {
               const relevance = Math.round((1 - r.distance) * 100);
               return `${i + 1}. ${r.text} (${relevance}% relevance)`;
             })
@@ -56,7 +65,8 @@ export function registerTools(api: any, config: PluginConfig): void {
             ],
             details: {
               count: result.results.length,
-              memories: result.results.map((r) => ({
+              namespace: ns,
+              memories: result.results.map((r: any) => ({
                 text: r.text,
                 blob_id: r.blob_id,
                 relevance: Math.round((1 - r.distance) * 100) / 100,
@@ -79,14 +89,21 @@ export function registerTools(api: any, config: PluginConfig): void {
       description:
         "Save important information to encrypted long-term memory. " +
         "Use when the user asks to remember something or when you " +
-        "identify important facts worth preserving.",
+        "identify important facts worth preserving. " +
+        "Pass the namespace parameter to store in the current agent's memory.",
       parameters: Type.Object({
         text: Type.String({
           description: "Information to store in memory",
         }),
+        namespace: Type.Optional(
+          Type.String({
+            description: "Memory namespace to store in (use the namespace from system context)",
+          }),
+        ),
       }),
       async execute(_id: string, params: any) {
-        const { text } = params;
+        const { text, namespace } = params;
+        const ns = namespace || config.defaultNamespace;
 
         if (!text || text.trim().length < 3) {
           return {
@@ -101,9 +118,7 @@ export function registerTools(api: any, config: PluginConfig): void {
         }
 
         try {
-          // Tools don't receive ctx — use default key
-          const client = await createClient(config.privateKey, config.accountId, config);
-          const result = await client.remember(text.trim());
+          const result = await client.remember(text.trim(), ns);
 
           return {
             content: [
@@ -114,6 +129,7 @@ export function registerTools(api: any, config: PluginConfig): void {
             ],
             details: {
               action: "created",
+              namespace: ns,
               id: result.id,
               blob_id: result.blob_id,
             },

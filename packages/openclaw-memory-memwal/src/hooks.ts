@@ -3,52 +3,68 @@
  *
  * before_prompt_build: search MemWal for relevant memories, inject into prompt
  * agent_end: extract conversation text, send to MemWal for fact extraction
+ *
+ * Each agent gets its own namespace derived from ctx.sessionKey.
+ * Same key, same account — isolation via server-side namespace scoping.
  */
 
-import { createClient } from "./client.js";
-import { resolveKey, resolveAgentName, keyPreview } from "./config.js";
-import { formatMemoriesForPrompt, stripMemoryTags } from "./format.js";
+import type { MemWal } from "@cmdoss/memwal";
+import { resolveNamespace, resolveAgentName } from "./config.js";
+import { shouldCapture } from "./capture.js";
+import { formatMemoriesForPrompt, stripMemoryTags, withRetry } from "./format.js";
 import type { PluginConfig } from "./types.js";
 
 const MIN_PROMPT_LENGTH = 10;
 
-export function registerHooks(api: any, config: PluginConfig): void {
+export function registerHooks(api: any, client: MemWal, config: PluginConfig): void {
   // Auto-recall: inject relevant memories before each agent turn
   if (config.autoRecall) {
     api.on("before_prompt_build", async (event: any, ctx: any) => {
       if (!event.prompt || event.prompt.length < MIN_PROMPT_LENGTH) return;
 
-      const resolved = resolveKey(config, ctx?.sessionKey);
+      const namespace = resolveNamespace(config.defaultNamespace, ctx?.sessionKey);
       const agent = resolveAgentName(ctx?.sessionKey);
 
+      const namespaceInstruction =
+        `When using memory_search or memory_store tools, ` +
+        `pass namespace="${namespace}" to scope operations to the current agent's memory.`;
+
       try {
-        const client = await createClient(resolved.key, resolved.accountId, config);
         const result = await client.recall(
           event.prompt,
           config.maxRecallResults,
+          namespace,
         );
 
-        if (!result.results?.length) return;
+        if (!result.results?.length) {
+          return { appendSystemContext: namespaceInstruction };
+        }
 
         const relevant = result.results.filter(
-          (r) => (1 - r.distance) >= config.minRelevance,
+          (r: any) => (1 - r.distance) >= config.minRelevance,
         );
-        if (!relevant.length) return;
+
+        if (!relevant.length) {
+          return { appendSystemContext: namespaceInstruction };
+        }
 
         api.logger.info(
           `memory-memwal: auto-recall injected ${relevant.length} memories ` +
-          `(agent: ${agent}, key: ${keyPreview(resolved.key)})`,
+          `(agent: ${agent}, namespace: ${namespace})`,
         );
 
         return {
           prependContext: formatMemoriesForPrompt(
-            relevant.map((r) => ({ text: r.text })),
+            relevant.map((r: any) => ({ text: r.text })),
           ),
+          appendSystemContext: namespaceInstruction,
         };
       } catch (err) {
         api.logger.warn(
           `memory-memwal: auto-recall failed: ${String(err)}`,
         );
+        // Still inject namespace instruction even if recall fails
+        return { appendSystemContext: namespaceInstruction };
       }
     });
   }
@@ -58,7 +74,7 @@ export function registerHooks(api: any, config: PluginConfig): void {
     api.on("agent_end", async (event: any, ctx: any) => {
       if (!event.success || !event.messages?.length) return;
 
-      const resolved = resolveKey(config, ctx?.sessionKey);
+      const namespace = resolveNamespace(config.defaultNamespace, ctx?.sessionKey);
       const agent = resolveAgentName(ctx?.sessionKey);
 
       try {
@@ -91,13 +107,17 @@ export function registerHooks(api: any, config: PluginConfig): void {
 
         if (!texts.length) return;
 
-        const client = await createClient(resolved.key, resolved.accountId, config);
-        const result = await client.analyze(texts.join("\n\n"));
+        const conversation = texts.join("\n\n");
+
+        // Skip trivial conversations (filler, emoji, short messages)
+        if (!shouldCapture(conversation)) return;
+
+        const result = await withRetry(() => client.analyze(conversation, namespace));
 
         if (result.facts?.length) {
           api.logger.info(
             `memory-memwal: auto-captured ${result.facts.length} facts ` +
-            `(agent: ${agent}, key: ${keyPreview(resolved.key)})`,
+            `(agent: ${agent}, namespace: ${namespace})`,
           );
         }
       } catch (err) {
