@@ -1,0 +1,27 @@
+{
+  "name": "@cmdoss/memory-memwal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "optionalDependencies": {
+    "@cmdoss/memwal": "^2.0.0-alpha.5"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.11"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

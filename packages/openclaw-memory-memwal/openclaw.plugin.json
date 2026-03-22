@@ -1,0 +1,116 @@
+{
+  "id": "memory-memwal",
+  "kind": "memory",
+  "name": "Memory (MemWal)",
+  "description": "Encrypted, decentralized long-term memory via MemWal + Walrus",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "privateKey": {
+        "type": "string",
+        "description": "Default Ed25519 private key (hex). Supports ${ENV_VAR}."
+      },
+      "accountId": {
+        "type": "string",
+        "description": "Default MemWalAccount object ID on Sui (0x...)"
+      },
+      "serverUrl": {
+        "type": "string",
+        "description": "MemWal server URL"
+      },
+      "agentKeys": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" },
+            "accountId": { "type": "string" }
+          },
+          "required": ["key", "accountId"]
+        },
+        "description": "Per-agent key+account mapping. Keys from different MemWalAccounts = isolated memory."
+      },
+      "mock": {
+        "type": "boolean",
+        "description": "Enable mock mode (in-memory storage, no real server)"
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "description": "Auto-inject relevant memories before each turn"
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "description": "Auto-extract and store facts after each turn"
+      },
+      "maxRecallResults": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 20,
+        "description": "Max memories per auto-recall"
+      },
+      "minRelevance": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Min relevance threshold for auto-recall"
+      },
+      "captureMaxMessages": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "Recent messages window for auto-capture"
+      }
+    },
+    "required": []
+  },
+  "uiHints": {
+    "privateKey": {
+      "label": "Ed25519 Private Key",
+      "sensitive": true,
+      "placeholder": "64-character hex string or ${ENV_VAR}",
+      "help": "Default key for all agents. Supports ${ENV_VAR} syntax."
+    },
+    "accountId": {
+      "label": "MemWalAccount ID",
+      "placeholder": "0x3247e3da...",
+      "help": "MemWalAccount object ID on Sui. Get from app.memwal.com."
+    },
+    "serverUrl": {
+      "label": "MemWal Server URL",
+      "placeholder": "https://memwal.example.com"
+    },
+    "mock": {
+      "label": "Mock Mode",
+      "help": "Use in-memory storage instead of real MemWal server. For demo/testing."
+    },
+    "agentKeys": {
+      "label": "Per-Agent Keys",
+      "help": "Map agent names to Ed25519 keys for memory isolation.",
+      "advanced": true
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Inject relevant memories before each turn"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Extract and store facts after each turn"
+    },
+    "maxRecallResults": {
+      "label": "Max Recall Results",
+      "placeholder": "5",
+      "advanced": true
+    },
+    "minRelevance": {
+      "label": "Min Relevance",
+      "placeholder": "0.3",
+      "advanced": true
+    },
+    "captureMaxMessages": {
+      "label": "Capture Window",
+      "placeholder": "10",
+      "advanced": true
+    }
+  }
+}
