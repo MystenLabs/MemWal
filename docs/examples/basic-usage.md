@@ -5,13 +5,13 @@
 First, install the MemWal SDK:
 
 ```bash
-pnpm add @cmdoss/memwal
+pnpm add @mysten/memwal
 ```
 
 ## Initialize
 
 ```typescript
-import { MemWal } from '@cmdoss/memwal'
+import { MemWal } from '@mysten/memwal'
 
 const memwal = new MemWal({
   network: 'testnet',

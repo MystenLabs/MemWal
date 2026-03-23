@@ -19,29 +19,29 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     <Tabs>
       <Tab title="pnpm">
         ```bash
-        pnpm add @cmdoss/memwal
+        pnpm add @mysten/memwal
         ```
       </Tab>
       <Tab title="npm">
         ```bash
-        npm install @cmdoss/memwal
+        npm install @mysten/memwal
         ```
       </Tab>
       <Tab title="yarn">
         ```bash
-        yarn add @cmdoss/memwal
+        yarn add @mysten/memwal
         ```
       </Tab>
       <Tab title="bun">
         ```bash
-        bun add @cmdoss/memwal
+        bun add @mysten/memwal
         ```
       </Tab>
     </Tabs>
 
     **Optional packages**
 
-    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@cmdoss/memwal/ai`):
+    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten/memwal/ai`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -66,7 +66,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
       </Tab>
     </Tabs>
 
-    For the [manual client flow](/getting-started/choose-your-path) (`@cmdoss/memwal/manual`):
+    For the [manual client flow](/getting-started/choose-your-path) (`@mysten/memwal/manual`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -98,7 +98,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     Set up the SDK with your delegate key and relayer URL:
 
     ```ts
-    import { MemWal } from "@cmdoss/memwal";
+    import { MemWal } from "@mysten/memwal";
 
     const memwal = MemWal.create({
       key: process.env.MEMWAL_PRIVATE_KEY!,

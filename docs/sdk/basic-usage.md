@@ -10,7 +10,7 @@ title: "Basic Usage"
 ## Code
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
