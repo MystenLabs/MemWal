@@ -10,7 +10,7 @@
 
 import type { MemWal } from "@cmdoss/memwal";
 import { resolveAgent } from "./config.js";
-import { shouldCapture } from "./capture.js";
+import { shouldCapture, looksLikeInjection } from "./capture.js";
 import {
   formatMemoriesForPrompt,
   extractMessageTexts,
@@ -44,7 +44,9 @@ export function registerHooks(api: any, client: MemWal, config: PluginConfig): v
         }
 
         const relevant = result.results.filter(
-          (r: any) => (1 - r.distance) >= config.minRelevance,
+          (r: any) =>
+            (1 - r.distance) >= config.minRelevance &&
+            !looksLikeInjection(r.text),
         );
 
         if (!relevant.length) {

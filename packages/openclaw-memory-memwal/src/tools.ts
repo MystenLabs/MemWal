@@ -118,20 +118,31 @@ export function registerTools(api: any, client: MemWal, config: PluginConfig): v
         }
 
         try {
-          const result = await client.remember(text.trim(), ns);
+          // Use analyze() instead of remember() — server LLM extracts
+          // individual facts from the text, producing cleaner, more
+          // searchable memories (same approach as Mem0's memory_store)
+          const result = await client.analyze(text.trim(), ns);
+
+          const factCount = result.facts?.length ?? 0;
+          const preview = result.facts
+            ?.map((f: any) => f.text)
+            .slice(0, 3)
+            .join("; ") ?? text.slice(0, 100);
 
           return {
             content: [
               {
                 type: "text",
-                text: `Stored in memory: "${text.slice(0, 100)}${text.length > 100 ? "..." : ""}"`,
+                text: factCount > 0
+                  ? `Stored ${factCount} fact${factCount === 1 ? "" : "s"}: ${preview}`
+                  : `No memorable facts extracted from the input.`,
               },
             ],
             details: {
               action: "created",
               namespace: ns,
-              id: result.id,
-              blob_id: result.blob_id,
+              factCount,
+              facts: result.facts,
             },
           };
         } catch (err) {
