@@ -72,6 +72,7 @@ yarn add ai zod
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `key` | `string` | Yes | Ed25519 private key in hex |
+| `accountId` | `string` | Yes | MemWalAccount object ID on Sui |
 | `serverUrl` | `string` | No | Relayer URL |
 | `namespace` | `string` | No | Default namespace — falls back to `"default"` |
 
@@ -82,6 +83,7 @@ import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
+  accountId: "<your-memwal-account-id>",
   serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });

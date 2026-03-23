@@ -4,7 +4,23 @@ description: "Client-managed embeddings and local SEAL operations."
 ---
 
 Use when the client must handle embedding calls and local SEAL operations. The relayer still handles
-upload relay, registration, search, and restore.
+upload relay, vector registration, search, and restore.
+
+This is the recommended path for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
+
+## What the client handles vs. what the relayer handles
+
+| Operation | Client (MemWalManual) | Relayer |
+|-----------|----------------------|---------|
+| Embedding | Client calls OpenAI/compatible API | — |
+| SEAL encryption | Client encrypts locally | — |
+| Walrus upload | — | Server uploads via sidecar (server pays gas) |
+| Vector registration | — | Server stores `{blob_id, vector}` in PostgreSQL |
+| Recall search | — | Server searches vectors, returns `{blob_id, distance}` |
+| Walrus download | Client downloads from aggregator | — |
+| SEAL decryption | Client decrypts locally (SessionKey) | — |
+
+## Setup
 
 ```ts
 import { MemWalManual } from "@mysten/memwal/manual";
@@ -12,7 +28,7 @@ import { MemWalManual } from "@mysten/memwal/manual";
 const manual = MemWalManual.create({
   key: "<your-ed25519-private-key>",
   serverUrl: "https://your-relayer-url.com",
-  suiPrivateKey: "<your-sui-private-key>",
+  suiPrivateKey: "<your-sui-private-key>",    // OR walletSigner
   embeddingApiKey: "<your-openai-api-key>",
   packageId: "<memwal-package-id>",
   accountId: "<memwal-account-id>",
@@ -28,6 +44,9 @@ await manual.rememberManual("User prefers dark mode.");
 
 // Embed locally, search via relayer, download and decrypt locally
 const result = await manual.recallManual("What do we know?", 5);
+for (const memory of result.results) {
+  console.log(memory.text, memory.distance);
+}
 
 // Same relayer restore endpoint
 await manual.restore("chatbot-prod", 50);
@@ -36,9 +55,46 @@ await manual.restore("chatbot-prod", 50);
 console.log(manual.isWalletMode);
 ```
 
+## Remember flow (under the hood)
+
+1. Client generates embedding via OpenAI-compatible API
+2. Client SEAL-encrypts the plaintext locally (no wallet signature needed)
+3. Client sends `{encrypted_data (base64), vector}` to the relayer
+4. Relayer uploads encrypted bytes to Walrus via upload-relay sidecar (server pays gas)
+5. Relayer stores `{blob_id, vector, owner, namespace}` in PostgreSQL
+
+## Recall flow (under the hood)
+
+1. Client generates query embedding via OpenAI-compatible API
+2. Client sends the vector to the relayer
+3. Relayer searches PostgreSQL and returns `{blob_id, distance}` hits
+4. Client downloads all matching encrypted blobs from Walrus concurrently
+5. Client creates a single SEAL SessionKey (one wallet popup in browser mode)
+6. Client decrypts each blob locally using the shared session key
+
+## Browser Integration (wallet signer)
+
+Use `walletSigner` instead of `suiPrivateKey` when integrating with a connected wallet (e.g., `@mysten/dapp-kit`):
+
+```ts
+const manual = MemWalManual.create({
+  key: "<your-ed25519-delegate-key>",
+  walletSigner: {
+    address: walletAddress,
+    signAndExecuteTransaction: signAndExecuteTransaction,
+    signPersonalMessage: signPersonalMessage,
+  },
+  embeddingApiKey: "<your-openai-api-key>",
+  packageId: "<memwal-package-id>",
+  accountId: "<memwal-account-id>",
+});
+```
+
 ## Config Notes
 
 - `suiNetwork` defaults to `mainnet`
 - `sealKeyServers` lets the client override the built-in SEAL key server object IDs
 - Walrus publisher, aggregator, and upload relay defaults follow `suiNetwork`
-- Use `walletSigner` instead of `suiPrivateKey` when integrating with a connected wallet
+- `embeddingModel` defaults to `text-embedding-3-small` (or `openai/text-embedding-3-small` for OpenRouter)
+- `walrusEpochs` defaults to `50` (storage duration)
+- All `@mysten/*` peer dependencies are loaded dynamically — users who only use the default `MemWal` client don't need them installed

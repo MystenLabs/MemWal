@@ -102,6 +102,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 
     const memwal = MemWal.create({
       key: process.env.MEMWAL_PRIVATE_KEY!,
+      accountId: process.env.MEMWAL_ACCOUNT_ID!,
       serverUrl: process.env.MEMWAL_SERVER_URL,
       namespace: "my-app",
     });

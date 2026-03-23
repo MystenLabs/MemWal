@@ -9,7 +9,7 @@ pnpm install
 pnpm dev:docs
 ```
 
-This starts the Docusaurus site using the docs in this repository.
+This starts the Mintlify site using the docs in this repository.
 
 ## Build the Docs
 

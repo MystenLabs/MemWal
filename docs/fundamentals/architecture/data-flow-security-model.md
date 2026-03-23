@@ -31,6 +31,12 @@ This means the **relayer operator can see your data in transit**. This is simila
 
 You have options depending on your trust requirements:
 
+| Option | Trust level | What the relayer sees |
+|--------|------------|----------------------|
+| **Public relayer** | You trust the MemWal team | Plaintext content, embeddings, decrypted results |
+| **Self-hosted relayer** | You trust your own infra | Same as above, but under your control |
+| **Manual client flow** | Minimal trust | Only encrypted payloads and pre-computed vectors — never plaintext |
+
 - **Use the public relayer** — convenient for getting started and prototyping. You trust the MemWal team to operate it responsibly.
 - **Self-host your own relayer** — you control the infrastructure, so the trust boundary is entirely yours. No third party sees your data.
 - **Manual client flow** — use `MemWalManual` to handle encryption and embedding entirely on the client side. The relayer only sees encrypted payloads and vectors, never plaintext. This is recommended for Web3-native users who want full control over their data and are comfortable managing keys, signing, and SEAL operations directly.
@@ -58,6 +64,17 @@ flowchart LR
 - **Onchain (trustless)**: ownership, delegate keys, access control — enforced by Sui smart contracts
 - **Offchain (operator trust)**: encryption, embedding, search — handled by the relayer and indexed database
 - **Decentralized (durable)**: encrypted memory payloads — stored on Walrus, no single point of failure
+
+## Authentication flow
+
+Every protected API call goes through Ed25519 signature verification:
+
+1. The SDK signs a message: `{timestamp}.{method}.{path}.{body_sha256}` using the delegate private key
+2. The relayer verifies the Ed25519 signature against the provided public key
+3. Timestamps must be within a **5-minute window** to prevent replay attacks
+4. The relayer resolves the public key to a `MemWalAccount` using the priority chain: cache → indexed accounts → onchain registry → header hint → config fallback
+5. The onchain account is fetched to verify the delegate key is registered in `delegate_keys`
+6. The resolved owner address is used to scope all subsequent operations
 
 ## Current status
 

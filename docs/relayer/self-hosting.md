@@ -19,10 +19,14 @@ The most common reasons are removing the trust assumption on a third-party relay
 
 A self-hosted MemWal backend has:
 
-- the Rust relayer in `services/server`
-- the TypeScript sidecar in `services/server/scripts`
-- PostgreSQL with pgvector
-- optional but recommended: the indexer in `services/indexer`
+| Component | Location | Description |
+|-----------|----------|-------------|
+| **Rust relayer** | `services/server` | Axum HTTP server — auth, routing, embedding, vector search |
+| **TypeScript sidecar** | `services/server/scripts` | SEAL encrypt/decrypt, Walrus upload, blob query (uses `@mysten/seal` and `@mysten/walrus`) |
+| **PostgreSQL + pgvector** | External | Vector storage, auth cache, indexer state |
+| **Indexer** (recommended) | `services/indexer` | Polls Sui events, syncs account data into PostgreSQL |
+
+The Rust relayer starts the TypeScript sidecar as a child process on boot. They communicate over HTTP (`localhost:9000` by default). If the sidecar fails to start within 15 seconds, the relayer exits.
 
 ## Quick Start
 
@@ -83,12 +87,25 @@ For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing
 `VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are frontend env vars for the app or playground — not for the relayer.
 </Note>
 
+## Database Setup
+
+The relayer requires PostgreSQL with the `pgvector` extension. The relayer runs migrations automatically on boot, creating these tables:
+
+- `vector_entries` — 1536-dimensional embeddings with HNSW index for cosine similarity search
+- `delegate_key_cache` — auth optimization (delegate key → account mapping)
+- `accounts` — populated by the indexer (account → owner mapping)
+- `indexer_state` — indexer cursor tracking
+
+See [Database Sync](/indexer/database-sync) for the full schema.
+
 ## Operational Notes
 
-- the server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will fail fast
-- DB migrations run automatically on boot (`pgvector` must already be available)
+- The server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will exit
+- DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension)
+- Connection pool: 10 max connections (relayer), 3 max connections (indexer)
 - `/health` is the basic service check, API routes live under `/api/*`
-- the indexer is recommended for fast account lookup in production
+- The indexer is recommended for fast account lookup in production — without it, the relayer falls back to onchain registry scans
+- Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based) — useful for local testing but not production
 
 ## Docker
 

@@ -7,7 +7,7 @@ This monorepo contains:
 - TypeScript applications under `apps/`
 - the SDK under `packages/sdk`
 - Rust backend services under `services/`
-- Docusaurus docs under `docs/`
+- Mintlify docs under `docs/`
 
 ## Common Local Entry Points
 
