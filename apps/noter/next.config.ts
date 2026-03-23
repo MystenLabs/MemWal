@@ -11,7 +11,7 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: [
-    "@cmdoss/memwal",
+    "@mysten/memwal",
     "@mysten/seal",
     "@mysten/walrus",
     "@mysten/sui",

@@ -20,14 +20,14 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/sdk/package.json ./packages/sdk/
 COPY apps/chatbot/package.json ./apps/chatbot/
 
-# Install all workspace deps (resolves workspace:* for @cmdoss/memwal)
+# Install all workspace deps (resolves workspace:* for @mysten/memwal)
 RUN pnpm install --frozen-lockfile
 
 # ── Stage 2: Build SDK ─────────────────────────────────────
 FROM deps AS sdk-builder
 
 COPY packages/sdk/ ./packages/sdk/
-RUN pnpm --filter @cmdoss/memwal build
+RUN pnpm --filter @mysten/memwal build
 
 # ── Stage 3: Build Next.js App ─────────────────────────────
 FROM sdk-builder AS builder
