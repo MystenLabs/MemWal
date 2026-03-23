@@ -9,7 +9,7 @@
  *
  * @example
  * ```typescript
- * import { MemWalManual } from "@cmdoss/memwal"
+ * import { MemWalManual } from "@mysten/memwal"
  *
  * const memwal = MemWalManual.create({
  *     key: process.env.MEMWAL_DELEGATE_KEY!,      // Ed25519 delegate key

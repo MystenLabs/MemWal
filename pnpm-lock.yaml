@@ -23,15 +23,15 @@ importers:
 
   apps/app:
     dependencies:
-      '@cmdoss/memwal':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@mysten/dapp-kit':
         specifier: ^1.0.3
         version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.2.3))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.2.3))
       '@mysten/enoki':
         specifier: ^1.0.4
         version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.3)
+      '@mysten/memwal':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@mysten/seal':
         specifier: ^1.1.0
         version: 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
@@ -153,9 +153,6 @@ importers:
       '@ai-sdk/react':
         specifier: 3.0.39
         version: 3.0.39(react@19.0.1)(zod@3.25.76)
-      '@cmdoss/memwal':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@codemirror/lang-javascript':
         specifier: ^6.2.2
         version: 6.2.5
@@ -174,6 +171,9 @@ importers:
       '@icons-pack/react-simple-icons':
         specifier: ^13.7.0
         version: 13.12.0(react@19.0.1)
+      '@mysten/memwal':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.0
@@ -460,9 +460,6 @@ importers:
       '@base-ui/react':
         specifier: ^1.2.0
         version: 1.3.0(@types/react@19.2.14)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-      '@cmdoss/memwal':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@hookform/resolvers':
         specifier: ^5.2.2
         version: 5.2.2(react-hook-form@7.71.2(react@19.2.3))
@@ -496,6 +493,9 @@ importers:
       '@lexical/utils':
         specifier: ^0.41.0
         version: 0.41.0
+      '@mysten/memwal':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@mysten/sui':
         specifier: ^2.5.0
         version: 2.8.0(typescript@5.9.3)
@@ -677,9 +677,6 @@ importers:
       '@ai-sdk/react':
         specifier: 3.0.39
         version: 3.0.39(react@19.0.1)(zod@3.25.76)
-      '@cmdoss/memwal':
-        specifier: 2.0.0-alpha.5
-        version: 2.0.0-alpha.5(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
       '@codemirror/lang-javascript':
         specifier: ^6.2.2
         version: 6.2.5
@@ -698,6 +695,9 @@ importers:
       '@icons-pack/react-simple-icons':
         specifier: ^13.7.0
         version: 13.12.0(react@19.0.1)
+      '@mysten/memwal':
+        specifier: 0.0.1-dev.0
+        version: 0.0.1-dev.0(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
       '@noble/ed25519':
         specifier: ^2.2.3
         version: 2.3.0
@@ -1477,26 +1477,6 @@ packages:
 
   '@clack/prompts@1.1.0':
     resolution: {integrity: sha512-pkqbPGtohJAvm4Dphs2M8xE29ggupihHdy1x84HNojZuMtFsHiUlRvqD24tM2+XmI+61LlfNceM3Wr7U5QES5g==}
-
-  '@cmdoss/memwal@2.0.0-alpha.5':
-    resolution: {integrity: sha512-EnrT4XFqc4RMPnWLuYcOOr7YKjPf1ELuUpTfQGCmJS++Y8SPg71WQ9/SyxHbQAxGricxvYKdSMlS4qgIR1COZw==}
-    peerDependencies:
-      '@mysten/seal': '>=1.1.0'
-      '@mysten/sui': '>=2.5.0'
-      '@mysten/walrus': '>=1.0.3'
-      ai: '>=4.0.0'
-      zod: ^3.23.0
-    peerDependenciesMeta:
-      '@mysten/seal':
-        optional: true
-      '@mysten/sui':
-        optional: true
-      '@mysten/walrus':
-        optional: true
-      ai:
-        optional: true
-      zod:
-        optional: true
 
   '@codemirror/autocomplete@6.20.1':
     resolution: {integrity: sha512-1cvg3Vz1dSSToCNlJfRA2WSI4ht3K+WplO0UMOgmUYPivCyy2oueZY6Lx7M9wThm7SDUBViRmuT+OG/i8+ON9A==}
@@ -3089,6 +3069,26 @@ packages:
 
   '@mysten/ledgerjs-hw-app-sui@0.7.1':
     resolution: {integrity: sha512-2KfPyTzdIeSq4auepS56T09rPE2dHz2VX3G9rFnYjayzynJtNd9tzKWPRpjpCEdBGjp8wg0kEzAeHSOwB0P/Kg==}
+
+  '@mysten/memwal@0.0.1-dev.0':
+    resolution: {integrity: sha512-WJ9uD7V0NKakYLiw2aphkJiTGFNxU3VbsdWncPyaVXtKmt1ySSlXmP7fiMY09JNwJsYmYAJiCb9M6ujiz7hejg==}
+    peerDependencies:
+      '@mysten/seal': '>=1.1.0'
+      '@mysten/sui': '>=2.5.0'
+      '@mysten/walrus': '>=1.0.3'
+      ai: '>=4.0.0'
+      zod: ^3.23.0
+    peerDependenciesMeta:
+      '@mysten/seal':
+        optional: true
+      '@mysten/sui':
+        optional: true
+      '@mysten/walrus':
+        optional: true
+      ai:
+        optional: true
+      zod:
+        optional: true
 
   '@mysten/seal@1.1.1':
     resolution: {integrity: sha512-OGxEDmEuXQAzxJKz3ap1dkRSf5fD/iKpz/J8+wZlPbeSok2fVt3KPaCZngjrvqqVRn5lmQomNpzXQCKo929A3w==}
@@ -11781,17 +11781,6 @@ snapshots:
       '@clack/core': 1.1.0
       sisteransi: 1.0.5
 
-  '@cmdoss/memwal@2.0.0-alpha.5(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
-    dependencies:
-      '@noble/ed25519': 2.3.0
-      '@noble/hashes': 2.0.1
-    optionalDependencies:
-      '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
-      '@mysten/sui': 2.8.0(typescript@5.9.3)
-      '@mysten/walrus': 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))
-      ai: 6.0.37(zod@3.25.76)
-      zod: 3.25.76
-
   '@codemirror/autocomplete@6.20.1':
     dependencies:
       '@codemirror/language': 6.12.2
@@ -13567,6 +13556,17 @@ snapshots:
       - supports-color
 
   '@mysten/ledgerjs-hw-app-sui@0.7.1': {}
+
+  '@mysten/memwal@0.0.1-dev.0(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
+    dependencies:
+      '@noble/ed25519': 2.3.0
+      '@noble/hashes': 2.0.1
+    optionalDependencies:
+      '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
+      '@mysten/sui': 2.8.0(typescript@5.9.3)
+      '@mysten/walrus': 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))
+      ai: 6.0.37(zod@3.25.76)
+      zod: 3.25.76
 
   '@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))':
     dependencies:
