@@ -18,6 +18,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done'
 
@@ -205,7 +206,7 @@ export default function SetupWizard() {
             <nav className="nav">
                 <div className="nav-inner">
                     <div className="nav-brand">
-                        <span>memwal</span>
+                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
                     </div>
                     <div className="nav-user">
                         <span className="nav-address">
