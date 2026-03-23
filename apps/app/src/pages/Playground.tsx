@@ -13,8 +13,8 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { MemWal } from '@cmdoss/memwal'
-import { MemWalManual } from '@cmdoss/memwal/manual'
+import { MemWal } from '@mysten/memwal'
+import { MemWalManual } from '@mysten/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -453,7 +453,7 @@ export default function Playground() {
                     <p>
                         try each memwal SDK operation live. click{' '}
                         <strong>▶ run</strong> to execute against your server
-                        using <code>@cmdoss/memwal</code>.
+                        using <code>@mysten/memwal</code>.
                     </p>
                 </div>
 
@@ -466,7 +466,7 @@ export default function Playground() {
                         key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
                     </div>
                     <div className="demo-server-tag">
-                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@cmdoss/memwal</span>
+                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten/memwal</span>
                     </div>
                     <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
                         <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
@@ -485,7 +485,7 @@ export default function Playground() {
                     number={1}
                     title="health check"
                     description="verify the memwal server is running"
-                    code={`import { MemWal } from "@cmdoss/memwal"
+                    code={`import { MemWal } from "@mysten/memwal"
 
 const memwal = MemWal.create({
   key: "${keyPreview}",
@@ -695,7 +695,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     </div>
 
                     <pre className={`demo-code-block${askResult || askError || askPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`import { withMemWal } from "@cmdoss/memwal/ai"
+                        <code>{`import { withMemWal } from "@mysten/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
 

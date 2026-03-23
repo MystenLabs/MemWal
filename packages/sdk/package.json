@@ -1,6 +1,6 @@
 {
-    "name": "@cmdoss/memwal",
-    "version": "2.0.0-alpha.7",
+    "name": "@mysten/memwal",
+    "version": "0.0.1-dev.0",
     "description": "MemWal — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "main": "./dist/index.js",

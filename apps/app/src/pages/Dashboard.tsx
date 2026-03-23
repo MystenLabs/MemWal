@@ -10,8 +10,8 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/memwal/account'
-import type { WalletSigner } from '@cmdoss/memwal/manual'
+import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten/memwal/account'
+import type { WalletSigner } from '@mysten/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -198,7 +198,7 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
-    const sdkSnippet = `import { MemWal } from "@cmdoss/memwal"
+    const sdkSnippet = `import { MemWal } from "@mysten/memwal"
 
 const memwal = MemWal.create({
   key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
@@ -214,7 +214,7 @@ const result = await memwal.recall("food allergies")
 console.log(result.results[0].text)`
 
     const aiSnippet = `import { generateText } from "ai"
-import { withMemWal } from "@cmdoss/memwal/ai"
+import { withMemWal } from "@mysten/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
@@ -570,7 +570,7 @@ const result = await generateText({
                         <div><div className="card-title">install</div></div>
                     </div>
                     <pre className="demo-code-block install-command">
-                        <code>npm install @cmdoss/memwal</code>
+                        <code>npm install @mysten/memwal</code>
                     </pre>
                 </div>
             </div>

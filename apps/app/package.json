@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@cmdoss/memwal": "workspace:*",
+    "@mysten/memwal": "workspace:*",
     "@mysten/dapp-kit": "^1.0.3",
     "@mysten/enoki": "^1.0.4",
     "@mysten/seal": "^1.1.0",
