@@ -1,37 +1,32 @@
 ---
-title: "Operate Your Own Relayer"
+title: "Self-Hosting"
 ---
 
-Run your own relayer when you need your own backend, secrets, and rollout control.
+Self-hosting means running your own relayer — either pointing at an existing MemWal package ID or deploying an entirely new MemWal instance with your own contract, database, and server wallet.
 
-## Use It When
+The public relayer provided by Mysten is a reference implementation. You can also build your own implementation that fits the protocol interface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
-- you want your own deployment environment
-- you want your own database and credentials
-- you want to control relayer upgrades and uptime
-- you want the server to use your own embedding provider credentials
+## When to Self-Host
+
+The most common reasons are removing the trust assumption on a third-party relayer or running your own MemWal instance entirely:
+
+- **Control the trust boundary** — a self-hosted relayer keeps plaintext, encryption, and embedding under your own control
+- **Run your own MemWal instance** — deploy your own contract with a separate package ID, SEAL encryption keys, and data isolation
+- **Choose your own embedding provider** — use your own OpenAI-compatible API and credentials
+- **Guarantee availability** — the public relayer is a beta service with no SLA
 
 ## What Runs
 
-A self-hosted MemWal backend usually has:
+A self-hosted MemWal backend has:
 
 - the Rust relayer in `services/server`
 - the TypeScript sidecar in `services/server/scripts`
 - PostgreSQL with pgvector
 - optional but recommended: the indexer in `services/indexer`
 
-## Local Run Flow
-
-1. create a PostgreSQL database with `pgvector`
-2. copy `services/server/.env.example` to `services/server/.env`
-3. fill in the required env vars
-4. install sidecar deps in `services/server/scripts`
-5. run the Rust server from `services/server`
-6. optionally run the indexer from `services/indexer`
-
 ## Quick Start
 
-If you already have PostgreSQL + pgvector running, the shortest path is:
+If you already have PostgreSQL + pgvector running:
 
 ```bash
 cp services/server/.env.example services/server/.env
@@ -46,12 +41,35 @@ Then check:
 curl http://localhost:8000/health
 ```
 
-Use this quick start for local evaluation. For production operation, review the full env setup
-and key configuration below.
+## Environment Variables
+
+### Required
+
+- `DATABASE_URL`
+- `MEMWAL_PACKAGE_ID`
+- `MEMWAL_REGISTRY_ID`
+- `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
+- `SEAL_KEY_SERVERS` — comma-separated list of SEAL key server object IDs
+
+### Recommended
+
+- `OPENAI_API_KEY` — enables real embeddings (falls back to mock embeddings without it)
+- `OPENAI_API_BASE` — point to an OpenAI-compatible provider like OpenRouter
+
+### Defaults
+
+- `PORT` defaults to `8000`
+- `SIDECAR_URL` defaults to `http://localhost:9000`
+- `SUI_NETWORK` defaults to `mainnet`
+- `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
+
+### Server Keys
+
+- `SERVER_SUI_PRIVATE_KEY` is the main server key
+- `SERVER_SUI_PRIVATE_KEYS` is a comma-separated key pool for parallel Walrus uploads
+- if both are set, the key pool takes priority for uploads
 
 ## Testnet Contract IDs
-
-If you want to run your own relayer on testnet, use these server env vars:
 
 ```env
 SUI_NETWORK=testnet
@@ -59,85 +77,24 @@ MEMWAL_PACKAGE_ID=0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090
 MEMWAL_REGISTRY_ID=0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05
 ```
 
-Important:
+For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.
 
-- use `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` in `services/server/.env`
-- `VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are for the app or playground, not for the relayer
-- the current server config still requires `MEMWAL_REGISTRY_ID`
+<Note>
+`VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are frontend env vars for the app or playground — not for the relayer.
+</Note>
 
-If you want the relayer to create real embeddings, set:
+## Operational Notes
 
-- `OPENAI_API_KEY`
-- `OPENAI_API_BASE`
+- the server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will fail fast
+- DB migrations run automatically on boot (`pgvector` must already be available)
+- `/health` is the basic service check, API routes live under `/api/*`
+- the indexer is recommended for fast account lookup in production
 
-The relayer uses these values to call an OpenAI-compatible `/embeddings` API during `remember`,
-`recall`, `analyze`, `ask`, and restore re-indexing.
-
-You also need:
-
-- `SEAL_KEY_SERVERS`
-
-The sidecar uses this comma-separated list of object IDs for backend SEAL encrypt and decrypt.
-
-For testnet setup, use https://seal-docs.wal.app/Pricing to get the current SEAL key server object IDs.
-
-## Commands
-
-Install sidecar dependencies:
-
-```bash
-cd services/server/scripts
-npm ci
-```
-
-Start the relayer:
-
-```bash
-cd services/server
-cargo run
-```
-
-The server starts the sidecar automatically through `npx tsx sidecar-server.ts`.
-
-Start the indexer:
-
-```bash
-cd services/indexer
-cargo run
-```
-
-## What To Expect
-
-- the relayer listens on `http://localhost:8000` by default
-- the sidecar listens on `http://localhost:9000` by default
-- the server runs DB migrations automatically on boot
-- `/health` is the first endpoint to test
-
-## Required For A Working Relayer
-
-- `DATABASE_URL`
-- `SUI_RPC_URL`
-- `WALRUS_PUBLISHER_URL`
-- `WALRUS_AGGREGATOR_URL`
-- `MEMWAL_PACKAGE_ID`
-- `MEMWAL_REGISTRY_ID`
-- `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
-
-## Recommended But Context-Dependent
-
-- `OPENAI_API_KEY`: lets the relayer call your embedding provider for real embeddings
-- `OPENAI_API_BASE`: use this when your provider is not the default OpenAI base URL
-- `SEAL_KEY_SERVERS`: required for backend SEAL encrypt and decrypt
-- indexer: recommended for fast account lookup, especially outside quick local testing
-
-## Docker Path
-
-If you want to deploy the relayer as a container, use:
+## Docker
 
 - `services/server/Dockerfile` for the relayer
 - `services/indexer/Dockerfile` for the indexer
 
 ## Read Next
 
-- [Installation and Setup](/relayer/installation-and-setup)
-- [Relayer API](/reference/relayer-api)
+- [Relayer API](/relayer/api-reference)

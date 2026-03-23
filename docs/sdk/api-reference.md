@@ -5,7 +5,7 @@ title: "API Reference"
 See also:
 
 - [Configuration](/reference/configuration)
-- [Relayer API](/reference/relayer-api)
+- [Relayer API](/relayer/api-reference)
 
 ## `MemWal.create(config)`
 
