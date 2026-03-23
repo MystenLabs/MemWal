@@ -93,9 +93,9 @@
     --border-accent: 1px solid rgba(255, 255, 255, 0.18);
     --border-light:  1px solid rgba(255, 255, 255, 0.06);
 
-    --neo-shadow:    6px 6px 0 #444444;
-    --neo-shadow-sm: 5px 5px 0 #444444;
-    --neo-shadow-xs: 3px 3px 0 #444444;
+    --neo-shadow:    6px 6px 0 #888888;
+    --neo-shadow-sm: 5px 5px 0 #888888;
+    --neo-shadow-xs: 3px 3px 0 #888888;
 
     --shadow-sm:   0 1px 4px  rgba(0, 0, 0, 0.5);
     --shadow-md:   0 8px 24px rgba(0, 0, 0, 0.6);
@@ -1185,7 +1185,8 @@ h1, h2, h3 {
 .input-group label {
   display: block;
   font-size: 0.8rem;
-  color: var(--text-secondary);
+  font-weight: 700;
+  color: #000000;
   margin-bottom: 6px;
 }
 
@@ -1520,6 +1521,18 @@ h1, h2, h3 {
     color: var(--text-secondary);
   }
 
+  .demo-result-panel {
+    background: #162e1e;
+    border-color: rgba(34, 197, 94, 0.4);
+    box-shadow: 3px 3px 0 rgba(34, 197, 94, 0.25);
+  }
+
+  .demo-error-panel {
+    background: #2e1616;
+    border-color: rgba(239, 68, 68, 0.4);
+    box-shadow: 3px 3px 0 rgba(239, 68, 68, 0.25);
+  }
+
   .dashboard-cta-arrow {
     color: #000000;
   }
@@ -1577,7 +1590,7 @@ h1, h2, h3 {
     background: var(--color-violet);
     color: #000000;
     border: var(--border);
-    box-shadow: 3px 3px 0 #444444;
+    box-shadow: 3px 3px 0 #888888;
   }
 
   .btn-secondary {
