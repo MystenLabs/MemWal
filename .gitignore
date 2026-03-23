@@ -88,6 +88,10 @@ target/
 # Gemini AI
 .gemini/
 
+# Docusaurus generated files
+docs/.docusaurus/
+docs/build/
+
 
 #Ignore vscode AI rules
 .github\instructions\codacy.instructions.md
