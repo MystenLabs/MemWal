@@ -14,6 +14,7 @@ import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@cmdoss/
 import type { WalletSigner } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 // ============================================================
 // Types
@@ -235,7 +236,7 @@ const result = await generateText({
             <nav className="nav">
                 <div className="nav-inner">
                     <div className="nav-brand">
-                        <span>memwal</span>
+                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
                     </div>
                     <div className="nav-user">
                         <span className="nav-address">
