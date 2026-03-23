@@ -3,6 +3,10 @@
   "theme": "mint",
   "name": "MemWal",
   "description": "Privacy-preserving decentralized memory protocol for humans and AI agents",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg"
+  },
   "favicon": "/favicon.ico",
   "colors": {
     "primary": "#191a23",
