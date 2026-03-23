@@ -3,7 +3,7 @@ name: Deploy App to Walrus Site
 on:
   push:
     branches:
-      - main
+      - dev
     paths:
       - 'apps/app/**'
       - '.github/workflows/deploy-app-walrus.yml'
@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   deploy-app:
@@ -27,9 +26,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Install dependencies
-        working-directory: ./apps/app
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Validate ws-resources.json exists
         run: |
@@ -49,7 +50,7 @@ jobs:
       - name: Build app for Mainnet
         working-directory: ./apps/app
         run: |
-          npm run build
+          pnpm build
           if [ -f "ws-resources.json" ]; then
             cp ws-resources.json dist/
           fi
@@ -70,7 +71,7 @@ jobs:
           SUI_KEYSTORE: ${{ secrets.SUI_KEYSTORE }}
           DIST: ./apps/app/dist
           SUI_NETWORK: mainnet
-          EPOCHS: 3
+          EPOCHS: ${{ vars.WALRUS_EPOCHS || '3' }}
           CHECK_EXTEND: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SITES_CONFIG: |
