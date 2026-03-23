@@ -17,6 +17,7 @@ import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
+  accountId: "<your-memwal-account-id>",
   serverUrl: "https://your-relayer-url.com",
   namespace: "chatbot-prod",
 });

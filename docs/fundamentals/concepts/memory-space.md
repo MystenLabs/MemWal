@@ -15,9 +15,9 @@ Every memory space is uniquely identified by three values:
 |-----------|-----------|
 | **Owner address** | The Sui wallet address that owns the memory |
 | **Namespace** | A developer-defined label to group and organize memories |
-| **App ID** | A globally unique identifier for the deployed MemWal instance |
+| **App ID** | The MemWal package ID (`MEMWAL_PACKAGE_ID`) — unique per relayer deployment |
 
-Together, `owner_address + namespace + app_id` form the boundary — no two memory spaces can overlap.
+Together, `owner + namespace + app_id` form the boundary — no two memory spaces can overlap.
 
 ## Namespace
 
@@ -33,6 +33,7 @@ Namespaces are set in the SDK when you create a client:
 ```ts
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
   serverUrl: process.env.MEMWAL_SERVER_URL,
   namespace: "personal",
 });
@@ -40,9 +41,9 @@ const memwal = MemWal.create({
 
 ## App ID
 
-MemWal is not a singleton service — developers can clone the repo and run their own deployed instance. The **app ID** is a globally unique identifier for each deployment, ensuring that different apps don't clash on the same owner + namespace combination.
+The **app ID** is the MemWal package ID deployed on Sui (`MEMWAL_PACKAGE_ID`). Each relayer deployment is tied to a single package ID, which is used for SEAL encryption key derivation and Walrus blob metadata.
 
-Two separate MemWal deployments can each have a user with a `personal` namespace, and their memories will never mix — because the app ID is different.
+Two separate MemWal deployments can each have a user with a `personal` namespace, and their memories will never mix — because the app ID (package ID) is different. This means the vector database scopes queries by `owner + namespace`, while the encryption and blob discovery layer provides an additional isolation boundary through the package ID.
 
 ## How it works in practice
 

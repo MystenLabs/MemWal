@@ -13,6 +13,7 @@ import { openai } from "@ai-sdk/openai";
 
 const model = withMemWal(openai("gpt-4o"), {
   key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
   serverUrl: process.env.MEMWAL_SERVER_URL,
   namespace: "chatbot-prod",
   maxMemories: 5,

@@ -38,6 +38,7 @@ The TypeScript SDK is the main entry point for developers. It wraps all MemWal o
 ```ts
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
   serverUrl: process.env.MEMWAL_SERVER_URL,
   namespace: "my-app",
 });
@@ -58,7 +59,7 @@ This means Web2 developers can integrate MemWal without touching wallets, signin
 - Encrypts and decrypts memory payloads
 - Uploads and downloads blobs to/from Walrus
 - Stores and searches vector metadata in the indexed database
-- Scopes all operations to `owner + namespace + app_id`
+- Scopes all operations to `owner + namespace` (with SEAL encryption bound to the app's package ID)
 - Can sponsor transaction and storage fees for user requests
 
 <Note>
@@ -101,11 +102,17 @@ Walrus is an external protocol — MemWal uses it as infrastructure, not as some
 
 ## Indexed Database
 
-PostgreSQL with pgvector serves as the local search and sync layer.
+PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension serves as the local search and sync layer.
+
+**Key tables:**
+- `vector_entries` — stores 1536-dimensional embeddings linked to Walrus blob IDs, with an HNSW index for fast cosine similarity search
+- `delegate_key_cache` — caches delegate key → account mappings for fast auth
+- `accounts` — synced by the indexer for account lookups
+- `indexer_state` — tracks the indexer's event polling cursor
 
 **Responsibilities:**
 - Stores vector embeddings for semantic search during recall
 - Caches account and delegate data synced by the indexer
-- Scopes all queries to `owner + namespace + app_id`
+- Scopes all queries to `owner + namespace` (package ID provides cross-deployment isolation via SEAL)
 
-This is an operational component — it makes recall fast and keeps onchain lookups efficient, but the encrypted source of truth always lives on Walrus.
+This is an operational component — it makes recall fast and keeps onchain lookups efficient, but the encrypted source of truth always lives on Walrus. If the database is lost, the [restore flow](/sdk/usage/memwal) can rebuild it from Walrus.

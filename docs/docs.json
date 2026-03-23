@@ -24,13 +24,13 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/MystenLabs/MemWal"
+        "href": "https://github.com/CommandOSSLabs/memwal"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/MystenLabs/MemWal"
+      "github": "https://github.com/CommandOSSLabs/memwal"
     }
   },
   "navigation": {

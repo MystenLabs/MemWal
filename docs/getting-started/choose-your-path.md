@@ -36,7 +36,7 @@ Go to: [SDK Usage](/sdk/usage)
 
 Use `@mysten/memwal/ai` when you already use the AI SDK and want recall plus auto-save behavior.
 
-Go to: [AI Integration](/sdk/ai-integration)
+Go to: [AI Integration](/sdk/usage/with-memwal)
 
 ## 5. Self-Host the Relayer
 
