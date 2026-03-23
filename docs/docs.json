@@ -24,13 +24,13 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/CommandOSSLabs/personal-data-wallet"
+        "href": "https://github.com/MystenLabs/MemWal"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/CommandOSSLabs/personal-data-wallet"
+      "github": "https://github.com/MystenLabs/MemWal"
     }
   },
   "navigation": {
