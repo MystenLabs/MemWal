@@ -73,12 +73,14 @@ export default function LandingPage() {
 
                         </div>
 
-                        <div className="lp-illustration" aria-hidden="true">
-                            <div className="lp-mega" />
-                            <div className="lp-orbit lp-orbit-a" />
-                            <div className="lp-orbit lp-orbit-b" />
-                            <div className="lp-dot" />
-                            <div className="lp-star">✦</div>
+                        <div className="lp-illustration" aria-hidden="true" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <svg width="180" height="144" viewBox="0 0 374 300" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ opacity: 0.9 }}>
+                                <path d="M49.8667 100H0V300H49.8667V100Z" fill="black" />
+                                <path d="M112.2 0H49.8667V100H112.2V0Z" fill="black" />
+                                <path d="M187 100H112.2V300H187V100Z" fill="black" />
+                                <path d="M274.267 0H187V100H274.267V0Z" fill="black" />
+                                <path d="M374 100H274.267V300H374V100Z" fill="black" />
+                            </svg>
                         </div>
                     </section>
 

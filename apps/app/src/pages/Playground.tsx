@@ -17,6 +17,7 @@ import { MemWal } from '@cmdoss/memwal'
 import { MemWalManual } from '@cmdoss/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 // ============================================================
 // Demo Step — reusable step card
@@ -418,7 +419,7 @@ export default function Playground() {
             <nav className="nav">
                 <div className="nav-inner">
                     <div className="nav-brand">
-                        <span>memwal</span>
+                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
                     </div>
                     <div className="nav-user">
                         <a
