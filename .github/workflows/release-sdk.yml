@@ -29,8 +29,6 @@ jobs:
 
       - name: Setup PNPM
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -65,22 +63,18 @@ jobs:
       - name: Publish staging release candidate
         if: github.ref == 'refs/heads/staging'
         run: |
-          npx changeset pre enter rc 2>/dev/null || true
-          npx changeset version
-          pnpm changeset publish --tag rc
+          PKG_VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          npm view @mysten/memwal@$PKG_VERSION version 2>/dev/null && echo "Version $PKG_VERSION already published, skipping" && exit 0
+          cd packages/sdk && npm publish --tag rc --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # ── dev branch → prerelease (dev tag) ──
       - name: Publish dev prerelease
         if: github.ref == 'refs/heads/dev'
         run: |
-          npx changeset pre enter dev 2>/dev/null || true
-          npx changeset version
-          pnpm changeset publish --tag dev
+          PKG_VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          npm view @mysten/memwal@$PKG_VERSION version 2>/dev/null && echo "Version $PKG_VERSION already published, skipping" && exit 0
+          cd packages/sdk && npm publish --tag dev --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
