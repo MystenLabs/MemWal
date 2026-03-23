@@ -678,8 +678,8 @@ importers:
         specifier: 3.0.39
         version: 3.0.39(react@19.0.1)(zod@3.25.76)
       '@cmdoss/memwal':
-        specifier: 2.0.0-alpha.2
-        version: 2.0.0-alpha.2(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
+        specifier: 2.0.0-alpha.5
+        version: 2.0.0-alpha.5(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
       '@codemirror/lang-javascript':
         specifier: ^6.2.2
         version: 6.2.5
@@ -1478,8 +1478,8 @@ packages:
   '@clack/prompts@1.1.0':
     resolution: {integrity: sha512-pkqbPGtohJAvm4Dphs2M8xE29ggupihHdy1x84HNojZuMtFsHiUlRvqD24tM2+XmI+61LlfNceM3Wr7U5QES5g==}
 
-  '@cmdoss/memwal@2.0.0-alpha.2':
-    resolution: {integrity: sha512-7JAFbsrvommDHzmolKdnGkcuFKa5LLbNKOPcyN/cv8jd9/1pw44vyaU2bxyMlNAXWYTtq8Qk2HwZ1lXr7HSA3Q==}
+  '@cmdoss/memwal@2.0.0-alpha.5':
+    resolution: {integrity: sha512-EnrT4XFqc4RMPnWLuYcOOr7YKjPf1ELuUpTfQGCmJS++Y8SPg71WQ9/SyxHbQAxGricxvYKdSMlS4qgIR1COZw==}
     peerDependencies:
       '@mysten/seal': '>=1.1.0'
       '@mysten/sui': '>=2.5.0'
@@ -11781,9 +11781,10 @@ snapshots:
       '@clack/core': 1.1.0
       sisteransi: 1.0.5
 
-  '@cmdoss/memwal@2.0.0-alpha.2(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
+  '@cmdoss/memwal@2.0.0-alpha.5(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
     dependencies:
       '@noble/ed25519': 2.3.0
+      '@noble/hashes': 2.0.1
     optionalDependencies:
       '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
       '@mysten/sui': 2.8.0(typescript@5.9.3)
