@@ -41,6 +41,16 @@ const TRIGGER_PATTERNS = [
 // ============================================================================
 
 /**
+ * Check if text looks like a prompt injection attempt.
+ * Used by both capture (reject on store) and recall (reject on inject).
+ */
+export function looksLikeInjection(text: string): boolean {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return INJECTION_PATTERNS.some((p) => p.test(normalized));
+}
+
+/**
  * Determine whether a conversation text is worth capturing.
  *
  * Returns true if the text likely contains memorable facts.
