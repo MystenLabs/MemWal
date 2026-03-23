@@ -1,10 +1,9 @@
 ---
-title: "@ai-sdk Integration"
+title: "withMemWal"
+description: "Drop-in memory middleware for Vercel AI SDK apps."
 ---
 
-MemWal includes an AI SDK integration for applications that already use model middleware.
-
-## `withMemWal`
+Drop-in memory middleware for Vercel AI SDK apps.
 
 ```ts
 import { generateText } from "ai";
@@ -12,8 +11,8 @@ import { withMemWal } from "@mysten/memwal/ai";
 import { openai } from "@ai-sdk/openai";
 
 const model = withMemWal(openai("gpt-4o"), {
-  key: process.env.MEMWAL_PRIVATE_KEY!,
-  serverUrl: process.env.MEMWAL_SERVER_URL,
+  key: "<your-ed25519-private-key>",
+  serverUrl: "https://your-relayer-url.com",
   namespace: "chatbot-prod",
   maxMemories: 5,
   autoSave: true,
@@ -29,17 +28,15 @@ const result = await generateText({
 
 Before generation:
 
-- reads the last user message
-- runs `recall()` against MemWal
-- filters by relevance
-- injects memory context into the prompt
+- Reads the last user message
+- Runs `recall()` against MemWal
+- Filters by relevance
+- Injects memory context into the prompt
 
 After generation:
 
-- optionally runs `analyze()` on the user message
-- saves extracted facts asynchronously
-
-## Why Namespace Matters Here
+- Optionally runs `analyze()` on the user message
+- Saves extracted facts asynchronously
 
 Set a namespace explicitly for each product surface that uses the middleware. Otherwise recalled
 and auto-saved memories fall back to `"default"`.
@@ -48,6 +45,6 @@ and auto-saved memories fall back to `"default"`.
 
 Use direct SDK methods when your app needs precise control over:
 
-- when memory is stored
-- which text is analyzed
-- how recall results are displayed or filtered
+- When memory is stored
+- Which text is analyzed
+- How recall results are displayed or filtered

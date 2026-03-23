@@ -1,5 +1,5 @@
 ---
-title: "SDK API Reference"
+title: "API Reference"
 ---
 
 See also:
@@ -67,7 +67,7 @@ These exist on the current SDK surface, but the main beta path is still `remembe
 Import:
 
 ```ts
-import { MemWalManual } from "@cmdoss/memwal/manual";
+import { MemWalManual } from "@mysten/memwal/manual";
 ```
 
 Main methods:
@@ -89,7 +89,7 @@ Important config notes:
 Import:
 
 ```ts
-import { withMemWal } from "@cmdoss/memwal/ai";
+import { withMemWal } from "@mysten/memwal/ai";
 ```
 
 Use it to add:

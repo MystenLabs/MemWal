@@ -13,7 +13,7 @@ The public relayer is the fastest way to evaluate MemWal during beta.
 ## Minimal Config
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,

@@ -74,14 +74,17 @@
           {
             "group": "SDK",
             "pages": [
-              "sdk/overview",
               "sdk/quick-start",
-              "sdk/usage",
-              "sdk/ai-integration",
-              "sdk/basic-usage",
-              "sdk/advanced-usage",
-              "sdk/research-app-example",
-              "sdk/example-map"
+              {
+                "group": "Usage",
+                "root": "sdk/usage",
+                "pages": [
+                  "sdk/usage/memwal",
+                  "sdk/usage/memwal-manual",
+                  "sdk/usage/with-memwal"
+                ]
+              },
+              "sdk/api-reference"
             ]
           }
         ]
@@ -132,7 +135,6 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/sdk-api",
               "reference/relayer-api",
               "reference/configuration",
               "reference/environment-variables"
