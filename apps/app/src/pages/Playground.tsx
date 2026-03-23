@@ -825,7 +825,7 @@ const { text } = await generateText({
                     </div>
 
                     <pre className={`demo-code-block${fullRememberResult || fullRememberError || fullRememberPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`import { MemWalManual } from "@cmdoss/memwal/manual"
+                        <code>{`import { MemWalManual } from "@mysten/memwal/manual"
 
 const memwal = MemWalManual.create({
   key: delegateKeyHex,

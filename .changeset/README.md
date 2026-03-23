@@ -1,6 +1,6 @@
 # Changesets
 
-This project uses [Changesets](https://github.com/changesets/changesets) to manage versioning and changelogs for `@cmdoss/memwal`.
+This project uses [Changesets](https://github.com/changesets/changesets) to manage versioning and changelogs for `@mysten/memwal`.
 
 ## How to add a changeset
 
@@ -11,7 +11,7 @@ pnpm changeset
 ```
 
 This will prompt you to:
-1. Select which packages have changed (`@cmdoss/memwal`)
+1. Select which packages have changed (`@mysten/memwal`)
 2. Choose the semver bump type (major / minor / patch)
 3. Write a summary of the change
 
