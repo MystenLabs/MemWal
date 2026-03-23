@@ -97,8 +97,8 @@
             "pages": [
               "relayer/overview",
               "relayer/public-relayer",
-              "relayer/installation-and-setup",
-              "relayer/self-hosting"
+              "relayer/self-hosting",
+              "relayer/api-reference"
             ]
           }
         ]
@@ -135,7 +135,6 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/relayer-api",
               "reference/configuration",
               "reference/environment-variables"
             ]

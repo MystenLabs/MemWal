@@ -1,5 +1,5 @@
 ---
-title: "Relayer API Reference"
+title: "API Reference"
 ---
 
 The current Rust server exposes these routes from `services/server/src/main.rs`.
