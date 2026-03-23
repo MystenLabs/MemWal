@@ -1,6 +1,11 @@
 # @cmdoss/memwal
 
-Privacy-first AI memory SDK. Stores encrypted memories on Walrus (decentralized storage) and retrieves them via semantic search. 
+Privacy-first AI memory SDK. Stores encrypted memories on Walrus (decentralized storage) and
+retrieves them via semantic search.
+
+> MemWal is currently in beta. It works today, but rough edges and operational guidance may still
+> evolve. Feedback and contributions are welcome while we harden the protocol and developer
+> experience.
 
 ## Install
 
@@ -20,30 +25,30 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 import { MemWal } from "@cmdoss/memwal";
 
 const memwal = MemWal.create({
-  key: "your-delegate-key-hex", // Ed25519 delegate key — get it from app.memwal.com
+  key: "your-delegate-key-hex",
   serverUrl: "https://your-memwal-server.com",
+  namespace: "demo",
 });
 
-// Store a memory
 await memwal.remember("User prefers dark mode and uses TypeScript.");
-
-// Retrieve relevant memories
 const memories = await memwal.recall("What are the user's preferences?");
+await memwal.restore("demo");
 ```
 
 ## Exports
 
 | Entry | Description |
 |---|---|
-| `@cmdoss/memwal` | Default client (`MemWal`). Server handles everything: embedding, SEAL encryption, Walrus upload/download, and decryption — all inside a TEE. |
-| `@cmdoss/memwal/manual` | Manual mode (`MemWalManual`). You handle SEAL encryption, embedding, and Walrus upload client-side. Server only stores the vector ↔ blobId mapping and returns matching blobIds on recall. Full client-side privacy. |
-| `@cmdoss/memwal/ai` | Vercel AI SDK integration — wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
+| `@cmdoss/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
+| `@cmdoss/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
+| `@cmdoss/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
 ## How It Works
 
-1. **Send** — Text is sent to the server (runs inside a TEE)
-2. **Store** — Server embeds → encrypts with SEAL → uploads to Walrus; vector stored with pgvector
-3. **Recall** — Query is embedded, similar memories fetched, decrypted inside TEE, returned as plaintext
+1. **Scope** - Each memory operation runs inside an `owner + namespace` boundary
+2. **Store** - The relayer embeds, encrypts, uploads to Walrus, and stores vector metadata in PostgreSQL
+3. **Recall** - The relayer searches by owner plus namespace, resolves matching blobs, and returns plaintext results
+4. **Restore** - The relayer can incrementally rebuild missing indexed entries for one namespace
 
 ## License
 
