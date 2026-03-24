@@ -2,42 +2,33 @@
 title: "Public Relayer"
 ---
 
-The public relayer is the fastest way to evaluate MemWal during beta.
+The public relayer is a managed MemWal deployment for teams that want to get started without running infrastructure. If a public relayer endpoint is available for your environment, it gives you the fastest path to integration.
 
-## Use It When
+## Endpoints
 
-- you are testing the SDK
-- you want to validate namespace-aware flows quickly
-- you want to try `remember`, `recall`, `analyze`, and `restore` before self-hosting
+| Network | Relayer URL |
+|---|---|
+| **Production** (mainnet) | `https://relayer.memwal.ai` |
+| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
 
 ## Minimal Config
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
-  key: process.env.MEMWAL_PRIVATE_KEY!,
-  serverUrl: process.env.MEMWAL_SERVER_URL!,
+  key: "<your-ed25519-private-key>",
+  accountId: "<your-memwal-account-id>",
+  serverUrl: "https://relayer.memwal.ai",
   namespace: "demo",
 });
 ```
 
-## Good Evaluation Flow
+## What to Know
 
-1. call `health()`
-2. store one memory with `remember()`
-3. retrieve it with `recall()`
-4. try `analyze()` on a longer passage
-5. use `restore()` only when you want to validate recovery behavior
+- **Shared App ID** - all users of the public relayer share the same MemWal package ID. Your data is isolated by your own `owner + namespace` (Memory Space), but the underlying deployment is shared.
+- **Trust assumption** - the relayer sees plaintext during encryption and embedding. By using the public relayer, you're trusting the Mysten-hosted instance with that data. See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for details.
+- **Availability** - the public relayer is a managed beta service. There are no SLA guarantees.
+- **Storage costs** - the server wallet covers Walrus storage fees. Usage limits may apply during beta.
 
-## Assume This
-
-- the public relayer is a managed beta surface
-- the documented routes are the supported surface
-- your integration should set a namespace explicitly
-
-## Self-Host Instead If You Need
-
-- your own infra and credentials
-- tighter operational guarantees
-- your own rollout control
+If you need full control over the trust boundary or your own dedicated instance, see [Self-Hosting](/relayer/self-hosting).

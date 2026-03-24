@@ -1,43 +1,49 @@
 ---
-title: "Operate Your Own Relayer"
+title: "Self-Hosting"
 ---
 
-Run your own relayer when you need your own backend, secrets, and rollout control.
+Self-hosting means running your own relayer — either pointing at an existing MemWal package ID or deploying an entirely new MemWal instance with your own contract, database, and server wallet.
 
-## Use It When
+The public relayer provided by Mysten is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
-- you want your own deployment environment
-- you want your own database and credentials
-- you want to control relayer upgrades and uptime
-- you want the server to use your own embedding provider credentials
+## When to Self-Host
+
+The most common reasons are removing the trust assumption on a third-party relayer or running your own MemWal instance entirely:
+
+- **Control the trust boundary** — a self-hosted relayer keeps plaintext, encryption, and embedding under your own control
+- **Run your own MemWal instance** — deploy your own contract with a separate package ID, SEAL encryption keys, and data isolation
+- **Choose your own embedding provider** — use your own OpenAI-compatible API and credentials
+- **Guarantee availability** — the public relayer is a beta service with no SLA
 
 ## What Runs
 
-A self-hosted MemWal backend usually has:
+A self-hosted MemWal backend has:
 
-- the Rust relayer in `services/server`
-- the TypeScript sidecar in `services/server/scripts`
-- PostgreSQL with pgvector
-- optional but recommended: the indexer in `services/indexer`
+| Component | Location | Description |
+|-----------|----------|-------------|
+| **Rust relayer** | `services/server` | Axum HTTP server — auth, routing, embedding, vector search |
+| **TypeScript sidecar** | `services/server/scripts` | SEAL encrypt/decrypt, Walrus upload, blob query (uses `@mysten/seal` and `@mysten/walrus`) |
+| **PostgreSQL + pgvector** | External | Vector storage, auth cache, indexer state |
+| **Indexer** (recommended) | `services/indexer` | Polls Sui events, syncs account data into PostgreSQL |
 
-## Local Run Flow
-
-1. create a PostgreSQL database with `pgvector`
-2. copy `services/server/.env.example` to `services/server/.env`
-3. fill in the required env vars
-4. install sidecar deps in `services/server/scripts`
-5. run the Rust server from `services/server`
-6. optionally run the indexer from `services/indexer`
+The Rust relayer starts the TypeScript sidecar as a child process on boot. They communicate over HTTP (`localhost:9000` by default). If the sidecar fails to start within 15 seconds, the relayer exits.
 
 ## Quick Start
 
-If you already have PostgreSQL + pgvector running, the shortest path is:
+If you do not already have PostgreSQL + pgvector running, start it with:
+
+```bash
+docker compose -f services/server/docker-compose.yml up -d postgres
+```
+
+Then run the relayer:
 
 ```bash
 cp services/server/.env.example services/server/.env
-cd services/server/scripts && npm ci
-cd ../ && cargo run
-cd ../indexer && cargo run
+cd services/server/scripts
+npm ci
+cd ..
+cargo run
 ```
 
 Then check:
@@ -46,98 +52,83 @@ Then check:
 curl http://localhost:8000/health
 ```
 
-Use this quick start for local evaluation. For production operation, review the full env setup
-and key configuration below.
+## Environment Variables
 
-## Testnet Contract IDs
-
-If you want to run your own relayer on testnet, use these server env vars:
-
-```env
-SUI_NETWORK=testnet
-MEMWAL_PACKAGE_ID=0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090ee3f
-MEMWAL_REGISTRY_ID=0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05
-```
-
-Important:
-
-- use `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` in `services/server/.env`
-- `VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are for the app or playground, not for the relayer
-- the current server config still requires `MEMWAL_REGISTRY_ID`
-
-If you want the relayer to create real embeddings, set:
-
-- `OPENAI_API_KEY`
-- `OPENAI_API_BASE`
-
-The relayer uses these values to call an OpenAI-compatible `/embeddings` API during `remember`,
-`recall`, `analyze`, `ask`, and restore re-indexing.
-
-You also need:
-
-- `SEAL_KEY_SERVERS`
-
-The sidecar uses this comma-separated list of object IDs for backend SEAL encrypt and decrypt.
-
-For testnet setup, use https://seal-docs.wal.app/Pricing to get the current SEAL key server object IDs.
-
-## Commands
-
-Install sidecar dependencies:
-
-```bash
-cd services/server/scripts
-npm ci
-```
-
-Start the relayer:
-
-```bash
-cd services/server
-cargo run
-```
-
-The server starts the sidecar automatically through `npx tsx sidecar-server.ts`.
-
-Start the indexer:
-
-```bash
-cd services/indexer
-cargo run
-```
-
-## What To Expect
-
-- the relayer listens on `http://localhost:8000` by default
-- the sidecar listens on `http://localhost:9000` by default
-- the server runs DB migrations automatically on boot
-- `/health` is the first endpoint to test
-
-## Required For A Working Relayer
+### Required
 
 - `DATABASE_URL`
-- `SUI_RPC_URL`
-- `WALRUS_PUBLISHER_URL`
-- `WALRUS_AGGREGATOR_URL`
 - `MEMWAL_PACKAGE_ID`
 - `MEMWAL_REGISTRY_ID`
 - `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
+- `SEAL_KEY_SERVERS` — comma-separated list of SEAL key server object IDs
 
-## Recommended But Context-Dependent
+### Recommended
 
-- `OPENAI_API_KEY`: lets the relayer call your embedding provider for real embeddings
-- `OPENAI_API_BASE`: use this when your provider is not the default OpenAI base URL
-- `SEAL_KEY_SERVERS`: required for backend SEAL encrypt and decrypt
-- indexer: recommended for fast account lookup, especially outside quick local testing
+- `OPENAI_API_KEY` — enables real embeddings (falls back to mock embeddings without it)
+- `OPENAI_API_BASE` — point to an OpenAI-compatible provider like OpenRouter
 
-## Docker Path
+### Defaults
 
-If you want to deploy the relayer as a container, use:
+- `PORT` defaults to `8000`
+- `SIDECAR_URL` defaults to `http://localhost:9000`
+- `SUI_NETWORK` defaults to `mainnet`
+- `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
+- The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
+
+### Server Keys
+
+- `SERVER_SUI_PRIVATE_KEY` is the main server key
+- `SERVER_SUI_PRIVATE_KEYS` is a comma-separated key pool for parallel Walrus uploads
+- if both are set, the key pool takes priority for uploads
+
+## Package Contract IDs
+### TESTNET
+```env
+SUI_NETWORK=testnet
+MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
+MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
+
+```
+### MAINNET
+```env
+SUI_NETWORK=mainnet
+MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6
+MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
+```
+
+For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.
+
+Using official key server of SDK is recommended. 
+
+<Note>
+`VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are frontend env vars for the app or playground — not for the relayer.
+</Note>
+
+## Database Setup
+
+The relayer requires PostgreSQL with the `pgvector` extension. The relayer runs migrations automatically on boot, creating these tables:
+
+- `vector_entries` — 1536-dimensional embeddings with HNSW index for cosine similarity search
+- `delegate_key_cache` — auth optimization (delegate key → account mapping)
+- `accounts` — populated by the indexer (account → owner mapping)
+- `indexer_state` — indexer cursor tracking
+
+See [Database Sync](/indexer/database-sync) for the full schema.
+
+## Operational Notes
+
+- The server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will exit
+- DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension)
+- Connection pool: 10 max connections (relayer), 3 max connections (indexer)
+- `/health` is the basic service check, API routes live under `/api/*`
+- The indexer is recommended for fast account lookup in production — without it, the relayer falls back to onchain registry scans
+- Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based) — useful for local testing but not production
+
+## Docker
 
 - `services/server/Dockerfile` for the relayer
 - `services/indexer/Dockerfile` for the indexer
 
 ## Read Next
 
-- [Installation and Setup](/relayer/installation-and-setup)
-- [Relayer API](/reference/relayer-api)
+- [Relayer API](/relayer/api-reference)

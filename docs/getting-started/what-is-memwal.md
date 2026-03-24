@@ -1,9 +1,9 @@
 ---
 title: "What is MemWal?"
-description: "Privacy-preserving, decentralized memory protocol for humans and AI agents — powered by Walrus and Sui."
+description: "Privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui."
 ---
 
-MemWal is a privacy-preserving, decentralized memory protocol for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
+MemWal is a privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encrypted" icon="lock">
@@ -86,7 +86,7 @@ AI agents today lose context between sessions — every conversation starts from
 
 ## Use Cases
 
-MemWal fits any app or protocol that needs to store, retrieve, and update memory persistently:
+MemWal fits any app that needs to store, retrieve, and update memory persistently:
 
 - **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
 - **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory
@@ -100,9 +100,12 @@ And many more — check out the example apps below to see MemWal in action.
 
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/CommandOSSLabs/memwal/tree/main/apps) directory:
 
+- **App** — dashboard demo for zkLogin, delegate-key setup, and account management
 - **Chatbot** — AI chat app with persistent memory across sessions
 - **Noter** — note-taking tool that stores knowledge as encrypted memory
 - **Researcher** — research assistant that builds and recalls a knowledge base
+
+See [Example Apps](/examples/example-apps) for short code examples from each app.
 
 ## Explore the Docs
 
@@ -113,7 +116,7 @@ The repo ships with ready-to-run apps in the [`/apps`](https://github.com/Comman
   <Card title="Architecture" icon="building" href="/fundamentals/architecture/core-components">
     System overview, component responsibilities, core flows, data flow security
   </Card>
-  <Card title="SDK" icon="box" href="/sdk/overview">
+  <Card title="SDK" icon="box" href="/sdk/quick-start">
     Quickstart, usage patterns, AI integration, and examples
   </Card>
   <Card title="Relayer" icon="tower-broadcast" href="/relayer/overview">
@@ -125,7 +128,7 @@ The repo ships with ready-to-run apps in the [`/apps`](https://github.com/Comman
   <Card title="Indexer" icon="magnifying-glass" href="/indexer/purpose">
     Event indexing, onchain events, database sync
   </Card>
-  <Card title="Reference" icon="book" href="/reference/sdk-api">
+  <Card title="Reference" icon="book" href="/sdk/api-reference">
     SDK API, relayer API, configuration, environment variables
   </Card>
 </CardGroup>

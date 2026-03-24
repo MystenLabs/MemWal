@@ -7,7 +7,7 @@ This monorepo contains:
 - TypeScript applications under `apps/`
 - the SDK under `packages/sdk`
 - Rust backend services under `services/`
-- Docusaurus docs under `docs/`
+- Mintlify docs under `docs/`
 
 ## Common Local Entry Points
 
@@ -37,5 +37,4 @@ For relayer-oriented local work you will typically need:
 
 If you want to run the backend locally, start with the Relayer docs:
 
-- [Installation and Setup](/relayer/installation-and-setup)
-- [Operate Your Own Relayer](/relayer/self-hosting)
+- [Self-Hosting](/relayer/self-hosting)

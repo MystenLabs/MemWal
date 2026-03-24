@@ -14,6 +14,7 @@ Used by:
 | Field | Required | Notes |
 | --- | --- | --- |
 | `key` | yes | Delegate private key in hex |
+| `accountId` | yes | MemWalAccount object ID on Sui |
 | `serverUrl` | no | Relayer URL. Default: `http://localhost:8000` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
 
@@ -21,7 +22,7 @@ Used by:
 
 Used by:
 
-- `new MemWalManual(config)`
+- `MemWalManual.create(config)`
 
 Core fields:
 
