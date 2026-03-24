@@ -1,0 +1,23 @@
+name: memwal-researcher
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: researcher-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: researcher
+      POSTGRES_USER: researcher
+      POSTGRES_PASSWORD: researcher_secret
+    ports:
+      - "5436:5432"
+    volumes:
+      - researcher_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U researcher"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  researcher_pgdata:

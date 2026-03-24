@@ -1,0 +1,282 @@
+/**
+ * Memory Highlight Styles - Optimized & Subtle
+ *
+ * Professional, easy-on-the-eyes design for memory highlights.
+ * Muted colors, subtle animations, accessible contrast.
+ */
+
+/* ═══════════════════════════════════════════════════════════════
+   BASE STYLES
+   ═══════════════════════════════════════════════════════════════ */
+
+.memory-highlight {
+  position: relative;
+  display: inline;
+  padding: 0.0625rem 0.125rem;
+  border-radius: 0.1875rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.memory-highlight:hover {
+  filter: brightness(0.95);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   STATUS COLORS - Muted & Subtle
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Pending - Soft Yellow */
+.memory-highlight--pending {
+  background-color: rgba(254, 243, 199, 0.7);
+}
+
+.memory-highlight--pending:hover {
+  background-color: rgba(254, 243, 199, 0.6);
+}
+
+/* Signing - Soft Purple */
+.memory-highlight--signing {
+  background-color: rgba(233, 213, 255, 0.7);
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* Uploading - Soft Blue */
+.memory-highlight--uploading {
+  background-color: rgba(191, 219, 254, 0.7);
+}
+
+.memory-highlight--uploading:hover {
+  background-color: rgba(191, 219, 254, 0.6);
+}
+
+/* Indexing - Soft Cyan */
+.memory-highlight--indexing {
+  background-color: rgba(207, 250, 254, 0.7);
+}
+
+.memory-highlight--indexing:hover {
+  background-color: rgba(207, 250, 254, 0.6);
+}
+
+/* Saved - Soft Green */
+.memory-highlight--saved {
+  background-color: rgba(209, 250, 229, 0.7);
+}
+
+.memory-highlight--saved:hover {
+  background-color: rgba(209, 250, 229, 0.6);
+}
+
+/* Error - Soft Red */
+.memory-highlight--error {
+  background-color: rgba(254, 226, 226, 0.7);
+}
+
+.memory-highlight--error:hover {
+  background-color: rgba(254, 226, 226, 0.6);
+}
+
+/* Rejected - Soft Gray */
+.memory-highlight--rejected {
+  background-color: rgba(243, 244, 246, 0.7);
+  opacity: 0.7;
+}
+
+.memory-highlight--rejected:hover {
+  opacity: 0.85;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   IMPORTANCE - Subtle Visual Weight
+   ═══════════════════════════════════════════════════════════════ */
+
+.memory-highlight[data-importance="9"],
+.memory-highlight[data-importance="10"] {
+  font-weight: 600;
+}
+
+.memory-highlight[data-importance="7"],
+.memory-highlight[data-importance="8"] {
+  font-weight: 600;
+}
+
+.memory-highlight[data-importance="1"],
+.memory-highlight[data-importance="2"],
+.memory-highlight[data-importance="3"] {
+  opacity: 0.8;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CATEGORY INDICATORS - Subtle Icons
+   ═══════════════════════════════════════════════════════════════ */
+
+.memory-highlight[data-memory-category="note"]::before {
+  content: "📝";
+  margin-right: 0.1875rem;
+  font-size: 0.6875rem;
+  opacity: 0.5;
+}
+
+.memory-highlight[data-memory-category="fact"]::before {
+  content: "💡";
+  margin-right: 0.1875rem;
+  font-size: 0.6875rem;
+  opacity: 0.5;
+}
+
+.memory-highlight[data-memory-category="preference"]::before {
+  content: "⭐";
+  margin-right: 0.1875rem;
+  font-size: 0.6875rem;
+  opacity: 0.5;
+}
+
+.memory-highlight[data-memory-category="todo"]::before {
+  content: "✅";
+  margin-right: 0.1875rem;
+  font-size: 0.6875rem;
+  opacity: 0.5;
+}
+
+.memory-highlight[data-memory-category="general"]::before {
+  content: "💭";
+  margin-right: 0.1875rem;
+  font-size: 0.6875rem;
+  opacity: 0.5;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TRANSITIONS - Smooth & Subtle
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Fade-in animation when memory is first injected */
+@keyframes fadeInHighlight {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.memory-highlight {
+  animation: fadeInHighlight 0.3s ease-out;
+}
+
+/* Status transition animation */
+@keyframes statusChange {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.memory-highlight.status-changing {
+  animation: statusChange 0.4s ease-out;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DARK MODE - Refined Dark Colors
+   ═══════════════════════════════════════════════════════════════ */
+
+@media (prefers-color-scheme: dark) {
+  /* Pending */
+  .memory-highlight--pending {
+    background-color: rgba(120, 53, 15, 0.25);
+  }
+
+  .memory-highlight--pending:hover {
+    background-color: rgba(120, 53, 15, 0.35);
+  }
+
+  /* Signing */
+  .memory-highlight--signing {
+    background-color: rgba(88, 28, 135, 0.25);
+  }
+
+  /* Uploading */
+  .memory-highlight--uploading {
+    background-color: rgba(30, 58, 138, 0.25);
+  }
+
+  .memory-highlight--uploading:hover {
+    background-color: rgba(30, 58, 138, 0.35);
+  }
+
+  /* Indexing */
+  .memory-highlight--indexing {
+    background-color: rgba(22, 78, 99, 0.25);
+  }
+
+  .memory-highlight--indexing:hover {
+    background-color: rgba(22, 78, 99, 0.35);
+  }
+
+  /* Saved */
+  .memory-highlight--saved {
+    background-color: rgba(6, 78, 59, 0.25);
+  }
+
+  .memory-highlight--saved:hover {
+    background-color: rgba(6, 78, 59, 0.35);
+  }
+
+  /* Error */
+  .memory-highlight--error {
+    background-color: rgba(127, 29, 29, 0.25);
+  }
+
+  .memory-highlight--error:hover {
+    background-color: rgba(127, 29, 29, 0.35);
+  }
+
+  /* Rejected */
+  .memory-highlight--rejected {
+    background-color: rgba(55, 65, 81, 0.25);
+  }
+
+  .memory-highlight--rejected:hover {
+    background-color: rgba(55, 65, 81, 0.35);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   ACCESSIBILITY
+   ═══════════════════════════════════════════════════════════════ */
+
+.memory-highlight:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+.memory-highlight:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .memory-highlight,
+  .memory-highlight * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

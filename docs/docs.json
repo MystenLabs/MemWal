@@ -1,0 +1,159 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "MemWal",
+  "description": "Privacy-preserving decentralized memory protocol for humans and AI agents",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg"
+  },
+  "favicon": "/favicon.ico",
+  "colors": {
+    "primary": "#191a23",
+    "light": "#E8FF75",
+    "dark": "#191a23"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "banner": {
+    "content": "MemWal is in beta with ongoing improvements to APIs and features based on developer feedback.",
+    "dismissible": false
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/CommandOSSLabs/memwal"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/CommandOSSLabs/memwal"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Get Started",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "getting-started/what-is-memwal",
+              "getting-started/quick-start",
+              "getting-started/choose-your-path"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Fundamentals",
+        "groups": [
+          {
+            "group": "Concepts",
+            "pages": [
+              "fundamentals/concepts/memory-space",
+              "fundamentals/concepts/ownership-and-access"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "fundamentals/architecture/core-components",
+              "fundamentals/architecture/how-storage-works",
+              "fundamentals/architecture/data-flow-security-model"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK",
+        "groups": [
+          {
+            "group": "SDK",
+            "pages": [
+              "sdk/quick-start",
+              {
+                "group": "Usage",
+                "root": "sdk/usage",
+                "pages": [
+                  "sdk/usage/memwal",
+                  "sdk/usage/memwal-manual",
+                  "sdk/usage/with-memwal"
+                ]
+              },
+              "sdk/api-reference"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Relayer",
+        "groups": [
+          {
+            "group": "Relayer",
+            "pages": [
+              "relayer/overview",
+              "relayer/public-relayer",
+              "relayer/self-hosting",
+              "relayer/api-reference"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contract",
+        "groups": [
+          {
+            "group": "Smart Contract",
+            "pages": [
+              "contract/overview",
+              "contract/delegate-key-management",
+              "contract/ownership-and-permissions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Indexer",
+        "groups": [
+          {
+            "group": "Indexer",
+            "pages": [
+              "indexer/purpose",
+              "indexer/onchain-events",
+              "indexer/database-sync"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/configuration",
+              "reference/environment-variables"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contributing",
+        "groups": [
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/run-docs-locally",
+              "contributing/run-repo-locally",
+              "contributing/docs-workflow"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,14 +1,19 @@
 {
-  "$schema": "https://unpkg.com/@changesets/config@3.1.2/schema.json",
-  "changelog": ["@changesets/changelog-github", { "repo": "CommandOSSLabs/personal-data-wallet" }],
-  "commit": false,
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": [
+    "@changesets/changelog-github",
+    { "repo": "CommandOSSLabs/MemWal" }
+  ],
+  "commit": true,
   "fixed": [],
   "linked": [],
   "access": "public",
-  "baseBranch": "refactor/service-consolidation",
+  "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": [],
-  "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
-    "onlyUpdatePeerDependentsWhenOutOfRange": true
-  }
+  "ignore": [
+    "@memwal/app",
+    "@memwal/noter",
+    "@memwal/chatbot",
+    "researcher"
+  ]
 }

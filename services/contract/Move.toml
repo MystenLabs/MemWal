@@ -1,0 +1,13 @@
+[package]
+name = "memwal"
+edition = "2024"
+authors = ["CommandOSS"]
+
+[dependencies]
+
+[addresses]
+memwal = "0x0"
+
+[dev-addresses]
+
+[dev-dependencies]

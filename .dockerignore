@@ -1,0 +1,19 @@
+# Only include packages needed for v2-test Docker build
+**/node_modules
+**/.next
+**/target
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/build
+**/.turbo
+**/.cursor
+**/.vscode
+**/.github
+**/test-results
+**/playwright-report
+**/*.lock
+!**/pnpm-lock.yaml
+!**/package-lock.json
+!**/Cargo.lock

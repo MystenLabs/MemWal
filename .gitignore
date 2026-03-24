@@ -76,3 +76,43 @@ bun.lockb
 bun.lock
 # Keep package-lock.json for npm
 !package-lock.json
+
+# Rust build artifacts
+target/
+
+# SQLite databases (local data)
+**/data/*.db
+**/data/*.db-shm
+**/data/*.db-wal
+
+# Gemini AI
+.gemini/
+
+# Docusaurus generated files
+docs/.docusaurus/
+docs/build/
+
+
+#Ignore vscode AI rules
+.github\instructions\codacy.instructions.md
+
+# Codacy
+.codacy/
+
+# x-wallet
+x-wallet/
+
+# Local system documents
+whole-system-documents/
+.gitnexus
+AGENTS.md
+CLAUDE.md
+
+.codacy
+.github/instructions
+x-wallet
+tmp-rememe/
+tmp-smashblob/
+
+# Railway sensitive docs
+railway-*.md

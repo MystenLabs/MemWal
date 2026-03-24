@@ -1,0 +1,6 @@
+# Build artifacts
+target/
+
+# Environment (contains credentials)
+.env
+.env.local
