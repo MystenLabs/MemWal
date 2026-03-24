@@ -84,8 +84,8 @@ curl http://localhost:8000/health
 
 ```env
 SUI_NETWORK=testnet
-MEMWAL_PACKAGE_ID=0x12b28adbe55c25341f08b8ad9ac69462aab917048c7cd5b736d951200090ee3f
-MEMWAL_REGISTRY_ID=0xfb8a1d298e2a73bdab353da3fcb3b16f68ab7d1f392f3a5c4944c747c026fc05
+MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
+MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
 ```
 
 For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.

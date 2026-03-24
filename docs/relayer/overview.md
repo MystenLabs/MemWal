@@ -22,24 +22,37 @@ The relayer is a Rust service (Axum) that manages a TypeScript sidecar process f
 ```mermaid
 flowchart LR
     Client["SDK / App"]
+
+    %% ===== HOST =====
     subgraph Host["Relayer Host"]
         direction LR
+
         Axum["Rust Relayer (Axum)<br>Auth + routes"]
         Sidecar["TypeScript Sidecar<br>SEAL + Walrus"]
+
+        %% container backend
+        subgraph Stack
+            direction TB
+            DB["PostgreSQL + pgvector"]
+            Sui["Sui RPC"]
+            AI["Embedding / LLM API"]
+        end
     end
-    DB["PostgreSQL + pgvector"]
-    Sui["Sui RPC"]
-    AI["Embedding / LLM API"]
+
+    %% external
     Seal["SEAL key servers"]
     Walrus["Walrus"]
 
+    %% flows
     Client --> Axum
+
+    %% chỉ nối vào container (qua node đầu)
     Axum --> DB
-    Axum --> Sui
-    Axum --> AI
+
+    %% sidecar
     Axum --> Sidecar
     Sidecar --> Seal
-    Sidecar --> Walrus
+    Sidecar --> Walrus  
 ```
 
 The sidecar is started automatically when the Rust server boots and communicates over HTTP on `localhost:9000` (configurable via `SIDECAR_URL`). If the sidecar fails to start, the relayer exits immediately.
