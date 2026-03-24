@@ -64,6 +64,7 @@ jobs:
           VITE_MEMWAL_REGISTRY_ID: ${{ vars.VITE_MEMWAL_REGISTRY_ID }}
           VITE_SEAL_KEY_SERVERS: ${{ vars.VITE_SEAL_KEY_SERVERS }}
           VITE_DOCS_URL: ${{ vars.VITE_DOCS_URL }}
+          VITE_DEMO_URLS: ${{ vars.VITE_DEMO_URLS }}
 
       - name: Deploy to Walrus Site (Mainnet)
         id: deploy-mainnet
