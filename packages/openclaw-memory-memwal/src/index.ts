@@ -4,11 +4,12 @@
  * Encrypted, decentralized long-term memory via MemWal + Walrus.
  *
  * Components:
- *   hooks.ts   — before_prompt_build (auto-recall), agent_end (auto-capture)
- *   tools.ts   — memory_search, memory_store
- *   cli.ts     — openclaw memwal search/stats/list
+ *   hooks/     — before_prompt_build (auto-recall), agent_end (auto-capture)
+ *   tools/     — memory_search, memory_store
+ *   cli/       — openclaw memwal search/stats
  *   config.ts  — Config parsing, namespace resolution
  *   format.ts  — Memory formatting, tag injection/stripping, prompt safety
+ *   capture.ts — Capture filtering, injection detection
  *   types.ts   — Shared TypeScript types
  *
  * Per-agent isolation via namespaces:
@@ -18,9 +19,9 @@
 
 import { MemWal } from "@cmdoss/memwal";
 import { parseConfig, keyPreview } from "./config.js";
-import { registerHooks } from "./hooks.js";
-import { registerTools } from "./tools.js";
-import { registerCli } from "./cli.js";
+import { registerHooks } from "./hooks/index.js";
+import { registerTools } from "./tools/index.js";
+import { registerCli } from "./cli/index.js";
 
 export default {
   id: "memory-memwal",
