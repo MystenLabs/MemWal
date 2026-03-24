@@ -3,7 +3,7 @@ name: Deploy App to Walrus Site
 on:
   push:
     branches:
-      - dev
+      - main
     paths:
       - 'apps/app/**'
       - '.github/workflows/deploy-app-walrus.yml'
@@ -47,6 +47,9 @@ jobs:
           fi
           echo "ws-resources.json found!"
 
+      - name: Build SDK
+        run: pnpm build:sdk
+
       - name: Build app for Mainnet
         working-directory: ./apps/app
         run: |
@@ -65,7 +68,7 @@ jobs:
 
       - name: Deploy to Walrus Site (Mainnet)
         id: deploy-mainnet
-        uses: MystenLabs/walrus-sites/.github/actions/deploy@main
+        uses: MystenLabs/walrus-sites-github-actions/deploy@v1
         with:
           SUI_ADDRESS: ${{ vars.SUI_ADDRESS }}
           SUI_KEYSTORE: ${{ secrets.SUI_KEYSTORE }}
