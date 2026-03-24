@@ -515,6 +515,90 @@ h1, h2, h3 {
   box-shadow: 1px 1px 0 #000000;
 }
 
+/* ── Demo Dropdown ── */
+
+.lp-demo-dropdown {
+  position: relative;
+}
+
+.lp-demo-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 2px solid #000000;
+  border-radius: 12px;
+  padding: 10px 18px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: 3px 3px 0 #000000;
+  color: #000000;
+  background: #ffffff;
+}
+
+.lp-demo-trigger:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0 #000000;
+}
+
+.lp-demo-trigger:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 #000000;
+}
+
+.lp-demo-chevron {
+  transition: transform 0.2s;
+}
+
+.lp-demo-chevron.open {
+  transform: rotate(180deg);
+}
+
+.lp-demo-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  background: #ffffff;
+  border: 2px solid #000000;
+  border-radius: 12px;
+  box-shadow: 4px 4px 0 #000000;
+  padding: 6px;
+  z-index: 100;
+  animation: lp-dropdown-in 0.15s ease-out;
+}
+
+@keyframes lp-dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.lp-demo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  color: #000000;
+  text-decoration: none;
+  font-size: 0.88rem;
+  font-weight: 600;
+  border-radius: 8px;
+  transition: background 0.1s;
+}
+
+.lp-demo-item:hover {
+  background: #E8FF75;
+}
+
 /* ── Hero ── */
 
 .lp-hero {

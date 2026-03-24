@@ -49,6 +49,17 @@
         ]
       },
       {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/example-apps"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Fundamentals",
         "groups": [
           {
