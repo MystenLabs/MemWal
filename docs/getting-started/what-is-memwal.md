@@ -1,9 +1,9 @@
 ---
 title: "What is MemWal?"
-description: "Privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui."
+description: "Persistent, verifiable memory for AI agents"
 ---
 
-MemWal is a privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
+MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encrypted" icon="lock">

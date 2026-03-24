@@ -49,17 +49,6 @@
         ]
       },
       {
-        "tab": "Examples",
-        "groups": [
-          {
-            "group": "Examples",
-            "pages": [
-              "examples/example-apps"
-            ]
-          }
-        ]
-      },
-      {
         "tab": "Fundamentals",
         "groups": [
           {
@@ -136,6 +125,17 @@
               "indexer/purpose",
               "indexer/onchain-events",
               "indexer/database-sync"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/example-apps"
             ]
           }
         ]

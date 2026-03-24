@@ -36,6 +36,7 @@ await memwal.restore("demo");
 
 ## Documentation
 
+- Full docs at [docs.memwal.ai](https://docs.memwal.ai)
 - Docs source of truth: `docs/`
 - Docs site entry points:
   - [What is MemWal?](docs/getting-started/what-is-memwal.md)
@@ -89,4 +90,4 @@ For broader local setup guidance, see:
 
 ## License
 
-Apache 2.0
+Apache 2.0 — see [LICENSE](LICENSE)
