@@ -6,6 +6,8 @@
  */
 
 import { useState, useCallback, useMemo, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
+import { LogOut } from 'lucide-react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
@@ -422,25 +424,17 @@ export default function Playground() {
                         <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
                     </div>
                     <div className="nav-user">
-                        <a
-                            href="#"
-                            className="demo-nav-back"
-                            onClick={(e) => {
-                                e.preventDefault()
-                                window.location.hash = ''
-                                window.scrollTo({ top: 0, behavior: 'smooth' })
-                            }}
-                        >
-                            ← dashboard
-                        </a>
+                        <Link to="/" className="demo-nav-back">
+                            ← Dashboard
+                        </Link>
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
                         <button
-                            className="btn btn-secondary btn-sm"
+                            className="lp-nav-cta"
                             onClick={handleLogout}
                         >
-                            sign out
+                            <LogOut size={14} /> sign out
                         </button>
                     </div>
                 </div>

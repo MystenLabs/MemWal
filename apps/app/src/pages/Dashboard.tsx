@@ -12,6 +12,8 @@ import {
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten/memwal/account'
 import type { WalletSigner } from '@mysten/memwal/manual'
+import { Link } from 'react-router-dom'
+import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -242,8 +244,8 @@ const result = await generateText({
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="btn btn-secondary btn-sm" onClick={handleLogout}>
-                            sign out
+                        <button className="lp-nav-cta" onClick={handleLogout}>
+                            <LogOut size={14} /> sign out
                         </button>
                     </div>
                 </div>
@@ -257,7 +259,7 @@ const result = await generateText({
                 </div>
 
                 {/* Try Demo CTA */}
-                <a href="#playground" className="dashboard-cta">
+                <Link to="/playground" className="dashboard-cta">
                     <div>
                         <div className="dashboard-cta-title">
                             try interactive demo
@@ -267,7 +269,7 @@ const result = await generateText({
                         </div>
                     </div>
                     <div className="dashboard-cta-arrow">→</div>
-                </a>
+                </Link>
 
 
                 {/* Current Delegate Key */}
@@ -291,7 +293,7 @@ const result = await generateText({
                                     className="btn btn-secondary btn-sm"
                                     onClick={() => copyToClipboard(accountObjectId, 'acct')}
                                 >
-                                    {copied === 'acct' ? 'copied!' : 'copy'}
+                                    <Copy size={12} /> {copied === 'acct' ? 'copied!' : 'copy'}
                                 </button>
                             </div>
                         </div>
@@ -308,7 +310,7 @@ const result = await generateText({
                                 className="btn btn-secondary btn-sm"
                                 onClick={() => copyToClipboard(delegatePublicKey!, 'pub')}
                             >
-                                {copied === 'pub' ? 'copied!' : 'copy'}
+                                <Copy size={12} /> {copied === 'pub' ? 'copied!' : 'copy'}
                             </button>
                         </div>
                     </div>
@@ -324,10 +326,10 @@ const result = await generateText({
                                         className="btn btn-secondary btn-sm"
                                         onClick={() => copyToClipboard(delegateKey!, 'priv')}
                                     >
-                                        {copied === 'priv' ? 'copied!' : 'copy'}
+                                        <Copy size={12} /> {copied === 'priv' ? 'copied!' : 'copy'}
                                     </button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(false)}>
-                                        hide
+                                        <EyeOff size={12} /> hide
                                     </button>
                                 </div>
                             </>
@@ -338,7 +340,7 @@ const result = await generateText({
                                 </div>
                                 <div className="key-actions">
                                     <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(true)}>
-                                        reveal
+                                        <Eye size={12} /> reveal
                                     </button>
                                 </div>
                             </>
@@ -361,14 +363,14 @@ const result = await generateText({
                                 onClick={fetchOnChainKeys}
                                 disabled={loadingKeys}
                             >
-                                {loadingKeys ? '...' : 'refresh'}
+                                <RefreshCw size={12} /> {loadingKeys ? '...' : 'refresh'}
                             </button>
                             <button
-                                className="btn btn-primary btn-sm"
+                                className="lp-nav-cta"
                                 onClick={() => setShowAddForm(true)}
                                 disabled={showAddForm || addingKey}
                             >
-                                + add key
+                                <Plus size={14} /> add key
                             </button>
                         </div>
                     </div>
@@ -403,7 +405,7 @@ const result = await generateText({
                                         className="btn btn-secondary btn-sm"
                                         onClick={() => copyToClipboard(newPrivateKey, 'new-priv')}
                                     >
-                                        {copied === 'new-priv' ? 'copied!' : 'copy'}
+                                        <Copy size={12} /> {copied === 'new-priv' ? 'copied!' : 'copy'}
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
@@ -503,14 +505,14 @@ const result = await generateText({
                                                 className="btn btn-secondary btn-sm"
                                                 onClick={() => copyToClipboard(k.publicKey, `pk-${k.publicKey.slice(0,8)}`)}
                                             >
-                                                {copied === `pk-${k.publicKey.slice(0,8)}` ? 'copied!' : 'copy public key'}
+                                                <Copy size={12} /> {copied === `pk-${k.publicKey.slice(0,8)}` ? 'copied!' : 'copy public key'}
                                             </button>
                                             <button
-                                                className="btn btn-secondary btn-sm"
+                                                className="btn btn-danger btn-sm"
                                                 onClick={() => handleRemoveKey(k.publicKey)}
                                                 disabled={isRemoving}
                                             >
-                                                {isRemoving ? '...' : 'remove'}
+                                                <Trash2 size={12} /> {isRemoving ? '...' : 'remove'}
                                             </button>
                                         </div>
                                     </div>
@@ -531,10 +533,10 @@ const result = await generateText({
                     <div style={{ position: 'relative' }}>
                         <button
                             className="btn btn-secondary btn-sm"
-                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
+                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1, background: '#ffffff' }}
                             onClick={() => copyToClipboard(sdkSnippet, 'sdk')}
                         >
-                            {copied === 'sdk' ? 'done' : 'copy'}
+                            <Copy size={12} /> {copied === 'sdk' ? 'done' : 'copy'}
                         </button>
                         <pre className="demo-code-block" style={{ padding: 20 }}>
                             <code>{sdkSnippet}</code>
@@ -553,10 +555,10 @@ const result = await generateText({
                     <div style={{ position: 'relative' }}>
                         <button
                             className="btn btn-secondary btn-sm"
-                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1 }}
+                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1, background: '#ffffff' }}
                             onClick={() => copyToClipboard(aiSnippet, 'ai')}
                         >
-                            {copied === 'ai' ? 'done' : 'copy'}
+                            <Copy size={12} /> {copied === 'ai' ? 'done' : 'copy'}
                         </button>
                         <pre className="demo-code-block" style={{ padding: 20 }}>
                             <code>{aiSnippet}</code>

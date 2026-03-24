@@ -17,6 +17,7 @@ import {
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
+import { LogOut, Copy } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
@@ -212,8 +213,8 @@ export default function SetupWizard() {
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="btn btn-secondary btn-sm" onClick={() => disconnect()}>
-                            sign out
+                        <button className="lp-nav-cta" onClick={() => disconnect()}>
+                            <LogOut size={14} /> sign out
                         </button>
                     </div>
                 </div>
@@ -262,7 +263,7 @@ export default function SetupWizard() {
                                 </div>
                             </div>
 
-                            <button className="btn btn-primary btn-lg" onClick={generateKeypair}>
+                            <button className="lp-btn-yellow" onClick={generateKeypair}>
                                 generate delegate key
                             </button>
                         </div>
@@ -298,7 +299,7 @@ export default function SetupWizard() {
                                 <div className="key-value">{privateKeyHex}</div>
                                 <div className="key-actions">
                                     <button className="btn btn-secondary btn-sm" onClick={copyKey}>
-                                        {copied ? 'copied!' : 'copy'}
+                                        <Copy size={12} /> {copied ? 'copied!' : 'copy'}
                                     </button>
                                 </div>
                             </div>
@@ -342,8 +343,8 @@ export default function SetupWizard() {
                             </div>
 
                             <button
-                                className="btn btn-primary btn-lg"
-                                style={{ width: '100%' }}
+                                className="lp-btn-yellow"
+                                style={{ width: '100%', justifyContent: 'center' }}
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
@@ -370,7 +371,7 @@ export default function SetupWizard() {
                                 all set!
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-                                your delegate key has been registered onchain. redirecting to dashboard...
+                                your delegate key has been registered onchain. loading playground...
                             </p>
                         </div>
                     )}

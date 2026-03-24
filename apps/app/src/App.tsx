@@ -136,9 +136,11 @@ function AppContent() {
 
   return (
     <Routes>
-      <Route path="/playground" element={<Playground />} />
+      <Route path="/playground" element={
+        delegateKey ? <Playground /> : <SetupWizard />
+      } />
       <Route path="*" element={
-        delegateKey ? <Dashboard /> : <SetupWizard />
+        delegateKey ? <Dashboard /> : <Navigate to="/playground" replace />
       } />
     </Routes>
   )
