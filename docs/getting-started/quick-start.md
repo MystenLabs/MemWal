@@ -102,9 +102,9 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     import { MemWal } from "@mysten/memwal";
 
     const memwal = MemWal.create({
-      key: process.env.MEMWAL_PRIVATE_KEY!,
-      accountId: process.env.MEMWAL_ACCOUNT_ID!,
-      serverUrl: process.env.MEMWAL_SERVER_URL,
+      key: "<your-ed25519-private-key>",
+      accountId: "<your-memwal-account-id>",
+      serverUrl: "https://your-relayer-url.com",
       namespace: "my-app",
     });
     ```
