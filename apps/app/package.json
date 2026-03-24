@@ -10,9 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@cmdoss/memwal": "workspace:*",
     "@mysten/dapp-kit": "^1.0.3",
     "@mysten/enoki": "^1.0.4",
+    "@mysten/memwal": "workspace:*",
     "@mysten/seal": "^1.1.0",
     "@mysten/sui": "^2.6.0",
     "@mysten/walrus": "^1.0.3",
@@ -29,6 +29,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.1",
+    "react-syntax-highlighter": "^15.6.6",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.1",
     "three": "^0.183.2",
@@ -39,6 +40,7 @@
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^5.1.1",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",

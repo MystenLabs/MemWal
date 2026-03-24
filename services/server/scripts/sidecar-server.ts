@@ -51,6 +51,8 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         : "https://upload-relay.mainnet.walrus.space"
 );
 
+const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 2;
+
 const suiClient = new SuiJsonRpcClient({
     url: getJsonRpcFullnodeUrl(SUI_NETWORK),
     network: SUI_NETWORK,
@@ -415,7 +417,14 @@ app.post("/seal/decrypt-batch", async (req, res) => {
 // ============================================================
 app.post("/walrus/upload", async (req, res) => {
     try {
-        const { data, privateKey, owner, namespace, packageId, epochs = 50 } = req.body;
+        const {
+            data,
+            privateKey,
+            owner,
+            namespace,
+            packageId,
+            epochs = DEFAULT_WALRUS_EPOCHS,
+        } = req.body;
         if (!data || !privateKey) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey" });
         }

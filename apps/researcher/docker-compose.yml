@@ -1,23 +1,23 @@
-name: memwal-chatbot
+name: memwal-researcher
 
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: chatbot-postgres
+    container_name: researcher-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: chatbot
-      POSTGRES_USER: chatbot
-      POSTGRES_PASSWORD: chatbot_secret
+      POSTGRES_DB: researcher
+      POSTGRES_USER: researcher
+      POSTGRES_PASSWORD: researcher_secret
     ports:
-      - "5433:5432"
+      - "5436:5432"
     volumes:
-      - chatbot_pgdata:/var/lib/postgresql/data
+      - researcher_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chatbot"]
+      test: ["CMD-SHELL", "pg_isready -U researcher"]
       interval: 5s
       timeout: 5s
       retries: 5
 
 volumes:
-  chatbot_pgdata:
+  researcher_pgdata:

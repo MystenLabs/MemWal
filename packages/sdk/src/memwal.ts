@@ -11,7 +11,7 @@
  *
  * @example
  * ```typescript
- * import { MemWal } from "@cmdoss/memwal"
+ * import { MemWal } from "@mysten/memwal"
  *
  * const memwal = MemWal.create({
  *     key: process.env.MEMWAL_PRIVATE_KEY,  // Ed25519 private key (hex)

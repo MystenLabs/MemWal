@@ -14,4 +14,10 @@ export const config = {
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
     docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
+    demoUrls: (import.meta.env.VITE_DEMO_URLS as string || '')
+        .split(',').map(s => s.trim()).filter(Boolean)
+        .map(entry => {
+            const [label, url] = entry.split('|').map(s => s.trim())
+            return url ? { label, url } : { label: label, url: label }
+        }),
 } as const

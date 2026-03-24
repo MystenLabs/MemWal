@@ -1,16 +1,13 @@
-# @cmdoss/memwal
+# @mysten/memwal
 
-Privacy-first AI memory SDK. Stores encrypted memories on Walrus (decentralized storage) and
-retrieves them via semantic search.
+Privacy-first AI memory SDK for storing encrypted memories on Walrus and retrieving them with semantic search.
 
-> MemWal is currently in beta. It works today, but rough edges and operational guidance may still
-> evolve. Feedback and contributions are welcome while we harden the protocol and developer
-> experience.
+> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Install
 
 ```bash
-pnpm add @cmdoss/memwal
+pnpm add @mysten/memwal
 ```
 
 Peer dependencies (install as needed):
@@ -22,11 +19,12 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 ## Quick Start
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "your-delegate-key-hex",
-  serverUrl: "https://your-memwal-server.com",
+  accountId: "your-memwal-account-id",
+  serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });
 
@@ -35,13 +33,15 @@ const memories = await memwal.recall("What are the user's preferences?");
 await memwal.restore("demo");
 ```
 
+If you are self-hosting the relayer and do not have an account ID yet, see [Self-Hosting](../../docs/relayer/self-hosting.md) for the account creation and delegate key setup flow.
+
 ## Exports
 
 | Entry | Description |
 |---|---|
-| `@cmdoss/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
-| `@cmdoss/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
-| `@cmdoss/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
+| `@mysten/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
+| `@mysten/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
+| `@mysten/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
 ## How It Works
 
@@ -52,4 +52,4 @@ await memwal.restore("demo");
 
 ## License
 
-MIT
+Apache 2.0

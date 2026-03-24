@@ -20,9 +20,9 @@ COPY apps/app/package.json      ./apps/app/
 # Install all workspace deps
 RUN pnpm install
 
-# Build SDK first (apps/app depends on @cmdoss/memwal via workspace:*)
+# Build SDK first (apps/app depends on @mysten/memwal via workspace:*)
 COPY packages/sdk/ ./packages/sdk/
-RUN pnpm --filter @cmdoss/memwal build
+RUN pnpm --filter @mysten/memwal build
 
 # Copy app source
 COPY apps/app/ ./apps/app/
@@ -35,6 +35,7 @@ ARG VITE_SUI_NETWORK=mainnet
 ARG VITE_ENOKI_API_KEY
 ARG VITE_GOOGLE_CLIENT_ID
 ARG VITE_DOCS_URL
+ARG VITE_DEMO_URLS
 
 ENV VITE_MEMWAL_SERVER_URL=$VITE_MEMWAL_SERVER_URL
 ENV VITE_MEMWAL_PACKAGE_ID=$VITE_MEMWAL_PACKAGE_ID
@@ -43,6 +44,7 @@ ENV VITE_SUI_NETWORK=$VITE_SUI_NETWORK
 ENV VITE_ENOKI_API_KEY=$VITE_ENOKI_API_KEY
 ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
 ENV VITE_DOCS_URL=$VITE_DOCS_URL
+ARG VITE_DEMO_URLS=$VITE_DEMO_URLS
 
 RUN pnpm --filter @memwal/app build
 

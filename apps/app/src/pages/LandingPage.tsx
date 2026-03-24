@@ -9,7 +9,11 @@ import {
     useWallets,
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
+import { ChevronDown, Github } from 'lucide-react'
+import { useRef, useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { config } from '../config'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 export default function LandingPage() {
     const currentAccount = useCurrentAccount()
@@ -24,88 +28,130 @@ export default function LandingPage() {
     )
     const googleWallet = walletsByProvider.get('google')
 
+    const navigate = useNavigate()
     const hasEnokiConfig = config.enokiApiKey && config.googleClientId
+    const demoUrls = config.demoUrls
+    const [demoOpen, setDemoOpen] = useState(false)
+    const demoRef = useRef<HTMLDivElement>(null)
 
-    // If somehow already connected, this page shouldn't show
-    if (currentAccount) return null
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (demoRef.current && !demoRef.current.contains(e.target as Node)) {
+                setDemoOpen(false)
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside)
+        return () => document.removeEventListener('mousedown', handleClickOutside)
+    }, [])
+
+    const handleConnect = () => {
+        if (currentAccount) {
+            navigate('/dashboard')
+        } else if (hasEnokiConfig && googleWallet) {
+            connect({ wallet: googleWallet })
+            navigate('/dashboard')
+        }
+    }
 
     return (
-        <>
-            <div className="lp-bg">
-                <div className="lp-sheet">
-                    <section className="lp-hero">
-                        <div className="lp-copy">
-                            <div className="lp-kicker">privacy-preserving AI memory</div>
-                            <h1>
-                                give your AI permanent memory
-                            </h1>
-                            <p>
-                                store memories on Walrus, encrypt with SEAL, and recall with semantic search.
-                                memwal gives agents long-term context while users keep ownership.
-                            </p>
+        <div className="lp-page">
+            {/* ── Nav ── */}
+            <nav className="lp-nav">
+                <div className="lp-nav-inner">
+                    <a href="/" className="lp-nav-brand">
+                        <img src={memwalLogo} alt="MemWal" height="28" />
+                    </a>
 
-                            {hasEnokiConfig && googleWallet ? (
-                                <div className="lp-cta-row">
-                                    <button
-                                        className="btn lp-btn-main"
-                                        onClick={() => connect({ wallet: googleWallet })}
-                                    >
-                                        playground
-                                    </button>
-                                    <button
-                                        className="btn lp-btn-main"
-                                        onClick={() => window.open(config.docsUrl, '_blank', 'noopener,noreferrer')}
-                                    >
-                                        view docs
-                                    </button>
-                                </div>
-                            ) : (
-                                <div className="lp-cta-row">
-                                    <ConnectButton connectText="playground" />
-                                    <button
-                                        className="btn lp-btn-main"
-                                        onClick={() => window.open(config.docsUrl, '_blank', 'noopener,noreferrer')}
-                                    >
-                                        view docs
-                                    </button>
-                                </div>
-                            )}
-
-                        </div>
-
-                        <div className="lp-illustration" aria-hidden="true">
-                            <div className="lp-mega" />
-                            <div className="lp-orbit lp-orbit-a" />
-                            <div className="lp-orbit lp-orbit-b" />
-                            <div className="lp-dot" />
-                            <div className="lp-star">✦</div>
-                        </div>
-                    </section>
-
-                    <section className="lp-services">
-                        <div className="lp-grid">
-                            <article className="lp-service-card">
-                                <h3>encrypted storage</h3>
-                                <p>SEAL encryption, persisted to Walrus blobs.</p>
-                            </article>
-                            <article className="lp-service-card lp-service-card--lime">
-                                <h3>semantic recall</h3>
-                                <p>embedding search for relevant memories in milliseconds.</p>
-                            </article>
-                            <article className="lp-service-card lp-service-card--lime">
-                                <h3>delegate keys</h3>
-                                <p>low-risk keys for apps, revocable anytime onchain.</p>
-                            </article>
-                            <article className="lp-service-card">
-                                <h3>AI middleware</h3>
-                                <p>wrap models with memory context using one SDK.</p>
-                            </article>
-                        </div>
-                    </section>
-
-
+                    <div className="lp-nav-links">
+                        {demoUrls.length > 0 && (
+                            <div className="lp-demo-dropdown" ref={demoRef}>
+                                <button
+                                    className="lp-demo-trigger"
+                                    onClick={() => setDemoOpen(o => !o)}
+                                >
+                                    Demo <ChevronDown size={14} className={`lp-demo-chevron${demoOpen ? ' open' : ''}`} />
+                                </button>
+                                {demoOpen && (
+                                    <div className="lp-demo-menu">
+                                        {demoUrls.map(({ label, url }) => (
+                                            <a
+                                                key={url}
+                                                href={url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="lp-demo-item"
+                                                onClick={() => setDemoOpen(false)}
+                                            >
+                                                {label} <span className="lp-arrow">↗</span>
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {currentAccount ? (
+                            <button className="lp-nav-cta" onClick={() => navigate('/dashboard')}>
+                                Playground <span className="lp-arrow">↗</span>
+                            </button>
+                        ) : hasEnokiConfig && googleWallet ? (
+                            <button className="lp-nav-cta" onClick={handleConnect}>
+                                Playground <span className="lp-arrow">↗</span>
+                            </button>
+                        ) : (
+                            <ConnectButton connectText="Playground ↗" />
+                        )}
+                    </div>
                 </div>
-            </div>
-        </>
+            </nav>
+
+            {/* ── Hero ── */}
+            <section className="lp-hero">
+                <div className="lp-hero-inner">
+                    <div className="lp-hero-copy">
+                        <h1>Privacy-Preserving<br />AI Memory</h1>
+                        <p>
+                            Store memories on Walrus, encrypt with SEAL, and recall with
+                            semantic search. memwal gives agents long-term context while
+                            users keep ownership.
+                        </p>
+
+                        <div className="lp-hero-actions">
+                            {config.docsUrl && (
+                                <a
+                                    href={config.docsUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="lp-btn-yellow"
+                                >
+                                    Documentation <span className="lp-arrow">↗</span>
+                                </a>
+                            )}
+                            <a
+                                href="https://github.com/MystenLabs/memwal"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="lp-btn-outline"
+                            >
+                                <Github size={18} /> GitHub <span className="lp-arrow">↗</span>
+                            </a>
+                        </div>
+                    </div>
+
+                    <div className="lp-hero-art">
+                        <img
+                            src="/memwal-grid-bg.png"
+                            alt=""
+                            className="lp-hero-grid"
+                            aria-hidden="true"
+                        />
+                        <img
+                            src="/memwal-mascot.png"
+                            alt="MemWal mascot"
+                            className="lp-hero-mascot"
+                        />
+                    </div>
+                </div>
+            </section>
+        </div>
     )
 }
