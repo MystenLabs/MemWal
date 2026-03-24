@@ -19,24 +19,27 @@ The relayer is the backend that turns SDK calls into memory operations. Using a 
 
 The relayer is a Rust service (Axum) that manages a TypeScript sidecar process for SEAL and Walrus operations that require the `@mysten/seal` and `@mysten/walrus` SDKs.
 
-```
-┌──────────────────────────────────┐
-│          Rust Relayer (Axum)     │
-│  ┌────────────┐ ┌─────────────┐ │     ┌──────────────┐
-│  │ Auth       │ │ Routes      │ │────▶│ PostgreSQL   │
-│  │ Middleware  │ │ (remember,  │ │     │ + pgvector   │
-│  │ (Ed25519)  │ │  recall,...)│ │     └──────────────┘
-│  └────────────┘ └─────┬───────┘ │
-│                       │         │     ┌──────────────┐
-│              ┌────────▼───────┐ │────▶│ Walrus       │
-│              │ TS Sidecar     │ │     │ (download)   │
-│              │ (localhost:9000)│ │     └──────────────┘
-│              │ SEAL encrypt/  │ │
-│              │ decrypt, Walrus│ │     ┌──────────────┐
-│              │ upload, blob   │ │────▶│ Sui RPC      │
-│              │ query          │ │     │ (auth verify) │
-│              └────────────────┘ │     └──────────────┘
-└──────────────────────────────────┘
+```mermaid
+flowchart LR
+    Client["SDK / App"]
+    subgraph Host["Relayer Host"]
+        direction LR
+        Axum["Rust Relayer (Axum)<br>Auth + routes"]
+        Sidecar["TypeScript Sidecar<br>SEAL + Walrus"]
+    end
+    DB["PostgreSQL + pgvector"]
+    Sui["Sui RPC"]
+    AI["Embedding / LLM API"]
+    Seal["SEAL key servers"]
+    Walrus["Walrus"]
+
+    Client --> Axum
+    Axum --> DB
+    Axum --> Sui
+    Axum --> AI
+    Axum --> Sidecar
+    Sidecar --> Seal
+    Sidecar --> Walrus
 ```
 
 The sidecar is started automatically when the Rust server boots and communicates over HTTP on `localhost:9000` (configurable via `SIDECAR_URL`). If the sidecar fails to start, the relayer exits immediately.

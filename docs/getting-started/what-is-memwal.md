@@ -1,9 +1,9 @@
 ---
 title: "What is MemWal?"
-description: "Privacy-preserving, decentralized memory protocol for humans and AI agents — powered by Walrus and Sui."
+description: "Privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui."
 ---
 
-MemWal is a privacy-preserving, decentralized memory protocol for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
+MemWal is a privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encrypted" icon="lock">
@@ -86,7 +86,7 @@ AI agents today lose context between sessions — every conversation starts from
 
 ## Use Cases
 
-MemWal fits any app or protocol that needs to store, retrieve, and update memory persistently:
+MemWal fits any app that needs to store, retrieve, and update memory persistently:
 
 - **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
 - **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory

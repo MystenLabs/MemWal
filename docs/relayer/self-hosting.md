@@ -4,7 +4,7 @@ title: "Self-Hosting"
 
 Self-hosting means running your own relayer — either pointing at an existing MemWal package ID or deploying an entirely new MemWal instance with your own contract, database, and server wallet.
 
-The public relayer provided by Mysten is a reference implementation. You can also build your own implementation that fits the protocol interface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
+The public relayer provided by Mysten is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
 ## When to Self-Host
 
@@ -30,13 +30,20 @@ The Rust relayer starts the TypeScript sidecar as a child process on boot. They 
 
 ## Quick Start
 
-If you already have PostgreSQL + pgvector running:
+If you do not already have PostgreSQL + pgvector running, start it with:
+
+```bash
+docker compose -f services/server/docker-compose.yml up -d postgres
+```
+
+Then run the relayer:
 
 ```bash
 cp services/server/.env.example services/server/.env
-cd services/server/scripts && npm ci
-cd ../ && cargo run
-cd ../indexer && cargo run
+cd services/server/scripts
+npm ci
+cd ..
+cargo run
 ```
 
 Then check:

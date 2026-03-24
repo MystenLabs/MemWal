@@ -1,12 +1,9 @@
 # MemWal
 
-Privacy-first AI memory SDK and protocol stack for storing encrypted memories on Walrus and
+Privacy-first AI memory layer for storing encrypted memories on Walrus and
 retrieving them with semantic search.
 
-> MemWal is currently in beta. It is usable today, but the protocol, SDK, and operational
-> surfaces may still evolve as we harden the system. The docs site is the primary source of
-> truth for the supported integration path and current architecture, and contributions are very
-> welcome as we improve the stack.
+> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Install
 
@@ -27,7 +24,8 @@ import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "your-delegate-key-hex",
-  serverUrl: "https://your-memwal-server.com",
+  accountId: "your-memwal-account-id",
+  serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });
 
@@ -40,11 +38,11 @@ await memwal.restore("demo");
 
 - Docs source of truth: `docs/`
 - Docs site entry points:
-  - [Overview](docs/about/what-is-memwal.md)
-  - [Build Your First Integration](docs/getting-started/for-developers.md)
-  - [SDK Overview](docs/sdk/overview.md)
+  - [What is MemWal?](docs/getting-started/what-is-memwal.md)
+  - [Quick Start](docs/getting-started/quick-start.md)
+  - [SDK Quick Start](docs/sdk/quick-start.md)
   - [Relayer Overview](docs/relayer/overview.md)
-  - [SDK API Reference](docs/reference/sdk-api.md)
+  - [SDK API Reference](docs/sdk/api-reference.md)
 
 ## Contributing
 

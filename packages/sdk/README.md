@@ -1,11 +1,8 @@
 # @mysten/memwal
 
-Privacy-first AI memory SDK. Stores encrypted memories on Walrus (decentralized storage) and
-retrieves them via semantic search.
+Privacy-first AI memory SDK for storing encrypted memories on Walrus and retrieving them with semantic search.
 
-> MemWal is currently in beta. It works today, but rough edges and operational guidance may still
-> evolve. Feedback and contributions are welcome while we harden the protocol and developer
-> experience.
+> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Install
 
@@ -26,7 +23,8 @@ import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "your-delegate-key-hex",
-  serverUrl: "https://your-memwal-server.com",
+  accountId: "your-memwal-account-id",
+  serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });
 
@@ -34,6 +32,8 @@ await memwal.remember("User prefers dark mode and uses TypeScript.");
 const memories = await memwal.recall("What are the user's preferences?");
 await memwal.restore("demo");
 ```
+
+If you are self-hosting the relayer and do not have an account ID yet, see [Self-Hosting](../../docs/relayer/self-hosting.md) for the account creation and delegate key setup flow.
 
 ## Exports
 
@@ -52,4 +52,4 @@ await memwal.restore("demo");
 
 ## License
 
-MIT
+Apache 2.0

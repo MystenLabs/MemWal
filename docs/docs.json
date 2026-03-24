@@ -17,7 +17,7 @@
     "default": "system"
   },
   "banner": {
-    "content": "**MemWal is in active beta.** APIs and features may evolve between releases.",
+    "content": "MemWal is in beta with ongoing improvements to APIs and features based on developer feedback.",
     "dismissible": false
   },
   "navbar": {
