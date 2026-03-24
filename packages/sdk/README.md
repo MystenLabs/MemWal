@@ -4,6 +4,10 @@ Privacy-first AI memory SDK for storing encrypted memories on Walrus and retriev
 
 > MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
+## Documentation
+
+For full documentation, visit [docs.memwal.ai](https://docs.memwal.ai).
+
 ## Install
 
 ```bash
@@ -52,4 +56,4 @@ If you are self-hosting the relayer and do not have an account ID yet, see [Self
 
 ## License
 
-Apache 2.0
+Apache 2.0 — see [LICENSE](../../LICENSE)
