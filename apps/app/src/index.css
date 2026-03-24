@@ -514,6 +514,21 @@ h1, h2, h3 {
   opacity: 0.7;
 }
 
+.lp-nav-github {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #000000;
+  text-decoration: none;
+  font-size: 0.92rem;
+  font-weight: 500;
+  transition: opacity 0.2s;
+}
+
+.lp-nav-github:hover {
+  opacity: 0.7;
+}
+
 .lp-nav-cta {
   background: #E8FF75;
   color: #000000;
@@ -704,6 +719,13 @@ h1, h2, h3 {
   font-weight: 700 !important;
   font-family: var(--font-sans) !important;
   box-shadow: 3px 3px 0 #000000 !important;
+  transition: transform 0.15s, box-shadow 0.15s !important;
+}
+
+.lp-nav-links [class*="ConnectButton"] button:hover,
+.lp-nav-links button[data-dapp-kit]:hover {
+  transform: translate(-2px, -2px) !important;
+  box-shadow: 5px 5px 0 #000000 !important;
 }
 
 /* ── Responsive ── */

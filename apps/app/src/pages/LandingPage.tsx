@@ -9,6 +9,7 @@ import {
     useWallets,
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
+import { Github } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
@@ -46,20 +47,12 @@ export default function LandingPage() {
                     </a>
 
                     <div className="lp-nav-links">
-                        {config.docsUrl && (
-                            <>
-                                <a href={`${config.docsUrl}/getting-started/what-is-memwal`} target="_blank" rel="noopener noreferrer">Guide</a>
-                                <a href={`${config.docsUrl}/examples/basic-usage`} target="_blank" rel="noopener noreferrer">Examples</a>
-                                <a href={`${config.docsUrl}/sdk/quick-start`} target="_blank" rel="noopener noreferrer">SDK</a>
-                            </>
-                        )}
-
                         {hasEnokiConfig && googleWallet ? (
                             <button className="lp-nav-cta" onClick={handleConnect}>
-                                Connect Wallet <span className="lp-arrow">↗</span>
+                                Playground <span className="lp-arrow">↗</span>
                             </button>
                         ) : (
-                            <ConnectButton connectText="Connect Wallet ↗" />
+                            <ConnectButton connectText="Playground ↗" />
                         )}
                     </div>
                 </div>
@@ -77,20 +70,23 @@ export default function LandingPage() {
                         </p>
 
                         <div className="lp-hero-actions">
-                            {hasEnokiConfig && googleWallet ? (
-                                <button className="lp-btn-yellow" onClick={handleConnect}>
-                                Playground <span className="lp-arrow">↗</span>
-                                </button>
-                            ) : (
-                                <ConnectButton connectText="Playground ↗" />
+                            {config.docsUrl && (
+                                <a
+                                    href={config.docsUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="lp-btn-yellow"
+                                >
+                                    Documentation <span className="lp-arrow">↗</span>
+                                </a>
                             )}
                             <a
-                                href="https://github.com/CommandOSSLabs/MemWal"
+                                href="https://github.com/MystenLabs/memwal"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="lp-btn-outline"
                             >
-                                View on GitHub <span className="lp-arrow">↗</span>
+                                <Github size={18} /> GitHub <span className="lp-arrow">↗</span>
                             </a>
                         </div>
                     </div>
