@@ -9,7 +9,7 @@
  *
  * @example
  * ```typescript
- * import { MemWalManual } from "@cmdoss/memwal"
+ * import { MemWalManual } from "@mysten/memwal"
  *
  * const memwal = MemWalManual.create({
  *     key: process.env.MEMWAL_DELEGATE_KEY!,      // Ed25519 delegate key
@@ -45,7 +45,7 @@ import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 // Users can override via SEAL_KEY_SERVERS in their environment
 const DEFAULT_KEY_SERVERS: Record<string, string[]> = {
     mainnet: [
-        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open)
+        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open) 
     ],
     testnet: [
         "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",

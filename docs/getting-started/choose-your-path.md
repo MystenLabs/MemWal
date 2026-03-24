@@ -10,7 +10,7 @@ These paths aren't mutually exclusive. You can combine them — for example, use
 
 ## 1. Default SDK
 
-Use `@cmdoss/memwal` when you want the fastest working integration.
+Use `@mysten/memwal` when you want the fastest working integration.
 
 - relayer handles embedding, encryption, retrieval, and restore
 - best starting point for most teams
@@ -25,7 +25,7 @@ Go to: [Public Relayer](/relayer/public-relayer)
 
 ## 3. Manual Client Flow
 
-Use `@cmdoss/memwal/manual` when you want full client-side control over encryption and embeddings. Recommended for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
+Use `@mysten/memwal/manual` when you want full client-side control over encryption and embeddings. Recommended for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
 
 - client handles embeddings and SEAL encryption locally
 - relayer only sees encrypted payloads and vectors
@@ -34,9 +34,9 @@ Go to: [SDK Usage](/sdk/usage)
 
 ## 4. AI Middleware
 
-Use `@cmdoss/memwal/ai` when you already use the AI SDK and want recall plus auto-save behavior.
+Use `@mysten/memwal/ai` when you already use the AI SDK and want recall plus auto-save behavior.
 
-Go to: [AI Integration](/sdk/ai-integration)
+Go to: [AI Integration](/sdk/usage/with-memwal)
 
 ## 5. Self-Host the Relayer
 

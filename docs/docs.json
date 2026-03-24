@@ -3,30 +3,34 @@
   "theme": "mint",
   "name": "MemWal",
   "description": "Privacy-preserving decentralized memory protocol for humans and AI agents",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg"
+  },
   "favicon": "/favicon.ico",
   "colors": {
     "primary": "#191a23",
-    "light": "#98efe4",
+    "light": "#E8FF75",
     "dark": "#191a23"
   },
   "appearance": {
     "default": "system"
   },
   "banner": {
-    "content": "**MemWal is in active beta.** APIs and features may evolve between releases.",
+    "content": "MemWal is in beta with ongoing improvements to APIs and features based on developer feedback.",
     "dismissible": false
   },
   "navbar": {
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/CommandOSSLabs/personal-data-wallet"
+        "href": "https://github.com/CommandOSSLabs/memwal"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/CommandOSSLabs/personal-data-wallet"
+      "github": "https://github.com/CommandOSSLabs/memwal"
     }
   },
   "navigation": {
@@ -70,14 +74,17 @@
           {
             "group": "SDK",
             "pages": [
-              "sdk/overview",
               "sdk/quick-start",
-              "sdk/usage",
-              "sdk/ai-integration",
-              "sdk/basic-usage",
-              "sdk/advanced-usage",
-              "sdk/research-app-example",
-              "sdk/example-map"
+              {
+                "group": "Usage",
+                "root": "sdk/usage",
+                "pages": [
+                  "sdk/usage/memwal",
+                  "sdk/usage/memwal-manual",
+                  "sdk/usage/with-memwal"
+                ]
+              },
+              "sdk/api-reference"
             ]
           }
         ]
@@ -90,8 +97,8 @@
             "pages": [
               "relayer/overview",
               "relayer/public-relayer",
-              "relayer/installation-and-setup",
-              "relayer/self-hosting"
+              "relayer/self-hosting",
+              "relayer/api-reference"
             ]
           }
         ]
@@ -128,8 +135,6 @@
           {
             "group": "Reference",
             "pages": [
-              "reference/sdk-api",
-              "reference/relayer-api",
               "reference/configuration",
               "reference/environment-variables"
             ]

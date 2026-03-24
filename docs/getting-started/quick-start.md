@@ -8,7 +8,8 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 
 - [Node.js](https://nodejs.org/) v18+ or [Bun](https://bun.sh/) v1+
 - A delegate key (Ed25519 private key in hex)
-- A relayer URL — use the [public relayer](/relayer/public-relayer) to get started
+- A MemWalAccount object ID on Sui
+- A relayer URL - use a public relayer if one is available to you, or your own local or self-hosted relayer
 
 ## Quick Start
 
@@ -19,29 +20,29 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     <Tabs>
       <Tab title="pnpm">
         ```bash
-        pnpm add @cmdoss/memwal
+        pnpm add @mysten/memwal
         ```
       </Tab>
       <Tab title="npm">
         ```bash
-        npm install @cmdoss/memwal
+        npm install @mysten/memwal
         ```
       </Tab>
       <Tab title="yarn">
         ```bash
-        yarn add @cmdoss/memwal
+        yarn add @mysten/memwal
         ```
       </Tab>
       <Tab title="bun">
         ```bash
-        bun add @cmdoss/memwal
+        bun add @mysten/memwal
         ```
       </Tab>
     </Tabs>
 
     **Optional packages**
 
-    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@cmdoss/memwal/ai`):
+    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten/memwal/ai`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -66,7 +67,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
       </Tab>
     </Tabs>
 
-    For the [manual client flow](/getting-started/choose-your-path) (`@cmdoss/memwal/manual`):
+    For the [manual client flow](/getting-started/choose-your-path) (`@mysten/memwal/manual`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -95,17 +96,20 @@ The fastest way to get MemWal running is through the TypeScript SDK.
   <Step>
     ### Configure the SDK
 
-    Set up the SDK with your delegate key and relayer URL:
+    Set up the SDK with your delegate key, account ID, and relayer URL:
 
     ```ts
-    import { MemWal } from "@cmdoss/memwal";
+    import { MemWal } from "@mysten/memwal";
 
     const memwal = MemWal.create({
       key: process.env.MEMWAL_PRIVATE_KEY!,
+      accountId: process.env.MEMWAL_ACCOUNT_ID!,
       serverUrl: process.env.MEMWAL_SERVER_URL,
       namespace: "my-app",
     });
     ```
+
+    If you are self-hosting the relayer and do not have `MEMWAL_ACCOUNT_ID` yet, see [Self-Hosting](/relayer/self-hosting) for the account-creation and delegate-key setup flow after the relayer starts.
   </Step>
 
   <Step>
@@ -128,6 +132,6 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     console.log(result.results);
     ```
 
-    That's it — you're up and running.
+    That's it - you're up and running.
   </Step>
 </Steps>

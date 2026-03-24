@@ -11,7 +11,8 @@ Memory content in MemWal is stored on Walrus and cryptographically owned by a us
 
 ```ts
 const memwal = MemWal.create({
-  key: process.env.MEMWAL_PRIVATE_KEY!, // owner's private key
+  key: process.env.MEMWAL_PRIVATE_KEY!, // delegate private key
+  accountId: process.env.MEMWAL_ACCOUNT_ID!, // MemWalAccount object ID
   serverUrl: process.env.MEMWAL_SERVER_URL,
   namespace: "personal",
 });
@@ -46,7 +47,7 @@ flowchart TD
     D3 -->|reads| Memory
 ```
 
-## Acess Control Enforcement
+## Access Control Enforcement
 
 The relationship between owners and delegates is enforced on chain by the Sui smart contract system — not by application logic or database permissions.
 

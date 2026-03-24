@@ -113,3 +113,6 @@ CLAUDE.md
 x-wallet
 tmp-rememe/
 tmp-smashblob/
+
+# Railway sensitive docs
+railway-*.md

@@ -1,0 +1,7 @@
+{
+  "site_name": "MemWal",
+  "object_id": "0xf2e1de6b5f0d413a3f4b92521881aabe1c52d9f30c4bd27af7d8ed7d56fc8a32",
+  "routes": {
+    "/*": "/index.html"
+  }
+}

@@ -1,65 +1,70 @@
-# Basic Usage
+---
+title: "Basic Usage"
+---
 
 ## Installation
 
-First, install the MemWal SDK:
-
 ```bash
-pnpm add @cmdoss/memwal
+pnpm add @mysten/memwal
 ```
 
 ## Initialize
 
 ```typescript
-import { MemWal } from '@cmdoss/memwal'
+import { MemWal } from "@mysten/memwal";
 
-const memwal = new MemWal({
-  network: 'testnet',
-  packageId: '0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6',
-  registryId: '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437',
-})
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  namespace: "my-app",
+});
 ```
 
-## Connect Wallet
+## Store a Memory
 
 ```typescript
-// Using Enoki zkLogin (Google)
-await memwal.connectEnoki()
-
-// Or using Sui wallet
-await memwal.connectWallet()
+const result = await memwal.remember("User prefers dark mode and works in TypeScript.");
+console.log("Blob ID:", result.blob_id);
 ```
 
-## Store Memory
+## Recall Memories
 
 ```typescript
-const memory = await memwal.addMemory({
-  content: 'Your memory content here',
-  metadata: {
-    type: 'note',
-    tags: ['important', 'work']
-  }
-})
+const results = await memwal.recall("What do we know about this user?", 10);
 
-console.log('Memory ID:', memory.id)
+for (const memory of results.results) {
+  console.log(memory.text, `(distance: ${memory.distance})`);
+}
 ```
 
-## Search Memories
+## Analyze Text
+
+Extract structured facts from longer text and store each as a separate memory.
 
 ```typescript
-const results = await memwal.search('search query', {
-  limit: 10
-})
+const analyzed = await memwal.analyze(
+  "I live in Hanoi, prefer dark mode, and usually work late at night."
+);
 
-results.forEach(memory => {
-  console.log(memory.content)
-})
+console.log(`Extracted ${analyzed.total} facts:`);
+for (const fact of analyzed.facts) {
+  console.log(`- ${fact.text}`);
+}
 ```
 
-## Get All Memories
+## Restore a Namespace
+
+Rebuild missing indexed entries from Walrus if your local database is incomplete.
 
 ```typescript
-const allMemories = await memwal.getMemories()
+const restored = await memwal.restore("my-app", 50);
+console.log(`Restored ${restored.restored} memories, skipped ${restored.skipped}`);
+```
 
-console.log(`Found ${allMemories.length} memories`)
+## Health Check
+
+```typescript
+const health = await memwal.health();
+console.log(health.status); // "ok"
 ```

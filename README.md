@@ -1,17 +1,14 @@
 # MemWal
 
-Privacy-first AI memory SDK and protocol stack for storing encrypted memories on Walrus and
+Privacy-first AI memory layer for storing encrypted memories on Walrus and
 retrieving them with semantic search.
 
-> MemWal is currently in beta. It is usable today, but the protocol, SDK, and operational
-> surfaces may still evolve as we harden the system. The docs site is the primary source of
-> truth for the supported integration path and current architecture, and contributions are very
-> welcome as we improve the stack.
+> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Install
 
 ```bash
-pnpm add @cmdoss/memwal
+pnpm add @mysten/memwal
 ```
 
 Peer dependencies (install as needed):
@@ -23,11 +20,12 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 ## Quick Start
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
   key: "your-delegate-key-hex",
-  serverUrl: "https://your-memwal-server.com",
+  accountId: "your-memwal-account-id",
+  serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });
 
@@ -40,11 +38,11 @@ await memwal.restore("demo");
 
 - Docs source of truth: `docs/`
 - Docs site entry points:
-  - [Overview](docs/about/what-is-memwal.md)
-  - [Build Your First Integration](docs/getting-started/for-developers.md)
-  - [SDK Overview](docs/sdk/overview.md)
+  - [What is MemWal?](docs/getting-started/what-is-memwal.md)
+  - [Quick Start](docs/getting-started/quick-start.md)
+  - [SDK Quick Start](docs/sdk/quick-start.md)
   - [Relayer Overview](docs/relayer/overview.md)
-  - [SDK API Reference](docs/reference/sdk-api.md)
+  - [SDK API Reference](docs/sdk/api-reference.md)
 
 ## Contributing
 
@@ -78,9 +76,9 @@ For broader local setup guidance, see:
 
 | Entry | Description |
 |---|---|
-| `@cmdoss/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
-| `@cmdoss/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
-| `@cmdoss/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
+| `@mysten/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
+| `@mysten/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
+| `@mysten/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
 ## How It Works
 

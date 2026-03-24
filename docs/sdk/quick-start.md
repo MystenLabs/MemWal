@@ -1,56 +1,101 @@
 ---
 title: "Quick Start"
+description: "Install the MemWal SDK and store your first memory in under a minute."
 ---
 
-This example uses the default relayer-backed client.
+The MemWal SDK gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It exposes three entry points:
+
+| Entry point | Import | When to use |
+| --- | --- | --- |
+| `MemWal` | `@mysten/memwal` | **Recommended default** for most integrations — relayer handles embeddings, SEAL, and storage |
+| `MemWalManual` | `@mysten/memwal/manual` | You need client-managed embeddings and local SEAL operations |
+| `withMemWal` | `@mysten/memwal/ai` | You already use the Vercel AI SDK and want memory as middleware |
+
+## Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @mysten/memwal
+```
+
+```bash pnpm
+pnpm add @mysten/memwal
+```
+
+```bash yarn
+yarn add @mysten/memwal
+```
+
+</CodeGroup>
+
+For `MemWalManual`, you also need the optional peer dependencies:
+
+<CodeGroup>
+
+```bash npm
+npm install @mysten/sui @mysten/seal @mysten/walrus
+```
+
+```bash pnpm
+pnpm add @mysten/sui @mysten/seal @mysten/walrus
+```
+
+```bash yarn
+yarn add @mysten/sui @mysten/seal @mysten/walrus
+```
+
+</CodeGroup>
+
+For `withMemWal`, you also need:
+
+<CodeGroup>
+
+```bash npm
+npm install ai zod
+```
+
+```bash pnpm
+pnpm add ai zod
+```
+
+```bash yarn
+yarn add ai zod
+```
+
+</CodeGroup>
+
+## Configuration
+
+`MemWal.create` takes a config object with the following fields:
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `key` | `string` | Yes | Ed25519 private key in hex |
+| `accountId` | `string` | Yes | MemWalAccount object ID on Sui |
+| `serverUrl` | `string` | No | Relayer URL |
+| `namespace` | `string` | No | Default namespace — falls back to `"default"` |
+
+## First Memory
 
 ```ts
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 
 const memwal = MemWal.create({
-  key: process.env.MEMWAL_PRIVATE_KEY!,
-  serverUrl: process.env.MEMWAL_SERVER_URL,
-  namespace: process.env.MEMWAL_NAMESPACE ?? "demo",
+  key: "<your-ed25519-private-key>",
+  accountId: "<your-memwal-account-id>",
+  serverUrl: "https://your-relayer-url.com",
+  namespace: "demo",
 });
 
 await memwal.health();
 await memwal.remember("I live in Hanoi and prefer dark mode.");
 
-const recall = await memwal.recall("What do we know about this user?");
-console.log(recall.results);
-
-const analyzed = await memwal.analyze(
-  "I live in Hanoi, prefer dark mode, and usually work late at night."
-);
-console.log(analyzed.facts);
+const result = await memwal.recall("What do we know about this user?");
+console.log(result.results);
 ```
-
-## Good Namespace Examples
-
-- `chatbot-prod`
-- `researcher-staging`
-- `support-agent`
-
-Avoid keeping everything in `"default"` after early testing.
-
-## What Happens
-
-- the SDK signs each request
-- the relayer verifies delegate access
-- data is stored and searched by `owner + namespace`
-- the relayer coordinates embeddings, SEAL, Walrus, and vector indexing
-
-## Restore Example
-
-```ts
-const result = await memwal.restore("demo");
-console.log(result);
-```
-
-Use restore when the relayer needs to rebuild missing indexed state for one namespace.
 
 ## Next Steps
 
-- [SDK Usage](/sdk/usage)
-- [AI Integration](/sdk/ai-integration)
-- [SDK API Reference](/reference/sdk-api)
+- [Usage](/sdk/usage) — all three clients in detail, namespace rules, and restore
+- [API Reference](/sdk/api-reference) — full method signatures and config fields

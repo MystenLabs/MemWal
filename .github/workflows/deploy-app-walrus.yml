@@ -1,0 +1,89 @@
+name: Deploy App to Walrus Site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/app/**'
+      - '.github/workflows/deploy-app-walrus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-app:
+    runs-on: ubuntu-latest
+    environment: mainnet
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate ws-resources.json exists
+        run: |
+          if [ ! -f "./apps/app/ws-resources.json" ]; then
+            echo "## Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Missing required file: \`apps/app/ws-resources.json\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This file is generated after your first manual deployment with \`site-builder\`." >> $GITHUB_STEP_SUMMARY
+
+            echo "ERROR: apps/app/ws-resources.json not found!"
+            echo "This file is generated after your first manual deployment with site-builder."
+            exit 1
+          fi
+          echo "ws-resources.json found!"
+
+      - name: Build SDK
+        run: pnpm build:sdk
+
+      - name: Build app for Mainnet
+        working-directory: ./apps/app
+        run: |
+          pnpm build
+          if [ -f "ws-resources.json" ]; then
+            cp ws-resources.json dist/
+          fi
+        env:
+          VITE_SUI_NETWORK: mainnet
+          VITE_MEMWAL_SERVER_URL: ${{ vars.VITE_MEMWAL_SERVER_URL }}
+          VITE_MEMWAL_PACKAGE_ID: ${{ vars.VITE_MEMWAL_PACKAGE_ID }}
+          VITE_MEMWAL_REGISTRY_ID: ${{ vars.VITE_MEMWAL_REGISTRY_ID }}
+          VITE_SEAL_KEY_SERVERS: ${{ vars.VITE_SEAL_KEY_SERVERS }}
+          VITE_DOCS_URL: ${{ vars.VITE_DOCS_URL }}
+
+      - name: Deploy to Walrus Site (Mainnet)
+        id: deploy-mainnet
+        uses: MystenLabs/walrus-sites-github-actions/deploy@v1
+        with:
+          SUI_ADDRESS: ${{ vars.SUI_ADDRESS }}
+          SUI_KEYSTORE: ${{ secrets.SUI_KEYSTORE }}
+          DIST: ./apps/app/dist
+          SUI_NETWORK: mainnet
+          EPOCHS: ${{ vars.WALRUS_EPOCHS || '3' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SITES_CONFIG: |
+            contexts:
+              mainnet:
+                portal: wal.app
+                package: 0x26eb7ee8688da02c5f671679524e379f0b837a12f1d1d799f255b7eea260ad27
+                staking_object: 0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904
+                general:
+                  wallet_env: mainnet
+                  walrus_context: mainnet
+                  walrus_package: 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77
+                  gas_budget: 500000000
+            default_context: mainnet
