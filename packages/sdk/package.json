@@ -1,6 +1,6 @@
 {
     "name": "@mysten/memwal",
-    "version": "0.0.1-dev.0",
+    "version": "0.0.1",
     "description": "MemWal — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "main": "./dist/index.js",
@@ -75,7 +75,7 @@
         "ed25519",
         "tee"
     ],
-    "license": "MIT",
+    "license": "Apache-2.0",
     "publishConfig": {
         "access": "public",
         "registry": "https://registry.npmjs.org/"
