@@ -82,11 +82,18 @@ curl http://localhost:8000/health
 - if both are set, the key pool takes priority for uploads
 
 ## Package Contract IDs
-
+### TESTNET
 ```env
-SUI_NETWORK=testnet|mainnet
+SUI_NETWORK=testnet
 MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
 MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
+
+```
+### MAINNET
+```env
+SUI_NETWORK=mainnet
+MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6
+MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
 ```
 
 For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.
