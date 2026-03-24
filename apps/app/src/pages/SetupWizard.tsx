@@ -371,7 +371,7 @@ export default function SetupWizard() {
                                 all set!
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-                                your delegate key has been registered onchain. loading playground...
+                                your delegate key has been registered onchain. loading dashboard...
                             </p>
                         </div>
                     )}

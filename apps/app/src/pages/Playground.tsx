@@ -424,7 +424,7 @@ export default function Playground() {
                         <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
                     </div>
                     <div className="nav-user">
-                        <Link to="/" className="demo-nav-back">
+                        <Link to="/dashboard" className="demo-nav-back">
                             ← Dashboard
                         </Link>
                         <span className="nav-address">

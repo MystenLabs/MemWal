@@ -16,7 +16,7 @@ import {
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -128,20 +128,26 @@ function RegisterEnokiWallets() {
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const { delegateKey } = useDelegateKey()
-  const location = useLocation()
 
   if (!currentAccount) {
-    return location.pathname === '/' ? <LandingPage /> : <Navigate to="/" replace />
+    return (
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    )
   }
 
   return (
     <Routes>
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/dashboard" element={
+        delegateKey ? <Dashboard /> : <SetupWizard />
+      } />
       <Route path="/playground" element={
-        delegateKey ? <Playground /> : <SetupWizard />
+        delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       } />
-      <Route path="*" element={
-        delegateKey ? <Dashboard /> : <Navigate to="/playground" replace />
-      } />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   )
 }
