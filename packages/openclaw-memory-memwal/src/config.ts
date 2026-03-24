@@ -21,6 +21,7 @@ const DEFAULTS = {
 // Env Var Resolution
 // ============================================================================
 
+/** Replace ${ENV_VAR} placeholders with process.env values. */
 function resolveEnvVar(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_, name) => {
     const v = process.env[name];
@@ -33,6 +34,16 @@ function resolveEnvVar(value: string): string {
 // Config Parser
 // ============================================================================
 
+/**
+ * Parse and validate raw plugin config from openclaw.json.
+ *
+ * Resolves ${ENV_VAR} placeholders in string fields and applies defaults
+ * for optional settings. Throws on missing required fields.
+ *
+ * @param raw - Raw config object from `api.pluginConfig`
+ * @returns Validated config with all defaults applied
+ * @throws {Error} If privateKey, accountId, or serverUrl is missing
+ */
 export function parseConfig(raw: unknown): PluginConfig {
   if (!raw || typeof raw !== "object") {
     throw new Error("memory-memwal: config is required");
@@ -84,9 +95,13 @@ export interface ResolvedAgent {
 /**
  * Resolve agent name and namespace from OpenClaw's sessionKey.
  *
- * Parses agent name from format "agent:<name>:<uuid>".
+ * Parses agent name from format "agent:\<name\>:\<uuid\>".
  * Each agent gets its own namespace for memory isolation.
  * Falls back to defaultNamespace for main agent or unknown sessions.
+ *
+ * @param defaultNamespace - Fallback namespace (used for main agent)
+ * @param sessionKey - OpenClaw session key, e.g. "agent:researcher:uuid-456"
+ * @returns Resolved namespace and human-readable agent name
  */
 export function resolveAgent(defaultNamespace: string, sessionKey?: string): ResolvedAgent {
   if (!sessionKey) return { namespace: defaultNamespace, agentName: "main" };

@@ -9,6 +9,7 @@ import type { MemWal } from "@cmdoss/memwal";
 import { resolveAgent, keyPreview } from "./config.js";
 import type { PluginConfig } from "./types.js";
 
+/** Register `openclaw memwal` CLI commands (search, stats). */
 export function registerCli(api: any, client: MemWal, config: PluginConfig): void {
   api.registerCli(
     ({ program }: any) => {

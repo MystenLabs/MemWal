@@ -28,6 +28,7 @@ export default {
   description: "Encrypted, decentralized long-term memory via MemWal + Walrus",
   kind: "memory" as const,
 
+  /** Initialize MemWal client and register all plugin components. */
   register(api: any) {
     const config = parseConfig(api.pluginConfig);
 
