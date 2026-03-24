@@ -9,7 +9,9 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 - [Node.js](https://nodejs.org/) v18+ or [Bun](https://bun.sh/) v1+
 - A delegate key (Ed25519 private key in hex)
 - A MemWalAccount object ID on Sui
-- A relayer URL - use a public relayer if one is available to you, or your own local or self-hosted relayer
+- A relayer URL — use a [public relayer](/relayer/public-relayer) or your own [self-hosted relayer](/relayer/self-hosting)
+  - Production (mainnet): `https://relayer.memwal.ai`
+  - Staging (testnet): `https://relayer.staging.memwal.ai`
 
 ## Quick Start
 
@@ -104,12 +106,18 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     const memwal = MemWal.create({
       key: "<your-ed25519-private-key>",
       accountId: "<your-memwal-account-id>",
-      serverUrl: "https://your-relayer-url.com",
+      serverUrl: "https://relayer.memwal.ai",
       namespace: "my-app",
     });
     ```
 
-    If you are self-hosting the relayer and do not have `MEMWAL_ACCOUNT_ID` yet, see [Self-Hosting](/relayer/self-hosting) for the account-creation and delegate-key setup flow after the relayer starts.
+    <Tip>
+    Use `https://relayer.memwal.ai` for production (mainnet) or `https://relayer.staging.memwal.ai` for staging (testnet). See [Public Relayer](/relayer/public-relayer) for details.
+    </Tip>
+
+    <Note>
+    If you are self-hosting and do not have `MEMWAL_ACCOUNT_ID` yet, see [Self-Hosting](/relayer/self-hosting) for the account-creation and delegate-key setup flow.
+    </Note>
   </Step>
 
   <Step>
