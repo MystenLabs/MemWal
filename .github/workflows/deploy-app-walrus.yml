@@ -76,6 +76,18 @@ jobs:
           SUI_NETWORK: mainnet
           EPOCHS: ${{ vars.WALRUS_EPOCHS || '3' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WALRUS_CONFIG: |
+            contexts:
+              mainnet:
+                system_object: 0x2134d52768ea07e8c43570ef975eb3e4c27a39fa6396bef985b5abc58d03ddd2
+                staking_object: 0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904
+                n_shards: 1000
+                max_epochs_ahead: 53
+                wallet_config:
+                  active_env: mainnet
+                rpc_urls:
+                  - https://fullnode.mainnet.sui.io:443
+            default_context: mainnet
           SITES_CONFIG: |
             contexts:
               mainnet:
@@ -85,6 +97,6 @@ jobs:
                 general:
                   wallet_env: mainnet
                   walrus_context: mainnet
-                  walrus_package: 0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77
+                  walrus_package: 0xfa65cb2d62f4d39e60346fb7d501c12538ca2bbc646eaa37ece2aec5f897814e
                   gas_budget: 500000000
             default_context: mainnet
