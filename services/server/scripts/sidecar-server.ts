@@ -415,7 +415,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
 // ============================================================
 app.post("/walrus/upload", async (req, res) => {
     try {
-        const { data, privateKey, owner, namespace, packageId, epochs = 50 } = req.body;
+        const { data, privateKey, owner, namespace, packageId, epochs = 2 } = req.body;
         if (!data || !privateKey) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey" });
         }
