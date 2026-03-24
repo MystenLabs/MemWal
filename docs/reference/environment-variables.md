@@ -47,6 +47,7 @@ These are not all enforced at boot, but most real deployments need them.
 - The relayer uses them for `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
 - `SEAL_KEY_SERVERS` is required for the sidecar SEAL encrypt and decrypt path.
 - `SUI_NETWORK` now drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
+- The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet`, `2` on `mainnet`, unless the request explicitly passes `epochs`.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For testnet, use `MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6` and `MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437`.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
