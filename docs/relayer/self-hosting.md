@@ -81,15 +81,17 @@ curl http://localhost:8000/health
 - `SERVER_SUI_PRIVATE_KEYS` is a comma-separated key pool for parallel Walrus uploads
 - if both are set, the key pool takes priority for uploads
 
-## Testnet Contract IDs
+## Package Contract IDs
 
 ```env
-SUI_NETWORK=testnet
+SUI_NETWORK=testnet|mainnet
 MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
 MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
 ```
 
 For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.
+
+Using official key server of SDK is recommended. 
 
 <Note>
 `VITE_MEMWAL_PACKAGE_ID` and `VITE_MEMWAL_REGISTRY_ID` are frontend env vars for the app or playground — not for the relayer.
