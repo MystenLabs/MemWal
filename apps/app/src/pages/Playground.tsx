@@ -8,6 +8,11 @@
 import { useState, useCallback, useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { LogOut } from 'lucide-react'
+import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
+import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
+import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
+
+SyntaxHighlighter.registerLanguage('javascript', js)
 import {
     useCurrentAccount,
     useDisconnectWallet,
@@ -84,9 +89,16 @@ function DemoStep({
             {children}
 
             {/* Code block */}
-            <pre className={`demo-code-block${hasOutput ? ' demo-code-block--spaced' : ''}`}>
-                <code>{code}</code>
-            </pre>
+            <div className={hasOutput ? 'demo-code-block--spaced' : ''}>
+                <SyntaxHighlighter
+                    language="javascript"
+                    style={githubGist}
+                    className="demo-code-block"
+                    customStyle={{ margin: 0 }}
+                >
+                    {code}
+                </SyntaxHighlighter>
+            </div>
 
             {/* Success result */}
             {result && (
@@ -420,9 +432,9 @@ export default function Playground() {
         <>
             <nav className="nav">
                 <div className="nav-inner">
-                    <div className="nav-brand">
+                    <Link to="/" className="nav-brand">
                         <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
-                    </div>
+                    </Link>
                     <div className="nav-user">
                         <Link to="/dashboard" className="demo-nav-back">
                             ← Dashboard
@@ -448,6 +460,9 @@ export default function Playground() {
                         try each memwal SDK operation live. click{' '}
                         <strong>▶ run</strong> to execute against your server
                         using <code>@mysten/memwal</code>.
+                        {config.docsUrl && (
+                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }}>documentation</a> for full API reference.</>
+                        )}
                     </p>
                 </div>
 
@@ -642,14 +657,14 @@ const result = await memwal.restore("${namespace || 'default'}")
                         </div>
                     </div>
 
-                    <pre className="demo-code-block">
-                        <code>{`// memwal doesn't include an LLM — you choose your own.
+                    <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+{`// memwal doesn't include an LLM — you choose your own.
 // steps 7–9 use this key for:
 //   • ask AI: recalls memories → injects into your LLM prompt
 //   • full client-side: embeds text via your OpenAI / OpenRouter key
 //
-// your key is never sent to memwal servers.`}</code>
-                    </pre>
+// your key is never sent to memwal servers.`}
+                    </SyntaxHighlighter>
                 </div>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
@@ -688,8 +703,9 @@ const result = await memwal.restore("${namespace || 'default'}")
                         />
                     </div>
 
-                    <pre className={`demo-code-block${askResult || askError || askPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`import { withMemWal } from "@mysten/memwal/ai"
+                    <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
+                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+{`import { withMemWal } from "@mysten/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
 
@@ -705,8 +721,9 @@ const { text } = await generateText({
   model,
   prompt: "${askQuestion.slice(0, 50)}"
 })
-// → AI answers using your encrypted memories as context`}</code>
-                    </pre>
+// → AI answers using your encrypted memories as context`}
+                        </SyntaxHighlighter>
+                    </div>
 
                     {/* Loading phase */}
                     {askPhase && (
@@ -818,8 +835,9 @@ const { text } = await generateText({
                         />
                     </div>
 
-                    <pre className={`demo-code-block${fullRememberResult || fullRememberError || fullRememberPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`import { MemWalManual } from "@mysten/memwal/manual"
+                    <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
+                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+{`import { MemWalManual } from "@mysten/memwal/manual"
 
 const memwal = MemWalManual.create({
   key: delegateKeyHex,
@@ -840,8 +858,9 @@ const memwal = MemWalManual.create({
 // server then:
 // 3. upload encrypted bytes to Walrus (server pays gas)
 // 4. store vector + blob_id in DB
-await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
-                    </pre>
+await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
+                        </SyntaxHighlighter>
+                    </div>
 
                     {fullRememberPhase && (
                         <div className="demo-phase-indicator">
@@ -899,8 +918,9 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
                         />
                     </div>
 
-                    <pre className={`demo-code-block${fullRecallResult || fullRecallError || fullRecallPhase ? ' demo-code-block--spaced' : ''}`}>
-                        <code>{`// client does:
+                    <div className={fullRecallResult || fullRecallError || fullRecallPhase ? 'demo-code-block--spaced' : ''}>
+                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+{`// client does:
 //   1. embed query via OpenAI
 //   2. SEAL decrypt each result (wallet popup)
 // server then:
@@ -908,8 +928,9 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}</code>
 //   4. download encrypted blobs from Walrus
 //   5. return encrypted results to client
 const result = await memwal.recallManual("${fullRecallQuery}", 5)
-// → { results: [{ blob_id, text, distance }], total }`}</code>
-                    </pre>
+// → { results: [{ blob_id, text, distance }], total }`}
+                        </SyntaxHighlighter>
+                    </div>
 
                     {fullRecallPhase && (
                         <div className="demo-phase-indicator">

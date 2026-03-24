@@ -30,13 +30,12 @@ export default function LandingPage() {
     const navigate = useNavigate()
     const hasEnokiConfig = config.enokiApiKey && config.googleClientId
 
-    // If somehow already connected, this page shouldn't show
-    if (currentAccount) return null
-
     const handleConnect = () => {
-        if (hasEnokiConfig && googleWallet) {
+        if (currentAccount) {
+            navigate('/dashboard')
+        } else if (hasEnokiConfig && googleWallet) {
             connect({ wallet: googleWallet })
-            navigate('/playground')
+            navigate('/dashboard')
         }
     }
 
@@ -50,7 +49,11 @@ export default function LandingPage() {
                     </a>
 
                     <div className="lp-nav-links">
-                        {hasEnokiConfig && googleWallet ? (
+                        {currentAccount ? (
+                            <button className="lp-nav-cta" onClick={() => navigate('/dashboard')}>
+                                Playground <span className="lp-arrow">↗</span>
+                            </button>
+                        ) : hasEnokiConfig && googleWallet ? (
                             <button className="lp-nav-cta" onClick={handleConnect}>
                                 Playground <span className="lp-arrow">↗</span>
                             </button>

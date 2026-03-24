@@ -14,6 +14,13 @@ import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten/
 import type { WalletSigner } from '@mysten/memwal/manual'
 import { Link } from 'react-router-dom'
 import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
+import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
+import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
+import bash from 'react-syntax-highlighter/dist/esm/languages/hljs/bash'
+import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
+
+SyntaxHighlighter.registerLanguage('javascript', js)
+SyntaxHighlighter.registerLanguage('bash', bash)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -44,6 +51,7 @@ export default function Dashboard() {
     const address = currentAccount?.address || ''
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
+    const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
 
     // Delegate key management state
     const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
@@ -237,9 +245,9 @@ const result = await generateText({
         <>
             <nav className="nav">
                 <div className="nav-inner">
-                    <div className="nav-brand">
+                    <Link to="/" className="nav-brand">
                         <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
-                    </div>
+                    </Link>
                     <div className="nav-user">
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
@@ -258,18 +266,33 @@ const result = await generateText({
                     <p>manage your memwal account and delegate keys</p>
                 </div>
 
-                {/* Try Demo CTA */}
-                <Link to="/playground" className="dashboard-cta">
-                    <div>
-                        <div className="dashboard-cta-title">
-                            try interactive demo
+                {/* Action CTAs */}
+                <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
+                    <Link to="/playground" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                        <div>
+                            <div className="dashboard-cta-title">
+                                try interactive demo
+                            </div>
+                            <div className="dashboard-cta-subtitle">
+                                test remember, recall & analyze with your live server
+                            </div>
                         </div>
-                        <div className="dashboard-cta-subtitle">
-                            test remember, recall & analyze with your live server
-                        </div>
-                    </div>
-                    <div className="dashboard-cta-arrow">→</div>
-                </Link>
+                        <div className="dashboard-cta-arrow">→</div>
+                    </Link>
+                    {config.docsUrl && (
+                        <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                            <div>
+                                <div className="dashboard-cta-title">
+                                    documentation
+                                </div>
+                                <div className="dashboard-cta-subtitle">
+                                    guides, examples & API reference
+                                </div>
+                            </div>
+                            <div className="dashboard-cta-arrow">→</div>
+                        </a>
+                    )}
+                </div>
 
 
                 {/* Current Delegate Key */}
@@ -538,9 +561,9 @@ const result = await generateText({
                         >
                             <Copy size={12} /> {copied === 'sdk' ? 'done' : 'copy'}
                         </button>
-                        <pre className="demo-code-block" style={{ padding: 20 }}>
-                            <code>{sdkSnippet}</code>
-                        </pre>
+                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 20 }}>
+                            {sdkSnippet}
+                        </SyntaxHighlighter>
                     </div>
                 </div>
 
@@ -560,9 +583,9 @@ const result = await generateText({
                         >
                             <Copy size={12} /> {copied === 'ai' ? 'done' : 'copy'}
                         </button>
-                        <pre className="demo-code-block" style={{ padding: 20 }}>
-                            <code>{aiSnippet}</code>
-                        </pre>
+                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 20 }}>
+                            {aiSnippet}
+                        </SyntaxHighlighter>
                     </div>
                 </div>
 
@@ -571,9 +594,23 @@ const result = await generateText({
                     <div className="card-header">
                         <div><div className="card-title">install</div></div>
                     </div>
-                    <pre className="demo-code-block install-command">
-                        <code>npm install @mysten/memwal</code>
-                    </pre>
+                    <div className="install-tabs">
+                        {(['npm', 'pnpm', 'yarn', 'bun'] as const).map((pm) => (
+                            <button
+                                key={pm}
+                                className={`install-tab${pkgManager === pm ? ' install-tab--active' : ''}`}
+                                onClick={() => setPkgManager(pm)}
+                            >
+                                {pm}
+                            </button>
+                        ))}
+                    </div>
+                    <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
+                        {pkgManager === 'npm' ? 'npm install @mysten/memwal' :
+                         pkgManager === 'pnpm' ? 'pnpm add @mysten/memwal' :
+                         pkgManager === 'yarn' ? 'yarn add @mysten/memwal' :
+                         'bun add @mysten/memwal'}
+                    </SyntaxHighlighter>
                 </div>
             </div>
         </>

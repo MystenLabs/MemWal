@@ -17,6 +17,7 @@ import {
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
+import { Link } from 'react-router-dom'
 import { LogOut, Copy } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -206,9 +207,9 @@ export default function SetupWizard() {
         <>
             <nav className="nav">
                 <div className="nav-inner">
-                    <div className="nav-brand">
+                    <Link to="/" className="nav-brand">
                         <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
-                    </div>
+                    </Link>
                     <div className="nav-user">
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}

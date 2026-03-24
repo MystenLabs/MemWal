@@ -129,25 +129,18 @@ function AppContent() {
   const currentAccount = useCurrentAccount()
   const { delegateKey } = useDelegateKey()
 
-  if (!currentAccount) {
-    return (
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    )
-  }
-
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/" element={<LandingPage />} />
       <Route path="/dashboard" element={
+        !currentAccount ? <Navigate to="/" replace /> :
         delegateKey ? <Dashboard /> : <SetupWizard />
       } />
       <Route path="/playground" element={
+        !currentAccount ? <Navigate to="/" replace /> :
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       } />
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
 }
