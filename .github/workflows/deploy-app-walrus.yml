@@ -59,11 +59,10 @@ jobs:
           fi
         env:
           VITE_SUI_NETWORK: mainnet
-          VITE_ENOKI_API_KEY: ${{ secrets.VITE_ENOKI_API_KEY }}
-          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
           VITE_MEMWAL_SERVER_URL: ${{ vars.VITE_MEMWAL_SERVER_URL }}
           VITE_MEMWAL_PACKAGE_ID: ${{ vars.VITE_MEMWAL_PACKAGE_ID }}
           VITE_MEMWAL_REGISTRY_ID: ${{ vars.VITE_MEMWAL_REGISTRY_ID }}
+          VITE_SEAL_KEY_SERVERS: ${{ vars.VITE_SEAL_KEY_SERVERS }}
           VITE_DOCS_URL: ${{ vars.VITE_DOCS_URL }}
 
       - name: Deploy to Walrus Site (Mainnet)
@@ -75,7 +74,6 @@ jobs:
           DIST: ./apps/app/dist
           SUI_NETWORK: mainnet
           EPOCHS: ${{ vars.WALRUS_EPOCHS || '3' }}
-          CHECK_EXTEND: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SITES_CONFIG: |
             contexts:

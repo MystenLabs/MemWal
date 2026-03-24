@@ -74,53 +74,24 @@ export function AuthButtonGroup() {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex h-9">
-        {/* Primary Button - Continue with Google */}
-        <LoginButton provider="google" className="flex-1" />
-
-        {/* Dropdown Trigger */}
-        <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="default"
-              size="icon"
-              disabled={isLoginPending || isWalletConnecting}
-            >
-              {isWalletConnecting ? (
-                <Loader2 className="h-4 w-4 animate-spinx" />
-              ) : (
-                <ChevronDown className="h-4 w-4" />
-              )}
-            </Button>
-          </DropdownMenuTrigger>
-
-          <DropdownMenuContent align="end" className="w-56">
-            <DropdownMenuLabel>Other sign-in options</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-
-            {/* Wallet Options */}
-            <DropdownMenuItem
-              onClick={() => handleWalletSelect("slush")}
-              disabled={isWalletConnecting}
-              className="cursor-pointer"
-            >
-              {isWalletConnecting ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Wallet className="mr-2 h-4 w-4" />
-              )}
-              <span>Slush Wallet</span>
-              {!slushInstalled && (
-                <span className="ml-auto text-xs text-muted-foreground">Install</span>
-              )}
-            </DropdownMenuItem>
-
-            {/* Future: Add more OAuth providers here */}
-            {/* <DropdownMenuSeparator />
-          <DropdownMenuItem>
-            <span>Facebook</span>
-          </DropdownMenuItem> */}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* Primary Button - Connect with Slush Wallet */}
+        <Button
+          onClick={() => handleWalletSelect("slush")}
+          disabled={isLoginPending || isWalletConnecting}
+          className="flex-1"
+        >
+          {isWalletConnecting ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Connecting...
+            </>
+          ) : (
+            <>
+              <Wallet className="mr-2 h-4 w-4" />
+              {slushInstalled ? "Continue with Slush Wallet" : "Install Slush Wallet"}
+            </>
+          )}
+        </Button>
       </div>
 
       {/* Error Message */}
