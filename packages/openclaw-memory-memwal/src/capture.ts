@@ -53,8 +53,13 @@ export function looksLikeInjection(text: string): boolean {
 /**
  * Determine whether a conversation text is worth capturing.
  *
- * Returns true if the text likely contains memorable facts.
- * Returns false for trivial filler, system content, or injection attempts.
+ * Applies a multi-step filter chain: rejects short text, filler responses,
+ * XML/system content, emoji-heavy messages, and injection attempts.
+ * Accepts immediately if a trigger pattern matches (e.g. "remember", "prefer").
+ * Falls through to accept if text is long enough for the server LLM to evaluate.
+ *
+ * @param text - Raw message text (user or assistant)
+ * @returns `true` if the text likely contains memorable facts
  */
 export function shouldCapture(text: string): boolean {
   // Too short to contain useful facts

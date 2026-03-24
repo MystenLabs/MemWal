@@ -12,6 +12,7 @@ import { Type } from "@sinclair/typebox";
 import { toolError } from "./format.js";
 import type { PluginConfig } from "./types.js";
 
+/** Register memory_search and memory_store agent tools. */
 export function registerTools(api: any, client: MemWal, config: PluginConfig): void {
   // memory_search — semantic recall
   api.registerTool(
@@ -35,6 +36,7 @@ export function registerTools(api: any, client: MemWal, config: PluginConfig): v
       }),
       async execute(_id: string, params: any) {
         const { query, limit = 5, namespace } = params;
+        // LLM may omit namespace (e.g. tools.allow set but hooks disabled) — fall back safely
         const ns = namespace || config.defaultNamespace;
 
         try {
@@ -49,6 +51,7 @@ export function registerTools(api: any, client: MemWal, config: PluginConfig): v
             };
           }
 
+          // MemWal returns L2 distance — convert to similarity % for readability
           const formatted = result.results
             .map((r: any, i: number) => {
               const relevance = Math.round((1 - r.distance) * 100);
@@ -124,6 +127,7 @@ export function registerTools(api: any, client: MemWal, config: PluginConfig): v
           const result = await client.analyze(text.trim(), ns);
 
           const factCount = result.facts?.length ?? 0;
+          // Show first 3 extracted facts as confirmation, or raw text truncation as fallback
           const preview = result.facts
             ?.map((f: any) => f.text)
             .slice(0, 3)

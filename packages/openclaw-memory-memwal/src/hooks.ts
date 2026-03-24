@@ -20,14 +20,20 @@ import type { PluginConfig } from "./types.js";
 
 const MIN_PROMPT_LENGTH = 10;
 
+/** Register before_prompt_build (auto-recall) and agent_end (auto-capture) hooks. */
 export function registerHooks(api: any, client: MemWal, config: PluginConfig): void {
   // Auto-recall: inject relevant memories before each agent turn
   if (config.autoRecall) {
     api.on("before_prompt_build", async (event: any, ctx: any) => {
+      // Skip trivial prompts ("ok", "y") — not worth a server round-trip
       if (!event.prompt || event.prompt.length < MIN_PROMPT_LENGTH) return;
 
       const { namespace, agentName } = resolveAgent(config.defaultNamespace, ctx?.sessionKey);
 
+      // The LLM doesn't know which agent it is. This instruction guides
+      // memory_search/memory_store tool calls to the correct namespace.
+      // Returned via appendSystemContext in ALL code paths (including errors)
+      // so tools still scope correctly even when recall itself fails.
       const namespaceInstruction =
         `When using memory_search or memory_store tools, ` +
         `pass namespace="${namespace}" to scope operations to the current agent's memory.`;
@@ -43,6 +49,8 @@ export function registerHooks(api: any, client: MemWal, config: PluginConfig): v
           return { appendSystemContext: namespaceInstruction };
         }
 
+        // Two filters: relevance threshold (drop noise) and injection
+        // detection (drop memories containing prompt manipulation attempts)
         const relevant = result.results.filter(
           (r: any) =>
             (1 - r.distance) >= config.minRelevance &&
@@ -99,11 +107,14 @@ export function registerHooks(api: any, client: MemWal, config: PluginConfig): v
           return;
         }
 
-        // Join capturable messages for analyze
+        // Numbered list helps the server LLM distinguish separate messages
+        // during fact extraction (vs one big wall of text)
         const conversation = capturable
           .map((t, i) => `${i + 1}. ${t}`)
           .join("\n\n");
 
+        // analyze() calls the server LLM for fact extraction — retry once
+        // since transient failures are common with remote LLM calls
         const result = await withRetry(() => client.analyze(conversation, namespace));
 
         if (result.facts?.length) {
