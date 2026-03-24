@@ -6,12 +6,10 @@ The public relayer is a managed MemWal deployment for teams that want to get sta
 
 ## Endpoints
 
-| | Value |
+| Network | Relayer URL |
 |---|---|
-| **Relayer URL** | Provided by the relayer operator |
-| **Package ID** | Provided by the relayer operator |
-
-If you do not have these values yet, use a local or [self-hosted relayer](/relayer/self-hosting) instead.
+| **Production** (mainnet) | `https://relayer.memwal.ai` |
+| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
 
 ## Minimal Config
 
@@ -21,7 +19,7 @@ import { MemWal } from "@mysten/memwal";
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
   accountId: "<your-memwal-account-id>",
-  serverUrl: "https://your-relayer-url.com",
+  serverUrl: "https://relayer.memwal.ai",
   namespace: "demo",
 });
 ```

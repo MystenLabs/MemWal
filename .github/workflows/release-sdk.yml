@@ -8,7 +8,6 @@ on:
       - dev
     paths:
       - 'packages/sdk/**'
-      - '.changeset/**'
       - '.github/workflows/release-sdk.yml'
   workflow_dispatch:
 
@@ -47,34 +46,58 @@ jobs:
         run: pnpm build:sdk
 
       # ── main branch → stable release (latest) ──
-      - name: Create Release PR or Publish to npm
+      - name: Publish stable release
         if: github.ref == 'refs/heads/main'
-        uses: changesets/action@v1
-        with:
-          title: 'chore: version packages'
-          commit: 'chore: version packages'
-          publish: pnpm changeset publish
+        run: |
+          BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          npm view @mysten/memwal@$BASE_VERSION version 2>/dev/null \
+            && echo "Version $BASE_VERSION already published, skipping" && exit 0
+          cd packages/sdk && npm publish --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # ── staging branch → release candidate (rc tag) ──
+      # ── staging branch → release candidate (rc tag, auto-increment) ──
       - name: Publish staging release candidate
         if: github.ref == 'refs/heads/staging'
         run: |
-          PKG_VERSION=$(node -p "require('./packages/sdk/package.json').version")
-          npm view @mysten/memwal@$PKG_VERSION version 2>/dev/null && echo "Version $PKG_VERSION already published, skipping" && exit 0
-          cd packages/sdk && npm publish --tag rc --access public
+          BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          LATEST=$(npm view @mysten/memwal versions --json 2>/dev/null \
+            | node -p "
+                const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                const nums = (Array.isArray(versions) ? versions : [versions])
+                  .filter(v => v.startsWith('${BASE_VERSION}-rc.'))
+                  .map(v => +v.split('-rc.')[1])
+                  .sort((a,b) => b - a);
+                nums.length ? nums[0] : -1;
+              " || echo "-1")
+          NEXT=$((LATEST + 1))
+          NEW_VERSION="${BASE_VERSION}-rc.${NEXT}"
+          echo "Publishing @mysten/memwal@${NEW_VERSION}"
+          cd packages/sdk
+          node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
+          npm publish --tag rc --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # ── dev branch → prerelease (dev tag) ──
+      # ── dev branch → prerelease (dev tag, auto-increment) ──
       - name: Publish dev prerelease
         if: github.ref == 'refs/heads/dev'
         run: |
-          PKG_VERSION=$(node -p "require('./packages/sdk/package.json').version")
-          npm view @mysten/memwal@$PKG_VERSION version 2>/dev/null && echo "Version $PKG_VERSION already published, skipping" && exit 0
-          cd packages/sdk && npm publish --tag dev --access public
+          BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          LATEST=$(npm view @mysten/memwal versions --json 2>/dev/null \
+            | node -p "
+                const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                const nums = (Array.isArray(versions) ? versions : [versions])
+                  .filter(v => v.startsWith('${BASE_VERSION}-dev.'))
+                  .map(v => +v.split('-dev.')[1])
+                  .sort((a,b) => b - a);
+                nums.length ? nums[0] : -1;
+              " || echo "-1")
+          NEXT=$((LATEST + 1))
+          NEW_VERSION="${BASE_VERSION}-dev.${NEXT}"
+          echo "Publishing @mysten/memwal@${NEW_VERSION}"
+          cd packages/sdk
+          node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
+          npm publish --tag dev --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

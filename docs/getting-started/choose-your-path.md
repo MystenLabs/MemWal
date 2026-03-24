@@ -21,6 +21,11 @@ Go to: [SDK Overview](/sdk/overview)
 
 Use this when you want to evaluate MemWal without running the backend yourself.
 
+| Network | Relayer URL |
+|---|---|
+| **Testnet** (staging) | `https://relayer.staging.memwal.ai` |
+| **Mainnet** (production) | `https://relayer.memwal.ai` |
+
 Go to: [Public Relayer](/relayer/public-relayer)
 
 ## 3. Manual Client Flow

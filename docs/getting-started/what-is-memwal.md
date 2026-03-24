@@ -1,9 +1,9 @@
 ---
 title: "What is MemWal?"
-description: "Privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui."
+description: "Persistent, verifiable memory for AI agents"
 ---
 
-MemWal is a privacy-preserving, decentralized memory layer for humans and AI agents — powered by Walrus and Sui. Store, recall, and share memory across apps, sessions, and agents.
+MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encrypted" icon="lock">
@@ -100,9 +100,12 @@ And many more — check out the example apps below to see MemWal in action.
 
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/CommandOSSLabs/memwal/tree/main/apps) directory:
 
+- **App** — dashboard demo for zkLogin, delegate-key setup, and account management
 - **Chatbot** — AI chat app with persistent memory across sessions
 - **Noter** — note-taking tool that stores knowledge as encrypted memory
 - **Researcher** — research assistant that builds and recalls a knowledge base
+
+See [Example Apps](/examples/example-apps) for short code examples from each app.
 
 ## Explore the Docs
 
