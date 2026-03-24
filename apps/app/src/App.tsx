@@ -16,6 +16,7 @@ import {
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -127,22 +128,19 @@ function RegisterEnokiWallets() {
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const { delegateKey } = useDelegateKey()
-  const [page, setPage] = useState(() => window.location.hash.replace('#', '') || '')
+  const location = useLocation()
 
-  useEffect(() => {
-    const onHash = () => setPage(window.location.hash.replace('#', '') || '')
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
+  if (!currentAccount) {
+    return location.pathname === '/' ? <LandingPage /> : <Navigate to="/" replace />
+  }
 
   return (
-    <>
-
-      {!currentAccount && <LandingPage />}
-      {currentAccount && !delegateKey && page !== 'playground' && <SetupWizard />}
-      {currentAccount && page === 'playground' && <Playground />}
-      {currentAccount && delegateKey && page !== 'playground' && <Dashboard />}
-    </>
+    <Routes>
+      <Route path="/playground" element={<Playground />} />
+      <Route path="*" element={
+        delegateKey ? <Dashboard /> : <SetupWizard />
+      } />
+    </Routes>
   )
 }
 
@@ -152,17 +150,19 @@ function AppContent() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
-        <RegisterEnokiWallets />
-        <WalletProvider autoConnect>
-          <DelegateKeyProvider>
-            <div className="app">
-              <AppContent />
-            </div>
-          </DelegateKeyProvider>
-        </WalletProvider>
-      </SuiClientProvider>
-    </QueryClientProvider>
+    <BrowserRouter>
+      <QueryClientProvider client={queryClient}>
+        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
+          <RegisterEnokiWallets />
+          <WalletProvider autoConnect>
+            <DelegateKeyProvider>
+              <div className="app">
+                <AppContent />
+              </div>
+            </DelegateKeyProvider>
+          </WalletProvider>
+        </SuiClientProvider>
+      </QueryClientProvider>
+    </BrowserRouter>
   )
 }

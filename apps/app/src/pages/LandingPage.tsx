@@ -10,6 +10,7 @@ import {
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
 import { Github } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
@@ -26,6 +27,7 @@ export default function LandingPage() {
     )
     const googleWallet = walletsByProvider.get('google')
 
+    const navigate = useNavigate()
     const hasEnokiConfig = config.enokiApiKey && config.googleClientId
 
     // If somehow already connected, this page shouldn't show
@@ -34,6 +36,7 @@ export default function LandingPage() {
     const handleConnect = () => {
         if (hasEnokiConfig && googleWallet) {
             connect({ wallet: googleWallet })
+            navigate('/playground')
         }
     }
 
