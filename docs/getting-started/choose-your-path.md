@@ -5,7 +5,7 @@ title: "Choose Your Path"
 MemWal supports several integration modes depending on how much control you need. Pick the one that fits your use case.
 
 <Tip>
-These paths aren't mutually exclusive. You can combine them — for example, use the **Default SDK** with the **AI Middleware**, or start with the **Public Relayer** and move to **Self-Hosting** later. They all share the same backend and data layer.
+These paths aren't mutually exclusive. You can combine them - for example, use the **Default SDK** with the **AI Middleware**, or start with the **Managed Relayer** and move to **Self-Hosting** later. They all share the same backend and data layer.
 </Tip>
 
 ## 1. Default SDK
@@ -17,20 +17,24 @@ Use `@mysten-incubation/memwal` when you want the fastest working integration.
 
 Go to: [SDK Overview](/sdk/overview)
 
-## 2. Public Relayer
+## 2. Managed Relayer
 
-Use this when you want to evaluate MemWal without running the backend yourself.
+Use a hosted relayer, or deploy your own [self-hosted relayer](/relayer/self-hosting) with access to a wallet funded with WAL and SUI.
+
+<Note>
+Following endpoints are provided as public good by Walrus Foundation.
+</Note>
 
 | Network | Relayer URL |
-|---|---|
-| **Testnet** (staging) | `https://relayer.staging.memwal.ai` |
-| **Mainnet** (production) | `https://relayer.memwal.ai` |
+| --- | --- |
+| **Production** (mainnet) | `https://relayer.memwal.ai` |
+| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
 
-Go to: [Public Relayer](/relayer/public-relayer)
+Go to: [Managed Relayer](/relayer/public-relayer)
 
 ## 3. Manual Client Flow
 
-Use `@mysten-incubation/memwal/manual` when you want full client-side control over encryption and embeddings. Recommended for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
+Use `@mysten-incubation/memwal/manual` when you want full client-side control over encryption and embeddings. Recommended for Web3-native users who want to minimize trust in the relayer - it never sees your plaintext data.
 
 - client handles embeddings and SEAL encryption locally
 - relayer only sees encrypted payloads and vectors
@@ -45,6 +49,6 @@ Go to: [AI Integration](/sdk/usage/with-memwal)
 
 ## 5. Self-Host the Relayer
 
-Use this when you need full control over the trust boundary — your infrastructure, your credentials, no third party sees your data.
+Use this when you need full control over the trust boundary - your infrastructure, your credentials, no third party sees your data.
 
 Go to: [Self-Hosting](/relayer/self-hosting)

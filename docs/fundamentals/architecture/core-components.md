@@ -66,7 +66,7 @@ This means Web2 developers can integrate MemWal without touching wallets, signin
 Because the relayer handles encryption and plaintext data, you are placing trust in the relayer operator. This is a deliberate trade-off for developer experience. If you need full control over that trust boundary, you can [self-host](/relayer/self-hosting) your own relayer, or use the [manual client flow](/sdk/usage) to handle encryption and embedding entirely on the client side (recommended for Web3-native users). See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for details.
 </Note>
 
-You can use the [public relayer](/relayer/public-relayer) to get started, [self-host](/relayer/self-hosting) your own, or use the manual client flow for full client-side control.
+You can use the [managed relayer](/relayer/public-relayer) to get started, [self-host](/relayer/self-hosting) your own, or use the manual client flow for full client-side control.
 
 ## MemWal Smart Contract
 
