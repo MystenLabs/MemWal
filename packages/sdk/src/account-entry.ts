@@ -1,12 +1,12 @@
 /**
- * @mysten/memwal/account
+ * @mysten-incubation/memwal/account
  *
  * Account management entry point — on-chain operations.
  * Requires @mysten/sui as a peer dependency.
  *
  * @example
  * ```typescript
- * import { createAccount, addDelegateKey, generateDelegateKey } from "@mysten/memwal/account"
+ * import { createAccount, addDelegateKey, generateDelegateKey } from "@mysten-incubation/memwal/account"
  * ```
  */
 
