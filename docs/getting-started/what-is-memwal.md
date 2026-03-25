@@ -3,6 +3,10 @@ title: "What is MemWal?"
 description: "Persistent, verifiable memory for AI agents"
 ---
 
+<Note>
+MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
+</Note>
+
 MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
 
 <CardGroup cols={2}>
@@ -98,7 +102,7 @@ And many more — check out the example apps below to see MemWal in action.
 
 ## Example Apps
 
-The repo ships with ready-to-run apps in the [`/apps`](https://github.com/CommandOSSLabs/memwal/tree/main/apps) directory:
+The repo ships with ready-to-run apps in the [`/apps`](https://github.com/MystenLabs/MemWal/tree/main/apps) directory:
 
 - **Playground** — dashboard demo for MemWal
 - **Chatbot** — AI chat app with persistent memory across sessions
@@ -120,7 +124,7 @@ See [Example Apps](/examples/example-apps) for short code examples from each app
     Quickstart, usage patterns, AI integration, and examples
   </Card>
   <Card title="Relayer" icon="tower-broadcast" href="/relayer/overview">
-    Public relayer, installation and setup, self-hosting
+    Managed relayer, installation and setup, self-hosting
   </Card>
   <Card title="Smart Contract" icon="scroll" href="/contract/overview">
     Onchain ownership model, delegate key management, permissions
