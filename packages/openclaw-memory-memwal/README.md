@@ -1,4 +1,4 @@
-<h1 align="center">@cmdoss/memory-memwal</h1>
+<h1 align="center">@mysten/memory-memwal</h1>
 
 <p align="center">
   Cloud-based long-term memory plugin for OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>MemWal</strong>.

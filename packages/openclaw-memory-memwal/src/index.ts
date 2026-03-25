@@ -17,7 +17,7 @@
  *   Same key, same account — isolation scoped at the server level.
  */
 
-import { MemWal } from "@cmdoss/memwal";
+import { MemWal } from "@mysten/memwal";
 import { parseConfig, keyPreview } from "./config.js";
 import { registerHooks } from "./hooks/index.js";
 import { registerTools } from "./tools/index.js";

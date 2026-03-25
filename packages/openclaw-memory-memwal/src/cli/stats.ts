@@ -4,7 +4,7 @@
  * Shows server health, config summary, and active namespace.
  */
 
-import type { MemWal } from "@cmdoss/memwal";
+import type { MemWal } from "@mysten/memwal";
 import { resolveAgent, keyPreview } from "../config.js";
 import type { PluginConfig } from "../types.js";
 

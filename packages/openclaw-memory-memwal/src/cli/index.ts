@@ -4,7 +4,7 @@
  * Agent scoping via --agent flag → namespace.
  */
 
-import type { MemWal } from "@cmdoss/memwal";
+import type { MemWal } from "@mysten/memwal";
 import { registerSearchCommand } from "./search.js";
 import { registerStatsCommand } from "./stats.js";
 import type { PluginConfig } from "../types.js";

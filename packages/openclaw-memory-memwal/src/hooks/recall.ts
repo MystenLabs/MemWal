@@ -6,7 +6,7 @@
  * tools scope to the correct agent's memory.
  */
 
-import type { MemWal } from "@cmdoss/memwal";
+import type { MemWal } from "@mysten/memwal";
 import { resolveAgent } from "../config.js";
 import { looksLikeInjection } from "../capture.js";
 import { formatMemoriesForPrompt } from "../format.js";

@@ -5,7 +5,7 @@
  * Same key, same account — isolation via server-side namespace scoping.
  */
 
-import type { MemWal } from "@cmdoss/memwal";
+import type { MemWal } from "@mysten/memwal";
 import { registerRecallHook } from "./recall.js";
 import { registerCaptureHook } from "./capture.js";
 import type { PluginConfig } from "../types.js";
