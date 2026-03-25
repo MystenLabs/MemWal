@@ -20,12 +20,12 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/sdk/package.json ./packages/sdk/
 COPY apps/noter/package.json   ./apps/noter/
 
-# Install all workspace deps (resolves workspace:* for @mysten/memwal)
+# Install all workspace deps (resolves workspace:* for @mysten-incubation/memwal)
 RUN pnpm install --frozen-lockfile
 
-# Build SDK first (@mysten/memwal is the package name — matches sdk/package.json)
+# Build SDK first (@mysten-incubation/memwal is the package name — matches sdk/package.json)
 COPY packages/sdk/ ./packages/sdk/
-RUN pnpm --filter @mysten/memwal build
+RUN pnpm --filter @mysten-incubation/memwal build
 
 # ── Stage 2: Build Next.js App ─────────────────────────────
 FROM deps AS builder

@@ -6,7 +6,7 @@
  * @example
  * ```typescript
  * import { generateText } from "ai"
- * import { withMemWal } from "@mysten/memwal/ai"
+ * import { withMemWal } from "@mysten-incubation/memwal/ai"
  * import { openai } from "@ai-sdk/openai"
  *
  * const model = withMemWal(openai("gpt-4o"), {

@@ -1,7 +1,7 @@
 import "server-only";
 
-import { MemWal } from "@mysten/memwal";
-import type { RememberResult } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
+import type { RememberResult } from "@mysten-incubation/memwal";
 import type { Citation, SourceMeta } from "./types";
 
 function getMemWalClient(key: string, accountId?: string) {

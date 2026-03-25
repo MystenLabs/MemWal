@@ -4,7 +4,7 @@ import {
   extractReasoningMiddleware,
   wrapLanguageModel,
 } from "ai";
-import { withMemWal } from "@mysten/memwal/ai";
+import { withMemWal } from "@mysten-incubation/memwal/ai";
 import { isTestEnvironment } from "../constants";
 
 const THINKING_SUFFIX_REGEX = /-thinking$/;
