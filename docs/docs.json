@@ -101,6 +101,20 @@
         ]
       },
       {
+        "tab": "OpenClaw Plugin",
+        "groups": [
+          {
+            "group": "OpenClaw Plugin",
+            "pages": [
+              "openclaw/overview",
+              "openclaw/quick-start",
+              "openclaw/how-it-works",
+              "openclaw/features"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Relayer",
         "groups": [
           {
