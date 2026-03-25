@@ -91,14 +91,14 @@ export default function LandingPage() {
                         )}
                         {currentAccount ? (
                             <button className="lp-nav-cta" onClick={() => navigate('/dashboard')}>
-                                Playground <span className="lp-arrow">↗</span>
+                                SDK Playground <span className="lp-arrow">↗</span>
                             </button>
                         ) : hasEnokiConfig && googleWallet ? (
                             <button className="lp-nav-cta" onClick={handleConnect}>
-                                Playground <span className="lp-arrow">↗</span>
+                                SDK Playground <span className="lp-arrow">↗</span>
                             </button>
                         ) : (
-                            <ConnectButton connectText="Playground ↗" />
+                            <ConnectButton connectText="SDK Playground ↗" />
                         )}
                     </div>
                 </div>
@@ -108,11 +108,11 @@ export default function LandingPage() {
             <section className="lp-hero">
                 <div className="lp-hero-inner">
                     <div className="lp-hero-copy">
-                        <h1>Privacy-Preserving<br />AI Memory</h1>
+                        <h1>Long-Term Memory<br />for AI Agents</h1>
                         <p>
-                            Store memories on Walrus, encrypt with SEAL, and recall with
-                            semantic search. memwal gives agents long-term context while
-                            users keep ownership.
+                            MemWal introduces a long-term, verifiable memory layer on
+                            Walrus, allowing agents to remember, share, and reuse
+                            information reliably.
                         </p>
 
                         <div className="lp-hero-actions">
