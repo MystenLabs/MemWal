@@ -36,8 +36,11 @@ jobs:
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Upgrade npm for OIDC Trusted Publishing
+        run: npm install -g npm@latest
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Typecheck
         run: pnpm --filter @mysten-incubation/memwal typecheck

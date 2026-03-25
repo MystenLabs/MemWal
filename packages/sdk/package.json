@@ -78,7 +78,7 @@
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/CommandOSSLabs/MemWal.git",
+        "url": "https://github.com/MystenLabs/MemWal.git",
         "directory": "packages/sdk"
     },
     "publishConfig": {
