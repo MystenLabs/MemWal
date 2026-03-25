@@ -100,7 +100,7 @@ And many more — check out the example apps below to see MemWal in action.
 
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/CommandOSSLabs/memwal/tree/main/apps) directory:
 
-- **App** — dashboard demo for zkLogin, delegate-key setup, and account management
+- **Playground** — dashboard demo for MemWal
 - **Chatbot** — AI chat app with persistent memory across sessions
 - **Noter** — note-taking tool that stores knowledge as encrypted memory
 - **Researcher** — research assistant that builds and recalls a knowledge base

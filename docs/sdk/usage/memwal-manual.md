@@ -23,7 +23,7 @@ This is the recommended path for Web3-native users who want to minimize trust in
 ## Setup
 
 ```ts
-import { MemWalManual } from "@mysten/memwal/manual";
+import { MemWalManual } from "@mysten-incubation/memwal/manual";
 
 const manual = MemWalManual.create({
   key: "<your-ed25519-private-key>",
