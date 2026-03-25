@@ -3,14 +3,15 @@ title: "Environment Variables"
 ---
 
 Use this page when you run your own relayer.
+For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting).
 
 ## Required
 
 | Variable | Notes |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string. `pgvector` must already exist |
-| `MEMWAL_PACKAGE_ID` | Sui package ID |
-| `MEMWAL_REGISTRY_ID` | Onchain registry object ID |
+| `MEMWAL_PACKAGE_ID` | Sui package ID. See [Contract Overview](/contract/overview) |
+| `MEMWAL_REGISTRY_ID` | Onchain registry object ID. See [Contract Overview](/contract/overview) |
 | `SEAL_KEY_SERVERS` | Comma-separated SEAL key server object IDs used by the sidecar for encrypt and decrypt |
 
 ## Usually Required
@@ -43,13 +44,9 @@ These are not all enforced at boot, but most real deployments need them.
 ## Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads.
-- `OPENAI_API_KEY` and `OPENAI_API_BASE` are how a self-hosted relayer calls your embedding provider.
-- The relayer uses them for `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
-- `SEAL_KEY_SERVERS` is required for the sidecar SEAL encrypt and decrypt path.
-- `SUI_NETWORK` now drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
-- The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet`, `2` on `mainnet`, unless the request explicitly passes `epochs`.
-- `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
-- For testnet, use `MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6` and `MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437`.
+- `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
-- The Rust server starts the TypeScript sidecar automatically.
-- `/health` is the fastest way to confirm the relayer is up.
+- `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
+- The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
+- `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
+- For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).

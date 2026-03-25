@@ -4,7 +4,7 @@ title: "Overview"
 
 MemWal exposes three SDK surfaces.
 
-## `@mysten/memwal`
+## `@mysten-incubation/memwal`
 
 Use this first.
 
@@ -13,25 +13,25 @@ Use this first.
 - main methods: `remember`, `recall`, `analyze`, `restore`, `health`
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 ```
 
-## `@mysten/memwal/manual`
+## `@mysten-incubation/memwal/manual`
 
 Use this when the client must handle embeddings and local SEAL operations.
 
 - relayer still handles upload relay, registration, search, and restore
 
 ```ts
-import { MemWalManual } from "@mysten/memwal/manual";
+import { MemWalManual } from "@mysten-incubation/memwal/manual";
 ```
 
-## `@mysten/memwal/ai`
+## `@mysten-incubation/memwal/ai`
 
 Use this when you already use the AI SDK.
 
 ```ts
-import { withMemWal } from "@mysten/memwal/ai";
+import { withMemWal } from "@mysten-incubation/memwal/ai";
 ```
 
 ## Namespace
