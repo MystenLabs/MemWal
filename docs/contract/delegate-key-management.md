@@ -17,7 +17,7 @@ Delegate keys are lightweight Ed25519 keys used for SDK authentication. They are
 Use the SDK's `generateDelegateKey()` helper to create a new Ed25519 keypair:
 
 ```ts
-import { generateDelegateKey } from "@mysten/memwal/account";
+import { generateDelegateKey } from "@mysten-incubation/memwal/account";
 
 const delegate = await generateDelegateKey();
 // delegate.privateKey — hex string, store securely
@@ -30,7 +30,7 @@ const delegate = await generateDelegateKey();
 Only the account owner can add delegate keys:
 
 ```ts
-import { addDelegateKey } from "@mysten/memwal/account";
+import { addDelegateKey } from "@mysten-incubation/memwal/account";
 
 await addDelegateKey({
   packageId: "0x...",
@@ -44,7 +44,7 @@ await addDelegateKey({
 ### 3. Use the private key in the SDK
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: delegate.privateKey,
@@ -57,7 +57,7 @@ const memwal = MemWal.create({
 Removing a delegate key prevents future relayer access from that key:
 
 ```ts
-import { removeDelegateKey } from "@mysten/memwal/account";
+import { removeDelegateKey } from "@mysten-incubation/memwal/account";
 
 await removeDelegateKey({
   packageId: "0x...",

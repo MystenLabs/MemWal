@@ -10,8 +10,8 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten/memwal/account'
-import type { WalletSigner } from '@mysten/memwal/manual'
+import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten-incubation/memwal/account'
+import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link } from 'react-router-dom'
 import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -208,7 +208,7 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
-    const sdkSnippet = `import { MemWal } from "@mysten/memwal"
+    const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
   key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
@@ -224,7 +224,7 @@ const result = await memwal.recall("food allergies")
 console.log(result.results[0].text)`
 
     const aiSnippet = `import { generateText } from "ai"
-import { withMemWal } from "@mysten/memwal/ai"
+import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
@@ -606,10 +606,10 @@ const result = await generateText({
                         ))}
                     </div>
                     <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
-                        {pkgManager === 'npm' ? 'npm install @mysten/memwal' :
-                         pkgManager === 'pnpm' ? 'pnpm add @mysten/memwal' :
-                         pkgManager === 'yarn' ? 'yarn add @mysten/memwal' :
-                         'bun add @mysten/memwal'}
+                        {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
+                         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
+                         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
+                         'bun add @mysten-incubation/memwal'}
                     </SyntaxHighlighter>
                 </div>
             </div>

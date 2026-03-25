@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { createAccount, addDelegateKey, generateDelegateKey } from "@mysten/memwal/account"
+ * import { createAccount, addDelegateKey, generateDelegateKey } from "@mysten-incubation/memwal/account"
  *
  * // Generate a delegate keypair
  * const delegate = await generateDelegateKey()

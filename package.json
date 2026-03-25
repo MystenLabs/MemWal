@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:sdk": "pnpm --filter @mysten/memwal build",
-    "dev:sdk": "pnpm --filter @mysten/memwal dev",
+    "build:sdk": "pnpm --filter @mysten-incubation/memwal build",
+    "dev:sdk": "pnpm --filter @mysten-incubation/memwal dev",
     "dev:noter": "pnpm --filter noter dev",
     "dev:chatbot": "pnpm --filter chatbot dev",
     "dev:app": "pnpm --filter app dev",

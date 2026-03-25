@@ -1,5 +1,5 @@
 /**
- * @mysten/memwal
+ * @mysten-incubation/memwal
  *
  * Privacy-first AI memory SDK.
  * Ed25519 delegate key auth + server-side TEE processing.
@@ -7,8 +7,8 @@
  * This is the default entry point — MemWal client + types only.
  * Does NOT import account.js (which requires @mysten/sui).
  *
- * For account management, import from "@mysten/memwal/account".
- * For manual (client-side SEAL + Walrus), import from "@mysten/memwal/manual".
+ * For account management, import from "@mysten-incubation/memwal/account".
+ * For manual (client-side SEAL + Walrus), import from "@mysten-incubation/memwal/manual".
  */
 
 // Core client (server-mode: server handles SEAL + Walrus + embedding)

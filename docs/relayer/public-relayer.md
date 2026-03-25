@@ -14,7 +14,7 @@ The public relayer is a managed MemWal deployment for teams that want to get sta
 ## Minimal Config
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",

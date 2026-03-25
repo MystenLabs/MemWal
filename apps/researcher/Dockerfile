@@ -12,7 +12,7 @@ WORKDIR /app
 
 COPY apps/researcher/package.json ./
 
-# Install deps — @mysten/memwal is now on npm, no local SDK needed
+# Install deps — @mysten-incubation/memwal is now on npm, no local SDK needed
 RUN bun install
 
 # ── Stage 2: Build ─────────────────────────────────────────
