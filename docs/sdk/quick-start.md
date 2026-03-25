@@ -7,24 +7,24 @@ The MemWal SDK gives your app persistent, encrypted memory — store, recall, an
 
 | Entry point | Import | When to use |
 | --- | --- | --- |
-| `MemWal` | `@mysten/memwal` | **Recommended default** for most integrations — relayer handles embeddings, SEAL, and storage |
-| `MemWalManual` | `@mysten/memwal/manual` | You need client-managed embeddings and local SEAL operations |
-| `withMemWal` | `@mysten/memwal/ai` | You already use the Vercel AI SDK and want memory as middleware |
+| `MemWal` | `@mysten-incubation/memwal` | **Recommended default** for most integrations — relayer handles embeddings, SEAL, and storage |
+| `MemWalManual` | `@mysten-incubation/memwal/manual` | You need client-managed embeddings and local SEAL operations |
+| `withMemWal` | `@mysten-incubation/memwal/ai` | You already use the Vercel AI SDK and want memory as middleware |
 
 ## Installation
 
 <CodeGroup>
 
 ```bash npm
-npm install @mysten/memwal
+npm install @mysten-incubation/memwal
 ```
 
 ```bash pnpm
-pnpm add @mysten/memwal
+pnpm add @mysten-incubation/memwal
 ```
 
 ```bash yarn
-yarn add @mysten/memwal
+yarn add @mysten-incubation/memwal
 ```
 
 </CodeGroup>
@@ -79,7 +79,7 @@ yarn add ai zod
 ## First Memory
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",

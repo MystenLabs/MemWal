@@ -11,7 +11,7 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: [
-    "@mysten/memwal",
+    "@mysten-incubation/memwal",
     "@mysten/seal",
     "@mysten/walrus",
     "@mysten/sui",

@@ -6,7 +6,7 @@
  * Key can be set from env var OR at runtime via setMemWalKey().
  */
 
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 let _memwal: MemWal | null = null;
 let _runtimeKey: string | null = null;

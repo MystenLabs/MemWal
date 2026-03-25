@@ -23,15 +23,15 @@ importers:
 
   apps/app:
     dependencies:
+      '@mysten-incubation/memwal':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@mysten/dapp-kit':
         specifier: ^1.0.3
         version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.2.3))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.2.3))
       '@mysten/enoki':
         specifier: ^1.0.4
         version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.3)
-      '@mysten/memwal':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@mysten/seal':
         specifier: ^1.1.0
         version: 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
@@ -177,7 +177,7 @@ importers:
       '@icons-pack/react-simple-icons':
         specifier: ^13.7.0
         version: 13.12.0(react@19.0.1)
-      '@mysten/memwal':
+      '@mysten-incubation/memwal':
         specifier: workspace:*
         version: link:../../packages/sdk
       '@opentelemetry/api':
@@ -499,7 +499,7 @@ importers:
       '@lexical/utils':
         specifier: ^0.41.0
         version: 0.41.0
-      '@mysten/memwal':
+      '@mysten-incubation/memwal':
         specifier: workspace:*
         version: link:../../packages/sdk
       '@mysten/sui':
@@ -701,9 +701,9 @@ importers:
       '@icons-pack/react-simple-icons':
         specifier: ^13.7.0
         version: 13.12.0(react@19.0.1)
-      '@mysten/memwal':
-        specifier: 0.0.1-dev.0
-        version: 0.0.1-dev.0(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
+      '@mysten-incubation/memwal':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@noble/ed25519':
         specifier: ^2.2.3
         version: 2.3.0
@@ -3075,26 +3075,6 @@ packages:
 
   '@mysten/ledgerjs-hw-app-sui@0.7.1':
     resolution: {integrity: sha512-2KfPyTzdIeSq4auepS56T09rPE2dHz2VX3G9rFnYjayzynJtNd9tzKWPRpjpCEdBGjp8wg0kEzAeHSOwB0P/Kg==}
-
-  '@mysten/memwal@0.0.1-dev.0':
-    resolution: {integrity: sha512-WJ9uD7V0NKakYLiw2aphkJiTGFNxU3VbsdWncPyaVXtKmt1ySSlXmP7fiMY09JNwJsYmYAJiCb9M6ujiz7hejg==}
-    peerDependencies:
-      '@mysten/seal': '>=1.1.0'
-      '@mysten/sui': '>=2.5.0'
-      '@mysten/walrus': '>=1.0.3'
-      ai: '>=4.0.0'
-      zod: ^3.23.0
-    peerDependenciesMeta:
-      '@mysten/seal':
-        optional: true
-      '@mysten/sui':
-        optional: true
-      '@mysten/walrus':
-        optional: true
-      ai:
-        optional: true
-      zod:
-        optional: true
 
   '@mysten/seal@1.1.1':
     resolution: {integrity: sha512-OGxEDmEuXQAzxJKz3ap1dkRSf5fD/iKpz/J8+wZlPbeSok2fVt3KPaCZngjrvqqVRn5lmQomNpzXQCKo929A3w==}
@@ -13563,17 +13543,6 @@ snapshots:
 
   '@mysten/ledgerjs-hw-app-sui@0.7.1': {}
 
-  '@mysten/memwal@0.0.1-dev.0(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
-    dependencies:
-      '@noble/ed25519': 2.3.0
-      '@noble/hashes': 2.0.1
-    optionalDependencies:
-      '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
-      '@mysten/sui': 2.8.0(typescript@5.9.3)
-      '@mysten/walrus': 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))
-      ai: 6.0.37(zod@3.25.76)
-      zod: 3.25.76
-
   '@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))':
     dependencies:
       '@mysten/bcs': 2.0.3
@@ -19016,7 +18985,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.6.1)
       eslint-import-resolver-node: 0.3.9
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react-hooks: 7.0.1(eslint@9.39.4(jiti@2.6.1))
@@ -19049,7 +19018,7 @@ snapshots:
       tinyglobby: 0.2.15
       unrs-resolver: 1.11.1
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
     transitivePeerDependencies:
       - supports-color
 
@@ -19063,7 +19032,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1)):
+  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9

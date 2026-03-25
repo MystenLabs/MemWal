@@ -15,9 +15,9 @@ pnpm dev:noter
 pnpm dev:researcher
 ```
 
-## [App](https://github.com/MystenLabs/MemWal/tree/main/apps/app)
+## [Playground](https://github.com/MystenLabs/MemWal/tree/main/apps/app)
 
-Onboarding app, account dashboard, playground, and interactive demo for MemWal.
+Dashboard, playground, and interactive demo for MemWal.
 
 ```ts
 const memwal = MemWal.create({
@@ -39,7 +39,7 @@ This app covers the full getting-started flow in one place. It signs users in, s
 AI chat app with persistent memory across sessions.
 
 ```ts
-import { withMemWal } from "@mysten/memwal/ai";
+import { withMemWal } from "@mysten-incubation/memwal/ai";
 
 const model = withMemWal(baseModel, {
   key,

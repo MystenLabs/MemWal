@@ -8,7 +8,7 @@ retrieving them with semantic search.
 ## Install
 
 ```bash
-pnpm add @mysten/memwal
+pnpm add @mysten-incubation/memwal
 ```
 
 Peer dependencies (install as needed):
@@ -20,7 +20,7 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 ## Quick Start
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: "your-delegate-key-hex",
@@ -77,9 +77,9 @@ For broader local setup guidance, see:
 
 | Entry | Description |
 |---|---|
-| `@mysten/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
-| `@mysten/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
-| `@mysten/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
+| `@mysten-incubation/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
+| `@mysten-incubation/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
+| `@mysten-incubation/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
 ## How It Works
 

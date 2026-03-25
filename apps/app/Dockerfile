@@ -20,9 +20,9 @@ COPY apps/app/package.json      ./apps/app/
 # Install all workspace deps
 RUN pnpm install
 
-# Build SDK first (apps/app depends on @mysten/memwal via workspace:*)
+# Build SDK first (apps/app depends on @mysten-incubation/memwal via workspace:*)
 COPY packages/sdk/ ./packages/sdk/
-RUN pnpm --filter @mysten/memwal build
+RUN pnpm --filter @mysten-incubation/memwal build
 
 # Copy app source
 COPY apps/app/ ./apps/app/

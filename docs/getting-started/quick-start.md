@@ -22,29 +22,29 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     <Tabs>
       <Tab title="pnpm">
         ```bash
-        pnpm add @mysten/memwal
+        pnpm add @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="npm">
         ```bash
-        npm install @mysten/memwal
+        npm install @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="yarn">
         ```bash
-        yarn add @mysten/memwal
+        yarn add @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="bun">
         ```bash
-        bun add @mysten/memwal
+        bun add @mysten-incubation/memwal
         ```
       </Tab>
     </Tabs>
 
     **Optional packages**
 
-    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten/memwal/ai`):
+    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten-incubation/memwal/ai`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -69,7 +69,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
       </Tab>
     </Tabs>
 
-    For the [manual client flow](/getting-started/choose-your-path) (`@mysten/memwal/manual`):
+    For the [manual client flow](/getting-started/choose-your-path) (`@mysten-incubation/memwal/manual`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -101,7 +101,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     Set up the SDK with your delegate key, account ID, and relayer URL:
 
     ```ts
-    import { MemWal } from "@mysten/memwal";
+    import { MemWal } from "@mysten-incubation/memwal";
 
     const memwal = MemWal.create({
       key: "<your-ed25519-private-key>",

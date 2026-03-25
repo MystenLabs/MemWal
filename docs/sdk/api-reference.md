@@ -119,7 +119,7 @@ These exist on the `MemWal` class for advanced use cases:
 ## `MemWalManual`
 
 ```ts
-import { MemWalManual } from "@mysten/memwal/manual";
+import { MemWalManual } from "@mysten-incubation/memwal/manual";
 ```
 
 See [MemWalManual usage](/sdk/usage/memwal-manual) for the full setup and flow details.
@@ -149,7 +149,7 @@ Whether this client uses a connected wallet signer (vs. raw keypair).
 ## `withMemWal`
 
 ```ts
-import { withMemWal } from "@mysten/memwal/ai";
+import { withMemWal } from "@mysten-incubation/memwal/ai";
 ```
 
 Wraps a Vercel AI SDK model with automatic memory recall and save.
@@ -183,7 +183,7 @@ import {
   addDelegateKey,
   removeDelegateKey,
   generateDelegateKey,
-} from "@mysten/memwal/account";
+} from "@mysten-incubation/memwal/account";
 ```
 
 | Function | Description |
@@ -196,7 +196,7 @@ import {
 ## Utility Functions
 
 ```ts
-import { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "@mysten/memwal";
+import { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "@mysten-incubation/memwal";
 ```
 
 | Function | Description |
