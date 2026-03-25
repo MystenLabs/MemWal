@@ -9,9 +9,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 - [Node.js](https://nodejs.org/) v18+ or [Bun](https://bun.sh/) v1+
 - A delegate key (Ed25519 private key in hex)
 - A MemWalAccount object ID on Sui
-- A relayer URL — use a [public relayer](/relayer/public-relayer) or your own [self-hosted relayer](/relayer/self-hosting)
-  - Production (mainnet): `https://relayer.memwal.ai`
-  - Staging (testnet): `https://relayer.staging.memwal.ai`
+- A relayer URL
 
 ## Quick Start
 
@@ -93,6 +91,28 @@ The fastest way to get MemWal running is through the TypeScript SDK.
         ```
       </Tab>
     </Tabs>
+  </Step>
+
+  <Step>
+    ### Generate your account ID and delegate key
+
+    Create a MemWal account ID and delegate private key for your SDK client using the hosted endpoint:
+
+    <Tip>
+    These hosted endpoints are provided by Walrus Foundation.
+    </Tip>
+
+    - Production (mainnet): `https://memwal.ai` or `https://memwal.wal.app`
+    - Staging (testnet): `https://staging.memwal.ai`
+  </Step>
+
+  <Step>
+    ### Choose a relayer
+
+    Use the hosted relayer, or deploy your own if it has access to a wallet funded with WAL and SUI:
+
+    - Production (mainnet): `https://relayer.memwal.ai`
+    - Staging (testnet): `https://relayer.staging.memwal.ai`
   </Step>
 
   <Step>
