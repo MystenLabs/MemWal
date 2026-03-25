@@ -7,7 +7,7 @@
  * the LLM to pass the correct value.
  */
 
-import type { MemWal } from "@mysten/memwal";
+import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
 import { escapeForPrompt, toolError } from "../format.js";

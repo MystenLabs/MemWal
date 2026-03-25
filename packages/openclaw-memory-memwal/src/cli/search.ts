@@ -4,7 +4,7 @@
  * Semantic search with JSON output, scoped by --agent flag.
  */
 
-import type { MemWal } from "@mysten/memwal";
+import type { MemWal } from "@mysten-incubation/memwal";
 import { resolveAgent } from "../config.js";
 import type { PluginConfig } from "../types.js";
 

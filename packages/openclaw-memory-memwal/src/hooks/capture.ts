@@ -6,7 +6,7 @@
  * for server-side fact extraction.
  */
 
-import type { MemWal } from "@mysten/memwal";
+import type { MemWal } from "@mysten-incubation/memwal";
 import { resolveAgent } from "../config.js";
 import { shouldCapture } from "../capture.js";
 import { extractMessageTexts, withRetry } from "../format.js";

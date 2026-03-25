@@ -6,7 +6,7 @@
  * LLM to pass the correct namespace. Falls back to defaultNamespace if omitted.
  */
 
-import type { MemWal } from "@mysten/memwal";
+import type { MemWal } from "@mysten-incubation/memwal";
 import { registerSearchTool } from "./search.js";
 import { registerStoreTool } from "./store.js";
 import type { PluginConfig } from "../types.js";

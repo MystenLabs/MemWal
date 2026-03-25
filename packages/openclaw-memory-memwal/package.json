@@ -1,12 +1,12 @@
 {
-  "name": "@mysten/memory-memwal",
+  "name": "@mysten-incubation/memory-memwal",
   "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
   "license": "Apache-2.0",
   "dependencies": {
-    "@mysten/memwal": "^0.0.2",
+    "@mysten-incubation/memwal": "^0.0.1",
     "@sinclair/typebox": "0.34.48"
   },
   "peerDependencies": {
