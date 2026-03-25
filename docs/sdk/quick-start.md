@@ -67,6 +67,16 @@ yarn add ai zod
 
 ## Configuration
 
+Before wiring the SDK into your app:
+
+- These hosted endpoints are provided by Walrus Foundation.
+- Generate a MemWal account ID and delegate private key for your client using the hosted endpoint:
+  - Production (mainnet): `https://memwal.ai` or `https://memwal.wal.app`
+  - Staging (testnet): `https://staging.memwal.ai`
+- Choose a relayer:
+  - Use the hosted relayer at `https://relayer.memwal.ai` (mainnet) or `https://relayer.staging.memwal.ai` (testnet)
+  - Or deploy your own relayer with access to a wallet funded with WAL and SUI
+
 `MemWal.create` takes a config object with the following fields:
 
 | Property | Type | Required | Description |
