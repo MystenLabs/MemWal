@@ -296,7 +296,10 @@ export class MemWalManual {
         );
 
         if (downloadedBlobs.length === 0) {
-            return { results: [], total: 0 };
+            throw new Error(
+                `All ${searchResult.results.length} Walrus download(s) failed. ` +
+                `The vector search matched memories, but none could be retrieved from Walrus.`,
+            );
         }
 
         // Step 4: Create ONE SEAL SessionKey (one wallet popup), then decrypt all blobs
