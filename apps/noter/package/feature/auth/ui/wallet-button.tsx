@@ -12,9 +12,9 @@ import { useState } from "react";
 import {
   connectWallet,
   signMessage,
-  generateAuthMessage,
   isWalletInstalled,
 } from "../lib/wallet-client";
+import { trpc } from "@/shared/lib/trpc/client";
 import { WALLET_NAMES, WALLET_INSTALL_URLS, type WalletType } from "../constant";
 
 export type WalletButtonProps = {
@@ -31,6 +31,7 @@ export function WalletButton({
   size = "default",
 }: WalletButtonProps) {
   const { connectWalletAuth, isLoginPending } = useAuth();
+  const getChallenge = trpc.auth.getChallenge.useMutation();
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,17 +45,19 @@ export function WalletButton({
     try {
       // 1. Connect to wallet
       const account = await connectWallet(wallet);
-      // 2. Generate message to sign
-      const message = generateAuthMessage();
 
-      // 3. Sign message
-      const { signature } = await signMessage(wallet, message, account);
+      // 2. Get server-issued challenge nonce
+      const { challengeId, nonce } = await getChallenge.mutateAsync();
+
+      // 3. Sign the challenge nonce
+      const { signature } = await signMessage(wallet, nonce, account);
+
       // 4. Authenticate with backend
       await connectWalletAuth({
         walletType: wallet,
         address: account.address,
         signature,
-        message,
+        challengeId,
       });    } catch (err) {
       console.error(`[WalletButton] Failed to connect ${wallet}:`, err);
       setError(err instanceof Error ? err.message : "Connection failed");
