@@ -34,7 +34,7 @@ import {
 import { OAUTH_PROVIDERS, OAUTH_SCOPES, AUTH_ERRORS } from "../constant";
 import { buildOAuthUrl } from "../domain/zklogin";
 import { zkLoginSessions, walletSessions, walletChallenges } from "@/shared/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, lt } from "drizzle-orm";
 import * as authService from "../domain/service";
 
 export const authRouter = router({
@@ -245,6 +245,11 @@ export const authRouter = router({
    */
   getChallenge: procedure
     .mutation(async ({ ctx }) => {
+      // Opportunistic cleanup: remove expired challenges to prevent table bloat
+      await ctx.db
+        .delete(walletChallenges)
+        .where(lt(walletChallenges.expiresAt, new Date()));
+
       const challengeId = uuidv7();
       const nonce = randomBytes(32).toString("hex");
       const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
@@ -255,7 +260,7 @@ export const authRouter = router({
         expiresAt,
       });
 
-      return { challengeId, nonce, expiresAt };
+      return { challengeId, nonce };
     }),
 
   /**
@@ -268,12 +273,11 @@ export const authRouter = router({
       const { challengeId, walletType, address, signature } = input;
 
       try {
-        // 1. Fetch and validate challenge
+        // 1. Atomically consume challenge (DELETE ... RETURNING prevents TOCTOU race)
         const [challenge] = await ctx.db
-          .select()
-          .from(walletChallenges)
+          .delete(walletChallenges)
           .where(eq(walletChallenges.id, challengeId))
-          .limit(1);
+          .returning();
 
         if (!challenge) {
           throw new TRPCError({
@@ -283,17 +287,13 @@ export const authRouter = router({
         }
 
         if (challenge.expiresAt < new Date()) {
-          await ctx.db.delete(walletChallenges).where(eq(walletChallenges.id, challengeId));
           throw new TRPCError({
             code: "UNAUTHORIZED",
             message: "Challenge expired",
           });
         }
 
-        // 2. Consume challenge (delete before verify to prevent timing-based replay)
-        await ctx.db.delete(walletChallenges).where(eq(walletChallenges.id, challengeId));
-
-        // 3. Verify signature against server-issued nonce
+        // 2. Verify signature against server-issued nonce
         const signerAddress = await verifyPersonalMessageSignature(
           new TextEncoder().encode(challenge.nonce),
           signature,
@@ -308,13 +308,13 @@ export const authRouter = router({
           });
         }
 
-        // 4. Create or update user
+        // 3. Create or update user
         const user = await authService.upsertWalletUser(ctx.db, {
           address,
           walletType,
         });
 
-        // 5. Create wallet session
+        // 4. Create wallet session
         const sessionId = uuidv7();
         const expiresAt = new Date();
         expiresAt.setHours(expiresAt.getHours() + 24); // 24 hour session
