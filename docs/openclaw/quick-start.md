@@ -8,24 +8,9 @@ Get the plugin running and test the memory loop in a few minutes.
 ## Prerequisites
 
 - [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running
-- [bun](https://bun.sh) as the package manager
-- A MemWal account with **Ed25519 key pair**, **MemWalAccount ID**, and a **server URL**
+- A package manager — [bun](https://bun.sh), [pnpm](https://pnpm.io), or [npm](https://www.npmjs.com)
 
-<Note>
-**MemWal** is a self-hostable memory infrastructure kit. You can run your own server for full control, or use the default staging server for testing. See [What is MemWal?](/getting-started/what-is-memwal) for details.
-</Note>
-
-The plugin needs three values from your MemWal setup:
-
-| Value | What it is |
-|-------|-----------|
-| **Private Key** | Ed25519 key (64-char hex) — your identity and encryption key |
-| **Account ID** | MemWalAccount object ID on Sui (`0x...`) — your on-chain identity |
-| **Server URL** | MemWal server endpoint — handles search, fact extraction, and storage |
-
-<Warning>
-The default staging server (`https://staging-api-dev.up.railway.app`) is for **testing only**. Data may be wiped and availability is not guaranteed. Self-host for production use.
-</Warning>
+You'll also need a **delegate key**, **account ID**, and **relayer URL** from MemWal — the steps below will guide you through getting these.
 
 ## Installation
 
@@ -33,10 +18,26 @@ The default staging server (`https://staging-api-dev.up.railway.app`) is for **t
   <Step>
     ### Install dependencies
 
-    ```bash
-    cd packages/openclaw-memory-memwal
-    bun install
-    ```
+    <Tabs>
+      <Tab title="bun">
+        ```bash
+        cd packages/openclaw-memory-memwal
+        bun install
+        ```
+      </Tab>
+      <Tab title="pnpm">
+        ```bash
+        cd packages/openclaw-memory-memwal
+        pnpm install
+        ```
+      </Tab>
+      <Tab title="npm">
+        ```bash
+        cd packages/openclaw-memory-memwal
+        npm install
+        ```
+      </Tab>
+    </Tabs>
   </Step>
 
   <Step>
@@ -51,9 +52,34 @@ The default staging server (`https://staging-api-dev.up.railway.app`) is for **t
   </Step>
 
   <Step>
-    ### Set your private key
+    ### Get your MemWal credentials
 
-    Store your Ed25519 private key as an environment variable so it's never hardcoded in config files:
+    The plugin needs three values to connect to MemWal:
+
+    | Value | What it is |
+    |-------|-----------|
+    | **Delegate Key** | A private key (64-char hex) used to sign requests and encrypt memories |
+    | **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
+    | **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
+
+    The easiest way to get your delegate key and account ID is through the [MemWal dashboard](https://memwal.ai). See the [main Quick Start](/getting-started/quick-start) for detailed setup instructions.
+
+    For the relayer URL, use a managed endpoint or deploy your own:
+
+    | Environment | Relayer URL |
+    |-------------|-------------|
+    | **Production** (mainnet) | `https://relayer.memwal.ai` |
+    | **Development** (testnet) | `https://relayer.dev.memwal.ai` |
+
+    <Info>
+    These managed relayer endpoints are provided as a public good by Walrus Foundation.
+    </Info>
+  </Step>
+
+  <Step>
+    ### Set your delegate key
+
+    Store your delegate key as an environment variable so it's never hardcoded in config files:
 
     ```bash
     # Add to your shell profile (.zshrc, .bashrc, etc.)
@@ -74,9 +100,9 @@ The default staging server (`https://staging-api-dev.up.railway.app`) is for **t
           "memory-memwal": {
             "enabled": true,
             "config": {
-              "privateKey": "${MEMWAL_PRIVATE_KEY}",                  // References the env var
-              "accountId": "0x3247e3da...",                            // Your MemWalAccount ID on Sui
-              "serverUrl": "https://staging-api-dev.up.railway.app"   // Your server URL
+              "privateKey": "${MEMWAL_PRIVATE_KEY}",           // References the env var
+              "accountId": "0x3247e3da...",                     // Your account ID from the dashboard
+              "serverUrl": "https://relayer.dev.memwal.ai"     // Or your self-hosted relayer
             }
           }
         }
@@ -113,7 +139,7 @@ The default staging server (`https://staging-api-dev.up.railway.app`) is for **t
     ```
 
     <Tip>
-    If you see `health check failed`, check that your server URL is reachable and your `MEMWAL_PRIVATE_KEY` env var is set.
+    If you see `health check failed`, check that your relayer URL is reachable and your `MEMWAL_PRIVATE_KEY` env var is set.
     </Tip>
   </Step>
 </Steps>
@@ -128,7 +154,7 @@ Run the stats command to confirm the plugin is connected:
 openclaw memwal stats
 ```
 
-This shows the server status, your key (masked), account ID, active namespace, and whether auto-recall/capture are enabled.
+This shows the relayer status, your key (masked), account ID, active namespace, and whether auto-recall/capture are enabled.
 
 ### Test the memory loop
 
@@ -182,4 +208,4 @@ Then the LLM can call `memory_search` and `memory_store` on its own when it deci
 ## Next steps
 
 - [How It Works](/openclaw/how-it-works) — understand the architecture, message flow, and hook mechanics
-- [Features](/openclaw/features) — detailed breakdown of every capability including CLI, tools, and multi-agent isolation
+- [Reference](/openclaw/reference) — detailed breakdown of hooks, tools, CLI, and configuration

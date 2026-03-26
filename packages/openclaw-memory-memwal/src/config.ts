@@ -62,6 +62,23 @@ export function parseConfig(raw: unknown): PluginConfig {
     ? resolveEnvVar(cfg.serverUrl)
     : (() => { throw new Error("memory-memwal: serverUrl is required"); })();
 
+  // Validate format early so bad config fails at startup, not at first API call
+  if (!/^[0-9a-fA-F]{64}$/.test(privateKey)) {
+    throw new Error(
+      "memory-memwal: privateKey must be a 64-character hex string (Ed25519 delegate key)",
+    );
+  }
+  if (!accountId.startsWith("0x") || accountId.length < 10) {
+    throw new Error(
+      "memory-memwal: accountId must be a Sui object ID (0x...)",
+    );
+  }
+  if (!/^https?:\/\/.+/.test(serverUrl)) {
+    throw new Error(
+      "memory-memwal: serverUrl must be a valid URL (https://...)",
+    );
+  }
+
   return {
     privateKey,
     accountId,

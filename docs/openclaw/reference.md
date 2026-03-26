@@ -1,9 +1,9 @@
 ---
-title: "Features"
-description: "Detailed breakdown of every plugin capability — hooks, tools, CLI, isolation, and security."
+title: "Reference"
+description: "Complete reference for hooks, tools, CLI commands, configuration, and security."
 ---
 
-A complete reference for what the plugin can do today.
+Complete reference for every plugin capability.
 
 ## Hooks
 

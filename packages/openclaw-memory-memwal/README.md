@@ -30,29 +30,28 @@ Memories are **encrypted** and stored on **MemWal**, a privacy-preserving memory
 
 ### OpenClaw
 
-You need [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running, and [bun](https://bun.sh) as the package manager.
+You need [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running, and a package manager ([bun](https://bun.sh), pnpm, or npm).
 
 ### MemWal Setup
 
-**MemWal** is an open-source, self-hostable memory infrastructure kit for blockchain-backed encrypted storage. It's not a SaaS — you can run your own server and own your entire memory stack.
+**MemWal** is an open-source, self-hostable memory infrastructure kit for encrypted, decentralized storage. You can run your own relayer or use a managed endpoint.
 
-The plugin needs three values from a MemWal setup:
+The plugin needs three values:
 
 | Value | What it is |
 |-------|-----------|
-| **Private Key** | Ed25519 key (64-char hex) — your identity and encryption key |
-| **Account ID** | MemWalAccount object ID on Sui (`0x...`) — your on-chain identity |
-| **Server URL** | The MemWal server endpoint — handles vector search, fact extraction, and encrypted storage |
+| **Delegate Key** | Private key (64-char hex) used to sign requests and encrypt memories |
+| **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
+| **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
 
-You can either **self-host** your own MemWal server for full control, or use the default staging server for quick testing:
+Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](/getting-started/quick-start) for detailed setup.
 
-```
-https://staging-api-dev.up.railway.app
-```
+For the relayer, use a managed endpoint or [self-host your own](/relayer/self-hosting):
 
-> **Note:** The default server is for **testing and development only**. It is not permanent — data may be wiped, and availability is not guaranteed. Do not use it for production or important data.
-
-For more details on MemWal and how to set up your account, see the [MemWal documentation](https://docs.memwal.ai/getting-started/what-is-memwal).
+| Environment | Relayer URL |
+|-------------|-------------|
+| **Production** (mainnet) | `https://relayer.memwal.ai` |
+| **Development** (testnet) | `https://relayer.dev.memwal.ai` |
 
 ## Quick Start
 
@@ -60,16 +59,16 @@ For more details on MemWal and how to set up your account, see the [MemWal docum
 
 ```bash
 cd packages/openclaw-memory-memwal
-bun install
+bun install  # or: pnpm install / npm install
 
 # Link into OpenClaw's extensions directory
 mkdir -p ~/.openclaw/extensions
 ln -s "$(pwd)" ~/.openclaw/extensions/memory-memwal
 ```
 
-### 2. Set your private key
+### 2. Set your delegate key
 
-Store your Ed25519 private key as an environment variable so it's never hardcoded in config files:
+Store your delegate key as an environment variable so it's never hardcoded in config files:
 
 ```bash
 # Add to your shell profile (.zshrc, .bashrc, etc.)
@@ -78,7 +77,7 @@ export MEMWAL_PRIVATE_KEY="your-64-char-hex-key"
 
 ### 3. Configure OpenClaw
 
-Add the plugin config to `~/.openclaw/openclaw.json`. The three required fields correspond to your MemWal setup — the private key references the env var you just set, and the account ID and server URL come from your MemWal account:
+Add the plugin config to `~/.openclaw/openclaw.json`:
 
 ```jsonc
 {
@@ -88,9 +87,9 @@ Add the plugin config to `~/.openclaw/openclaw.json`. The three required fields 
       "memory-memwal": {
         "enabled": true,
         "config": {
-          "privateKey": "${MEMWAL_PRIVATE_KEY}",                  // References the env var
-          "accountId": "0x3247e3da...",                            // Your MemWalAccount ID on Sui
-          "serverUrl": "https://staging-api-dev.up.railway.app"   // Your server (or default for testing)
+          "privateKey": "${MEMWAL_PRIVATE_KEY}",             // References the env var
+          "accountId": "0x3247e3da...",                    // Your account ID from the dashboard
+          "serverUrl": "https://relayer.dev.memwal.ai"    // Or your self-hosted relayer
         }
       }
     }

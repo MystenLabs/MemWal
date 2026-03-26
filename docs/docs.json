@@ -24,13 +24,13 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/CommandOSSLabs/memwal"
+        "href": "https://github.com/MystenLabs/MemWal"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/CommandOSSLabs/memwal"
+      "github": "https://github.com/MystenLabs/MemWal"
     }
   },
   "navigation": {
@@ -109,7 +109,7 @@
               "openclaw/overview",
               "openclaw/quick-start",
               "openclaw/how-it-works",
-              "openclaw/features"
+              "openclaw/reference"
             ]
           }
         ]
