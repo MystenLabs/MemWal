@@ -1,7 +1,7 @@
 <h1 align="center">@mysten-incubation/memory-memwal</h1>
 
 <p align="center">
-  Cloud-based long-term memory plugin for OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>MemWal</strong>.
+  Cloud-based long-term memory plugin for NemoClaw/OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>MemWal</strong>.
 </p>
 
 <p align="center">

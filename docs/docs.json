@@ -101,20 +101,6 @@
         ]
       },
       {
-        "tab": "OpenClaw Plugin",
-        "groups": [
-          {
-            "group": "OpenClaw Plugin",
-            "pages": [
-              "openclaw/overview",
-              "openclaw/quick-start",
-              "openclaw/how-it-works",
-              "openclaw/reference"
-            ]
-          }
-        ]
-      },
-      {
         "tab": "Relayer",
         "groups": [
           {
@@ -150,6 +136,20 @@
               "indexer/purpose",
               "indexer/onchain-events",
               "indexer/database-sync"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "NemoClaw/OpenClaw Plugin",
+        "groups": [
+          {
+            "group": "NemoClaw/OpenClaw Plugin",
+            "pages": [
+              "openclaw/overview",
+              "openclaw/quick-start",
+              "openclaw/how-it-works",
+              "openclaw/reference"
             ]
           }
         ]

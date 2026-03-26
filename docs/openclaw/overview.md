@@ -1,5 +1,5 @@
 ---
-title: "OpenClaw Plugin"
+title: "NemoClaw/OpenClaw Plugin"
 description: "Give your OpenClaw AI agents persistent, encrypted long-term memory powered by MemWal."
 ---
 
