@@ -20,10 +20,10 @@ import { WALLET_INSTALL_URLS, type WalletType } from "../constant";
 import { useAuth } from "../hook/use-auth";
 import {
   connectWallet,
-  generateAuthMessage,
   isWalletInstalled,
   signMessage,
 } from "../lib/wallet-client";
+import { trpc } from "@/shared/lib/trpc/client";
 import { LoginButton } from "./login-button";
 
 export function AuthButtonGroup() {
@@ -31,6 +31,7 @@ export function AuthButtonGroup() {
   const [isWalletConnecting, setIsWalletConnecting] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
   const { connectWalletAuth, isLoginPending } = useAuth();
+  const getChallenge = trpc.auth.getChallenge.useMutation();
 
   const slushInstalled = isWalletInstalled("slush");
 
@@ -50,18 +51,18 @@ export function AuthButtonGroup() {
       // 1. Connect to wallet
       const account = await connectWallet(walletType);
 
-      // 2. Generate message to sign
-      const message = generateAuthMessage();
+      // 2. Get server-issued challenge nonce
+      const { challengeId, nonce } = await getChallenge.mutateAsync();
 
-      // 3. Sign message
-      const { signature } = await signMessage(walletType, message, account);
+      // 3. Sign the challenge nonce
+      const { signature } = await signMessage(walletType, nonce, account);
 
       // 4. Authenticate with backend
       await connectWalletAuth({
         walletType,
         address: account.address,
         signature,
-        message,
+        challengeId,
       });
     } catch (err) {
       console.error(`[AuthButtonGroup] Failed to connect ${walletType}:`, err);

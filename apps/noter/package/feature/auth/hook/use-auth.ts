@@ -27,6 +27,7 @@ export function useAuth() {
   // tRPC mutations
   const initiateLoginMutation = trpc.auth.initiateLogin.useMutation();
   const completeLoginMutation = trpc.auth.completeLogin.useMutation();
+  const getChallengeMutation = trpc.auth.getChallenge.useMutation();
   const connectWalletMutation = trpc.auth.connectWallet.useMutation();
   const logoutMutation = trpc.auth.logout.useMutation();
 
@@ -141,7 +142,7 @@ export function useAuth() {
       walletType: "slush";
       address: string;
       signature: string;
-      message: string;
+      challengeId: string;
     }) => {
       try {
         setLoading(true);
