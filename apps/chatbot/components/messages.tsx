@@ -75,12 +75,15 @@ function PureMessages({
             />
           ))}
 
-          {status === "submitted" &&
-            !messages.some((msg) =>
-              msg.parts?.some(
-                (part) => "state" in part && part.state === "approval-responded"
-              )
-            ) && <ThinkingMessage />}
+          {(status === "submitted" || status === "streaming") &&
+            (() => {
+              const lastMsg = messages[messages.length - 1];
+              // Show ThinkingMessage when:
+              // 1. Status is "submitted" (request sent, no response yet) AND last message is from user
+              // 2. Status is "streaming" but no assistant message exists yet
+              const lastIsUser = !lastMsg || lastMsg.role === "user";
+              return lastIsUser;
+            })() && <ThinkingMessage />}
 
           <div
             className="min-h-[24px] min-w-[24px] shrink-0"
