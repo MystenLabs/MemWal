@@ -4,7 +4,7 @@ title: "Self-Hosting"
 
 Self-hosting means running your own relayer — either pointing at an existing MemWal package ID or deploying an entirely new MemWal instance with your own contract, database, and server wallet.
 
-The public relayer provided by Mysten is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
+The managed relayer provided by Walrus Foundation is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
 ## When to Self-Host
 
@@ -13,7 +13,7 @@ The most common reasons are removing the trust assumption on a third-party relay
 - **Control the trust boundary** — a self-hosted relayer keeps plaintext, encryption, and embedding under your own control
 - **Run your own MemWal instance** — deploy your own contract with a separate package ID, SEAL encryption keys, and data isolation
 - **Choose your own embedding provider** — use your own OpenAI-compatible API and credentials
-- **Guarantee availability** — the public relayer is a beta service with no SLA
+- **Guarantee availability** — the managed relayer is a beta service with no SLA
 
 ## What Runs
 

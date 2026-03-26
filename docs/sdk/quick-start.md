@@ -83,7 +83,7 @@ Before wiring the SDK into your app:
 | --- | --- | --- | --- |
 | `key` | `string` | Yes | Ed25519 private key in hex |
 | `accountId` | `string` | Yes | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | Relayer URL — use `https://relayer.memwal.ai` (mainnet) or `https://relayer.staging.memwal.ai` (testnet) for the [public relayer](/relayer/public-relayer) |
+| `serverUrl` | `string` | No | Relayer URL — use `https://relayer.memwal.ai` (mainnet) or `https://relayer.staging.memwal.ai` (testnet) for the [managed relayer](/relayer/public-relayer) |
 | `namespace` | `string` | No | Default namespace — falls back to `"default"` |
 
 ## First Memory
