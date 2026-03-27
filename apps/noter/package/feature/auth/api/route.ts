@@ -5,6 +5,7 @@
 
 import { router, procedure } from "@/shared/lib/trpc/init";
 import { TRPCError } from "@trpc/server";
+import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { uuidv7 } from "uuidv7";
 import {
   initiateLoginInput,
@@ -247,9 +248,18 @@ export const authRouter = router({
       const { walletType, address, signature, message } = input;
 
       try {
-        // TODO: Verify signature on server-side
-        // For now, we trust the client signature
-        // In production, use @mysten/sui.js to verify the signature
+        // Verify the wallet signature before creating a session
+        const signerAddress = await verifyPersonalMessageSignature(
+          new TextEncoder().encode(message),
+          signature,
+        ).catch(() => {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid signature" });
+        });
+
+        if (signerAddress.toSuiAddress() !== address) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Signature does not match address" });
+        }
+
         // Create or update user via service
         const user = await authService.upsertWalletUser(ctx.db, {
           address,

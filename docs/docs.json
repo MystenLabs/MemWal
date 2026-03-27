@@ -130,12 +130,15 @@
         ]
       },
       {
-        "tab": "Examples",
+        "tab": "NemoClaw/OpenClaw Plugin",
         "groups": [
           {
-            "group": "Examples",
+            "group": "NemoClaw/OpenClaw Plugin",
             "pages": [
-              "examples/example-apps"
+              "openclaw/overview",
+              "openclaw/quick-start",
+              "openclaw/how-it-works",
+              "openclaw/reference"
             ]
           }
         ]

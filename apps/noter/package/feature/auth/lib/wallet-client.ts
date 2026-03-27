@@ -130,7 +130,7 @@ export async function signMessage(
 
     // Sign message using sui:signPersonalMessage feature
     const signFeature = wallet.features['sui:signPersonalMessage'] as {
-      signPersonalMessage: (params: { message: Uint8Array; account: any }) => Promise<{ signature: Uint8Array }>
+      signPersonalMessage: (params: { message: Uint8Array; account: any }) => Promise<{ signature: string | Uint8Array }>
     } | undefined;
 
     if (!signFeature) {
@@ -144,9 +144,10 @@ export async function signMessage(
       account: walletAccount,
     });
 
-
-    // Convert Uint8Array signature to base64
-    const signatureBase64 = Buffer.from(result.signature).toString("base64");
+    // Wallet standard returns signature as a base64 string; older versions return Uint8Array
+    const signatureBase64 = typeof result.signature === 'string'
+      ? result.signature
+      : Buffer.from(result.signature).toString("base64");
 
     return {
       signature: signatureBase64,

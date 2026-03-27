@@ -1,0 +1,101 @@
+{
+  "id": "memory-memwal",
+  "kind": "memory",
+  "name": "Memory (MemWal)",
+  "description": "Encrypted, decentralized long-term memory via MemWal + Walrus",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "privateKey": {
+        "type": "string",
+        "description": "Ed25519 private key (hex). Supports ${ENV_VAR}."
+      },
+      "accountId": {
+        "type": "string",
+        "description": "MemWalAccount object ID on Sui (0x...)"
+      },
+      "serverUrl": {
+        "type": "string",
+        "description": "MemWal server URL"
+      },
+      "defaultNamespace": {
+        "type": "string",
+        "description": "Default namespace for memory scoping (default: 'default')"
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "description": "Auto-inject relevant memories before each turn"
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "description": "Auto-extract and store facts after each turn"
+      },
+      "maxRecallResults": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 20,
+        "description": "Max memories per auto-recall"
+      },
+      "minRelevance": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Min relevance threshold for auto-recall"
+      },
+      "captureMaxMessages": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "Recent messages window for auto-capture"
+      }
+    },
+    "required": ["privateKey", "accountId", "serverUrl"]
+  },
+  "uiHints": {
+    "privateKey": {
+      "label": "Ed25519 Private Key",
+      "sensitive": true,
+      "placeholder": "64-character hex string or ${ENV_VAR}",
+      "help": "Get from app.memwal.com. Supports ${ENV_VAR} syntax."
+    },
+    "accountId": {
+      "label": "MemWalAccount ID",
+      "placeholder": "0x3247e3da...",
+      "help": "MemWalAccount object ID on Sui. Get from app.memwal.com."
+    },
+    "serverUrl": {
+      "label": "MemWal Server URL",
+      "placeholder": "https://relayer.dev.memwal.ai"
+    },
+    "defaultNamespace": {
+      "label": "Default Namespace",
+      "placeholder": "default",
+      "help": "Memory scope for the main agent. Other agents auto-scope by name.",
+      "advanced": true
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Inject relevant memories before each turn"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Extract and store facts after each turn"
+    },
+    "maxRecallResults": {
+      "label": "Max Recall Results",
+      "placeholder": "5",
+      "advanced": true
+    },
+    "minRelevance": {
+      "label": "Min Relevance",
+      "placeholder": "0.3",
+      "advanced": true
+    },
+    "captureMaxMessages": {
+      "label": "Capture Window",
+      "placeholder": "10",
+      "advanced": true
+    }
+  }
+}
