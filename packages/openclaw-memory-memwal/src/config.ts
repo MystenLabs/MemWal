@@ -1,21 +1,34 @@
 /**
  * Config parsing, validation, and namespace resolution.
+ *
+ * Uses Zod for schema validation — all config errors surface at startup
+ * with clear messages instead of failing at runtime.
  */
 
+import { z } from "zod";
 import type { PluginConfig } from "./types.js";
 
 // ============================================================================
-// Defaults
+// Schema
 // ============================================================================
 
-const DEFAULTS = {
-  defaultNamespace: "default",
-  autoRecall: true,
-  autoCapture: true,
-  maxRecallResults: 5,
-  minRelevance: 0.3,
-  captureMaxMessages: 10,
-};
+const ConfigSchema = z.object({
+  privateKey: z.string()
+    .min(1, "required")
+    .regex(/^[0-9a-fA-F]{64}$/, "must be a 64-character hex string (delegate key)"),
+  accountId: z.string()
+    .min(1, "required")
+    .regex(/^0x[0-9a-fA-F]{10,}$/, "must be a Sui object ID (0x...)"),
+  serverUrl: z.string()
+    .min(1, "required")
+    .url("must be a valid URL"),
+  defaultNamespace: z.string().default("default"),
+  autoRecall: z.boolean().default(true),
+  autoCapture: z.boolean().default(true),
+  maxRecallResults: z.number().min(1).max(20).default(5),
+  minRelevance: z.number().min(0).max(1).default(0.3),
+  captureMaxMessages: z.number().min(1).max(50).default(10),
+});
 
 // ============================================================================
 // Env Var Resolution
@@ -30,6 +43,18 @@ function resolveEnvVar(value: string): string {
   });
 }
 
+/**
+ * Resolve ${ENV_VAR} placeholders in all string fields of a config object.
+ * Non-string fields are passed through unchanged.
+ */
+function resolveEnvVars(raw: Record<string, unknown>): Record<string, unknown> {
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    resolved[key] = typeof value === "string" ? resolveEnvVar(value) : value;
+  }
+  return resolved;
+}
+
 // ============================================================================
 // Config Parser
 // ============================================================================
@@ -37,67 +62,32 @@ function resolveEnvVar(value: string): string {
 /**
  * Parse and validate raw plugin config from openclaw.json.
  *
- * Resolves ${ENV_VAR} placeholders in string fields and applies defaults
- * for optional settings. Throws on missing required fields.
+ * Resolves ${ENV_VAR} placeholders in string fields, then validates
+ * the full config against the Zod schema. Throws with clear field-level
+ * error messages on invalid config.
  *
  * @param raw - Raw config object from `api.pluginConfig`
  * @returns Validated config with all defaults applied
- * @throws {Error} If privateKey, accountId, or serverUrl is missing
+ * @throws {Error} If config is missing, or any field fails validation
  */
 export function parseConfig(raw: unknown): PluginConfig {
   if (!raw || typeof raw !== "object") {
     throw new Error("memory-memwal: config is required");
   }
-  const cfg = raw as Record<string, unknown>;
 
-  const privateKey = typeof cfg.privateKey === "string" && cfg.privateKey
-    ? resolveEnvVar(cfg.privateKey)
-    : (() => { throw new Error("memory-memwal: privateKey is required"); })();
+  // Resolve env vars before validation
+  const resolved = resolveEnvVars(raw as Record<string, unknown>);
 
-  const accountId = typeof cfg.accountId === "string" && cfg.accountId
-    ? resolveEnvVar(cfg.accountId)
-    : (() => { throw new Error("memory-memwal: accountId is required"); })();
-
-  const serverUrl = typeof cfg.serverUrl === "string" && cfg.serverUrl
-    ? resolveEnvVar(cfg.serverUrl)
-    : (() => { throw new Error("memory-memwal: serverUrl is required"); })();
-
-  // Validate format early so bad config fails at startup, not at first API call
-  if (!/^[0-9a-fA-F]{64}$/.test(privateKey)) {
-    throw new Error(
-      "memory-memwal: privateKey must be a 64-character hex string (Ed25519 delegate key)",
-    );
-  }
-  if (!accountId.startsWith("0x") || accountId.length < 10) {
-    throw new Error(
-      "memory-memwal: accountId must be a Sui object ID (0x...)",
-    );
-  }
-  if (!/^https?:\/\/.+/.test(serverUrl)) {
-    throw new Error(
-      "memory-memwal: serverUrl must be a valid URL (https://...)",
-    );
+  // Validate with Zod — clear error messages per field
+  const result = ConfigSchema.safeParse(resolved);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+      .join("\n");
+    throw new Error(`memory-memwal: invalid config:\n${issues}`);
   }
 
-  return {
-    privateKey,
-    accountId,
-    serverUrl,
-    defaultNamespace: typeof cfg.defaultNamespace === "string"
-      ? cfg.defaultNamespace
-      : DEFAULTS.defaultNamespace,
-    autoRecall: typeof cfg.autoRecall === "boolean" ? cfg.autoRecall : DEFAULTS.autoRecall,
-    autoCapture: typeof cfg.autoCapture === "boolean" ? cfg.autoCapture : DEFAULTS.autoCapture,
-    maxRecallResults: typeof cfg.maxRecallResults === "number"
-      ? cfg.maxRecallResults
-      : DEFAULTS.maxRecallResults,
-    minRelevance: typeof cfg.minRelevance === "number"
-      ? cfg.minRelevance
-      : DEFAULTS.minRelevance,
-    captureMaxMessages: typeof cfg.captureMaxMessages === "number"
-      ? cfg.captureMaxMessages
-      : DEFAULTS.captureMaxMessages,
-  };
+  return result.data;
 }
 
 // ============================================================================

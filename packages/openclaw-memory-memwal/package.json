@@ -7,7 +7,8 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@mysten-incubation/memwal": "^0.0.1",
-    "@sinclair/typebox": "0.34.48"
+    "@sinclair/typebox": "0.34.48",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.11"
