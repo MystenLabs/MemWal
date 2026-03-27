@@ -7,11 +7,6 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) v18+ or [Bun](https://bun.sh/) v1+
-- A delegate key (Ed25519 private key in hex)
-- A MemWalAccount object ID on Sui
-- A relayer URL — use a [public relayer](/relayer/public-relayer) or your own [self-hosted relayer](/relayer/self-hosting)
-  - Production (mainnet): `https://relayer.memwal.ai`
-  - Staging (testnet): `https://relayer.staging.memwal.ai`
 
 ## Quick Start
 
@@ -22,29 +17,29 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     <Tabs>
       <Tab title="pnpm">
         ```bash
-        pnpm add @mysten/memwal
+        pnpm add @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="npm">
         ```bash
-        npm install @mysten/memwal
+        npm install @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="yarn">
         ```bash
-        yarn add @mysten/memwal
+        yarn add @mysten-incubation/memwal
         ```
       </Tab>
       <Tab title="bun">
         ```bash
-        bun add @mysten/memwal
+        bun add @mysten-incubation/memwal
         ```
       </Tab>
     </Tabs>
 
     **Optional packages**
 
-    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten/memwal/ai`):
+    For AI middleware with [Vercel AI SDK](https://sdk.vercel.ai/) (`@mysten-incubation/memwal/ai`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -69,7 +64,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
       </Tab>
     </Tabs>
 
-    For the [manual client flow](/getting-started/choose-your-path) (`@mysten/memwal/manual`):
+    For the [manual client flow](/getting-started/choose-your-path) (`@mysten-incubation/memwal/manual`):
 
     <Tabs>
       <Tab title="pnpm">
@@ -96,12 +91,44 @@ The fastest way to get MemWal running is through the TypeScript SDK.
   </Step>
 
   <Step>
+    ### Generate your account ID and delegate key
+
+    Create a MemWal account ID and delegate private key for your SDK client using one of the hosted endpoints below.
+
+    <Note>
+    The following endpoints are provided as a public good by Walrus Foundation.
+    </Note>
+
+    | App | URL |
+    | --- | --- |
+    | **MemWal Playground** | [memwal.ai](https://memwal.ai) |
+    | **Walrus-hosted Playground** | [memwal.wal.app](https://memwal.wal.app) |
+
+    For the contract-based setup flow, see [Delegate Key Management](/contract/delegate-key-management) and [MemWal smart contract](/contract/overview).
+  </Step>
+
+  <Step>
+    ### Choose a relayer
+
+    Use a hosted relayer, or deploy your own [self-hosted relayer](/relayer/self-hosting) with access to a wallet funded with WAL and SUI:
+
+    <Note>
+    Following endpoints are provided as public good by Walrus Foundation.
+    </Note>
+
+    | Network | Relayer URL |
+    | --- | --- |
+    | **Production** (mainnet) | `https://relayer.memwal.ai` |
+    | **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
+  </Step>
+
+  <Step>
     ### Configure the SDK
 
     Set up the SDK with your delegate key, account ID, and relayer URL:
 
     ```ts
-    import { MemWal } from "@mysten/memwal";
+    import { MemWal } from "@mysten-incubation/memwal";
 
     const memwal = MemWal.create({
       key: "<your-ed25519-private-key>",
@@ -110,14 +137,6 @@ The fastest way to get MemWal running is through the TypeScript SDK.
       namespace: "my-app",
     });
     ```
-
-    <Tip>
-    Use `https://relayer.memwal.ai` for production (mainnet) or `https://relayer.staging.memwal.ai` for staging (testnet). See [Public Relayer](/relayer/public-relayer) for details.
-    </Tip>
-
-    <Note>
-    If you are self-hosting and do not have `MEMWAL_ACCOUNT_ID` yet, see [Self-Hosting](/relayer/self-hosting) for the account-creation and delegate-key setup flow.
-    </Note>
   </Step>
 
   <Step>

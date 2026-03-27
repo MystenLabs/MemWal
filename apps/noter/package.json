@@ -18,7 +18,7 @@
     "@ai-sdk/openai": "^3.0.41",
     "@ai-sdk/react": "3.0.39",
     "@base-ui/react": "^1.2.0",
-    "@mysten/memwal": "workspace:*",
+    "@mysten-incubation/memwal": "workspace:*",
     "@hookform/resolvers": "^5.2.2",
     "@lexical/code": "^0.41.0",
     "@lexical/link": "^0.41.0",

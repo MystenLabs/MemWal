@@ -13,7 +13,7 @@ The recommended default client. The relayer handles embeddings, SEAL encryption,
 4. `recall` searches by Memory Space and returns decrypted matches
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",

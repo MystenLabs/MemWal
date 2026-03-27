@@ -4,6 +4,28 @@ title: "Smart Contract Overview"
 
 The smart contract (`memwal::account`) defines the onchain account model for MemWal. It is a Move module deployed on Sui.
 
+## Network IDs
+
+These are the onchain IDs for the current public MemWal deployments:
+
+### Staging (Testnet)
+
+```env
+SUI_NETWORK=testnet
+MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
+MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
+```
+
+### Production (Mainnet)
+
+```env
+SUI_NETWORK=mainnet
+MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6
+MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
+```
+
+For relayer setup and environment variable usage, see [Self-Hosting](/relayer/self-hosting) and [Environment Variables](/reference/environment-variables).
+
 ## What It Manages
 
 - **Ownership** — who owns a MemWal account

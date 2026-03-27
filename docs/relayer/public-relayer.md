@@ -1,10 +1,10 @@
 ---
-title: "Public Relayer"
+title: "Managed Relayer"
 ---
 
-The public relayer is a managed MemWal deployment for teams that want to get started without running infrastructure. If a public relayer endpoint is available for your environment, it gives you the fastest path to integration.
+A managed relayer is a simpler experience for teams that want to get started without running infrastructure. If a managed relayer endpoint is available for your environment, it gives you the fastest path to integration.
 
-## Endpoints
+## Walrus Foundation hosted endpoints
 
 | Network | Relayer URL |
 |---|---|
@@ -14,7 +14,7 @@ The public relayer is a managed MemWal deployment for teams that want to get sta
 ## Minimal Config
 
 ```ts
-import { MemWal } from "@mysten/memwal";
+import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
@@ -26,9 +26,9 @@ const memwal = MemWal.create({
 
 ## What to Know
 
-- **Shared App ID** - all users of the public relayer share the same MemWal package ID. Your data is isolated by your own `owner + namespace` (Memory Space), but the underlying deployment is shared.
-- **Trust assumption** - the relayer sees plaintext during encryption and embedding. By using the public relayer, you're trusting the Mysten-hosted instance with that data. See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for details.
-- **Availability** - the public relayer is a managed beta service. There are no SLA guarantees.
+- **Shared App ID** - all users of the managed relayer share the same MemWal package ID. Your data is isolated by your own `owner + namespace` (Memory Space), but the underlying deployment is shared.
+- **Trust assumption** - the relayer sees plaintext during encryption and embedding. By using the managed relayer, you're trusting the Walrus Foundation-hosted instance with that data. See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for details.
+- **Availability** - the managed relayer is a managed beta service. There are no SLA guarantees.
 - **Storage costs** - the server wallet covers Walrus storage fees. Usage limits may apply during beta.
 
 If you need full control over the trust boundary or your own dedicated instance, see [Self-Hosting](/relayer/self-hosting).

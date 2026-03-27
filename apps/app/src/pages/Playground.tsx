@@ -20,8 +20,8 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { MemWal } from '@mysten/memwal'
-import { MemWalManual } from '@mysten/memwal/manual'
+import { MemWal } from '@mysten-incubation/memwal'
+import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
@@ -459,7 +459,7 @@ export default function Playground() {
                     <p>
                         try each memwal SDK operation live. click{' '}
                         <strong>▶ run</strong> to execute against your server
-                        using <code>@mysten/memwal</code>.
+                        using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
                             <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }}>documentation</a> for full API reference.</>
                         )}
@@ -475,7 +475,7 @@ export default function Playground() {
                         key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
                     </div>
                     <div className="demo-server-tag">
-                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten/memwal</span>
+                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten-incubation/memwal</span>
                     </div>
                     <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
                         <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
@@ -494,7 +494,7 @@ export default function Playground() {
                     number={1}
                     title="health check"
                     description="verify the memwal server is running"
-                    code={`import { MemWal } from "@mysten/memwal"
+                    code={`import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
   key: "${keyPreview}",
@@ -705,7 +705,7 @@ const result = await memwal.restore("${namespace || 'default'}")
 
                     <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
                         <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
-{`import { withMemWal } from "@mysten/memwal/ai"
+{`import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
 
@@ -837,7 +837,7 @@ const { text } = await generateText({
 
                     <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
                         <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
-{`import { MemWalManual } from "@mysten/memwal/manual"
+{`import { MemWalManual } from "@mysten-incubation/memwal/manual"
 
 const memwal = MemWalManual.create({
   key: delegateKeyHex,

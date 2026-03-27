@@ -7,9 +7,9 @@ MemWal exposes three entry points:
 
 | Entry point | Import | When to use |
 | --- | --- | --- |
-| `MemWal` | `@mysten/memwal` | **Recommended default** — relayer handles embeddings, SEAL, and storage |
-| `MemWalManual` | `@mysten/memwal/manual` | You need client-managed embeddings and local SEAL operations |
-| `withMemWal` | `@mysten/memwal/ai` | You already use the Vercel AI SDK and want memory as middleware |
+| `MemWal` | `@mysten-incubation/memwal` | **Recommended default** — relayer handles embeddings, SEAL, and storage |
+| `MemWalManual` | `@mysten-incubation/memwal/manual` | You need client-managed embeddings and local SEAL operations |
+| `withMemWal` | `@mysten-incubation/memwal/ai` | You already use the Vercel AI SDK and want memory as middleware |
 
 ## Namespace Rules
 

@@ -1,5 +1,5 @@
 {
-    "name": "@mysten/memwal",
+    "name": "@mysten-incubation/memwal",
     "version": "0.0.1",
     "description": "MemWal — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
@@ -76,6 +76,11 @@
         "tee"
     ],
     "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/MystenLabs/MemWal.git",
+        "directory": "packages/sdk"
+    },
     "publishConfig": {
         "access": "public",
         "registry": "https://registry.npmjs.org/"

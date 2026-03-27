@@ -1,6 +1,6 @@
 import { streamText, convertToModelMessages, stepCountIs } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import { withMemWal } from "@mysten/memwal/ai";
+import { withMemWal } from "@mysten-incubation/memwal/ai";
 import { DEFAULT_MODEL } from "@/shared/lib/ai/constant";
 import { createTools } from "@/shared/lib/ai/tools";
 import { db } from "@/shared/lib/db";
