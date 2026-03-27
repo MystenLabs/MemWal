@@ -68,11 +68,11 @@ async fn generate_embedding(
                 AppError::Internal(format!("Failed to parse embedding response: {}", e))
             })?;
 
-            if api_resp.data.is_empty() {
-                return Err(AppError::Internal("Embedding API returned no data".into()));
-            }
-
-            let vector = api_resp.data.into_iter().next().unwrap().embedding;
+            let vector = api_resp.data
+                .into_iter()
+                .next()
+                .ok_or_else(|| AppError::Internal("Embedding API returned no data".into()))?
+                .embedding;
             Ok(vector)
         }
         None => {
