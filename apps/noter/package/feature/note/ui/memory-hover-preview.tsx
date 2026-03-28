@@ -207,7 +207,7 @@ export function MemoryHoverPreview({
                       {memory.memwalMemoryId.slice(0, 16)}...
                     </span>
                     <a
-                      href={`https://suiscan.xyz/${ZKLOGIN_CONFIG.network}/object/${memory.memwalMemoryId}`}
+                      href={`https://walruscan.com/${ZKLOGIN_CONFIG.network}/blob/${memory.memwalBlobId}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
