@@ -34,6 +34,10 @@ import { MarketingBorder } from "@/package/shared/components/border";
 import { Button } from "@/shared/components/ui/button";
 import { Brain, Check, Loader2, Save } from "lucide-react";
 import { useNote } from "../hook/use-note";
+import { MemoryHighlightNode } from "../nodes/MemoryHighlightNode";
+import { MemoryHighlightPlugin } from "../plugins/MemoryHighlightPlugin";
+import { MemoryPanelEnhanced } from "./memory-panel-enhanced";
+import { MemoryDetectButton } from "./memory-detect-button";
 
 // ════════════════════════════════════════════════════════════════════════════
 // EDITOR CONFIG
@@ -54,6 +58,7 @@ const editorConfig = {
     TableCellNode,
     TableRowNode,
     HorizontalRuleNode,
+    MemoryHighlightNode,
   ],
   onError(error: Error) {
     console.error("Lexical error:", error);
@@ -195,6 +200,7 @@ export function NoteEditor({ noteId }: NoteEditorProps) {
       {/* Toolbar */}
       <div className="border-b p-4 flex items-center justify-start gap-3">
         <SaveToMemWalButton onSaveToDb={saveImmediate} />
+        <MemoryDetectButton noteId={noteId} />
       </div>
 
       {/* Editor */}
@@ -220,10 +226,11 @@ export function NoteEditor({ noteId }: NoteEditorProps) {
           <HorizontalRulePlugin />
           <CodeHighlightPlugin />
           <MarkdownShortcutPlugin transformers={CHAT_TRANSFORMERS} />
-
+          <MemoryHighlightPlugin />
 
           <MarketingBorder />
         </div>
+        <MemoryPanelEnhanced onSaveComplete={saveImmediate} />
       </div>
     </LexicalComposer>
   );
