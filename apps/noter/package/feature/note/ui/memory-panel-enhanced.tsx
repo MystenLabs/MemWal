@@ -36,6 +36,7 @@ import {
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useNoteMemorySave } from "../hook/use-note-memory-save";
+import { ZKLOGIN_CONFIG } from "@/feature/auth/constant";
 import { $getAllMemories, REMOVE_MEMORY_HIGHLIGHT_COMMAND, UPDATE_MEMORY_STATUS_COMMAND } from "../plugins/MemoryHighlightPlugin";
 
 const STATUS_CONFIGS = {
@@ -433,18 +434,17 @@ const MemoryCard = forwardRef<HTMLDivElement, MemoryCardProps>(
                   <div className="space-y-1 text-xs text-muted-foreground font-mono">
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate">Memory: {memory.memwalMemoryId.slice(0, 12)}...</span>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-5 w-5 p-0"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // TODO: Add link to Sui Explorer
-                          toast.info("Opening in Sui Explorer...");
-                        }}
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </Button>
+                      {memory.memwalBlobId && (
+                        <a
+                          href={`https://walruscan.com/${ZKLOGIN_CONFIG.network}/blob/${memory.memwalBlobId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="shrink-0 p-0.5 text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
                     </div>
                     {memory.memwalBlobId && (
                       <div className="truncate">Blob: {memory.memwalBlobId.slice(0, 12)}...</div>
