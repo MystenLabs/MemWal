@@ -9,6 +9,19 @@ use crate::walrus;
 use crate::types::*;
 use crate::db::VectorDb;
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
+/// character.  Falls back to the nearest char boundary when `max_bytes` lands
+/// inside a multi-byte sequence (e.g. emoji).
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 // ============================================================
 // Embedding — OpenRouter/OpenAI API (with mock fallback)
@@ -119,7 +132,7 @@ pub async fn remember(
     let owner = &auth.owner;
     let text = &body.text;
     let namespace = &body.namespace;
-    tracing::info!("remember: text=\"{}...\" owner={} ns={}", &text[..text.len().min(50)], owner, namespace);
+    tracing::info!("remember: text=\"{}...\" owner={} ns={}", truncate_str(text, 50), owner, namespace);
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
@@ -178,7 +191,7 @@ pub async fn recall(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("recall: query=\"{}...\" owner={} ns={}", &body.query[..body.query.len().min(50)], owner, namespace);
+    tracing::info!("recall: query=\"{}...\" owner={} ns={}", truncate_str(&body.query, 50), owner, namespace);
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
     let private_key = auth.delegate_key.as_deref()
@@ -368,7 +381,7 @@ pub async fn analyze(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", &body.text[..body.text.len().min(50)], owner, namespace);
+    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", truncate_str(&body.text, 50), owner, namespace);
 
     // Step 1: Extract facts using LLM
     let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
@@ -590,7 +603,7 @@ pub async fn ask(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     let limit = body.limit.unwrap_or(5);
-    tracing::info!("ask: question=\"{}...\" owner={} ns={}", &body.question[..body.question.len().min(50)], owner, namespace);
+    tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
