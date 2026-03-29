@@ -55,15 +55,10 @@ For the relayer, use a managed endpoint or [self-host your own](/relayer/self-ho
 
 ## Quick Start
 
-### 1. Install and link
+### 1. Install
 
 ```bash
-cd packages/openclaw-memory-memwal
-bun install  # or: pnpm install / npm install
-
-# Link into OpenClaw's extensions directory
-mkdir -p ~/.openclaw/extensions
-ln -s "$(pwd)" ~/.openclaw/extensions/memory-memwal
+openclaw plugins install @mysten-incubation/oc-memwal
 ```
 
 ### 2. Set your delegate key
@@ -82,9 +77,9 @@ Add the plugin config to `~/.openclaw/openclaw.json`:
 ```jsonc
 {
   "plugins": {
-    "slots": { "memory": "memory-memwal" },
+    "slots": { "memory": "oc-memwal" },
     "entries": {
-      "memory-memwal": {
+      "oc-memwal": {
         "enabled": true,
         "config": {
           "privateKey": "${MEMWAL_PRIVATE_KEY}",             // References the env var
