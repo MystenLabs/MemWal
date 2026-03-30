@@ -34,19 +34,11 @@
   "dependencies": {
     "@mysten-incubation/memwal": "^0.0.1",
     "@sinclair/typebox": "0.34.48",
-    "zod": "^4.3.6"
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
-  },
-  "peerDependencies": {
-    "openclaw": ">=2026.3.11"
-  },
-  "peerDependenciesMeta": {
-    "openclaw": {
-      "optional": true
-    }
   },
   "openclaw": {
     "extensions": [
