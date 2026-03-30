@@ -1,6 +1,6 @@
 {
   "name": "@mysten-incubation/oc-memwal",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
   "license": "Apache-2.0",
@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepublishOnly": "npm run clean && npm run build"
   },
