@@ -44,9 +44,9 @@ The plugin needs three values:
 | **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
 | **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
 
-Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](/getting-started/quick-start) for detailed setup.
+Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](https://docs.memwal.ai/getting-started/quick-start) for detailed setup.
 
-For the relayer, use a managed endpoint or [self-host your own](/relayer/self-hosting):
+For the relayer, use a managed endpoint or [self-host your own](https://docs.memwal.ai/relayer/self-hosting):
 
 | Environment | Relayer URL |
 |-------------|-------------|
