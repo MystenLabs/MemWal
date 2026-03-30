@@ -4,6 +4,11 @@
   "type": "module",
   "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MystenLabs/MemWal",
+    "directory": "packages/openclaw-memory-memwal"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
