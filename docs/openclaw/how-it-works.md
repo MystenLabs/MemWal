@@ -20,7 +20,7 @@ graph TB
         LLM_PROC["Language Model\n(Gemini, GPT, Claude)"]
     end
 
-    subgraph "MemWal Server (TEE)"
+    subgraph "MemWal Relayer"
         SEARCH["Vector Search"]
         ANALYZE["Fact Extraction (LLM)"]
         STORE["Encrypted Storage"]
@@ -56,7 +56,7 @@ graph TB
 | **Auto-recall hook** | Gateway (Node.js) | Searches MemWal before each turn, injects memories into prompt |
 | **Auto-capture hook** | Gateway (Node.js) | Extracts facts after each turn, stores via MemWal |
 | **Tool execution** | Gateway (Node.js) | Runs `memory_search` / `memory_store` when the LLM calls them |
-| **MemWal Server** | Remote (TEE) | Handles vector search, LLM fact extraction, encrypted storage |
+| **MemWal Relayer** | Remote | Handles vector search, LLM fact extraction, encrypted storage |
 | **Walrus** | Decentralized | Stores encrypted memory blobs |
 
 ## Message Flow

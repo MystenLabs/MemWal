@@ -1,0 +1,103 @@
+name: Release OC-MemWal Plugin
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+    paths:
+      - 'packages/openclaw-memory-memwal/**'
+      - '.github/workflows/release-oc-memwal.yml'
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Version & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for OIDC Trusted Publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build SDK (dependency)
+        run: pnpm build:sdk
+
+      - name: Typecheck
+        run: cd packages/openclaw-memory-memwal && npm run typecheck
+
+      - name: Build plugin
+        run: cd packages/openclaw-memory-memwal && npm run build
+
+      # ── main branch → stable release (latest) ──
+      - name: Publish stable release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
+          npm view @mysten-incubation/oc-memwal@$BASE_VERSION version 2>/dev/null \
+            && echo "Version $BASE_VERSION already published, skipping" && exit 0
+          cd packages/openclaw-memory-memwal && npm publish --provenance --access public
+
+      # ── staging branch → release candidate (rc tag, auto-increment) ──
+      - name: Publish staging release candidate
+        if: github.ref == 'refs/heads/staging'
+        run: |
+          BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
+          LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
+            | node -p "
+                const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                const nums = (Array.isArray(versions) ? versions : [versions])
+                  .filter(v => v.startsWith('${BASE_VERSION}-rc.'))
+                  .map(v => +v.split('-rc.')[1])
+                  .sort((a,b) => b - a);
+                nums.length ? nums[0] : -1;
+              " || echo "-1")
+          NEXT=$((LATEST + 1))
+          NEW_VERSION="${BASE_VERSION}-rc.${NEXT}"
+          echo "Publishing @mysten-incubation/oc-memwal@${NEW_VERSION}"
+          cd packages/openclaw-memory-memwal
+          node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
+          npm publish --tag rc --provenance --access public
+
+      # ── dev branch → prerelease (dev tag, auto-increment) ──
+      - name: Publish dev prerelease
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
+          LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
+            | node -p "
+                const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                const nums = (Array.isArray(versions) ? versions : [versions])
+                  .filter(v => v.startsWith('${BASE_VERSION}-dev.'))
+                  .map(v => +v.split('-dev.')[1])
+                  .sort((a,b) => b - a);
+                nums.length ? nums[0] : -1;
+              " || echo "-1")
+          NEXT=$((LATEST + 1))
+          NEW_VERSION="${BASE_VERSION}-dev.${NEXT}"
+          echo "Publishing @mysten-incubation/oc-memwal@${NEW_VERSION}"
+          cd packages/openclaw-memory-memwal
+          node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
+          npm publish --tag dev --provenance --access public

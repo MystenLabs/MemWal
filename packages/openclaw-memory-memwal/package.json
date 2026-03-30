@@ -1,14 +1,39 @@
 {
-  "name": "@mysten-incubation/memory-memwal",
-  "version": "0.2.0",
-  "private": true,
+  "name": "@mysten-incubation/oc-memwal",
+  "version": "0.0.1",
   "type": "module",
-  "description": "OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
+  "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
   "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
     "@mysten-incubation/memwal": "^0.0.1",
     "@sinclair/typebox": "0.34.48",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.11"
@@ -20,7 +45,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   }
 }
