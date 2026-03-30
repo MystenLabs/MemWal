@@ -1,6 +1,6 @@
 ---
 title: "Quick Start"
-description: "Install the MemWal memory plugin for OpenClaw and verify it works."
+description: "Install the MemWal memory plugin for NemoClaw/OpenClaw and verify it works."
 ---
 
 Get the plugin running and test the memory loop in a few minutes.
@@ -8,7 +8,6 @@ Get the plugin running and test the memory loop in a few minutes.
 ## Prerequisites
 
 - [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running
-- A package manager — [bun](https://bun.sh), [pnpm](https://pnpm.io), or [npm](https://www.npmjs.com)
 
 You'll also need a **delegate key**, **account ID**, and **relayer URL** from MemWal — the steps below will guide you through getting these.
 
@@ -16,38 +15,10 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Me
 
 <Steps>
   <Step>
-    ### Install dependencies
-
-    <Tabs>
-      <Tab title="bun">
-        ```bash
-        cd packages/openclaw-memory-memwal
-        bun install
-        ```
-      </Tab>
-      <Tab title="pnpm">
-        ```bash
-        cd packages/openclaw-memory-memwal
-        pnpm install
-        ```
-      </Tab>
-      <Tab title="npm">
-        ```bash
-        cd packages/openclaw-memory-memwal
-        npm install
-        ```
-      </Tab>
-    </Tabs>
-  </Step>
-
-  <Step>
-    ### Link into OpenClaw
-
-    OpenClaw discovers plugins from `~/.openclaw/extensions/`. Create a symlink:
+    ### Install the plugin
 
     ```bash
-    mkdir -p ~/.openclaw/extensions
-    ln -s "$(pwd)" ~/.openclaw/extensions/memory-memwal
+    openclaw plugins install @mysten-incubation/oc-memwal
     ```
   </Step>
 
@@ -95,9 +66,9 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Me
     ```jsonc
     {
       "plugins": {
-        "slots": { "memory": "memory-memwal" },
+        "slots": { "memory": "oc-memwal" },
         "entries": {
-          "memory-memwal": {
+          "oc-memwal": {
             "enabled": true,
             "config": {
               "privateKey": "${MEMWAL_PRIVATE_KEY}",           // References the env var
@@ -134,8 +105,8 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Me
     You should see in the logs:
 
     ```
-    memory-memwal: registered (server: https://..., key: e21d...ed9b, namespace: default)
-    memory-memwal: connected (status: ok, version: ...)
+    oc-memwal: registered (server: https://..., key: e21d...ed9b, namespace: default)
+    oc-memwal: connected (status: ok, version: ...)
     ```
 
     <Tip>
@@ -169,7 +140,7 @@ Bot: (responds normally)
 
 Check logs — you should see:
 ```
-memory-memwal: auto-captured 1 facts (agent: main, namespace: default)
+oc-memwal: auto-captured 1 facts (agent: main, namespace: default)
 ```
 
 **2. Recall it** — in a **new conversation**, ask about it:
@@ -180,7 +151,7 @@ You: What programming languages do I like?
 
 Check logs — you should see:
 ```
-memory-memwal: auto-recall injected 1 memories (agent: main, namespace: default)
+oc-memwal: auto-recall injected 1 memories (agent: main, namespace: default)
 ```
 
 **3. Search from terminal** — confirm the memory exists via CLI:
