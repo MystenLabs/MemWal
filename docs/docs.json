@@ -84,7 +84,8 @@
                   "sdk/usage/with-memwal"
                 ]
               },
-              "sdk/api-reference"
+              "sdk/api-reference",
+              "sdk/changelog"
             ]
           }
         ]
@@ -138,7 +139,8 @@
               "openclaw/overview",
               "openclaw/quick-start",
               "openclaw/how-it-works",
-              "openclaw/reference"
+              "openclaw/reference",
+              "openclaw/changelog"
             ]
           }
         ]
