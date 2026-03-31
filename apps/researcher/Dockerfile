@@ -13,7 +13,7 @@ WORKDIR /app
 COPY apps/researcher/package.json ./
 
 # Install deps — @mysten-incubation/memwal is now on npm, no local SDK needed
-RUN bun install
+RUN bun install --frozen-lockfile
 
 # ── Stage 2: Build ─────────────────────────────────────────
 FROM oven/bun:1 AS builder
