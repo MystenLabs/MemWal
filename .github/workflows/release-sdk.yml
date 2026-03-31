@@ -40,7 +40,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm --filter @mysten-incubation/memwal typecheck
