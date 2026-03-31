@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::db::VectorDb;
+use crate::rate_limit::RateLimitConfig;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -15,6 +16,8 @@ pub struct AppState {
     pub walrus_client: walrus_rs::WalrusClient,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads
     pub key_pool: KeyPool,
+    /// Redis multiplexed connection for rate limiting
+    pub redis: redis::aio::MultiplexedConnection,
 }
 
 // ============================================================
@@ -75,6 +78,8 @@ pub struct Config {
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
+    /// Rate limiting configuration
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Config {
@@ -124,6 +129,7 @@ impl Config {
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            rate_limit: RateLimitConfig::from_env(),
         }
     }
 }
@@ -332,6 +338,11 @@ pub enum AppError {
     Internal(String),
     /// Walrus blob not found (expired or deleted) — triggers cleanup
     BlobNotFound(String),
+    /// Rate limit exceeded (HTTP 429)
+    #[allow(dead_code)]
+    RateLimited(String),
+    /// Storage quota exceeded (HTTP 402)
+    QuotaExceeded(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -341,6 +352,8 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
+            AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
         }
     }
 }
@@ -355,6 +368,8 @@ impl axum::response::IntoResponse for AppError {
                 msg.clone(),
             ),
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
+            AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
         };
 
         let body = serde_json::json!({ "error": message });

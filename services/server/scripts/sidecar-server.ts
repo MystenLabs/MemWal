@@ -51,7 +51,7 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         : "https://upload-relay.mainnet.walrus.space"
 );
 
-const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 2;
+const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 3;
 
 const suiClient = new SuiJsonRpcClient({
     url: getJsonRpcFullnodeUrl(SUI_NETWORK),

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::seal;
 use crate::walrus;
+use crate::rate_limit;
 use crate::types::*;
 use crate::db::VectorDb;
 
@@ -121,6 +122,10 @@ pub async fn remember(
     let namespace = &body.namespace;
     tracing::info!("remember: text=\"{}...\" owner={} ns={}", &text[..text.len().min(50)], owner, namespace);
 
+    // Check storage quota before processing
+    let text_bytes = text.as_bytes().len() as i64;
+    rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
+
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
@@ -142,8 +147,9 @@ pub async fn remember(
     let blob_id = upload_result.blob_id;
 
     // Step 3: Store {vector, blobId, namespace} in Vector DB
+    let blob_size = encrypted.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector, blob_size).await?;
 
     tracing::info!(
         "remember complete: blob_id={}, owner={}, ns={}, dims={}",
@@ -231,7 +237,15 @@ pub async fn recall(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                    let err_str = e.to_string();
+                    let is_permanent = err_str.contains("Not enough shares")
+                        || err_str.contains("decrypt failed");
+                    if is_permanent {
+                        tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
+                        cleanup_expired_blob(db, &blob_id).await;
+                    } else {
+                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                    }
                     None
                 }
             }
@@ -283,6 +297,9 @@ pub async fn remember_manual(
         .decode(&body.encrypted_data)
         .map_err(|e| AppError::BadRequest(format!("encrypted_data is not valid base64: {}", e)))?;
 
+    // Check storage quota before upload
+    rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
+
     // Upload encrypted bytes to Walrus via sidecar (server pays gas)
     let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
         AppError::Internal("SERVER_SUI_PRIVATE_KEY not configured for Walrus upload".into())
@@ -304,8 +321,9 @@ pub async fn remember_manual(
     tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
 
     // Store {vector, blobId, namespace} in Vector DB
+    let blob_size = encrypted_bytes.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size).await?;
 
     tracing::info!("remember_manual complete: id={}, blob_id={}, ns={}", id, blob_id, namespace);
 
@@ -382,6 +400,10 @@ pub async fn analyze(
         }));
     }
 
+    // Check storage quota before processing all facts
+    let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+    rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
+
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
     // Each fact gets its own key from the pool so sidecar can upload them in parallel
     // (different signer addresses bypass the per-signer serialization lock).
@@ -414,8 +436,9 @@ pub async fn analyze(
             ).await?;
 
             // Store in Vector DB with namespace
+            let blob_size = encrypted.len() as i64;
             let id = uuid::Uuid::new_v4().to_string();
-            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector).await?;
+            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector, blob_size).await?;
 
             Ok::<AnalyzedFact, AppError>(AnalyzedFact {
                 text: fact_text,
@@ -935,7 +958,8 @@ pub async fn restore(
     let restored = results.len();
     for (blob_id, vector) in &results {
         let id = uuid::Uuid::new_v4().to_string();
-        state.db.insert_vector(&id, owner, namespace, blob_id, vector).await?;
+        // Restore flow: blob_size not tracked (already counted when first stored)
+        state.db.insert_vector(&id, owner, namespace, blob_id, vector, 0).await?;
     }
 
     tracing::info!(
