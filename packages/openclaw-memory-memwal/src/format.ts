@@ -3,6 +3,12 @@
  * Shared by hooks, tools, and CLI.
  */
 
+import {
+  MIN_EXTRACTED_TEXT_LENGTH,
+  DEFAULT_RETRY_COUNT,
+  DEFAULT_RETRY_DELAY_MS,
+} from "./constants.js";
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -104,7 +110,7 @@ export function extractMessageTexts(
     // Strip our injected memory tags to prevent feedback loops, then drop
     // anything that's empty or trivially short after stripping
     text = stripMemoryTags(text).trim();
-    if (text.length > 10) {
+    if (text.length > MIN_EXTRACTED_TEXT_LENGTH) {
       texts.push(text);
     }
   }
@@ -130,8 +136,8 @@ export function toolError(message: string, err: unknown) {
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
-  retries: number = 1,
-  delayMs: number = 2000,
+  retries: number = DEFAULT_RETRY_COUNT,
+  delayMs: number = DEFAULT_RETRY_DELAY_MS,
 ): Promise<T> {
   try {
     return await fn();
