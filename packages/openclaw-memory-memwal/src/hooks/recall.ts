@@ -11,8 +11,7 @@ import { resolveAgent } from "../config.js";
 import { looksLikeInjection } from "../capture.js";
 import { formatMemoriesForPrompt } from "../format.js";
 import type { PluginConfig } from "../types.js";
-
-const MIN_PROMPT_LENGTH = 10;
+import { MIN_PROMPT_LENGTH } from "../constants.js";
 
 /** Register the before_prompt_build hook for auto-recall. */
 export function registerRecallHook(api: any, client: MemWal, config: PluginConfig): void {
