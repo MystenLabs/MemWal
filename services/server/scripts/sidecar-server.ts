@@ -76,6 +76,49 @@ const walrusClient = new WalrusClient({
     },
 });
 
+const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
+const GAS_INTENT_TYPE = "gas";
+const SUI_TYPE = "0x2::sui::SUI";
+type TxIntentCommand = {
+    $kind?: string;
+    $Intent?: {
+        name?: string;
+        data?: { type?: string };
+    };
+};
+type TxDataWithCommands = { commands: TxIntentCommand[] };
+type UploadRelayTipConfigResponse = {
+    send_tip?: {
+        address?: string;
+    };
+};
+
+/**
+ * Rewrite CoinWithBalance "gas" intents to explicit SUI coin type so Enoki
+ * sponsorship can build the transaction (Enoki rejects GasCoin tx arguments).
+ */
+function patchGasCoinIntents(tx: Transaction): void {
+    tx.addSerializationPlugin(async (transactionData: TxDataWithCommands, _buildOptions, next) => {
+        let patched = 0;
+        for (const command of transactionData.commands) {
+            if (
+                command.$kind === "$Intent" &&
+                command.$Intent?.name === COIN_WITH_BALANCE_INTENT &&
+                command.$Intent?.data?.type === GAS_INTENT_TYPE
+            ) {
+                command.$Intent.data.type = SUI_TYPE;
+                patched += 1;
+            }
+        }
+
+        if (patched > 0) {
+            console.log(`[patch] converted ${patched} CoinWithBalance intent(s) from GasCoin -> sender SUI coins`);
+        }
+
+        await next();
+    });
+}
+
 const ENOKI_API_BASE_URL = "https://api.enoki.mystenlabs.com/v1";
 const enokiApiKey = process.env.ENOKI_API_KEY;
 const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "mainnet") as
@@ -87,6 +130,38 @@ type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
 const signerUploadQueues = new Map<string, Promise<void>>();
+let uploadRelayTipAddressCache: string | null | undefined = undefined;
+
+function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
+    return [...new Set(addresses.filter((addr): addr is string => typeof addr === "string" && addr.length > 0))];
+}
+
+async function getUploadRelayTipAddress(): Promise<string | null> {
+    if (uploadRelayTipAddressCache !== undefined) {
+        return uploadRelayTipAddressCache;
+    }
+
+    try {
+        const resp = await fetch(`${WALRUS_UPLOAD_RELAY_URL}/v1/tip-config`);
+        if (!resp.ok) {
+            throw new Error(`tip-config request failed (${resp.status})`);
+        }
+
+        const json = await resp.json() as UploadRelayTipConfigResponse;
+        const address = json.send_tip?.address;
+        if (typeof address === "string" && address.startsWith("0x")) {
+            uploadRelayTipAddressCache = address;
+            return address;
+        }
+
+        uploadRelayTipAddressCache = null;
+        return null;
+    } catch (err: any) {
+        console.warn(`[upload-relay] could not load tip-config: ${err.message || err}`);
+        // Don't cache transient failures; retry on next request.
+        return null;
+    }
+}
 
 async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     if (!enokiApiKey) {
@@ -147,12 +222,8 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
 
         return executed.digest;
     } catch (err: any) {
-        console.warn(`[enoki-sponsor] sponsor failed, falling back to direct signing: ${err.message}`);
-        const direct = await suiClient.signAndExecuteTransaction({
-            signer,
-            transaction: tx,
-        });
-        return direct.digest;
+        console.error(`[enoki-sponsor] sponsor failed: ${err.message}`);
+        throw err;
     }
 }
 
@@ -454,12 +525,16 @@ app.post("/walrus/upload", async (req, res) => {
                 },
             });
 
-            // Wait until register tx is confirmed before starting upload/certify.
-            // NOTE: Walrus register uses GasCoin internally — cannot be Enoki-sponsored
-            const registerResult = await suiClient.signAndExecuteTransaction({ signer, transaction: registerTx });
-            await suiClient.waitForTransaction({ digest: registerResult.digest });
+            // Patch: convert GasCoin intents → sender's SUI coins.
+            // Enoki rejects GasCoin as tx argument, but relay requires the tip.
+            // After patching, signer pays tip from own SUI; Enoki sponsors gas.
+            patchGasCoinIntents(registerTx);
+            const tipRecipient = await getUploadRelayTipAddress();
+            const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
+            const registerDigest = await executeWithEnokiSponsor(registerTx, signer, registerAllowedAddresses);
+            await suiClient.waitForTransaction({ digest: registerDigest });
 
-            await flow.upload({ digest: registerResult.digest });
+            await flow.upload({ digest: registerDigest });
 
             const certifyTx = flow.certify();
             // Wait until certify tx is confirmed before returning this upload.
@@ -525,9 +600,9 @@ app.post("/walrus/upload", async (req, res) => {
                 // Transfer blob to user
                 metaTx.transferObjects([blobArg], owner);
 
-                const metaDigest = await executeWithEnokiSponsor(metaTx, signer, [owner]);
+                const metaDigest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
                 await suiClient.waitForTransaction({ digest: metaDigest });
-                console.error(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
+                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
             } catch (metaErr: any) {
                 // Non-fatal: blob is uploaded but metadata/transfer failed
                 console.error(`[walrus/upload] metadata+transfer failed: ${metaErr.message}`);

@@ -150,12 +150,12 @@ pub async fn remember(
     let encrypted = encrypted_result?;
 
     // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
-    })?;
+    let sui_key = state.key_pool.next()
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        &encrypted, 50, owner, sui_key, namespace, &state.config.package_id,
+        &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
     ).await?;
     let blob_id = upload_result.blob_id;
 
@@ -313,10 +313,10 @@ pub async fn remember_manual(
     // Check storage quota before upload
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
-    // Upload encrypted bytes to Walrus via sidecar (server pays gas)
-    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY not configured for Walrus upload".into())
-    })?;
+    // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
+    let sui_key = state.key_pool.next()
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
 
     let upload = walrus::upload_blob(
         &state.http_client,
@@ -324,7 +324,7 @@ pub async fn remember_manual(
         &encrypted_bytes,
         50,
         owner,
-        sui_key,
+        &sui_key,
         namespace,
         &state.config.package_id,
     )
