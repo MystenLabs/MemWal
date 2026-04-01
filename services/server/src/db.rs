@@ -30,12 +30,18 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
 
+        let migration_003 = include_str!("../migrations/003_rate_limiter.sql");
+        sqlx::raw_sql(migration_003)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
     }
 
-    /// Insert a vector entry
+    /// Insert a vector entry (with blob size tracking for storage quota)
     pub async fn insert_vector(
         &self,
         id: &str,
@@ -43,23 +49,25 @@ impl VectorDb {
         namespace: &str,
         blob_id: &str,
         vector: &[f32],
+        blob_size_bytes: i64,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(id)
         .bind(owner)
         .bind(namespace)
         .bind(blob_id)
         .bind(embedding)
+        .bind(blob_size_bytes)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
-        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}", id, blob_id, owner, namespace);
+        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B", id, blob_id, owner, namespace, blob_size_bytes);
         Ok(())
     }
 
@@ -196,6 +204,23 @@ impl VectorDb {
 
         tracing::debug!("cached delegate key: {} -> account {}", public_key_hex, account_id);
         Ok(())
+    }
+
+    // ============================================================
+    // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
+    // ============================================================
+
+    /// Get total storage used by a user (sum of blob_size_bytes for active entries).
+    pub async fn get_storage_used(&self, owner: &str) -> Result<i64, AppError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
+
+        Ok(row.0)
     }
 
     // ============================================================

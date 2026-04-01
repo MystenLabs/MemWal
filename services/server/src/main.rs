@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod rate_limit;
 mod routes;
 mod seal;
 mod sui;
@@ -34,6 +35,12 @@ async fn main() {
     tracing::info!("  package id: {}", config.package_id);
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!("  memwal account: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
+    tracing::info!("  rate limit: burst={}/min, sustained={}/hr, per-key={}/min, quota={}MB/user",
+        config.rate_limit.max_requests_per_minute,
+        config.rate_limit.max_requests_per_hour,
+        config.rate_limit.max_requests_per_delegate_key,
+        config.rate_limit.max_storage_bytes / 1_048_576
+    );
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
@@ -98,6 +105,12 @@ async fn main() {
     // Build key pool for parallel Walrus uploads
     let key_pool = KeyPool::new(config.sui_private_keys.clone());
 
+    // Initialize Redis for rate limiting
+    let redis = rate_limit::create_redis_client(&config.rate_limit.redis_url)
+        .await
+        .expect("Failed to connect to Redis for rate limiting");
+    tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -105,6 +118,7 @@ async fn main() {
         http_client,
         walrus_client,
         key_pool,
+        redis,
     });
 
     // Build routes
@@ -118,6 +132,12 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        // Router::layer runs middleware bottom-to-top (last added runs first).
+        // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,
