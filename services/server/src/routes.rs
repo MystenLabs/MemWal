@@ -891,6 +891,12 @@ pub async fn restore(
         .flatten()
         .collect();
 
+    // Preserve encrypted blob sizes so restored rows still contribute to storage quota.
+    let blob_sizes: std::collections::HashMap<String, i64> = downloaded
+        .iter()
+        .map(|(blob_id, data)| (blob_id.clone(), data.len() as i64))
+        .collect();
+
     if downloaded.is_empty() {
         return Ok(Json(RestoreResponse {
             restored: 0,
@@ -971,8 +977,16 @@ pub async fn restore(
     let restored = results.len();
     for (blob_id, vector) in &results {
         let id = uuid::Uuid::new_v4().to_string();
-        // Restore flow: blob_size not tracked (already counted when first stored)
-        state.db.insert_vector(&id, owner, namespace, blob_id, vector, 0).await?;
+        let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
+            tracing::warn!(
+                "restore: missing blob size for {}, defaulting to 0 for quota tracking",
+                blob_id
+            );
+            0
+        });
+        state.db
+            .insert_vector(&id, owner, namespace, blob_id, vector, blob_size)
+            .await?;
     }
 
     tracing::info!(

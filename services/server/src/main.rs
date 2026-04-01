@@ -132,6 +132,8 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        // Router::layer runs middleware bottom-to-top (last added runs first).
+        // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,
