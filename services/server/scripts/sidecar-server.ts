@@ -125,6 +125,10 @@ const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "m
     | "mainnet"
     | "testnet"
     | "devnet";
+const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
+    const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "true").trim().toLowerCase();
+    return raw !== "0" && raw !== "false" && raw !== "no";
+})();
 
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
@@ -222,8 +226,18 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
 
         return executed.digest;
     } catch (err: any) {
-        console.error(`[enoki-sponsor] sponsor failed: ${err.message}`);
-        throw err;
+        const errMsg = err?.message || String(err);
+        if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
+            console.error(`[enoki-sponsor] sponsor failed and fallback disabled: ${errMsg}`);
+            throw err;
+        }
+
+        console.warn(`[enoki-sponsor] sponsor failed, falling back to direct signing: ${errMsg}`);
+        const direct = await suiClient.signAndExecuteTransaction({
+            signer,
+            transaction: tx,
+        });
+        return direct.digest;
     }
 }
 
