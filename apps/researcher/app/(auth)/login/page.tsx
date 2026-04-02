@@ -1,12 +1,21 @@
 "use client";
 
-import { KeyRound, Eye, EyeOff, ArrowRight, Loader2, Lock } from "lucide-react";
+import {
+  KeyRound,
+  Eye,
+  EyeOff,
+  ArrowRight,
+  Loader2,
+  Lock,
+  ChevronDown,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { EnokiLoginCard } from "@/components/enoki-login-card";
 
 export default function Page() {
   const router = useRouter();
@@ -14,6 +23,7 @@ export default function Page() {
   const [accountId, setAccountId] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +45,10 @@ export default function Page() {
       const res = await fetch("/api/auth/key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ privateKey: trimmed, accountId: trimmedAccountId }),
+        body: JSON.stringify({
+          privateKey: trimmed,
+          accountId: trimmedAccountId,
+        }),
       });
 
       if (!res.ok) {
@@ -75,73 +88,99 @@ export default function Page() {
               Researcher
             </h1>
             <p className="text-muted-foreground text-sm">
-              Sign in with your ed25519 key
+              Sign in to get started
             </p>
           </div>
         </div>
 
-        {/* Card */}
-        <div className="rounded-xl border bg-card p-6 shadow-sm">
-          <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="accountId">Account ID</Label>
-              <Input
-                autoFocus
-                className="font-mono text-sm"
-                id="accountId"
-                onChange={(e) => setAccountId(e.target.value)}
-                placeholder="0x..."
-                required
-                value={accountId}
-              />
-            </div>
+        {/* Google Sign-in (Enoki) */}
+        <EnokiLoginCard />
 
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="privateKey">Private Key</Label>
-              <div className="relative">
-                <Input
-                  className="pr-10 font-mono text-sm"
-                  id="privateKey"
-                  onChange={(e) => setPrivateKey(e.target.value)}
-                  placeholder="Enter your private key"
-                  required
-                  type={showKey ? "text" : "password"}
-                  value={privateKey}
-                />
-                <button
-                  className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                  onClick={() => setShowKey(!showKey)}
-                  tabIndex={-1}
-                  type="button"
+        {/* Divider */}
+        <div className="my-4 flex items-center gap-3">
+          <div className="h-px flex-1 bg-border" />
+          <span className="text-muted-foreground text-xs">or</span>
+          <div className="h-px flex-1 bg-border" />
+        </div>
+
+        {/* Advanced: Key login */}
+        <div className="rounded-xl border bg-card shadow-sm">
+          <button
+            className="flex w-full items-center justify-between p-4 text-left text-muted-foreground text-sm transition-colors hover:text-foreground"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            type="button"
+          >
+            <span>Sign in with Ed25519 key</span>
+            <ChevronDown
+              className={`size-4 transition-transform ${showAdvanced ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          {showAdvanced && (
+            <div className="border-t px-6 pb-6 pt-4">
+              <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="accountId">Account ID</Label>
+                  <Input
+                    className="font-mono text-sm"
+                    id="accountId"
+                    onChange={(e) => setAccountId(e.target.value)}
+                    placeholder="0x..."
+                    required
+                    value={accountId}
+                  />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="privateKey">Private Key</Label>
+                  <div className="relative">
+                    <Input
+                      className="pr-10 font-mono text-sm"
+                      id="privateKey"
+                      onChange={(e) => setPrivateKey(e.target.value)}
+                      placeholder="Enter your private key"
+                      required
+                      type={showKey ? "text" : "password"}
+                      value={privateKey}
+                    />
+                    <button
+                      className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                      onClick={() => setShowKey(!showKey)}
+                      tabIndex={-1}
+                      type="button"
+                    >
+                      {showKey ? (
+                        <EyeOff className="size-4" />
+                      ) : (
+                        <Eye className="size-4" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <Button
+                  className="w-full"
+                  disabled={
+                    isLoading || !privateKey.trim() || !accountId.trim()
+                  }
+                  size="lg"
+                  type="submit"
                 >
-                  {showKey ? (
-                    <EyeOff className="size-4" />
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      Authenticating...
+                    </>
                   ) : (
-                    <Eye className="size-4" />
+                    <>
+                      Sign In
+                      <ArrowRight className="size-4" />
+                    </>
                   )}
-                </button>
-              </div>
+                </Button>
+              </form>
             </div>
-
-            <Button
-              className="w-full"
-              disabled={isLoading || !privateKey.trim() || !accountId.trim()}
-              size="lg"
-              type="submit"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Authenticating...
-                </>
-              ) : (
-                <>
-                  Sign In
-                  <ArrowRight className="size-4" />
-                </>
-              )}
-            </Button>
-          </form>
+          )}
         </div>
 
         {/* Footer note */}

@@ -30,6 +30,9 @@ export const user = pgTable("User", {
   email: varchar("email", { length: 64 }).notNull(),
   password: varchar("password", { length: 64 }),
   publicKey: varchar("publicKey", { length: 128 }).unique(),
+  suiAddress: varchar("suiAddress", { length: 128 }).unique(),
+  delegatePrivateKey: varchar("delegatePrivateKey", { length: 128 }),
+  accountId: varchar("accountId", { length: 128 }),
 });
 
 export type User = InferSelectModel<typeof user>;

@@ -4,6 +4,7 @@ import { ChevronUp } from "lucide-react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
+import { useDisconnectWallet } from "@mysten/dapp-kit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,6 +23,7 @@ type SessionUser = { id: string; email?: string; publicKey?: string };
 export function SidebarUserNav({ user }: { user: SessionUser }) {
   const router = useRouter();
   const { setTheme, resolvedTheme } = useTheme();
+  const { mutateAsync: disconnectWallet } = useDisconnectWallet();
 
   const displayName = user.publicKey
     ? `${user.publicKey.slice(0, 6)}...${user.publicKey.slice(-4)}`
@@ -69,8 +71,8 @@ export function SidebarUserNav({ user }: { user: SessionUser }) {
                 className="w-full cursor-pointer"
                 onClick={async () => {
                   await fetch("/api/auth/signout", { method: "POST" });
-                  router.push("/login");
-                  router.refresh();
+                  await disconnectWallet().catch(() => {});
+                  window.location.href = "/login";
                 }}
                 type="button"
               >

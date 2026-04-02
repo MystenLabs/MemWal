@@ -60,6 +60,65 @@ export async function createUserByPublicKey(publicKey: string): Promise<User> {
   }
 }
 
+export async function getUserBySuiAddress(suiAddress: string): Promise<User | null> {
+  try {
+    const [found] = await db.select().from(user).where(eq(user.suiAddress, suiAddress));
+    return found ?? null;
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get user by Sui address"
+    );
+  }
+}
+
+export async function createEnokiUser({
+  publicKey,
+  suiAddress,
+  delegatePrivateKey,
+  accountId,
+}: {
+  publicKey: string;
+  suiAddress: string;
+  delegatePrivateKey: string;
+  accountId: string;
+}): Promise<User> {
+  const email = `enoki-${suiAddress.slice(0, 8)}@zklogin`;
+  try {
+    const [created] = await db
+      .insert(user)
+      .values({ email, publicKey, suiAddress, delegatePrivateKey, accountId })
+      .returning();
+    return created;
+  } catch (_error) {
+    throw new ChatbotError("bad_request:database", "Failed to create Enoki user");
+  }
+}
+
+export async function updateEnokiUserCredentials({
+  userId,
+  publicKey,
+  delegatePrivateKey,
+  accountId,
+}: {
+  userId: string;
+  publicKey: string;
+  delegatePrivateKey: string;
+  accountId: string;
+}): Promise<void> {
+  try {
+    await db
+      .update(user)
+      .set({ publicKey, delegatePrivateKey, accountId })
+      .where(eq(user.id, userId));
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to update Enoki user credentials"
+    );
+  }
+}
+
 // ============================================================
 // Chat queries
 // ============================================================
