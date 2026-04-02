@@ -114,7 +114,11 @@ export function EnokiLoginCard() {
   const enokiWallets = wallets.filter(isEnokiWallet);
   const googleWallet = enokiWallets.find((w) => w.provider === "google");
   const hasEnokiConfig =
-    enokiConfig.enokiApiKey && enokiConfig.googleClientId;
+    enokiConfig.enokiApiKey &&
+    enokiConfig.googleClientId &&
+    enokiConfig.memwalPackageId &&
+    enokiConfig.memwalRegistryId &&
+    enokiConfig.memwalServerUrl;
 
   const [pendingSetup, setPendingSetup] = useState(false);
 
@@ -133,15 +137,18 @@ export function EnokiLoginCard() {
           body: JSON.stringify({ suiAddress: address }),
         });
 
-        if (checkRes.ok) {
-          const checkData = await checkRes.json();
-          if (!checkData.needsSetup) {
-            // Returning user — session created from stored credentials
-            setStep("done");
-            router.push("/");
-            router.refresh();
-            return;
-          }
+        if (!checkRes.ok) {
+          // Server error — don't silently fall through to Phase 2
+          throw new Error("Unable to check account status. Please try again.");
+        }
+
+        const checkData = await checkRes.json();
+        if (!checkData.needsSetup) {
+          // Returning user — session created from stored credentials
+          setStep("done");
+          router.push("/");
+          router.refresh();
+          return;
         }
 
         // Phase 2: First-time user — generate key + register on-chain
@@ -260,6 +267,12 @@ export function EnokiLoginCard() {
             knownAccountId = createdObj.objectId;
           }
 
+          if (!knownAccountId) {
+            throw new Error(
+              "Account created on-chain but object ID not found in transaction. Please try again.",
+            );
+          }
+
           // Add delegate key
           const tx2 = new Transaction();
           tx2.moveCall({
@@ -289,8 +302,7 @@ export function EnokiLoginCard() {
           body: JSON.stringify({
             suiAddress: address,
             privateKey: privateKeyHex,
-            publicKey: publicKeyHex,
-            accountId: knownAccountId || "",
+            accountId: knownAccountId!,
           }),
         });
 
