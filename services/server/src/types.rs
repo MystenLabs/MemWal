@@ -190,6 +190,17 @@ pub struct RecallResult {
     pub distance: f64,
 }
 
+/// POST /api/embed
+#[derive(Debug, Deserialize)]
+pub struct EmbedRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbedResponse {
+    pub vector: Vec<f32>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
     pub blob_id: String,

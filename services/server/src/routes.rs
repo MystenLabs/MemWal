@@ -599,6 +599,24 @@ async fn extract_facts_llm(
     Ok(facts)
 }
 
+
+/// POST /api/embed
+///
+/// Generate an embedding vector for text without storing it.
+/// Useful for the manual flow (rememberManual / recallManual) when the client
+/// wants a vector consistent with the server's embedding model.
+pub async fn embed(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
+    Json(body): Json<EmbedRequest>,
+) -> Result<Json<EmbedResponse>, AppError> {
+    if body.text.is_empty() {
+        return Err(AppError::BadRequest("text cannot be empty".into()));
+    }
+    let vector = generate_embedding(&state.http_client, &state.config, &body.text).await?;
+    Ok(Json(EmbedResponse { vector }))
+}
+
 /// GET /health
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {

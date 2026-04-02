@@ -128,7 +128,7 @@ async fn main() {
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
-
+        .route("/api/embed", post(routes::embed))
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
