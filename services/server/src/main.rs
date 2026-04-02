@@ -35,6 +35,12 @@ async fn main() {
     tracing::info!("  package id: {}", config.package_id);
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!("  memwal account: {}", config.memwal_account_id.as_deref().unwrap_or("(from client header)"));
+    tracing::info!("  embedding model: {} (base: {})", config.embedding_model,
+        config.embedding_api_base.as_deref().unwrap_or(&config.openai_api_base));
+    if let Some(dims) = config.embedding_dimensions {
+        tracing::info!("  embedding dimensions: {}", dims);
+    }
+    tracing::info!("  llm model: {}", config.llm_model);
     tracing::info!("  rate limit: burst={}/min, sustained={}/hr, per-key={}/min, quota={}MB/user",
         config.rate_limit.max_requests_per_minute,
         config.rate_limit.max_requests_per_hour,
@@ -85,6 +91,36 @@ async fn main() {
     let db = VectorDb::new(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL");
+
+    // Warn if the schema embedding dimension doesn't match EMBEDDING_DIMENSIONS.
+    // Mixing dimensions in the same table breaks cosine similarity queries.
+    // To change dimensions: truncate vector_entries, then ALTER COLUMN embedding TYPE vector(<n>).
+    if let Some(configured_dims) = config.embedding_dimensions {
+        if let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&config.database_url)
+            .await
+        {
+            let row: Option<(i32,)> = sqlx::query_as(
+                "SELECT atttypmod FROM pg_attribute
+                 WHERE attrelid = 'vector_entries'::regclass AND attname = 'embedding'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None);
+
+            if let Some((schema_dims,)) = row {
+                if schema_dims > 0 && schema_dims as u32 != configured_dims {
+                    tracing::warn!(
+                        "DIMENSION MISMATCH: schema has vector({}) but EMBEDDING_DIMENSIONS={}. \
+                         Recall will fail. Truncate vector_entries and run: \
+                         ALTER TABLE vector_entries ALTER COLUMN embedding TYPE vector({});",
+                        schema_dims, configured_dims, configured_dims
+                    );
+                }
+            }
+        }
+    }
 
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
     let walrus_client = walrus_rs::WalrusClient::new(
