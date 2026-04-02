@@ -1,4 +1,4 @@
-name: Release SDK
+name: Release OC-MemWal Plugin
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
       - staging
       - dev
     paths:
-      - 'packages/sdk/**'
-      - '.github/workflows/release-sdk.yml'
+      - 'packages/openclaw-memory-memwal/**'
+      - '.github/workflows/release-oc-memwal.yml'
   workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
@@ -42,20 +42,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm --filter @mysten-incubation/memwal typecheck
-
-      - name: Build SDK
+      - name: Build SDK (dependency)
         run: pnpm build:sdk
+
+      - name: Typecheck
+        run: cd packages/openclaw-memory-memwal && npm run typecheck
+
+      - name: Build plugin
+        run: cd packages/openclaw-memory-memwal && npm run build
 
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)
         if: github.ref == 'refs/heads/main'
         id: changeset_version
         run: |
-          # Consume pending changesets → bump version + update CHANGELOG.md
           pnpm changeset version 2>/dev/null || true
-          # Check if changeset produced any changes
           if git diff --quiet; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
@@ -73,27 +74,26 @@ jobs:
 
       - name: Publish stable release
         if: github.ref == 'refs/heads/main'
-        id: publish_sdk
+        id: publish_oc
         run: |
-          VERSION=$(node -p "require('./packages/sdk/package.json').version")
+          VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          npm view @mysten-incubation/memwal@$VERSION version 2>/dev/null \
+          npm view @mysten-incubation/oc-memwal@$VERSION version 2>/dev/null \
             && echo "Version $VERSION already published, skipping" && echo "published=false" >> $GITHUB_OUTPUT && exit 0
-          cd packages/sdk && npm publish --provenance --access public
+          cd packages/openclaw-memory-memwal && npm publish --provenance --access public
           echo "published=true" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' && steps.publish_sdk.outputs.published == 'true'
+        if: github.ref == 'refs/heads/main' && steps.publish_oc.outputs.published == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const version = '${{ steps.publish_sdk.outputs.version }}';
-            const tag = `@mysten-incubation/memwal@${version}`;
-            // Extract latest changelog entry
-            let body = `Release @mysten-incubation/memwal v${version}`;
+            const version = '${{ steps.publish_oc.outputs.version }}';
+            const tag = `@mysten-incubation/oc-memwal@${version}`;
+            let body = `Release @mysten-incubation/oc-memwal v${version}`;
             try {
-              const changelog = fs.readFileSync('packages/sdk/CHANGELOG.md', 'utf8');
+              const changelog = fs.readFileSync('packages/openclaw-memory-memwal/CHANGELOG.md', 'utf8');
               const match = changelog.match(/## \d+\.\d+\.\d+[\s\S]*?(?=## \d+\.\d+\.\d+|$)/);
               if (match) body = match[0].trim();
             } catch (e) { /* use default body */ }
@@ -111,8 +111,8 @@ jobs:
       - name: Publish staging release candidate
         if: github.ref == 'refs/heads/staging'
         run: |
-          BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
-          LATEST=$(npm view @mysten-incubation/memwal versions --json 2>/dev/null \
+          BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
+          LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
             | node -p "
                 const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
                 const nums = (Array.isArray(versions) ? versions : [versions])
@@ -123,8 +123,8 @@ jobs:
               " || echo "-1")
           NEXT=$((LATEST + 1))
           NEW_VERSION="${BASE_VERSION}-rc.${NEXT}"
-          echo "Publishing @mysten-incubation/memwal@${NEW_VERSION}"
-          cd packages/sdk
+          echo "Publishing @mysten-incubation/oc-memwal@${NEW_VERSION}"
+          cd packages/openclaw-memory-memwal
           node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
           npm publish --tag rc --provenance --access public
 
@@ -132,8 +132,8 @@ jobs:
       - name: Publish dev prerelease
         if: github.ref == 'refs/heads/dev'
         run: |
-          BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
-          LATEST=$(npm view @mysten-incubation/memwal versions --json 2>/dev/null \
+          BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
+          LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
             | node -p "
                 const versions = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
                 const nums = (Array.isArray(versions) ? versions : [versions])
@@ -144,7 +144,7 @@ jobs:
               " || echo "-1")
           NEXT=$((LATEST + 1))
           NEW_VERSION="${BASE_VERSION}-dev.${NEXT}"
-          echo "Publishing @mysten-incubation/memwal@${NEW_VERSION}"
-          cd packages/sdk
+          echo "Publishing @mysten-incubation/oc-memwal@${NEW_VERSION}"
+          cd packages/openclaw-memory-memwal
           node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
           npm publish --tag dev --provenance --access public

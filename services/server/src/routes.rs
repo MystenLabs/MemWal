@@ -6,9 +6,23 @@ use std::sync::Arc;
 
 use crate::seal;
 use crate::walrus;
+use crate::rate_limit;
 use crate::types::*;
 use crate::db::VectorDb;
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
+/// character.  Falls back to the nearest char boundary when `max_bytes` lands
+/// inside a multi-byte sequence (e.g. emoji).
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 // ============================================================
 // Embedding — OpenRouter/OpenAI API (with mock fallback)
@@ -119,7 +133,11 @@ pub async fn remember(
     let owner = &auth.owner;
     let text = &body.text;
     let namespace = &body.namespace;
-    tracing::info!("remember: text=\"{}...\" owner={} ns={}", &text[..text.len().min(50)], owner, namespace);
+    tracing::info!("remember: text=\"{}...\" owner={} ns={}", truncate_str(text, 50), owner, namespace);
+
+    // Check storage quota before processing
+    let text_bytes = text.as_bytes().len() as i64;
+    rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
@@ -132,18 +150,19 @@ pub async fn remember(
     let encrypted = encrypted_result?;
 
     // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY required for Walrus upload".into())
-    })?;
+    let sui_key = state.key_pool.next()
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        &encrypted, 50, owner, sui_key, namespace, &state.config.package_id,
+        &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
     ).await?;
     let blob_id = upload_result.blob_id;
 
     // Step 3: Store {vector, blobId, namespace} in Vector DB
+    let blob_size = encrypted.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector, blob_size).await?;
 
     tracing::info!(
         "remember complete: blob_id={}, owner={}, ns={}, dims={}",
@@ -178,7 +197,7 @@ pub async fn recall(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("recall: query=\"{}...\" owner={} ns={}", &body.query[..body.query.len().min(50)], owner, namespace);
+    tracing::info!("recall: query=\"{}...\" owner={} ns={}", truncate_str(&body.query, 50), owner, namespace);
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
     let private_key = auth.delegate_key.as_deref()
@@ -231,7 +250,15 @@ pub async fn recall(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                    let err_str = e.to_string();
+                    let is_permanent = err_str.contains("Not enough shares")
+                        || err_str.contains("decrypt failed");
+                    if is_permanent {
+                        tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
+                        cleanup_expired_blob(db, &blob_id).await;
+                    } else {
+                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                    }
                     None
                 }
             }
@@ -283,10 +310,13 @@ pub async fn remember_manual(
         .decode(&body.encrypted_data)
         .map_err(|e| AppError::BadRequest(format!("encrypted_data is not valid base64: {}", e)))?;
 
-    // Upload encrypted bytes to Walrus via sidecar (server pays gas)
-    let sui_key = state.config.sui_private_key.as_deref().ok_or_else(|| {
-        AppError::Internal("SERVER_SUI_PRIVATE_KEY not configured for Walrus upload".into())
-    })?;
+    // Check storage quota before upload
+    rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
+
+    // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
+    let sui_key = state.key_pool.next()
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
 
     let upload = walrus::upload_blob(
         &state.http_client,
@@ -294,7 +324,7 @@ pub async fn remember_manual(
         &encrypted_bytes,
         50,
         owner,
-        sui_key,
+        &sui_key,
         namespace,
         &state.config.package_id,
     )
@@ -304,8 +334,9 @@ pub async fn remember_manual(
     tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
 
     // Store {vector, blobId, namespace} in Vector DB
+    let blob_size = encrypted_bytes.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector).await?;
+    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size).await?;
 
     tracing::info!("remember_manual complete: id={}, blob_id={}, ns={}", id, blob_id, namespace);
 
@@ -368,7 +399,7 @@ pub async fn analyze(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", &body.text[..body.text.len().min(50)], owner, namespace);
+    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", truncate_str(&body.text, 50), owner, namespace);
 
     // Step 1: Extract facts using LLM
     let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
@@ -381,6 +412,10 @@ pub async fn analyze(
             owner: owner.clone(),
         }));
     }
+
+    // Check storage quota before processing all facts
+    let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+    rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
 
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
     // Each fact gets its own key from the pool so sidecar can upload them in parallel
@@ -414,8 +449,9 @@ pub async fn analyze(
             ).await?;
 
             // Store in Vector DB with namespace
+            let blob_size = encrypted.len() as i64;
             let id = uuid::Uuid::new_v4().to_string();
-            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector).await?;
+            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector, blob_size).await?;
 
             Ok::<AnalyzedFact, AppError>(AnalyzedFact {
                 text: fact_text,
@@ -590,7 +626,7 @@ pub async fn ask(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     let limit = body.limit.unwrap_or(5);
-    tracing::info!("ask: question=\"{}...\" owner={} ns={}", &body.question[..body.question.len().min(50)], owner, namespace);
+    tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
@@ -855,6 +891,12 @@ pub async fn restore(
         .flatten()
         .collect();
 
+    // Preserve encrypted blob sizes so restored rows still contribute to storage quota.
+    let blob_sizes: std::collections::HashMap<String, i64> = downloaded
+        .iter()
+        .map(|(blob_id, data)| (blob_id.clone(), data.len() as i64))
+        .collect();
+
     if downloaded.is_empty() {
         return Ok(Json(RestoreResponse {
             restored: 0,
@@ -935,7 +977,16 @@ pub async fn restore(
     let restored = results.len();
     for (blob_id, vector) in &results {
         let id = uuid::Uuid::new_v4().to_string();
-        state.db.insert_vector(&id, owner, namespace, blob_id, vector).await?;
+        let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
+            tracing::warn!(
+                "restore: missing blob size for {}, defaulting to 0 for quota tracking",
+                blob_id
+            );
+            0
+        });
+        state.db
+            .insert_vector(&id, owner, namespace, blob_id, vector, blob_size)
+            .await?;
     }
 
     tracing::info!(

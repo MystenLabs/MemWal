@@ -57,12 +57,12 @@
       "label": "Ed25519 Private Key",
       "sensitive": true,
       "placeholder": "64-character hex string or ${ENV_VAR}",
-      "help": "Get from app.memwal.com. Supports ${ENV_VAR} syntax."
+      "help": "Get from memwal.ai. Supports ${ENV_VAR} syntax."
     },
     "accountId": {
       "label": "MemWalAccount ID",
       "placeholder": "0x3247e3da...",
-      "help": "MemWalAccount object ID on Sui. Get from app.memwal.com."
+      "help": "MemWalAccount object ID on Sui. Get from memwal.ai."
     },
     "serverUrl": {
       "label": "MemWal Server URL",
