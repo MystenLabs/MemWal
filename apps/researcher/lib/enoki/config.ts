@@ -1,3 +1,4 @@
+/** Enoki zkLogin configuration from NEXT_PUBLIC_* environment variables. */
 export const enokiConfig = {
   enokiApiKey: process.env.NEXT_PUBLIC_ENOKI_API_KEY || "",
   googleClientId: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "",

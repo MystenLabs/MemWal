@@ -19,6 +19,7 @@ const { networkConfig } = createNetworkConfig({
 
 const queryClient = new QueryClient();
 
+/** Registers Enoki wallets (Google OAuth) with dapp-kit on mount. No-op if env vars are missing. */
 function RegisterEnokiWallets() {
   const { client, network } = useSuiClientContext();
 
@@ -41,6 +42,7 @@ function RegisterEnokiWallets() {
   return null;
 }
 
+/** Sui + Enoki provider stack. Wraps children with QueryClient, SuiClient, and WalletProvider. */
 export function SuiProviders({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>

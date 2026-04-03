@@ -46,6 +46,12 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/**
+ * Execute a transaction via Enoki gas sponsorship through the MemWal relayer.
+ * Builds TX kind bytes, requests sponsorship, signs with user wallet, then executes.
+ * @param transaction - The Sui transaction to execute
+ * @param sender - The sender's Sui address (Enoki zkLogin address)
+ */
 async function sponsoredSignAndExecute(
   transaction: Transaction,
   sender: string,
@@ -99,6 +105,14 @@ async function sponsoredSignAndExecute(
   return execRes.json();
 }
 
+/**
+ * Google sign-in card using Enoki zkLogin.
+ *
+ * Handles the full flow: Google OAuth -> check returning user -> generate delegate
+ * key -> register on-chain (sponsored) -> create server session.
+ *
+ * Returns null if Enoki env vars are not configured.
+ */
 export function EnokiLoginCard() {
   const router = useRouter();
   const wallets = useWallets();

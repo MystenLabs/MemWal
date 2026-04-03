@@ -38,6 +38,19 @@ import { db } from "./drizzle";
 // User queries
 // ============================================================
 
+/** Look up a user by their UUID primary key. */
+export async function getUserById(id: string): Promise<User | null> {
+  try {
+    const [found] = await db.select().from(user).where(eq(user.id, id));
+    return found ?? null;
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to get user by id"
+    );
+  }
+}
+
 export async function getUserByPublicKey(publicKey: string): Promise<User | null> {
   try {
     const [found] = await db.select().from(user).where(eq(user.publicKey, publicKey));
@@ -60,6 +73,7 @@ export async function createUserByPublicKey(publicKey: string): Promise<User> {
   }
 }
 
+/** Look up an Enoki user by their stable zkLogin Sui address. */
 export async function getUserBySuiAddress(suiAddress: string): Promise<User | null> {
   try {
     const [found] = await db.select().from(user).where(eq(user.suiAddress, suiAddress));
@@ -72,6 +86,7 @@ export async function getUserBySuiAddress(suiAddress: string): Promise<User | nu
   }
 }
 
+/** Create a new user from Enoki zkLogin with stored delegate key credentials for returning login. */
 export async function createEnokiUser({
   publicKey,
   suiAddress,
@@ -95,6 +110,7 @@ export async function createEnokiUser({
   }
 }
 
+/** Update an existing Enoki user's delegate key credentials (e.g. after key rotation). */
 export async function updateEnokiUserCredentials({
   userId,
   publicKey,

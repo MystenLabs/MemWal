@@ -1,7 +1,8 @@
 "use client";
 
-import { ChevronUp } from "lucide-react";
+import { ChevronUp, User } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useDisconnectWallet } from "@mysten/dapp-kit";
@@ -56,6 +57,12 @@ export function SidebarUserNav({ user }: { user: SessionUser }) {
             data-testid="user-nav-menu"
             side="top"
           >
+            <DropdownMenuItem asChild className="cursor-pointer">
+              <Link href="/profile">
+                <User className="mr-2 size-4" />
+                Profile
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="cursor-pointer"
               data-testid="user-nav-item-theme"
