@@ -4,13 +4,11 @@ import {
   jsonb,
   pgEnum,
   pgTable,
-  real,
   text,
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
 import { uuidv7 } from "uuidv7";
-import type { UIMessagePart, UIDataTypes, UITools } from "ai";
 
 /**
  * SCHEMA ARCHITECTURE (for AI context)
@@ -44,24 +42,7 @@ import type { UIMessagePart, UIDataTypes, UITools } from "ai";
  *    - Both checked on session validation via isSessionExpired() helper
  *    - Expired sessions are invalid for authentication but remain in DB for audit
  *
- * 6. AI MESSAGE ARCHITECTURE:
- *    - messages table: Base message record with role ("user" | "assistant")
- *    - User messages: Simple text content stored in messages.content
- *    - AI messages: Structured parts stored in messages.parts (JSONB)
- *      - parts: Array of UIMessagePart (text, tool calls, tool results)
- *      - status: "streaming" | "awaiting-approval" | "in-progress" | "completed" | "error"
- *      - model, promptTokens, completionTokens tracked per message
- *    - AI SDK v6 integration: parts array matches Vercel AI SDK's UIMessage format
- *
- * 7. CHAT SYSTEM:
- *    - chats: One-to-many with messages (all AI conversations)
- *    - chats.userId: Owner of the chat (user can have multiple chats)
- *    - chats.model: Per-chat AI model selection (e.g., "anthropic/claude-sonnet-4")
- *    - chats.systemPrompt: Optional custom system prompt override
- *    - chats.temperature: Optional temperature setting (0-2)
- *    - Auto-generated titles from first message or user-provided
- *
- * 8. NOTES SYSTEM (Apple Notes / Notion-like with MemWal):
+ * 6. NOTES SYSTEM (Apple Notes / Notion-like with MemWal):
  *    - notes: User-created notes with Lexical editor content
  *    - notes.content: Lexical EditorState JSON for rich text editing
  *    - notes.plainText: Extracted plain text for AI memory detection and search
@@ -128,29 +109,8 @@ export const users = pgTable(
 );
 
 // ════════════════════════════════════════════════════════════════
-// CHATS (AI conversations only)
+// (REMOVED: chats table — AI chat feature was unused bloat)
 // ════════════════════════════════════════════════════════════════
-
-export const chats = pgTable(
-  "chats",
-  {
-    ...basicFields,
-
-    // Owner of this chat
-    userId: uuid()
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-
-    // Display
-    title: text(), // Auto-generated or user-set
-
-    // AI config (per-chat overrides)
-    model: text().default("anthropic/claude-sonnet-4"),
-    systemPrompt: text(),
-    temperature: real(),
-  },
-  (t) => [index().on(t.userId), index().on(t.userId, t.createdAt)]
-);
 
 // ════════════════════════════════════════════════════════════════
 // ZKLOGIN SESSIONS (ephemeral keypairs with expiration)
@@ -312,51 +272,5 @@ export const noteMemoryHighlights = pgTable(
 );
 
 // ════════════════════════════════════════════════════════════════
-// MESSAGES
+// (REMOVED: messages table — AI chat feature was unused bloat)
 // ════════════════════════════════════════════════════════════════
-
-export const messageRole = pgEnum("message_role", ["user", "assistant"]);
-
-export const aiMessageStatus = pgEnum("ai_message_status", [
-  "streaming",
-  "awaiting-approval", // Tool needs human approval
-  "in-progress", // Tool executing
-  "completed",
-  "error",
-]);
-
-export type AiMessagePart = UIMessagePart<UIDataTypes, UITools>;
-
-export const messages = pgTable(
-  "messages",
-  {
-    ...basicFields,
-
-    chatId: uuid()
-      .references(() => chats.id, { onDelete: "cascade" })
-      .notNull(),
-
-    role: messageRole().notNull(),
-
-    // Content: text for user, null for AI (use parts)
-    content: text(),
-
-    // AI-specific (null for user messages)
-    parts: jsonb().$type<AiMessagePart[]>(),
-    model: text(),
-    status: aiMessageStatus(),
-
-    // Token usage (AI only)
-    promptTokens: integer(),
-    completionTokens: integer(),
-
-    // Agent tracking (for multi-turn tool loops)
-    agentRunId: uuid(),
-    turnIndex: integer(),
-  },
-  (t) => [
-    index().on(t.chatId),
-    index().on(t.chatId, t.createdAt),
-    index().on(t.agentRunId),
-  ]
-);
