@@ -8,7 +8,7 @@
 
 import type { db as dbClient } from "@/shared/lib/db";
 import { users, zkLoginSessions, walletSessions } from "@/shared/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import type { ZkProofData } from "@/shared/db/type";
 
 type DbClient = typeof dbClient;
@@ -256,7 +256,9 @@ export async function getEnokiUserBySuiAddress(db: DbClient, suiAddress: string)
   const [user] = await db
     .select()
     .from(users)
-    .where(eq(users.suiAddress, suiAddress))
+    .where(
+      and(eq(users.suiAddress, suiAddress), eq(users.authMethod, "enoki"))
+    )
     .limit(1);
 
   if (user?.delegatePrivateKey && user?.delegateAccountId) {

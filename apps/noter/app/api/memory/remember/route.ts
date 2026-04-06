@@ -57,6 +57,9 @@ export async function POST(req: Request) {
     }
 
     const { key, accountId } = await resolveUserKey(req);
+    if (!key || !accountId) {
+      return Response.json({ facts: [], count: 0 });
+    }
     const facts = await extractMemories("noter", text, key, accountId);
     return Response.json({ facts, count: facts.length });
   } catch (error) {

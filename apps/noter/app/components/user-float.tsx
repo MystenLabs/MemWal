@@ -46,23 +46,11 @@ function truncateAddress(addr: string): string {
 export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const { user, suiAddress, logout } = useAuth();
   const [showKey, setShowKey] = useState(false);
-  const [privateKey, setPrivateKey] = useState<string | null>(null);
-  const [keyLoading, setKeyLoading] = useState(false);
 
   const handleLogout = async () => {
     await logout();
     onClose();
     window.location.href = "/";
-  };
-
-  const handleExportKey = async () => {
-    if (privateKey) {
-      setShowKey(!showKey);
-      return;
-    }
-    // For now, the key is not directly accessible from the client.
-    // Users can get it from the researcher app's profile page.
-    setShowKey(!showKey);
   };
 
   const authMethod = user?.authMethod === "enoki" ? "Google" : user?.authMethod === "wallet" ? "Wallet" : "Key";
@@ -184,7 +172,7 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
                   variant="secondary"
                   size="sm"
                   className="w-full"
-                  onClick={handleExportKey}
+                  onClick={() => setShowKey(!showKey)}
                 >
                   {showKey ? (
                     <><EyeOff className="size-3 mr-1.5" /> Hide Key</>
