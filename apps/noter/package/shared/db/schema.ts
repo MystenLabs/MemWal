@@ -73,7 +73,7 @@ const basicFields = {
 // USERS (zkLogin + Wallet auth)
 // ════════════════════════════════════════════════════════════════
 
-export const authMethod = pgEnum("auth_method", ["zklogin", "wallet"]);
+export const authMethod = pgEnum("auth_method", ["zklogin", "wallet", "enoki"]);
 
 export const users = pgTable(
   "users",
@@ -97,6 +97,10 @@ export const users = pgTable(
     name: text(),
     email: text(),
     avatar: text(),
+
+    // Enoki delegate key credentials (nullable, only for Enoki auth)
+    delegatePrivateKey: text(),
+    delegateAccountId: text(),
 
     // Last active
     lastSeenAt: timestamp(),
