@@ -97,6 +97,7 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const handleLogout = async () => {
     await logout();
     onClose();
+    window.location.href = "/";
   };
 
   return (

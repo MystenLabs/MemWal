@@ -9,12 +9,20 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useNoteList } from "@/feature/note/hook/use-note-list";
+import { useAuth } from "@/feature/auth";
 import { Button } from "@/shared/components/ui/button";
 import { FileText, Loader2 } from "lucide-react";
 
 export default function NotePage() {
   const { notes, isLoading, createNote, isCreating } = useNoteList();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const router = useRouter();
+
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.replace("/");
+    }
+  }, [authLoading, isAuthenticated, router]);
 
   useEffect(() => {
     // Redirect to first note if available
