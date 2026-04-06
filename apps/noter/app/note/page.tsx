@@ -53,7 +53,7 @@ export default function NotePage() {
           <Button
             onClick={async () => {
               const note = await createNote({
-                title: "New Note",
+                title: "Untitled Note",
                 content: {
                   root: {
                     children: [
