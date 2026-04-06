@@ -28,4 +28,12 @@ export type {
     AnalyzedFact,
     HealthResult,
     RestoreResult,
+    // Memory orchestration types (Phase 1-4)
+    MemoryType,
+    MemorySource,
+    RememberOptions,
+    RecallOptions,
+    ScoringWeights,
+    MemoryStats,
+    ForgetResult,
 } from "./types.js";

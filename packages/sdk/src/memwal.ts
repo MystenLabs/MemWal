@@ -40,6 +40,10 @@ import type {
     RecallManualOptions,
     RecallManualResult,
     RestoreResult,
+    RememberOptions,
+    RecallOptions,
+    MemoryStats,
+    ForgetResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
 
@@ -91,18 +95,34 @@ export class MemWal {
      * Remember something — server handles: verify → embed → encrypt → Walrus upload → store
      *
      * @param text - The text to remember
-     * @returns RememberResult with id, blob_id, owner
+     * @param namespaceOrOptions - Namespace string or RememberOptions object
+     * @returns RememberResult with id, blob_id, owner, memory_type, importance
      *
      * @example
      * ```typescript
-     * const result = await memwal.remember("I'm allergic to peanuts")
-     * console.log(result.blob_id) // "TY8mW0yr..."
+     * // Simple usage (backward compatible)
+     * await memwal.remember("I'm allergic to peanuts")
+     *
+     * // Enriched usage with options
+     * await memwal.remember("User prefers dark mode", {
+     *   memoryType: 'preference',
+     *   importance: 0.8,
+     *   tags: ['ui', 'settings'],
+     * })
      * ```
      */
-    async remember(text: string, namespace?: string): Promise<RememberResult> {
+    async remember(text: string, namespaceOrOptions?: string | (RememberOptions & { namespace?: string })): Promise<RememberResult> {
+        const opts = typeof namespaceOrOptions === 'string'
+            ? { namespace: namespaceOrOptions }
+            : namespaceOrOptions ?? {};
+
         return this.signedRequest<RememberResult>("POST", "/api/remember", {
             text,
-            namespace: namespace ?? this.namespace,
+            namespace: opts.namespace ?? this.namespace,
+            ...(opts.memoryType && { memory_type: opts.memoryType }),
+            ...(opts.importance !== undefined && { importance: opts.importance }),
+            ...(opts.metadata && { metadata: opts.metadata }),
+            ...(opts.tags && { tags: opts.tags }),
         });
     }
 
@@ -111,22 +131,36 @@ export class MemWal {
      * verify → embed query → search → Walrus download → decrypt → return plaintext
      *
      * @param query - Search query
-     * @param limit - Max number of results (default: 10)
-     * @returns RecallResult with decrypted text results
+     * @param limitOrOptions - Max results (number) or RecallOptions object
+     * @returns RecallResult with decrypted text results, scored and ranked
      *
      * @example
      * ```typescript
+     * // Simple usage (backward compatible)
      * const result = await memwal.recall("food allergies")
-     * for (const memory of result.results) {
-     *     console.log(memory.text, memory.distance)
-     * }
+     *
+     * // Enriched usage with filtering and scoring
+     * const result = await memwal.recall("food allergies", {
+     *   limit: 5,
+     *   memoryTypes: ['fact', 'biographical'],
+     *   minImportance: 0.3,
+     *   scoringWeights: { semantic: 0.6, importance: 0.3, recency: 0.1 },
+     * })
      * ```
      */
-    async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
+    async recall(query: string, limitOrOptions?: number | RecallOptions, namespace?: string): Promise<RecallResult> {
+        const opts: RecallOptions = typeof limitOrOptions === 'number'
+            ? { limit: limitOrOptions, namespace }
+            : limitOrOptions ?? {};
+
         return this.signedRequest<RecallResult>("POST", "/api/recall", {
             query,
-            limit,
-            namespace: namespace ?? this.namespace,
+            limit: opts.limit ?? 10,
+            namespace: opts.namespace ?? namespace ?? this.namespace,
+            ...(opts.memoryTypes && { memory_types: opts.memoryTypes }),
+            ...(opts.minImportance !== undefined && { min_importance: opts.minImportance }),
+            ...(opts.includeExpired !== undefined && { include_expired: opts.includeExpired }),
+            ...(opts.scoringWeights && { scoring_weights: opts.scoringWeights }),
         });
     }
 
@@ -138,7 +172,8 @@ export class MemWal {
      * Remember (manual mode) — user handles SEAL encrypt, embedding,
      * and Walrus upload externally. Server only stores the vector ↔ blobId mapping.
      *
-     * @param opts.blobId - Walrus blob ID (user already uploaded encrypted data)
+     * @param opts.blobId - Walrus blob ID (legacy mode, user already uploaded encrypted data)
+     * @param opts.encryptedData - Base64 encrypted payload (new mode, server uploads to Walrus)
      * @param opts.vector - Embedding vector (user already generated, e.g. 1536-dim)
      * @returns RememberManualResult with id, blob_id, owner
      *
@@ -153,10 +188,14 @@ export class MemWal {
      * ```
      */
     async rememberManual(opts: RememberManualOptions): Promise<RememberManualResult> {
+        if (!opts.blobId && !opts.encryptedData) {
+            throw new Error("rememberManual requires either blobId or encryptedData");
+        }
         return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
-            blob_id: opts.blobId,
             vector: opts.vector,
             namespace: opts.namespace ?? this.namespace,
+            ...(opts.blobId && { blob_id: opts.blobId }),
+            ...(opts.encryptedData && { encrypted_data: opts.encryptedData }),
         });
     }
 
@@ -260,6 +299,72 @@ export class MemWal {
     async getPublicKeyHex(): Promise<string> {
         const pk = await this.getPublicKey();
         return bytesToHex(pk);
+    }
+
+    // ============================================================
+    // Memory Management API
+    // ============================================================
+
+    /**
+     * Get memory statistics for a namespace.
+     *
+     * @param namespace - Namespace to get stats for (default: config namespace)
+     * @returns MemoryStats with counts, types breakdown, importance stats
+     *
+     * @example
+     * ```typescript
+     * const stats = await memwal.stats()
+     * console.log(`Total: ${stats.total}, Avg importance: ${stats.avg_importance}`)
+     * ```
+     */
+    async stats(namespace?: string): Promise<MemoryStats> {
+        return this.signedRequest<MemoryStats>("POST", "/api/stats", {
+            namespace: namespace ?? this.namespace,
+        });
+    }
+
+    /**
+     * Selectively forget memories matching a semantic query.
+     * Performs soft-deletion (memories are invalidated, not permanently deleted).
+     *
+     * @param query - Semantic query to find memories to forget
+     * @param options - Limit and similarity threshold
+     * @returns ForgetResult with count of forgotten memories
+     *
+     * @example
+     * ```typescript
+     * const result = await memwal.forget("peanut allergy")
+     * console.log(`Forgot ${result.forgotten} memories`)
+     * ```
+     */
+    async forget(
+        query: string,
+        options?: { limit?: number; threshold?: number; namespace?: string },
+    ): Promise<ForgetResult> {
+        return this.signedRequest<ForgetResult>("POST", "/api/forget", {
+            query,
+            limit: options?.limit ?? 5,
+            threshold: options?.threshold ?? 0.8,
+            namespace: options?.namespace ?? this.namespace,
+        });
+    }
+
+    /**
+     * Trigger manual memory consolidation — merge duplicates, resolve conflicts.
+     *
+     * @param namespace - Namespace to consolidate (default: config namespace)
+     * @param limit - Max memories to process (default: 50)
+     *
+     * @example
+     * ```typescript
+     * await memwal.consolidate()
+     * ```
+     */
+    async consolidate(namespace?: string, limit?: number): Promise<void> {
+        await this.signedRequest<unknown>("POST", "/api/consolidate", {
+            namespace: namespace ?? this.namespace,
+            limit: limit ?? 50,
+        });
     }
 
     // ============================================================

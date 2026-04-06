@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
@@ -135,6 +136,123 @@ impl Config {
 }
 
 // ============================================================
+// Memory Types
+// ============================================================
+
+/// Classification of memory type — determines how the memory is scored and retrieved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    /// Factual statements ("User is allergic to peanuts")
+    Fact,
+    /// User preferences ("User prefers dark mode")
+    Preference,
+    /// Episode/event summaries ("User discussed project X on 2025-03-01")
+    Episodic,
+    /// How-to / workflows ("Deploy: git push → CI → staging")
+    Procedural,
+    /// Identity info ("User's name is Duc, lives in Hanoi")
+    Biographical,
+}
+
+impl Default for MemoryType {
+    fn default() -> Self {
+        MemoryType::Fact
+    }
+}
+
+impl fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryType::Fact => write!(f, "fact"),
+            MemoryType::Preference => write!(f, "preference"),
+            MemoryType::Episodic => write!(f, "episodic"),
+            MemoryType::Procedural => write!(f, "procedural"),
+            MemoryType::Biographical => write!(f, "biographical"),
+        }
+    }
+}
+
+impl MemoryType {
+    #[allow(dead_code)]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "fact" => Some(MemoryType::Fact),
+            "preference" => Some(MemoryType::Preference),
+            "episodic" => Some(MemoryType::Episodic),
+            "procedural" => Some(MemoryType::Procedural),
+            "biographical" => Some(MemoryType::Biographical),
+            _ => None,
+        }
+    }
+}
+
+/// Source provenance — how this memory was created
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySource {
+    /// Direct remember() call from user
+    User,
+    /// Extracted from analyze() fact extraction
+    Extracted,
+    /// Automated (decay, compaction, consolidation)
+    System,
+}
+
+impl Default for MemorySource {
+    fn default() -> Self {
+        MemorySource::User
+    }
+}
+
+impl fmt::Display for MemorySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemorySource::User => write!(f, "user"),
+            MemorySource::Extracted => write!(f, "extracted"),
+            MemorySource::System => write!(f, "system"),
+        }
+    }
+}
+
+/// Consolidation action decided by LLM during the memorization pipeline
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ConsolidationAction {
+    /// New fact — store as new memory
+    Add,
+    /// Enriches/corrects an existing memory
+    Update,
+    /// Contradicts an existing memory — invalidate old
+    Delete,
+    /// Already known — no action needed (bump access count)
+    Noop,
+}
+
+/// Result of an LLM consolidation decision for a single fact (internal logic)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationDecision {
+    pub action: ConsolidationAction,
+    /// ID of the existing memory to update/delete (if applicable)
+    pub target_id: Option<String>,
+    /// Reason for the decision (for logging/debugging)
+    pub reason: String,
+}
+
+/// JSON schema expected from the LLM during consolidation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConsolidationDecision {
+    pub action: ConsolidationAction,
+    pub target_id: Option<String>,
+    pub text: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_importance() -> f32 {
+    0.5
+}
+
+// ============================================================
 // API Types
 // ============================================================
 
@@ -147,6 +265,18 @@ pub struct RememberRequest {
     /// Namespace for memory isolation (default: "default")
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Memory type classification (default: "fact")
+    #[serde(default)]
+    pub memory_type: Option<MemoryType>,
+    /// Importance score 0.0-1.0 (default: 0.5)
+    #[serde(default)]
+    pub importance: Option<f32>,
+    /// Arbitrary metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Tags for categorization
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,11 +285,12 @@ pub struct RememberResponse {
     pub blob_id: String,
     pub owner: String,
     pub namespace: String,
+    pub memory_type: String,
+    pub importance: f32,
 }
 
 /// POST /api/recall
 /// Phase 2: Server does search → download → decrypt → return plaintext
-/// Owner is derived from delegate key via onchain verification (auth middleware)
 fn default_limit() -> usize {
     10
 }
@@ -175,6 +306,51 @@ pub struct RecallRequest {
     pub limit: usize,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Filter by memory types (if empty, return all types)
+    #[serde(default)]
+    pub memory_types: Option<Vec<String>>,
+    /// Minimum importance threshold (default: 0.0)
+    #[serde(default)]
+    pub min_importance: Option<f32>,
+    /// Include superseded/expired memories (default: false)
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+    /// Scoring weights for composite ranking
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
+}
+
+/// Weights for composite memory scoring
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoringWeights {
+    /// Weight for semantic similarity (default: 0.5)
+    #[serde(default = "default_w_semantic")]
+    pub semantic: f32,
+    /// Weight for importance score (default: 0.2)
+    #[serde(default = "default_w_importance")]
+    pub importance: f32,
+    /// Weight for temporal recency (default: 0.2)
+    #[serde(default = "default_w_recency")]
+    pub recency: f32,
+    /// Weight for access frequency (default: 0.1)
+    #[serde(default = "default_w_frequency")]
+    pub frequency: f32,
+}
+
+fn default_w_semantic() -> f32 { 0.5 }
+fn default_w_importance() -> f32 { 0.2 }
+fn default_w_recency() -> f32 { 0.2 }
+fn default_w_frequency() -> f32 { 0.1 }
+
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        ScoringWeights {
+            semantic: 0.5,
+            importance: 0.2,
+            recency: 0.2,
+            frequency: 0.1,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -183,17 +359,39 @@ pub struct RecallResponse {
     pub total: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct RecallResult {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
+    /// Composite score (higher = more relevant)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_count: Option<i32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SearchHit {
+    /// Memory record ID (UUID)
+    pub id: String,
     pub blob_id: String,
     pub distance: f64,
+    /// Structured metadata from DB for composite scoring
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_count: Option<i32>,
 }
 
 
@@ -224,11 +422,15 @@ pub struct AnalyzeResponse {
 }
 
 /// POST /api/remember/manual
-/// Client sends SEAL-encrypted data (base64) + pre-computed embedding vector.
-/// Server uploads to Walrus via sidecar, then stores the vector ↔ blobId mapping.
+/// Client sends either:
+/// - `encrypted_data` (base64) + vector: server uploads to Walrus, OR
+/// - `blob_id` + vector (legacy): server reuses existing uploaded blob.
 #[derive(Debug, Deserialize)]
 pub struct RememberManualRequest {
-    pub encrypted_data: String,  // base64-encoded SEAL-encrypted bytes
+    #[serde(default)]
+    pub encrypted_data: Option<String>,  // base64-encoded SEAL-encrypted bytes
+    #[serde(default)]
+    pub blob_id: Option<String>,         // legacy mode: pre-uploaded Walrus blob ID
     pub vector: Vec<f32>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
@@ -307,6 +509,77 @@ pub struct RestoreResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+}
+
+/// POST /api/stats
+/// Memory statistics for an owner/namespace
+#[derive(Debug, Deserialize)]
+pub struct StatsRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    pub total: usize,
+    pub by_type: std::collections::HashMap<String, usize>,
+    pub avg_importance: f64,
+    pub oldest_memory: Option<String>,
+    pub newest_memory: Option<String>,
+    pub total_access_count: i64,
+    pub storage_bytes: i64,
+    pub owner: String,
+    pub namespace: String,
+}
+
+/// POST /api/forget
+/// Selectively invalidate memories by semantic query
+#[derive(Debug, Deserialize)]
+pub struct ForgetRequest {
+    /// Semantic query to find memories to forget
+    pub query: String,
+    /// Max memories to forget (default: 5)
+    #[serde(default = "default_forget_limit")]
+    pub limit: usize,
+    /// Minimum similarity to consider for deletion (default: 0.8).
+    /// This is a SIMILARITY threshold (1.0 = identical, 0.0 = unrelated).
+    /// Internally converted to cosine distance: distance = 1.0 - similarity.
+    #[serde(default = "default_forget_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+fn default_forget_limit() -> usize { 5 }
+fn default_forget_threshold() -> f64 { 0.8 }
+
+#[derive(Debug, Serialize)]
+pub struct ForgetResponse {
+    pub forgotten: usize,
+    pub owner: String,
+    pub namespace: String,
+}
+
+/// POST /api/consolidate
+/// Trigger manual memory consolidation — merge duplicates, resolve conflicts
+#[derive(Debug, Deserialize)]
+pub struct ConsolidateRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    /// Max memories to consolidate (default: 50)
+    #[serde(default = "default_restore_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConsolidateResponse {
+    pub processed: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+    pub owner: String,
+    pub namespace: String,
 }
 
 // ============================================================

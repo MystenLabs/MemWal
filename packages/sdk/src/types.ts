@@ -21,6 +21,56 @@ export interface MemWalConfig {
 }
 
 // ============================================================
+// Memory Types
+// ============================================================
+
+/** Classification of memory type */
+export type MemoryType = 'fact' | 'preference' | 'episodic' | 'procedural' | 'biographical';
+
+/** Source provenance — how a memory was created */
+export type MemorySource = 'user' | 'extracted' | 'system';
+
+/** Options for enriched remember() calls */
+export interface RememberOptions {
+    /** Memory type classification (default: 'fact') */
+    memoryType?: MemoryType;
+    /** Importance score 0.0-1.0 (default: 0.5) */
+    importance?: number;
+    /** Arbitrary metadata */
+    metadata?: Record<string, unknown>;
+    /** Tags for categorization */
+    tags?: string[];
+}
+
+/** Weights for composite memory scoring */
+export interface ScoringWeights {
+    /** Weight for semantic similarity (default: 0.5) */
+    semantic?: number;
+    /** Weight for importance score (default: 0.2) */
+    importance?: number;
+    /** Weight for temporal recency (default: 0.2) */
+    recency?: number;
+    /** Weight for access frequency (default: 0.1) */
+    frequency?: number;
+}
+
+/** Options for enriched recall() calls */
+export interface RecallOptions {
+    /** Max number of results (default: 10) */
+    limit?: number;
+    /** Namespace override */
+    namespace?: string;
+    /** Filter by memory types (return all if empty) */
+    memoryTypes?: MemoryType[];
+    /** Minimum importance threshold */
+    minImportance?: number;
+    /** Include superseded/expired memories (default: false) */
+    includeExpired?: boolean;
+    /** Scoring weights for composite ranking */
+    scoringWeights?: ScoringWeights;
+}
+
+// ============================================================
 // API Types
 // ============================================================
 
@@ -30,6 +80,8 @@ export interface RememberResult {
     blob_id: string;
     owner: string;
     namespace: string;
+    memory_type: string;
+    importance: number;
 }
 
 /** A single recalled memory */
@@ -37,6 +89,12 @@ export interface RecallMemory {
     blob_id: string;
     text: string;
     distance: number;
+    /** Composite score (higher = more relevant) */
+    score?: number;
+    memory_type?: MemoryType;
+    importance?: number;
+    created_at?: string;
+    access_count?: number;
 }
 
 /** Result from recall() */
@@ -76,8 +134,10 @@ export interface HealthResult {
 
 /** Options for rememberManual() on MemWal class */
 export interface RememberManualOptions {
-    /** Walrus blob ID (user already uploaded encrypted data) */
-    blobId: string;
+    /** Walrus blob ID (legacy mode: user already uploaded encrypted data) */
+    blobId?: string;
+    /** Base64-encoded encrypted payload (new mode: server uploads to Walrus) */
+    encryptedData?: string;
     /** Embedding vector (user already generated) */
     vector: number[];
     /** Namespace (default: config namespace or "default") */
@@ -115,6 +175,26 @@ export interface RestoreResult {
     total: number;
     namespace: string;
     owner: string;
+}
+
+/** Memory statistics */
+export interface MemoryStats {
+    total: number;
+    by_type: Partial<Record<MemoryType, number>>;
+    avg_importance: number;
+    oldest_memory: string | null;
+    newest_memory: string | null;
+    total_access_count: number;
+    storage_bytes: number;
+    owner: string;
+    namespace: string;
+}
+
+/** Result from forget() */
+export interface ForgetResult {
+    forgotten: number;
+    owner: string;
+    namespace: string;
 }
 
 // ============================================================

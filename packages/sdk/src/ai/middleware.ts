@@ -24,7 +24,7 @@
 import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { wrapLanguageModel } from "ai";
 import { MemWal } from "../memwal.js";
-import type { MemWalConfig, RecallMemory } from "../types.js";
+import type { MemWalConfig, RecallMemory, MemoryType } from "../types.js";
 
 // ============================================================
 // Config
@@ -92,11 +92,17 @@ export function withMemWal(
                     const lastUserMessage = findLastUserMessage(params.prompt);
                     if (!lastUserMessage) return params;
 
-                    const recallResult = await memwal.recall(lastUserMessage, maxMemories);
+                    const recallResult = await memwal.recall(lastUserMessage, {
+                        limit: maxMemories,
+                        scoringWeights: { semantic: 0.5, importance: 0.2, recency: 0.2, frequency: 0.1 },
+                    });
 
-                    // Filter by minimum relevance (distance < 1 - minRelevance)
+                    // Filter by composite score or distance as fallback
                     const relevant = recallResult.results.filter(
-                        (m: RecallMemory) => (1 - m.distance) >= minRelevance
+                        (m: RecallMemory) => {
+                            if (m.score !== undefined) return m.score >= minRelevance;
+                            return (1 - m.distance) >= minRelevance;
+                        }
                     );
 
                     if (relevant.length === 0) return params;
@@ -178,10 +184,37 @@ function findLastUserMessage(
 }
 
 function formatMemories(memories: RecallMemory[]): string {
-    const lines = memories.map(
-        (m) => `- ${m.text} (relevance: ${(1 - m.distance).toFixed(2)})`
-    );
-    return `[Memory Context] The following are known facts about this user from their personal memory store. Use these facts to answer the user's question:\n${lines.join("\n")}`;
+    // Group memories by type for better LLM comprehension
+    const typeLabels: Record<string, string> = {
+        fact: '📌 Facts',
+        preference: '⭐ Preferences',
+        episodic: '📅 Recent Events',
+        procedural: '📋 Procedures',
+        biographical: '👤 Personal Info',
+    };
+
+    const grouped = new Map<string, RecallMemory[]>();
+    for (const m of memories) {
+        const type = m.memory_type ?? 'fact';
+        if (!grouped.has(type)) grouped.set(type, []);
+        grouped.get(type)!.push(m);
+    }
+
+    const sections: string[] = [];
+    for (const [type, mems] of grouped) {
+        const label = typeLabels[type] || `📎 ${type}`;
+        const lines = mems.map((m) => {
+            const importance = m.importance ?? 0.5;
+            const icon = importance >= 0.8 ? '⚡' : importance >= 0.5 ? '💡' : '';
+            const score = m.score !== undefined
+                ? `score: ${m.score.toFixed(2)}`
+                : `relevance: ${(1 - m.distance).toFixed(2)}`;
+            return `  ${icon} ${m.text} (${score})`;
+        });
+        sections.push(`${label}:\n${lines.join('\n')}`);
+    }
+
+    return `[Memory Context] The following are known facts about this user from their personal memory store. Use these facts to answer the user's question:\n\n${sections.join('\n\n')}`;
 }
 
 function injectMemoryContext(
