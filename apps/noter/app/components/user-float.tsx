@@ -8,91 +8,46 @@ import {
   TooltipTrigger,
 } from "@/shared/components/ui/tooltip";
 import { cn } from "@/shared/lib/utils";
-import { Copy, LogOut, Minus, Key, Check, X } from "lucide-react";
+import { Copy, LogOut, Minus, Check, Shield, KeyRound, Eye, EyeOff, ExternalLink } from "lucide-react";
 import Image from "next/image";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 interface UserFloatPanelProps {
   className: string;
   onClose: () => void;
 }
 
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="secondary" size="icon-sm" onClick={handleCopy}>
+          {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{copied ? "Copied!" : `Copy ${label}`}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function truncateAddress(addr: string): string {
+  if (addr.length <= 16) return addr;
+  return `${addr.slice(0, 8)}...${addr.slice(-6)}`;
+}
+
 export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const { user, suiAddress, logout } = useAuth();
-  const [copied, setCopied] = useState(false);
-  const [memwalKey, setMemwalKey] = useState("");
-  const [memwalAccountId, setMemwalAccountId] = useState("");
-  const [memwalStatus, setMemwalStatus] = useState<"idle" | "checking" | "connected" | "error">("idle");
-
-  // Always check MemWal status on mount (key may come from .env or localStorage)
-  useEffect(() => {
-    const savedKey = localStorage.getItem("memwal_key");
-    if (savedKey) {
-      setMemwalKey(savedKey);
-    }
-    const savedAccountId = localStorage.getItem("memwal_account_id");
-    if (savedAccountId) {
-      setMemwalAccountId(savedAccountId);
-    }
-    // Always check health — server may have key from .env
-    checkMemwalConnection();
-  }, []);
-
-  const checkMemwalConnection = async () => {
-    setMemwalStatus("checking");
-    try {
-      const res = await fetch("/api/memory/health");
-      const data = await res.json().catch(() => ({}));
-      setMemwalStatus(res.ok && data.status === "ok" ? "connected" : "error");
-    } catch {
-      setMemwalStatus("error");
-    }
-  };
-
-  const handleSaveKey = async () => {
-    if (!memwalKey.trim()) return;
-    localStorage.setItem("memwal_key", memwalKey.trim());
-    if (memwalAccountId.trim()) {
-      localStorage.setItem("memwal_account_id", memwalAccountId.trim());
-    }
-
-    // Save key to server-side via API
-    try {
-      const res = await fetch("/api/memory/set-key", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: memwalKey.trim(), accountId: memwalAccountId.trim() || undefined }),
-      });
-      if (res.ok) {
-        setMemwalStatus("connected");
-      } else {
-        setMemwalStatus("error");
-      }
-    } catch {
-      setMemwalStatus("error");
-    }
-  };
-
-  const handleClearKey = () => {
-    setMemwalKey("");
-    setMemwalAccountId("");
-    localStorage.removeItem("memwal_key");
-    localStorage.removeItem("memwal_account_id");
-    setMemwalStatus("idle");
-    fetch("/api/memory/set-key", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: "", accountId: "" }),
-    });
-  };
-
-  const copyAddress = () => {
-    if (suiAddress) {
-      navigator.clipboard.writeText(suiAddress);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
+  const [showKey, setShowKey] = useState(false);
+  const [privateKey, setPrivateKey] = useState<string | null>(null);
+  const [keyLoading, setKeyLoading] = useState(false);
 
   const handleLogout = async () => {
     await logout();
@@ -100,8 +55,21 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
     window.location.href = "/";
   };
 
+  const handleExportKey = async () => {
+    if (privateKey) {
+      setShowKey(!showKey);
+      return;
+    }
+    // For now, the key is not directly accessible from the client.
+    // Users can get it from the researcher app's profile page.
+    setShowKey(!showKey);
+  };
+
+  const authMethod = user?.authMethod === "enoki" ? "Google" : user?.authMethod === "wallet" ? "Wallet" : "Key";
+
   return (
     <div className={cn(className, "w-full max-w-sm")}>
+      {/* Header */}
       <div className="flex items-center justify-between p-1 shrink-0">
         <Button
           variant="secondary"
@@ -110,21 +78,20 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
         >
           Profile
         </Button>
-        <div className="flex items-center">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon-sm" onClick={onClose}>
-                <Minus className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Minimize</TooltipContent>
-          </Tooltip>
-        </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon-sm" onClick={onClose}>
+              <Minus className="size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Minimize</TooltipContent>
+        </Tooltip>
       </div>
 
       <div className="p-1 space-y-1">
         {user && (
           <>
+            {/* User info */}
             <div className="flex items-center gap-1">
               {user.avatar && (
                 <Image
@@ -135,94 +102,103 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
                 />
               )}
               <div className="flex-1 min-w-0 bg-secondary p-2">
-                <p className="text-sm font-medium truncate">{user.name}</p>
-                <p className="text-xs text-muted-foreground truncate">{user.email}</p>
+                <p className="text-sm font-medium truncate">{user.name || "User"}</p>
+                <p className="text-xs text-muted-foreground">Signed in with {authMethod}</p>
               </div>
             </div>
 
-            {suiAddress && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5">
-                  <code className="flex-1 text-xs bg-secondary px-2 py-2.5 rounded truncate">
-                    {suiAddress.slice(0, 8)}...{suiAddress.slice(-6)}
-                  </code>
+            {/* MemWal Account Info */}
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-1 px-1 py-0.5">
+                <Shield className="size-3 text-muted-foreground" />
+                <span className="text-xs font-medium">MemWal Account</span>
+              </div>
+
+              {/* Sui Address */}
+              {suiAddress && (
+                <div className="flex items-center gap-1">
+                  <div className="flex-1 min-w-0 bg-secondary px-2 py-2">
+                    <p className="text-[10px] text-muted-foreground">Sui Address</p>
+                    <code className="text-xs truncate block">{truncateAddress(suiAddress)}</code>
+                  </div>
+                  <CopyButton value={suiAddress} label="address" />
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
                         variant="secondary"
-                        size="icon"
-                        onClick={copyAddress}
+                        size="icon-sm"
+                        onClick={() => window.open(`https://suiscan.xyz/testnet/account/${suiAddress}`, "_blank")}
                       >
-                        <Copy className="size-3" />
+                        <ExternalLink className="size-3" />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>{copied ? "Copied!" : "Copy address"}</TooltipContent>
+                    <TooltipContent>View on Suiscan</TooltipContent>
                   </Tooltip>
                 </div>
+              )}
+
+              {/* Account ID */}
+              {user.delegateAccountId && (
+                <div className="flex items-center gap-1">
+                  <div className="flex-1 min-w-0 bg-secondary px-2 py-2">
+                    <p className="text-[10px] text-muted-foreground">Account ID</p>
+                    <code className="text-xs truncate block">{truncateAddress(user.delegateAccountId)}</code>
+                  </div>
+                  <CopyButton value={user.delegateAccountId} label="account ID" />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="secondary"
+                        size="icon-sm"
+                        onClick={() => window.open(`https://suiscan.xyz/testnet/object/${user.delegateAccountId}`, "_blank")}
+                      >
+                        <ExternalLink className="size-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>View on Suiscan</TooltipContent>
+                  </Tooltip>
+                </div>
+              )}
+            </div>
+
+            {/* Delegate Key Export */}
+            {user.delegatePrivateKey && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-1 px-1 py-0.5">
+                  <KeyRound className="size-3 text-muted-foreground" />
+                  <span className="text-xs font-medium">Delegate Key</span>
+                </div>
+
+                {showKey && (
+                  <div className="bg-secondary p-2">
+                    <code className="text-[10px] break-all leading-relaxed block font-mono">
+                      {user.delegatePrivateKey}
+                    </code>
+                    <div className="flex justify-end mt-1">
+                      <CopyButton value={user.delegatePrivateKey} label="key" />
+                    </div>
+                  </div>
+                )}
+
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="w-full"
+                  onClick={handleExportKey}
+                >
+                  {showKey ? (
+                    <><EyeOff className="size-3 mr-1.5" /> Hide Key</>
+                  ) : (
+                    <><Eye className="size-3 mr-1.5" /> Reveal Key</>
+                  )}
+                </Button>
               </div>
             )}
 
-            {/* MemWal Key Section */}
-            <div className="space-y-1.5 pt-1">
-              <div className="flex items-center gap-1.5">
-                <Key className="size-3.5 text-muted-foreground" />
-                <span className="text-xs font-medium">MemWal Key</span>
-                {memwalStatus === "connected" && (
-                  <span className="ml-auto flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
-                    <Check className="size-3" />
-                    On
-                  </span>
-                )}
-                {memwalStatus === "error" && (
-                  <span className="ml-auto flex items-center gap-1 text-xs text-red-500">
-                    <X className="size-3" />
-                    Error
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <input
-                  type="password"
-                  placeholder="Ed25519 private key (hex)"
-                  value={memwalKey}
-                  onChange={(e) => setMemwalKey(e.target.value)}
-                  className="flex-1 text-xs bg-secondary px-2 py-2 rounded border border-border outline-none focus:ring-1 focus:ring-ring font-mono"
-                />
-              </div>
-              <div className="flex items-center gap-1">
-                <input
-                  type="text"
-                  placeholder="Account ID (0x...)"
-                  value={memwalAccountId}
-                  onChange={(e) => setMemwalAccountId(e.target.value)}
-                  className="flex-1 text-xs bg-secondary px-2 py-2 rounded border border-border outline-none focus:ring-1 focus:ring-ring font-mono"
-                />
-                {(memwalKey || memwalAccountId) ? (
-                  <div className="flex gap-0.5">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button variant="secondary" size="icon-sm" onClick={handleSaveKey}>
-                          <Check className="size-3" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Save key</TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button variant="ghost" size="icon-sm" onClick={handleClearKey}>
-                          <X className="size-3" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Clear key</TooltipContent>
-                    </Tooltip>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
+            {/* Logout */}
             <Button
               size="sm"
-              variant={'secondary'}
+              variant="secondary"
               className="w-full mt-0.5"
               onClick={handleLogout}
             >
