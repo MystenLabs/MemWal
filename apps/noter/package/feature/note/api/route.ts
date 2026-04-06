@@ -183,7 +183,7 @@ export const noteRouter = router({
       const plainText = input.plainText ?? note.plainText;
 
       // Extract memories using AI
-      const memories = await detectMemoriesForLexical(ctx.userId, plainText);
+      const memories = await detectMemoriesForLexical(ctx.userId, plainText, ctx.memwalKey, ctx.memwalAccountId);
 
       // Return memory data (client will inject as Lexical nodes)
       return {
