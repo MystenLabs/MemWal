@@ -149,23 +149,21 @@ export default function LandingPage() {
     }, [setupStep, navigate])
 
     // ── Detect wallet connection via ConnectButton ──
-    // Only triggers when user explicitly clicked "Connect Wallet" in the popover.
-    // authMethod is persisted to sessionStorage, so if it's already set (e.g. 'enoki'),
-    // this won't override it.
+    // Sets authMethod only after wallet actually connects, not on click.
     useEffect(() => {
         if (currentAccount && !delegateKey && authMethod === null) {
-            // Check sessionStorage — if 'enoki' was persisted before OAuth redirect,
-            // getPersistedAuthMethod() already restored it on mount. So if authMethod
-            // is still null here, it means user connected via ConnectButton.
-            // But only if we know the user explicitly interacted (not autoConnect).
             const persisted = getPersistedAuthMethod()
             if (persisted) {
-                // Restored from OAuth redirect — update state
+                // Restored from OAuth redirect (e.g. enoki)
                 setAuthMethod(persisted)
+            } else if (walletClickedRef.current) {
+                // User clicked "Connect Wallet" and wallet just connected
+                walletClickedRef.current = false
+                updateAuthMethod('wallet')
             }
-            // If no persisted method either, this is autoConnect — don't trigger setup
+            // Otherwise this is autoConnect — don't trigger setup
         }
-    }, [currentAccount, delegateKey, authMethod])
+    }, [currentAccount, delegateKey, authMethod, updateAuthMethod])
 
     // ── Generate Ed25519 keypair (returns the keys) ──
     const generateKeys = useCallback(async () => {
@@ -281,7 +279,10 @@ export default function LandingPage() {
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
-        return knownAccountId || ''
+        if (!knownAccountId) {
+            throw new Error('Unexpected state: no account ID after registration.')
+        }
+        return knownAccountId
     }, [suiClient, signAndExecute])
 
     // ── Enoki: silent key gen + register + save (no UI) ──
@@ -389,20 +390,34 @@ export default function LandingPage() {
         connect({ wallet: googleWallet })
     }
 
+    // Track that user clicked "Connect Wallet" — authMethod is set later
+    // when the wallet actually connects (see effect below).
+    const walletClickedRef = useRef(false)
+
     const handleWalletClick = () => {
-        updateAuthMethod('wallet')
+        walletClickedRef.current = true
         setLoginOpen(false)
     }
 
     // ── Determine what to show ──
-    // Show setup flow when: new user with active setup, OR error state (even if wallet disconnected)
-    const showSetupFlow = (isNewUser && authMethod !== null && setupStep !== 'idle')
+    // Show setup flow when:
+    // - new user with auth method set (includes idle → prevents hero flash after OAuth redirect)
+    // - error state (even if wallet disconnected, so user sees the error)
+    const showSetupFlow = (isNewUser && authMethod !== null)
         || setupStep === 'error'
 
     // ── Setup UI for wallet flow (shown inline, replaces hero) ──
     const renderWalletSetupFlow = () => (
         <section className="lp-hero" style={{ justifyContent: 'center', padding: '0 24px' }}>
             <div style={{ maxWidth: 520, width: '100%', margin: '0 auto' }}>
+
+                {/* Idle — brief spinner before key generation starts */}
+                {setupStep === 'idle' && (
+                    <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                        <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
+                        <p style={{ color: 'var(--text-secondary)' }}>connecting wallet...</p>
+                    </div>
+                )}
 
                 {/* Generating */}
                 {setupStep === 'generating' && (
