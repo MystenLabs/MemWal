@@ -21,7 +21,6 @@ import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
-import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 
 
@@ -134,7 +133,7 @@ function AppContent() {
       <Route path="/" element={<LandingPage />} />
       <Route path="/dashboard" element={
         !currentAccount ? <Navigate to="/" replace /> :
-        delegateKey ? <Dashboard /> : <SetupWizard />
+        delegateKey ? <Dashboard /> : <Navigate to="/" replace />
       } />
       <Route path="/playground" element={
         !currentAccount ? <Navigate to="/" replace /> :
