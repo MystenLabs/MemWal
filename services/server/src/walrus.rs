@@ -86,7 +86,7 @@ pub async fn upload_blob(
             epochs,
         });
     if let Some(secret) = sidecar_secret {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()
@@ -148,7 +148,7 @@ pub async fn query_blobs_by_owner(
         .post(&url)
         .json(&body);
     if let Some(secret) = sidecar_secret {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()

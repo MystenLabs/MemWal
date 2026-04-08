@@ -1039,7 +1039,7 @@ pub async fn sponsor_proxy(
         .header("Content-Type", "application/json")
         .body(body.to_vec());
     if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()
@@ -1081,7 +1081,7 @@ pub async fn sponsor_execute_proxy(
         .header("Content-Type", "application/json")
         .body(body.to_vec());
     if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()

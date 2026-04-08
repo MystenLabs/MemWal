@@ -292,23 +292,24 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 // Shared-secret authentication — protects all routes registered after this point.
-// Set SIDECAR_SECRET in the environment; callers must send it as X-Sidecar-Secret.
-// If SIDECAR_SECRET is not set (dev mode), requests are allowed but a warning is logged.
+// Set SIDECAR_AUTH_TOKEN in the environment; callers must send it as Authorization: Bearer <token>.
+// Sidecar refuses to start if SIDECAR_AUTH_TOKEN is not set.
+const SIDECAR_AUTH_TOKEN = process.env.SIDECAR_AUTH_TOKEN;
+if (!SIDECAR_AUTH_TOKEN) {
+    console.error("[sidecar] FATAL: SIDECAR_AUTH_TOKEN not set. Refusing to start without auth.");
+    process.exit(1);
+}
+
 app.use((req: Request, res: Response, next: NextFunction) => {
-    const secret = process.env.SIDECAR_SECRET;
-    if (secret) {
-        const provided = req.headers["x-sidecar-secret"];
-        const secretBuf = Buffer.from(secret);
-        const providedBuf = Buffer.from(typeof provided === "string" ? provided : "");
-        // timingSafeEqual prevents timing side-channel attacks on the secret comparison.
-        // Buffers must be same length — if lengths differ it's already a mismatch.
-        const valid = providedBuf.length === secretBuf.length &&
-            timingSafeEqual(providedBuf, secretBuf);
-        if (!valid) {
-            return res.status(401).json({ error: "Unauthorized" });
-        }
-    } else {
-        console.warn("[sidecar] WARNING: SIDECAR_SECRET is not set — running without authentication");
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    const secretBuf = Buffer.from(SIDECAR_AUTH_TOKEN!);
+    const providedBuf = Buffer.from(typeof token === "string" ? token : "");
+    // timingSafeEqual prevents timing side-channel attacks on the token comparison.
+    // Buffers must be same length — if lengths differ it's already a mismatch.
+    const valid = providedBuf.length === secretBuf.length &&
+        timingSafeEqual(providedBuf, secretBuf);
+    if (!valid) {
+        return res.status(401).json({ error: "Unauthorized" });
     }
     next();
 });
