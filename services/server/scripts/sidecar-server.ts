@@ -795,7 +795,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         // Patch: convert GasCoin intents → sender's SUI coins.
         // Enoki rejects GasCoin as tx argument, but relay requires the tip.
         // After patching, signer pays tip from own SUI; Enoki sponsors gas.
-        patchGasCoinIntents(registerTx);
+        // Only apply when Enoki sponsorship is enabled — direct signing
+        // resolves gas normally and the patch would break it.
+        if (enokiApiKey) {
+            patchGasCoinIntents(registerTx);
+        }
         const tipRecipient = await getUploadRelayTipAddress();
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
         const registerDigest = await submitWalletTransaction(
