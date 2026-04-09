@@ -8,6 +8,13 @@
       "when": 1710600000000,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1743500000000,
+      "tag": "0001_add_enoki_fields",
+      "breakpoints": true
     }
   ]
 }
