@@ -56,7 +56,7 @@ pub async fn seal_encrypt(
             package_id: package_id.to_string(),
         });
     if let Some(secret) = sidecar_secret {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()
@@ -118,7 +118,7 @@ pub async fn seal_decrypt(
             account_id: account_id.to_string(),
         });
     if let Some(secret) = sidecar_secret {
-        req = req.header("x-sidecar-secret", secret);
+        req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()

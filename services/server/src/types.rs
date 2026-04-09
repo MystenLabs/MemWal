@@ -131,7 +131,7 @@ impl Config {
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            sidecar_secret: std::env::var("SIDECAR_SECRET").ok(),
+            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
         }
     }

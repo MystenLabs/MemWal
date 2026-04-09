@@ -16,12 +16,15 @@
 import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
+import { useDelegateKey } from '../App'
+import { apiCall } from '../utils/api'
 
 export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
     const { mutateAsync: directSignAndExecute } = useSignAndExecuteTransaction()
+    const { delegateKey, delegatePublicKey, accountObjectId } = useDelegateKey()
 
     const mutateAsync = async ({ transaction }: { transaction: Transaction }): Promise<{ digest: string }> => {
         const sender = currentAccount?.address
@@ -35,44 +38,33 @@ export function useSponsoredTransaction() {
             })
             const kindBase64 = uint8ArrayToBase64(kindBytes)
 
-            // 2. Sponsor via server (proxied to sidecar)
-            const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    transactionBlockKindBytes: kindBase64,
-                    sender,
-                }),
-            })
-
-            if (!sponsorRes.ok) {
-                const errText = await sponsorRes.text()
-                throw new Error(`Sponsor failed (${sponsorRes.status}): ${errText}`)
+            if (!delegateKey || !delegatePublicKey) {
+                throw new Error('No delegate key available for signing sponsor request')
             }
 
-            const sponsored = await sponsorRes.json()
+            // 2. Sponsor via server — signed with delegate key (required by verify_signature middleware)
+            const sponsored = await apiCall(
+                delegateKey,
+                config.memwalServerUrl,
+                '/sponsor',
+                { transactionBlockKindBytes: kindBase64, sender },
+                accountObjectId ?? undefined,
+            )
             // sponsored = { bytes: base64, digest: string }
 
             // 3. Sign sponsored bytes with user wallet
             const sponsoredTx = Transaction.from(sponsored.bytes)
             const { signature } = await signTransaction({ transaction: sponsoredTx })
 
-            // 4. Execute via server (proxied to sidecar)
-            const execRes = await fetch(`${config.memwalServerUrl}/sponsor/execute`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    digest: sponsored.digest,
-                    signature,
-                }),
-            })
+            // 4. Execute via server — signed with delegate key
+            const result = await apiCall(
+                delegateKey,
+                config.memwalServerUrl,
+                '/sponsor/execute',
+                { digest: sponsored.digest, signature },
+                accountObjectId ?? undefined,
+            )
 
-            if (!execRes.ok) {
-                const errText = await execRes.text()
-                throw new Error(`Sponsored execute failed (${execRes.status}): ${errText}`)
-            }
-
-            const result = await execRes.json()
             console.log(`[sponsored-tx] success, digest=${result.digest}`)
             return { digest: result.digest }
         } catch (err) {
