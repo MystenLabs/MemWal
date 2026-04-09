@@ -5,6 +5,7 @@
 
 import { router, procedure } from "@/shared/lib/trpc/init";
 import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { uuidv7 } from "uuidv7";
 import {
@@ -298,6 +299,121 @@ export const authRouter = router({
           throw error;
         }
 
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
+  /** Connect with Enoki zkLogin. Two-phase: suiAddress only = returning user check, full = register. */
+  connectEnoki: procedure
+    .input(z.object({
+      suiAddress: z.string().min(1),
+      privateKey: z.string().optional(),
+      accountId: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { suiAddress, privateKey, accountId } = input;
+
+      try {
+        // Phase 1: returning user check
+        if (!privateKey && !accountId) {
+          const existing = await authService.getEnokiUserBySuiAddress(ctx.db, suiAddress);
+          if (existing) {
+            const sessionId = uuidv7();
+            const session = await authService.createEnokiSession(ctx.db, {
+              sessionId, userId: existing.id, suiAddress,
+            });
+            return {
+              needsSetup: false,
+              user: existing,
+              sessionId: session.sessionId,
+              sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
+            };
+          }
+          return { needsSetup: true };
+        }
+
+        // Phase 2: register with credentials
+        if (!privateKey || !accountId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "privateKey and accountId required" });
+        }
+
+        const user = await authService.upsertEnokiUser(ctx.db, {
+          suiAddress, delegatePrivateKey: privateKey, delegateAccountId: accountId,
+        });
+
+        const sessionId = uuidv7();
+        const session = await authService.createEnokiSession(ctx.db, {
+          sessionId, userId: user.id, suiAddress,
+        });
+
+        return {
+          needsSetup: false,
+          user,
+          sessionId: session.sessionId,
+          sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) throw error;
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
+  /** Connect with delegate key (manual key + account ID login). */
+  connectDelegateKey: procedure
+    .input(z.object({
+      privateKey: z.string().regex(/^[0-9a-f]{64}$/i, "Must be 64 hex characters"),
+      accountId: z.string().min(1),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { privateKey, accountId } = input;
+
+      try {
+        // Derive Sui address from private key
+        const ed = await import("@noble/ed25519");
+        const { sha512 } = await import("@noble/hashes/sha512");
+        if (!(ed.etc as any).sha512Sync) {
+          (ed.etc as any).sha512Sync = (...m: Uint8Array[]) => {
+            const h = sha512.create();
+            for (const msg of m) h.update(msg);
+            return h.digest();
+          };
+        }
+
+        const privKeyBytes = Uint8Array.from(
+          privateKey.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+        );
+        const pubKeyBytes = ed.getPublicKey(privKeyBytes);
+
+        const { blake2b } = await import("@noble/hashes/blake2b");
+        const addrInput = new Uint8Array(33);
+        addrInput[0] = 0x00;
+        addrInput.set(pubKeyBytes, 1);
+        const addressBytes = blake2b(addrInput, { dkLen: 32 });
+        const suiAddress = "0x" + Array.from(new Uint8Array(addressBytes))
+          .map((b) => b.toString(16).padStart(2, "0")).join("");
+
+        const user = await authService.upsertEnokiUser(ctx.db, {
+          suiAddress, delegatePrivateKey: privateKey, delegateAccountId: accountId,
+        });
+
+        const sessionId = uuidv7();
+        const session = await authService.createEnokiSession(ctx.db, {
+          sessionId, userId: user.id, suiAddress,
+        });
+
+        return {
+          user,
+          sessionId: session.sessionId,
+          sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) throw error;
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,

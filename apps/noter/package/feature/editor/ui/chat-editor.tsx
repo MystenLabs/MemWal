@@ -31,8 +31,6 @@ import { ListNode, ListItemNode } from '@lexical/list';
 import { TableCellNode, TableNode, TableRowNode } from '@lexical/table';
 import { HorizontalRuleNode } from '@lexical/react/LexicalHorizontalRuleNode';
 
-import { CoinMentionNode } from '../nodes/CoinMentionNode';
-import CoinMentionPlugin from '../plugins/CoinMentionPlugin';
 import CodeHighlightPlugin from '../plugins/CodeHighlightPlugin';
 import ChatEditorTheme from '../themes/ChatEditorTheme';
 import { CHAT_TRANSFORMERS } from '../config/markdown-transformers';
@@ -44,7 +42,6 @@ import { CHAT_TRANSFORMERS } from '../config/markdown-transformers';
 const editorConfig = {
   namespace: 'ChatEditor',
   nodes: [
-    CoinMentionNode,
     HeadingNode,
     QuoteNode,
     CodeNode,
@@ -202,7 +199,6 @@ export function ChatEditor({
         <TextContentPlugin onChange={onChange} />
         <SubmitOnEnterPlugin onSubmit={onSubmit} disabled={disabled} />
         <ClearEditorPlugin shouldClear={shouldClear} onCleared={handleCleared} />
-        <CoinMentionPlugin />
       </div>
     </LexicalComposer>
   );
