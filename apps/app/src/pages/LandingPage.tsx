@@ -71,8 +71,9 @@ export default function LandingPage() {
     // ── Auth method tracking (restored from sessionStorage on mount for OAuth redirects) ──
     const [authMethod, setAuthMethod] = useState<AuthMethod>(getPersistedAuthMethod)
 
-    // ── Guard against double execution (React 18 Strict Mode) ──
+    // ── Refs ──
     const setupRunningRef = useRef(false)
+    const walletClickedRef = useRef(false)
 
     // ── Setup state ──
     const [setupStep, setSetupStep] = useState<SetupStep>('idle')
@@ -93,77 +94,9 @@ export default function LandingPage() {
         persistAuthMethod(method)
     }, [])
 
-    // ── Close dropdowns on outside click ──
-    useEffect(() => {
-        const handleClickOutside = (e: MouseEvent) => {
-            if (demoRef.current && !demoRef.current.contains(e.target as Node)) {
-                setDemoOpen(false)
-            }
-            if (loginRef.current && !loginRef.current.contains(e.target as Node)) {
-                setLoginOpen(false)
-            }
-        }
-        document.addEventListener('mousedown', handleClickOutside)
-        return () => document.removeEventListener('mousedown', handleClickOutside)
-    }, [])
-
-    // ── Returning user: auto-redirect to dashboard ──
-    useEffect(() => {
-        if (currentAccount && delegateKey) {
-            // Clean up persisted auth method since setup is complete
-            persistAuthMethod(null)
-            navigate('/dashboard')
-        }
-    }, [currentAccount, delegateKey, navigate])
-
-    // ── New user + Enoki: run full silent setup ──
-    useEffect(() => {
-        if (isNewUser && authMethod === 'enoki' && setupStep === 'idle') {
-            runEnokiSilentSetup()
-        }
-    }, [isNewUser, authMethod, setupStep, runEnokiSilentSetup])
-
-    // ── New user + Wallet: auto-trigger key generation (shows key UI) ──
-    useEffect(() => {
-        if (isNewUser && authMethod === 'wallet' && setupStep === 'idle') {
-            generateKeypair()
-        }
-    }, [isNewUser, authMethod, setupStep, generateKeypair])
-
-    // ── Wallet disconnect during active setup → show error ──
-    useEffect(() => {
-        if (!currentAccount && setupStep !== 'idle' && setupStep !== 'done' && setupStep !== 'error') {
-            setError('Wallet disconnected. Please reconnect and try again.')
-            setSetupStep('error')
-            setupRunningRef.current = false
-        }
-    }, [currentAccount, setupStep])
-
-    // ── Done: redirect to dashboard ──
-    useEffect(() => {
-        if (setupStep === 'done') {
-            persistAuthMethod(null)
-            const timer = setTimeout(() => navigate('/dashboard'), 1500)
-            return () => clearTimeout(timer)
-        }
-    }, [setupStep, navigate])
-
-    // ── Detect wallet connection via ConnectButton ──
-    // Sets authMethod only after wallet actually connects, not on click.
-    useEffect(() => {
-        if (currentAccount && !delegateKey && authMethod === null) {
-            const persisted = getPersistedAuthMethod()
-            if (persisted) {
-                // Restored from OAuth redirect (e.g. enoki)
-                setAuthMethod(persisted)
-            } else if (walletClickedRef.current) {
-                // User clicked "Connect Wallet" and wallet just connected
-                walletClickedRef.current = false
-                updateAuthMethod('wallet')
-            }
-            // Otherwise this is autoConnect — don't trigger setup
-        }
-    }, [currentAccount, delegateKey, authMethod, updateAuthMethod])
+    // ════════════════════════════════════════════════════════════
+    // Callbacks — declared before effects that reference them
+    // ════════════════════════════════════════════════════════════
 
     // ── Generate Ed25519 keypair (returns the keys) ──
     const generateKeys = useCallback(async () => {
@@ -259,7 +192,6 @@ export default function LandingPage() {
                 knownAccountId = createdObj.objectId
             }
 
-            // [Bug 4 fix] Verify we actually got the account ID
             if (!knownAccountId) {
                 throw new Error('Account created but object ID not found in transaction. Please try again.')
             }
@@ -279,19 +211,14 @@ export default function LandingPage() {
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
-        if (!knownAccountId) {
-            throw new Error('Unexpected state: no account ID after registration.')
-        }
         return knownAccountId
     }, [suiClient, signAndExecute])
 
     // ── Enoki: silent key gen + register + save (no UI) ──
     const runEnokiSilentSetup = useCallback(async () => {
-        // [Bug 3 fix] Guard against double execution
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
-        // [Bug 2 fix] Guard against empty address
         if (!address) {
             setupRunningRef.current = false
             return
@@ -311,7 +238,6 @@ export default function LandingPage() {
             console.error('Enoki setup failed:', err)
             const message = err instanceof Error ? err.message : 'setup failed. please try again.'
             setError(message)
-            // [Bug 5 fix] Set to 'error' instead of 'idle' to prevent infinite retry loop
             setSetupStep('error')
         } finally {
             setupRunningRef.current = false
@@ -320,7 +246,6 @@ export default function LandingPage() {
 
     // ── Wallet: generate keypair (shows key in UI) ──
     const generateKeypair = useCallback(async () => {
-        // [Bug 3 fix] Guard against double execution
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
@@ -355,7 +280,6 @@ export default function LandingPage() {
             const accountId = await registerOnchain(address, publicKeyHex, suiAddress)
             setTxStatus('delegate key registered onchain!')
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
-            // Clear key from React state to reduce exposure window
             setPrivateKeyHex('')
             setSetupStep('done')
         } catch (err: unknown) {
@@ -374,44 +298,106 @@ export default function LandingPage() {
         setTimeout(() => setCopied(false), 2000)
     }, [privateKeyHex])
 
-    // ── Retry from error state ──
     const handleRetry = useCallback(() => {
         setError('')
         setSetupStep('idle')
-        // The useEffect watching setupStep === 'idle' will re-trigger the appropriate flow
     }, [])
 
     // ── Button handlers ──
     const handleEnokiConnect = () => {
         if (!googleWallet) return
-        // [Bug 1 fix] Persist authMethod before OAuth redirect
         updateAuthMethod('enoki')
         setLoginOpen(false)
         connect({ wallet: googleWallet })
     }
-
-    // Track that user clicked "Connect Wallet" — authMethod is set later
-    // when the wallet actually connects (see effect below).
-    const walletClickedRef = useRef(false)
 
     const handleWalletClick = () => {
         walletClickedRef.current = true
         setLoginOpen(false)
     }
 
-    // ── Determine what to show ──
-    // Show setup flow when:
-    // - new user with auth method set (includes idle → prevents hero flash after OAuth redirect)
-    // - error state (even if wallet disconnected, so user sees the error)
+    // ════════════════════════════════════════════════════════════
+    // Effects — all referenced callbacks are declared above
+    // ════════════════════════════════════════════════════════════
+
+    // ── Close dropdowns on outside click ──
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (demoRef.current && !demoRef.current.contains(e.target as Node)) {
+                setDemoOpen(false)
+            }
+            if (loginRef.current && !loginRef.current.contains(e.target as Node)) {
+                setLoginOpen(false)
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside)
+        return () => document.removeEventListener('mousedown', handleClickOutside)
+    }, [])
+
+    // ── Returning user: auto-redirect to dashboard ──
+    useEffect(() => {
+        if (currentAccount && delegateKey) {
+            persistAuthMethod(null)
+            navigate('/dashboard')
+        }
+    }, [currentAccount, delegateKey, navigate])
+
+    // ── New user + Enoki: run full silent setup ──
+    useEffect(() => {
+        if (isNewUser && authMethod === 'enoki' && setupStep === 'idle') {
+            runEnokiSilentSetup()
+        }
+    }, [isNewUser, authMethod, setupStep, runEnokiSilentSetup])
+
+    // ── New user + Wallet: auto-trigger key generation (shows key UI) ──
+    useEffect(() => {
+        if (isNewUser && authMethod === 'wallet' && setupStep === 'idle') {
+            generateKeypair()
+        }
+    }, [isNewUser, authMethod, setupStep, generateKeypair])
+
+    // ── Wallet disconnect during active setup → show error ──
+    useEffect(() => {
+        if (!currentAccount && setupStep !== 'idle' && setupStep !== 'done' && setupStep !== 'error') {
+            setError('Wallet disconnected. Please reconnect and try again.')
+            setSetupStep('error')
+            setupRunningRef.current = false
+        }
+    }, [currentAccount, setupStep])
+
+    // ── Done: redirect to dashboard ──
+    useEffect(() => {
+        if (setupStep === 'done') {
+            persistAuthMethod(null)
+            const timer = setTimeout(() => navigate('/dashboard'), 1500)
+            return () => clearTimeout(timer)
+        }
+    }, [setupStep, navigate])
+
+    // ── Detect wallet connection via ConnectButton ──
+    useEffect(() => {
+        if (currentAccount && !delegateKey && authMethod === null) {
+            const persisted = getPersistedAuthMethod()
+            if (persisted) {
+                setAuthMethod(persisted)
+            } else if (walletClickedRef.current) {
+                walletClickedRef.current = false
+                updateAuthMethod('wallet')
+            }
+        }
+    }, [currentAccount, delegateKey, authMethod, updateAuthMethod])
+
+    // ════════════════════════════════════════════════════════════
+    // Render
+    // ════════════════════════════════════════════════════════════
+
     const showSetupFlow = (isNewUser && authMethod !== null)
         || setupStep === 'error'
 
-    // ── Setup UI for wallet flow (shown inline, replaces hero) ──
     const renderWalletSetupFlow = () => (
         <section className="lp-hero" style={{ justifyContent: 'center', padding: '0 24px' }}>
             <div style={{ maxWidth: 520, width: '100%', margin: '0 auto' }}>
 
-                {/* Idle — brief spinner before key generation starts */}
                 {setupStep === 'idle' && (
                     <div style={{ textAlign: 'center', padding: '60px 0' }}>
                         <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
@@ -419,7 +405,6 @@ export default function LandingPage() {
                     </div>
                 )}
 
-                {/* Generating */}
                 {setupStep === 'generating' && (
                     <div style={{ textAlign: 'center', padding: '60px 0' }}>
                         <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
@@ -427,7 +412,6 @@ export default function LandingPage() {
                     </div>
                 )}
 
-                {/* Show Key */}
                 {setupStep === 'show-key' && (
                     <div>
                         <div style={{ textAlign: 'center', marginBottom: 24 }}>
@@ -505,7 +489,6 @@ export default function LandingPage() {
                     </div>
                 )}
 
-                {/* Onchain tx in progress */}
                 {setupStep === 'onchain' && (
                     <div style={{ textAlign: 'center', padding: '60px 0' }}>
                         <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
@@ -516,7 +499,6 @@ export default function LandingPage() {
                     </div>
                 )}
 
-                {/* Error */}
                 {setupStep === 'error' && (
                     <div style={{ textAlign: 'center', padding: '60px 0' }}>
                         <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8, color: 'var(--danger)' }}>
@@ -531,7 +513,6 @@ export default function LandingPage() {
                     </div>
                 )}
 
-                {/* Done */}
                 {setupStep === 'done' && (
                     <div style={{ textAlign: 'center', padding: '60px 0' }}>
                         <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8 }}>
@@ -547,7 +528,6 @@ export default function LandingPage() {
         </section>
     )
 
-    // ── Enoki silent setup UI (just a spinner) ──
     const renderEnokiSetupFlow = () => (
         <section className="lp-hero" style={{ justifyContent: 'center', padding: '0 24px' }}>
             <div style={{ maxWidth: 520, width: '100%', margin: '0 auto' }}>
@@ -594,7 +574,6 @@ export default function LandingPage() {
                     </a>
 
                     <div className="lp-nav-links">
-                        {/* Demo dropdown */}
                         {demoUrls.length > 0 && (
                             <div className="lp-demo-dropdown" ref={demoRef}>
                                 <button
@@ -622,7 +601,6 @@ export default function LandingPage() {
                             </div>
                         )}
 
-                        {/* SDK Playground — direct link if logged in, popover with login options if not */}
                         {currentAccount && delegateKey ? (
                             <button className="lp-nav-cta" onClick={() => navigate('/dashboard')}>
                                 SDK Playground <span className="lp-arrow">↗</span>
@@ -637,7 +615,6 @@ export default function LandingPage() {
                                 </button>
                                 {loginOpen && (
                                     <div className="lp-demo-menu" style={{ minWidth: 240, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                        {/* Sign in with Google */}
                                         {hasEnokiConfig && googleWallet && (
                                             <button
                                                 onClick={handleEnokiConnect}
@@ -663,7 +640,6 @@ export default function LandingPage() {
                                             </button>
                                         )}
 
-                                        {/* Connect Wallet — wrapper to match styling */}
                                         <div
                                             onClick={handleWalletClick}
                                             className="lp-login-wallet-btn"
