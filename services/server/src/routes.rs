@@ -1,14 +1,18 @@
-use axum::{extract::State, Extension, Json};
 use axum::body::Body;
 use axum::response::Response;
+use axum::{extract::State, Extension, Json};
 use base64::Engine as _;
+use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
-use crate::seal;
-use crate::walrus;
-use crate::rate_limit;
-use crate::types::*;
 use crate::db::VectorDb;
+use crate::rate_limit;
+use crate::seal;
+use crate::types::*;
+use crate::walrus;
+
+const MAX_ANALYZE_FACTS: usize = 20;
+const ANALYZE_CONCURRENCY: usize = 5;
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
@@ -74,7 +78,8 @@ async fn generate_embedding(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 return Err(AppError::Internal(format!(
-                    "Embedding API error ({}): {}", status, body
+                    "Embedding API error ({}): {}",
+                    status, body
                 )));
             }
 
@@ -82,7 +87,8 @@ async fn generate_embedding(
                 AppError::Internal(format!("Failed to parse embedding response: {}", e))
             })?;
 
-            let vector = api_resp.data
+            let vector = api_resp
+                .data
                 .into_iter()
                 .next()
                 .ok_or_else(|| AppError::Internal("Embedding API returned no data".into()))?
@@ -133,7 +139,12 @@ pub async fn remember(
     let owner = &auth.owner;
     let text = &body.text;
     let namespace = &body.namespace;
-    tracing::info!("remember: text=\"{}...\" owner={} ns={}", truncate_str(text, 50), owner, namespace);
+    tracing::info!(
+        "remember: text=\"{}...\" owner={} ns={}",
+        truncate_str(text, 50),
+        owner,
+        namespace
+    );
 
     // Check storage quota before processing
     let text_bytes = text.as_bytes().len() as i64;
@@ -142,33 +153,56 @@ pub async fn remember(
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
-        &state.http_client, &state.config.sidecar_url,
+        &state.http_client,
+        &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
-        text.as_bytes(), owner, &state.config.package_id,
+        text.as_bytes(),
+        owner,
+        &state.config.package_id,
     );
     let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
     let vector = vector_result?;
     let encrypted = encrypted_result?;
 
     // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let sui_key = state.key_pool.next()
+    let sui_key = state
+        .key_pool
+        .next()
         .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
+        .ok_or_else(|| {
+            AppError::Internal(
+                "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                    .into(),
+            )
+        })?;
     let upload_result = walrus::upload_blob(
-        &state.http_client, &state.config.sidecar_url,
+        &state.http_client,
+        &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
-        &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
-    ).await?;
+        &encrypted,
+        50,
+        owner,
+        &sui_key,
+        namespace,
+        &state.config.package_id,
+    )
+    .await?;
     let blob_id = upload_result.blob_id;
 
     // Step 3: Store {vector, blobId, namespace} in Vector DB
     let blob_size = encrypted.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &vector, blob_size).await?;
+    state
+        .db
+        .insert_vector(&id, owner, namespace, &blob_id, &vector, blob_size)
+        .await?;
 
     tracing::info!(
         "remember complete: blob_id={}, owner={}, ns={}, dims={}",
-        blob_id, owner, namespace, vector.len()
+        blob_id,
+        owner,
+        namespace,
+        vector.len()
     );
 
     Ok(Json(RememberResponse {
@@ -199,74 +233,105 @@ pub async fn recall(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("recall: query=\"{}...\" owner={} ns={}", truncate_str(&body.query, 50), owner, namespace);
+    tracing::info!(
+        "recall: query=\"{}...\" owner={} ns={}",
+        truncate_str(&body.query, 50),
+        owner,
+        namespace
+    );
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth.delegate_key.as_deref()
+    let private_key = auth
+        .delegate_key
+        .as_deref()
         .or(state.config.sui_private_key.as_deref())
         .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+            AppError::Internal(
+                "Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into(),
+            )
         })?;
 
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
 
     // Step 2: Search Vector DB
-    let hits = state.db.search_similar(&query_vector, owner, namespace, body.limit).await?;
+    let hits = state
+        .db
+        .search_similar(&query_vector, owner, namespace, body.limit)
+        .await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
     let db = &state.db;
-    let tasks: Vec<_> = hits.iter().map(|hit| {
-        let walrus_client = &state.walrus_client;
-        let http_client = &state.http_client;
-        let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.clone();
-        let blob_id = hit.blob_id.clone();
-        let distance = hit.distance;
-        let private_key = private_key.to_string();
-        let package_id = state.config.package_id.clone();
-        let account_id = auth.account_id.clone();
-        async move {
-            // Download encrypted blob from Walrus (native Rust)
-            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                Ok(data) => data,
-                Err(AppError::BlobNotFound(msg)) => {
-                    // Blob expired on Walrus — clean up from DB reactively
-                    tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to download blob {}: {}", blob_id, e);
-                    return None;
-                }
-            };
-            // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
-                Ok(plaintext) => {
-                    match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
+    let tasks: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            let walrus_client = &state.walrus_client;
+            let http_client = &state.http_client;
+            let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_secret = state.config.sidecar_secret.clone();
+            let blob_id = hit.blob_id.clone();
+            let distance = hit.distance;
+            let private_key = private_key.to_string();
+            let package_id = state.config.package_id.clone();
+            let account_id = auth.account_id.clone();
+            async move {
+                // Download encrypted blob from Walrus (native Rust)
+                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                    Ok(data) => data,
+                    Err(AppError::BlobNotFound(msg)) => {
+                        // Blob expired on Walrus — clean up from DB reactively
+                        tracing::warn!("Blob expired, cleaning up: {}", msg);
+                        cleanup_expired_blob(db, &blob_id).await;
+                        return None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to download blob {}: {}", blob_id, e);
+                        return None;
+                    }
+                };
+                // Decrypt using SEAL (via sidecar HTTP)
+                match seal::seal_decrypt(
+                    http_client,
+                    &sidecar_url,
+                    sidecar_secret.as_deref(),
+                    &encrypted_data,
+                    &private_key,
+                    &package_id,
+                    &account_id,
+                )
+                .await
+                {
+                    Ok(plaintext) => match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult {
+                            blob_id,
+                            text,
+                            distance,
+                        }),
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
                             None
                         }
+                    },
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        let is_permanent = err_str.contains("Not enough shares")
+                            || err_str.contains("decrypt failed");
+                        if is_permanent {
+                            tracing::warn!(
+                                "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
+                                blob_id,
+                                e
+                            );
+                            cleanup_expired_blob(db, &blob_id).await;
+                        } else {
+                            tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                        }
+                        None
                     }
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    let is_permanent = err_str.contains("Not enough shares")
-                        || err_str.contains("decrypt failed");
-                    if is_permanent {
-                        tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
-                        cleanup_expired_blob(db, &blob_id).await;
-                    } else {
-                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
-                    }
-                    None
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let results: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
@@ -279,8 +344,6 @@ pub async fn recall(
 
     Ok(Json(RecallResponse { results, total }))
 }
-
-
 
 /// POST /api/remember/manual
 ///
@@ -295,7 +358,9 @@ pub async fn remember_manual(
     Json(body): Json<RememberManualRequest>,
 ) -> Result<Json<RememberManualResponse>, AppError> {
     if body.encrypted_data.is_empty() {
-        return Err(AppError::BadRequest("encrypted_data cannot be empty".into()));
+        return Err(AppError::BadRequest(
+            "encrypted_data cannot be empty".into(),
+        ));
     }
     if body.vector.is_empty() {
         return Err(AppError::BadRequest("vector cannot be empty".into()));
@@ -305,7 +370,9 @@ pub async fn remember_manual(
     let namespace = &body.namespace;
     tracing::info!(
         "remember_manual: vector_dims={} owner={} ns={}",
-        body.vector.len(), owner, namespace
+        body.vector.len(),
+        owner,
+        namespace
     );
 
     // Decode base64 → raw SEAL-encrypted bytes
@@ -317,9 +384,16 @@ pub async fn remember_manual(
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
     // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
-    let sui_key = state.key_pool.next()
+    let sui_key = state
+        .key_pool
+        .next()
         .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
+        .ok_or_else(|| {
+            AppError::Internal(
+                "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                    .into(),
+            )
+        })?;
 
     let upload = walrus::upload_blob(
         &state.http_client,
@@ -340,9 +414,17 @@ pub async fn remember_manual(
     // Store {vector, blobId, namespace} in Vector DB
     let blob_size = encrypted_bytes.len() as i64;
     let id = uuid::Uuid::new_v4().to_string();
-    state.db.insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size).await?;
+    state
+        .db
+        .insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size)
+        .await?;
 
-    tracing::info!("remember_manual complete: id={}, blob_id={}, ns={}", id, blob_id, namespace);
+    tracing::info!(
+        "remember_manual complete: id={}, blob_id={}, ns={}",
+        id,
+        blob_id,
+        namespace
+    );
 
     Ok(Json(RememberManualResponse {
         id,
@@ -351,7 +433,6 @@ pub async fn remember_manual(
         namespace: namespace.clone(),
     }))
 }
-
 
 /// POST /api/recall/manual
 ///
@@ -371,14 +452,25 @@ pub async fn recall_manual(
     let namespace = &body.namespace;
     tracing::info!(
         "recall_manual: vector_dims={} limit={} owner={} ns={}",
-        body.vector.len(), body.limit, owner, namespace
+        body.vector.len(),
+        body.limit,
+        owner,
+        namespace
     );
 
     // Search Vector DB — return blob IDs + distances only
-    let hits = state.db.search_similar(&body.vector, owner, namespace, body.limit).await?;
+    let hits = state
+        .db
+        .search_similar(&body.vector, owner, namespace, body.limit)
+        .await?;
     let total = hits.len();
 
-    tracing::info!("recall_manual complete: {} results for owner={} ns={}", total, owner, namespace);
+    tracing::info!(
+        "recall_manual complete: {} results for owner={} ns={}",
+        total,
+        owner,
+        namespace
+    );
 
     Ok(Json(RecallManualResponse {
         results: hits,
@@ -403,11 +495,28 @@ pub async fn analyze(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    tracing::info!("analyze: text=\"{}...\" owner={} ns={}", truncate_str(&body.text, 50), owner, namespace);
+    tracing::info!(
+        "analyze: text=\"{}...\" owner={} ns={}",
+        truncate_str(&body.text, 50),
+        owner,
+        namespace
+    );
 
     // Step 1: Extract facts using LLM
-    let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
-    tracing::info!("  → Extracted {} facts", facts.len());
+    let extracted = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
+    let raw_fact_count = extracted.raw_count;
+    let facts = extracted.facts;
+    let total_weight = rate_limit::analyze_total_weight(facts.len());
+    let additional_weight = rate_limit::analyze_additional_weight(facts.len());
+    tracing::info!(
+        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} additional_weight={})",
+        raw_fact_count,
+        facts.len(),
+        MAX_ANALYZE_FACTS,
+        ANALYZE_CONCURRENCY,
+        total_weight,
+        additional_weight
+    );
 
     if facts.is_empty() {
         return Ok(Json(AnalyzeResponse {
@@ -416,6 +525,8 @@ pub async fn analyze(
             owner: owner.clone(),
         }));
     }
+
+    rate_limit::charge_explicit_weight(&state, &auth, additional_weight, "/api/analyze").await?;
 
     // Check storage quota before processing all facts
     let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
@@ -467,7 +578,7 @@ pub async fn analyze(
         }
     }).collect();
 
-    let results = futures::future::join_all(tasks).await;
+    let results = collect_bounded_results(tasks, ANALYZE_CONCURRENCY).await;
 
     // Collect successes, fail on first error (same semantics as sequential version)
     let mut stored_facts = Vec::with_capacity(results.len());
@@ -476,7 +587,11 @@ pub async fn analyze(
     }
 
     let total = stored_facts.len();
-    tracing::info!("analyze complete: {} facts stored for owner={}", total, owner);
+    tracing::info!(
+        "analyze complete: {} facts stored for owner={}",
+        total,
+        owner
+    );
 
     Ok(Json(AnalyzeResponse {
         facts: stored_facts,
@@ -519,6 +634,11 @@ struct ChatMessageResp {
     content: String,
 }
 
+struct ExtractedFacts {
+    facts: Vec<String>,
+    raw_count: usize,
+}
+
 const FACT_EXTRACTION_PROMPT: &str = r#"You are a fact extraction system. Given a text or conversation, extract distinct factual statements about the user that are worth remembering for future interactions.
 
 Rules:
@@ -544,10 +664,11 @@ async fn extract_facts_llm(
     client: &reqwest::Client,
     config: &Config,
     text: &str,
-) -> Result<Vec<String>, AppError> {
-    let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
-        AppError::Internal("OPENAI_API_KEY required for fact extraction".into())
-    })?;
+) -> Result<ExtractedFacts, AppError> {
+    let api_key = config
+        .openai_api_key
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OPENAI_API_KEY required for fact extraction".into()))?;
 
     let url = format!("{}/chat/completions", config.openai_api_base);
 
@@ -577,13 +698,15 @@ async fn extract_facts_llm(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(AppError::Internal(format!(
-            "LLM API error ({}): {}", status, body
+            "LLM API error ({}): {}",
+            status, body
         )));
     }
 
-    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse LLM response: {}", e))
-    })?;
+    let api_resp: ChatCompletionResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
     let content = api_resp
         .choices
@@ -591,18 +714,37 @@ async fn extract_facts_llm(
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_default();
 
-    // Parse response: one fact per line, skip "NONE"
+    Ok(parse_extracted_facts(&content))
+}
+
+fn parse_extracted_facts(content: &str) -> ExtractedFacts {
     if content == "NONE" || content.is_empty() {
-        return Ok(vec![]);
+        return ExtractedFacts {
+            facts: vec![],
+            raw_count: 0,
+        };
     }
 
-    let facts: Vec<String> = content
+    let mut facts: Vec<String> = content
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && l != "NONE")
         .collect();
 
-    Ok(facts)
+    let raw_count = facts.len();
+    facts.truncate(MAX_ANALYZE_FACTS);
+
+    ExtractedFacts { facts, raw_count }
+}
+
+async fn collect_bounded_results<F, T, E>(tasks: Vec<F>, concurrency: usize) -> Vec<Result<T, E>>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    stream::iter(tasks)
+        .buffer_unordered(concurrency)
+        .collect()
+        .await
 }
 
 /// GET /health
@@ -611,6 +753,70 @@ pub async fn health() -> Json<HealthResponse> {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        collect_bounded_results, parse_extracted_facts, ANALYZE_CONCURRENCY, MAX_ANALYZE_FACTS,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn parse_extracted_facts_ignores_none_and_blank_lines() {
+        let parsed = parse_extracted_facts("NONE\n\n");
+        assert_eq!(parsed.raw_count, 0);
+        assert!(parsed.facts.is_empty());
+
+        let parsed = parse_extracted_facts("Fact A\n\nFact B\n  \n");
+        assert_eq!(parsed.raw_count, 2);
+        assert_eq!(
+            parsed.facts,
+            vec!["Fact A".to_string(), "Fact B".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_extracted_facts_truncates_to_server_cap() {
+        let content = (0..(MAX_ANALYZE_FACTS + 3))
+            .map(|i| format!("Fact {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = parse_extracted_facts(&content);
+
+        assert_eq!(parsed.raw_count, MAX_ANALYZE_FACTS + 3);
+        assert_eq!(parsed.facts.len(), MAX_ANALYZE_FACTS);
+        assert_eq!(parsed.facts.first().map(String::as_str), Some("Fact 0"));
+        assert_eq!(parsed.facts.last().map(String::as_str), Some("Fact 19"));
+    }
+
+    #[tokio::test]
+    async fn bounded_collection_limits_concurrency() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let tasks: Vec<_> = (0..12)
+            .map(|_| {
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                async move {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now_active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<usize, ()>(now_active)
+                }
+            })
+            .collect();
+
+        let results = collect_bounded_results(tasks, ANALYZE_CONCURRENCY).await;
+        assert_eq!(results.len(), 12);
+        assert!(peak.load(Ordering::SeqCst) <= ANALYZE_CONCURRENCY);
+    }
 }
 
 /// POST /api/ask
@@ -632,62 +838,90 @@ pub async fn ask(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     let limit = body.limit.unwrap_or(5);
-    tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
+    tracing::info!(
+        "ask: question=\"{}...\" owner={} ns={}",
+        truncate_str(&body.question, 50),
+        owner,
+        namespace
+    );
 
     // Step 1: Recall relevant memories
-    let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
-    let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
+    let query_vector =
+        generate_embedding(&state.http_client, &state.config, &body.question).await?;
+    let hits = state
+        .db
+        .search_similar(&query_vector, owner, namespace, limit)
+        .await?;
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth.delegate_key.as_deref()
+    let private_key = auth
+        .delegate_key
+        .as_deref()
         .or(state.config.sui_private_key.as_deref())
         .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+            AppError::Internal(
+                "Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into(),
+            )
         })?;
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
-    let tasks: Vec<_> = hits.iter().map(|hit| {
-        let walrus_client = &state.walrus_client;
-        let http_client = &state.http_client;
-        let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.clone();
-        let blob_id = hit.blob_id.clone();
-        let distance = hit.distance;
-        let private_key = private_key.to_string();
-        let package_id = state.config.package_id.clone();
-        let account_id = auth.account_id.clone();
-        async move {
-            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                Ok(data) => data,
-                Err(AppError::BlobNotFound(msg)) => {
-                    // Blob expired on Walrus — clean up from DB reactively
-                    tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!("Download failed for {}: {}", blob_id, e);
-                    return None;
-                }
-            };
-            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
-                Ok(plaintext) => {
-                    match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
+    let tasks: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            let walrus_client = &state.walrus_client;
+            let http_client = &state.http_client;
+            let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_secret = state.config.sidecar_secret.clone();
+            let blob_id = hit.blob_id.clone();
+            let distance = hit.distance;
+            let private_key = private_key.to_string();
+            let package_id = state.config.package_id.clone();
+            let account_id = auth.account_id.clone();
+            async move {
+                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                    Ok(data) => data,
+                    Err(AppError::BlobNotFound(msg)) => {
+                        // Blob expired on Walrus — clean up from DB reactively
+                        tracing::warn!("Blob expired, cleaning up: {}", msg);
+                        cleanup_expired_blob(db, &blob_id).await;
+                        return None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Download failed for {}: {}", blob_id, e);
+                        return None;
+                    }
+                };
+                match seal::seal_decrypt(
+                    http_client,
+                    &sidecar_url,
+                    sidecar_secret.as_deref(),
+                    &encrypted_data,
+                    &private_key,
+                    &package_id,
+                    &account_id,
+                )
+                .await
+                {
+                    Ok(plaintext) => match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult {
+                            blob_id,
+                            text,
+                            distance,
+                        }),
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8: {}", e);
                             None
                         }
+                    },
+                    Err(e) => {
+                        tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                        None
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
-                    None
-                }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
@@ -702,7 +936,8 @@ pub async fn ask(
     let memory_context = if memories.is_empty() {
         "No memories found for this user yet.".to_string()
     } else {
-        let lines: Vec<String> = memories.iter()
+        let lines: Vec<String> = memories
+            .iter()
             .map(|m| format!("- {} (relevance: {:.2})", m.text, 1.0 - m.distance))
             .collect();
         format!("Known facts about this user:\n{}", lines.join("\n"))
@@ -715,20 +950,29 @@ pub async fn ask(
     );
 
     // Step 3: Call LLM
-    let api_key = state.config.openai_api_key.as_ref().ok_or_else(|| {
-        AppError::Internal("OPENAI_API_KEY required for /api/ask".into())
-    })?;
+    let api_key = state
+        .config
+        .openai_api_key
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OPENAI_API_KEY required for /api/ask".into()))?;
     let url = format!("{}/chat/completions", state.config.openai_api_base);
 
-    let resp = state.http_client
+    let resp = state
+        .http_client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&ChatCompletionRequest {
             model: "openai/gpt-4o-mini".to_string(),
             messages: vec![
-                ChatMessage { role: "system".to_string(), content: system_prompt },
-                ChatMessage { role: "user".to_string(), content: body.question.clone() },
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: body.question.clone(),
+                },
             ],
             temperature: 0.7,
         })
@@ -739,20 +983,30 @@ pub async fn ask(
     if !resp.status().is_success() {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!("LLM error ({}): {}", status, body_text)));
+        return Err(AppError::Internal(format!(
+            "LLM error ({}): {}",
+            status, body_text
+        )));
     }
 
-    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse LLM response: {}", e))
-    })?;
+    let api_resp: ChatCompletionResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
-    let answer = api_resp.choices.first()
+    let answer = api_resp
+        .choices
+        .first()
         .map(|c| c.message.content.trim().to_string())
         .unwrap_or_else(|| "No response from LLM".to_string());
 
     tracing::info!("ask complete: answer length={} chars", answer.len());
 
-    Ok(Json(AskResponse { answer, memories_used, memories }))
+    Ok(Json(AskResponse {
+        answer,
+        memories_used,
+        memories,
+    }))
 }
 
 // ============================================================
@@ -767,14 +1021,12 @@ async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str) {
         Ok(rows) => {
             tracing::info!(
                 "reactive cleanup: deleted {} vector entries for expired blob_id={}",
-                rows, blob_id
+                rows,
+                blob_id
             );
         }
         Err(e) => {
-            tracing::error!(
-                "reactive cleanup failed for blob_id={}: {}",
-                blob_id, e
-            );
+            tracing::error!("reactive cleanup failed for blob_id={}: {}", blob_id, e);
         }
     }
 }
@@ -806,7 +1058,9 @@ pub async fn restore(
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // Use delegate key for SEAL decryption
-    let private_key = auth.delegate_key.as_deref()
+    let private_key = auth
+        .delegate_key
+        .as_deref()
         .or(state.config.sui_private_key.as_deref())
         .ok_or_else(|| {
             AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for restore".into())
@@ -814,7 +1068,11 @@ pub async fn restore(
         .to_string();
 
     // Step 1: Discover all blob_ids from on-chain (source of truth)
-    tracing::info!("restore: querying chain for blobs owner={} ns={}", owner, namespace);
+    tracing::info!(
+        "restore: querying chain for blobs owner={} ns={}",
+        owner,
+        namespace
+    );
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
@@ -822,13 +1080,15 @@ pub async fn restore(
         owner,
         Some(namespace),
         Some(&state.config.package_id),
-    ).await?;
+    )
+    .await?;
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
     let total = all_blob_ids.len();
 
     // Build blob_id → package_id lookup from on-chain metadata
     // Each blob may have been encrypted with a different package_id (e.g. after contract upgrades)
-    let blob_package_ids: std::collections::HashMap<String, String> = on_chain_blobs.iter()
+    let blob_package_ids: std::collections::HashMap<String, String> = on_chain_blobs
+        .iter()
         .filter(|b| !b.package_id.is_empty())
         .map(|b| (b.blob_id.clone(), b.package_id.clone()))
         .collect();
@@ -845,8 +1105,10 @@ pub async fn restore(
 
     // Step 2: Check which blobs already exist in local DB → only restore missing ones
     let existing_blob_ids = state.db.get_blobs_by_namespace(owner, namespace).await?;
-    let existing_set: std::collections::HashSet<&str> = existing_blob_ids.iter().map(|s| s.as_str()).collect();
-    let all_missing: Vec<String> = all_blob_ids.iter()
+    let existing_set: std::collections::HashSet<&str> =
+        existing_blob_ids.iter().map(|s| s.as_str()).collect();
+    let all_missing: Vec<String> = all_blob_ids
+        .iter()
         .filter(|id| !existing_set.contains(id.as_str()))
         .cloned()
         .collect();
@@ -859,7 +1121,11 @@ pub async fn restore(
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
         "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",
-        total, existing_blob_ids.len(), missing_blob_ids.len(), limit, namespace
+        total,
+        existing_blob_ids.len(),
+        missing_blob_ids.len(),
+        limit,
+        namespace
     );
 
     if missing_blob_ids.is_empty() {
@@ -874,24 +1140,27 @@ pub async fn restore(
 
     // Step 3: Download all missing blobs from Walrus concurrently
     let db = &state.db;
-    let download_tasks: Vec<_> = missing_blob_ids.iter().map(|blob_id| {
-        let walrus_client = &state.walrus_client;
-        let blob_id = blob_id.clone();
-        async move {
-            match walrus::download_blob(walrus_client, &blob_id).await {
-                Ok(data) => Some((blob_id, data)),
-                Err(AppError::BlobNotFound(msg)) => {
-                    tracing::warn!("restore: blob expired, skipping: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!("restore: download failed for {}: {}", blob_id, e);
-                    None
+    let download_tasks: Vec<_> = missing_blob_ids
+        .iter()
+        .map(|blob_id| {
+            let walrus_client = &state.walrus_client;
+            let blob_id = blob_id.clone();
+            async move {
+                match walrus::download_blob(walrus_client, &blob_id).await {
+                    Ok(data) => Some((blob_id, data)),
+                    Err(AppError::BlobNotFound(msg)) => {
+                        tracing::warn!("restore: blob expired, skipping: {}", msg);
+                        cleanup_expired_blob(db, &blob_id).await;
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("restore: download failed for {}: {}", blob_id, e);
+                        None
+                    }
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let downloaded: Vec<(String, Vec<u8>)> = futures::future::join_all(download_tasks)
         .await
@@ -915,7 +1184,11 @@ pub async fn restore(
         }));
     }
 
-    tracing::info!("restore: downloaded {}/{} blobs, decrypting (3 concurrent)...", downloaded.len(), missing_blob_ids.len());
+    tracing::info!(
+        "restore: downloaded {}/{} blobs, decrypting (3 concurrent)...",
+        downloaded.len(),
+        missing_blob_ids.len()
+    );
 
     // Step 4: SEAL decrypt with bounded concurrency (3 at a time)
     // Use per-blob package_id from on-chain metadata, fall back to current server config
@@ -927,24 +1200,30 @@ pub async fn restore(
             let sidecar_secret = state.config.sidecar_secret.clone();
             let private_key = private_key.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
-            let package_id = blob_package_ids.get(&blob_id)
+            let package_id = blob_package_ids
+                .get(&blob_id)
                 .cloned()
                 .unwrap_or_else(|| state.config.package_id.clone());
             let account_id = auth.account_id.clone();
             async move {
                 match seal::seal_decrypt(
-                    http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data,
-                    &private_key, &package_id, &account_id,
-                ).await {
-                    Ok(plaintext) => {
-                        match String::from_utf8(plaintext) {
-                            Ok(text) => Some((blob_id, text)),
-                            Err(e) => {
-                                tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
-                                None
-                            }
+                    http_client,
+                    &sidecar_url,
+                    sidecar_secret.as_deref(),
+                    &encrypted_data,
+                    &private_key,
+                    &package_id,
+                    &account_id,
+                )
+                .await
+                {
+                    Ok(plaintext) => match String::from_utf8(plaintext) {
+                        Ok(text) => Some((blob_id, text)),
+                        Err(e) => {
+                            tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
+                            None
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!("restore: decrypt failed for {}: {}", blob_id, e);
                         None
@@ -957,24 +1236,31 @@ pub async fn restore(
         .await;
 
     let decrypted_texts: Vec<(String, String)> = decrypt_results.into_iter().flatten().collect();
-    tracing::info!("restore: decrypted {}/{} blobs", decrypted_texts.len(), missing_blob_ids.len());
+    tracing::info!(
+        "restore: decrypted {}/{} blobs",
+        decrypted_texts.len(),
+        missing_blob_ids.len()
+    );
 
     // Step 5: Re-embed all decrypted texts concurrently
-    let embed_tasks: Vec<_> = decrypted_texts.iter().map(|(blob_id, text)| {
-        let http_client = &state.http_client;
-        let config = state.config.clone();
-        let blob_id = blob_id.clone();
-        let text = text.clone();
-        async move {
-            match generate_embedding(http_client, &config, &text).await {
-                Ok(vector) => Some((blob_id, vector)),
-                Err(e) => {
-                    tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
-                    None
+    let embed_tasks: Vec<_> = decrypted_texts
+        .iter()
+        .map(|(blob_id, text)| {
+            let http_client = &state.http_client;
+            let config = state.config.clone();
+            let blob_id = blob_id.clone();
+            let text = text.clone();
+            async move {
+                match generate_embedding(http_client, &config, &text).await {
+                    Ok(vector) => Some((blob_id, vector)),
+                    Err(e) => {
+                        tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
+                        None
+                    }
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let results: Vec<(String, Vec<f32>)> = futures::future::join_all(embed_tasks)
         .await
@@ -993,14 +1279,19 @@ pub async fn restore(
             );
             0
         });
-        state.db
+        state
+            .db
             .insert_vector(&id, owner, namespace, blob_id, vector, blob_size)
             .await?;
     }
 
     tracing::info!(
         "restore complete: restored={} skipped={} total={} owner={} ns={}",
-        restored, skipped, total, owner, namespace
+        restored,
+        skipped,
+        total,
+        owner,
+        namespace
     );
 
     Ok(Json(RestoreResponse {
@@ -1022,7 +1313,8 @@ pub async fn sponsor_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor", state.config.sidecar_url);
-    let mut req = state.http_client
+    let mut req = state
+        .http_client
         .post(&url)
         .header("Content-Type", "application/json")
         .body(body.to_vec());
@@ -1036,7 +1328,9 @@ pub async fn sponsor_proxy(
 
     let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    let resp_body = resp.bytes().await
+    let resp_body = resp
+        .bytes()
+        .await
         .map_err(|e| AppError::Internal(format!("Sponsor proxy read failed: {}", e)))?;
 
     Ok(Response::builder()
@@ -1052,7 +1346,8 @@ pub async fn sponsor_execute_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state.http_client
+    let mut req = state
+        .http_client
         .post(&url)
         .header("Content-Type", "application/json")
         .body(body.to_vec());
@@ -1066,7 +1361,9 @@ pub async fn sponsor_execute_proxy(
 
     let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    let resp_body = resp.bytes().await
+    let resp_body = resp
+        .bytes()
+        .await
         .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
 
     Ok(Response::builder()
