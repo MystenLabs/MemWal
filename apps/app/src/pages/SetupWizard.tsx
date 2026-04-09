@@ -134,7 +134,7 @@ export default function SetupWizard() {
                     ],
                 })
 
-                const result = await signAndExecute({ transaction: tx, signingKey: privateKeyHex, signingPublicKey: publicKeyHex })
+                const result = await signAndExecute({ transaction: tx })
                 await suiClient.waitForTransaction({ digest: result.digest })
             } else {
                 // Step A: Create account first (now creates a shared object)
@@ -149,7 +149,7 @@ export default function SetupWizard() {
                     ],
                 })
 
-                const createResult = await signAndExecute({ transaction: tx, signingKey: privateKeyHex, signingPublicKey: publicKeyHex })
+                const createResult = await signAndExecute({ transaction: tx })
                 await suiClient.waitForTransaction({ digest: createResult.digest })
 
                 // Find the created MemWalAccount object (now shared)
@@ -180,7 +180,7 @@ export default function SetupWizard() {
                     ],
                 })
 
-                const addResult = await signAndExecute({ transaction: tx2, signingKey: privateKeyHex, signingPublicKey: publicKeyHex })
+                const addResult = await signAndExecute({ transaction: tx2 })
                 await suiClient.waitForTransaction({ digest: addResult.digest })
             }
 

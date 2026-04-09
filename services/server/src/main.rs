@@ -7,7 +7,7 @@ mod sui;
 mod types;
 mod walrus;
 
-use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
+use axum::{middleware, routing::{get, post}, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -122,18 +122,18 @@ async fn main() {
     });
 
     // Build routes
-    // General protected routes (require Ed25519 signature + onchain verification).
-    // Body size is implicitly bounded to 1 MB by the auth middleware's to_bytes call.
-    // Router::layer runs middleware bottom-to-top (last added runs first).
-    // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
-    let api_routes = Router::new()
+    // Protected routes (require Ed25519 signature + onchain verification)
+    let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
+
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        // Router::layer runs middleware bottom-to-top (last added runs first).
+        // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,
@@ -143,30 +143,14 @@ async fn main() {
             auth::verify_signature,
         ));
 
-    // Sponsor proxy routes — auth-gated with a tight 16 KB body limit to
-    // prevent large-payload abuse of the Enoki gas sponsorship budget.
-    // DefaultBodyLimit is applied outermost (last layer added = first to run)
-    // so oversized bodies are rejected before the auth middleware reads them.
-    let sponsor_routes = Router::new()
-        .route("/sponsor", post(routes::sponsor_proxy))
-        .route("/sponsor/execute", post(routes::sponsor_execute_proxy))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit::rate_limit_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::verify_signature_sponsor,
-        ))
-        .layer(DefaultBodyLimit::max(16_384));
-
-    // Public routes (no auth, no rate limit)
+    // Public routes
     let public_routes = Router::new()
-        .route("/health", get(routes::health));
+        .route("/health", get(routes::health))
+        .route("/sponsor", post(routes::sponsor_proxy))
+        .route("/sponsor/execute", post(routes::sponsor_execute_proxy));
 
     let app = Router::new()
-        .merge(api_routes)
-        .merge(sponsor_routes)
+        .merge(protected_routes)
         .merge(public_routes)
         .with_state(state)
         .layer(CorsLayer::permissive())

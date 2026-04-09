@@ -1017,22 +1017,10 @@ pub async fn restore(
 // ============================================================
 
 /// POST /sponsor — proxy to sidecar POST /sponsor
-///
-/// Requires valid auth (Ed25519 signature) — enforced by protected_routes middleware.
-/// Validates that the body is well-formed JSON containing `transactionBlockKindBytes`.
 pub async fn sponsor_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
-    // Basic JSON validation: must parse and contain the expected field.
-    let parsed: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| AppError::BadRequest("Request body must be valid JSON".to_string()))?;
-    if parsed.get("transactionBlockKindBytes").is_none() {
-        return Err(AppError::BadRequest(
-            "Missing required field: transactionBlockKindBytes".to_string(),
-        ));
-    }
-
     let url = format!("{}/sponsor", state.config.sidecar_url);
     let mut req = state.http_client
         .post(&url)
@@ -1059,22 +1047,10 @@ pub async fn sponsor_proxy(
 }
 
 /// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
-///
-/// Requires valid auth (Ed25519 signature) — enforced by protected_routes middleware.
-/// Validates that the body is well-formed JSON containing `digest`.
 pub async fn sponsor_execute_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
-    // Basic JSON validation: must parse and contain the expected field.
-    let parsed: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| AppError::BadRequest("Request body must be valid JSON".to_string()))?;
-    if parsed.get("digest").is_none() {
-        return Err(AppError::BadRequest(
-            "Missing required field: digest".to_string(),
-        ));
-    }
-
     let url = format!("{}/sponsor/execute", state.config.sidecar_url);
     let mut req = state.http_client
         .post(&url)

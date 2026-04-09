@@ -97,8 +97,6 @@ fn endpoint_weight(path: &str) -> i64 {
         "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,           // download + decrypt + re-embed
         "/api/ask" => 2,               // recall + LLM
-        "/sponsor" => 5,               // Enoki gas sponsorship — expensive on-chain operation
-        "/sponsor/execute" => 5,       // Enoki execute — submits sponsored transaction on-chain
         _ => 1,                        // recall, recall/manual, etc.
     }
 }
