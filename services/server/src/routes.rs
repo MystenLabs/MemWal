@@ -503,24 +503,14 @@ pub async fn analyze(
         namespace
     );
 
-    // Reserve the worst-case additional cost up front so the expensive LLM call
-    // cannot run before quota is checked.
-    let reserved_additional_weight = rate_limit::analyze_additional_weight(MAX_ANALYZE_FACTS);
-    rate_limit::charge_explicit_weight(
-        &state,
-        &auth,
-        reserved_additional_weight,
-        "/api/analyze",
-    )
-    .await?;
-
     // Step 1: Extract facts using LLM
     let extracted = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
+    let reserved_additional_weight = rate_limit::analyze_additional_weight(facts.len());
     let total_weight = rate_limit::analyze_total_weight(facts.len());
     tracing::info!(
-        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} reserved_additional_weight={})",
+        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} additional_weight={})",
         raw_fact_count,
         facts.len(),
         MAX_ANALYZE_FACTS,
@@ -536,6 +526,14 @@ pub async fn analyze(
             owner: owner.clone(),
         }));
     }
+
+    rate_limit::charge_explicit_weight(
+        &state,
+        &auth,
+        reserved_additional_weight,
+        "/api/analyze",
+    )
+    .await?;
 
     // Check storage quota before processing all facts
     let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();

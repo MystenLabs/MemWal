@@ -91,7 +91,7 @@ impl RateLimitConfig {
 /// Expensive endpoints (embedding + encrypt + Walrus upload + LLM)
 /// consume more of the rate limit budget than cheap read endpoints.
 pub const ANALYZE_BASE_WEIGHT: i64 = 10;
-const ANALYZE_PER_FACT_WEIGHT: i64 = 2;
+const ANALYZE_PER_FACT_WEIGHT: i64 = 1;
 
 pub fn endpoint_weight(path: &str) -> i64 {
     match path {
@@ -105,11 +105,11 @@ pub fn endpoint_weight(path: &str) -> i64 {
 }
 
 pub fn analyze_total_weight(fact_count: usize) -> i64 {
-    ANALYZE_BASE_WEIGHT.max((fact_count as i64) * ANALYZE_PER_FACT_WEIGHT)
+    ANALYZE_BASE_WEIGHT + (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
 }
 
 pub fn analyze_additional_weight(fact_count: usize) -> i64 {
-    (analyze_total_weight(fact_count) - ANALYZE_BASE_WEIGHT).max(0)
+    (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
 }
 
 // ============================================================
@@ -561,16 +561,16 @@ mod tests {
     #[test]
     fn analyze_weight_never_drops_below_base() {
         assert_eq!(analyze_total_weight(0), ANALYZE_BASE_WEIGHT);
-        assert_eq!(analyze_total_weight(1), ANALYZE_BASE_WEIGHT);
+        assert_eq!(analyze_total_weight(1), ANALYZE_BASE_WEIGHT + 1);
         assert_eq!(analyze_additional_weight(0), 0);
-        assert_eq!(analyze_additional_weight(1), 0);
+        assert_eq!(analyze_additional_weight(1), 1);
     }
 
     #[test]
     fn analyze_weight_scales_with_fact_count() {
-        assert_eq!(analyze_total_weight(5), ANALYZE_BASE_WEIGHT);
-        assert_eq!(analyze_total_weight(6), 12);
-        assert_eq!(analyze_additional_weight(6), 2);
-        assert_eq!(analyze_additional_weight(20), 30);
+        assert_eq!(analyze_total_weight(5), 15);
+        assert_eq!(analyze_total_weight(6), 16);
+        assert_eq!(analyze_additional_weight(6), 6);
+        assert_eq!(analyze_additional_weight(20), 20);
     }
 }
