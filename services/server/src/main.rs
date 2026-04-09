@@ -156,7 +156,7 @@ async fn main() {
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::verify_signature,
+            auth::verify_signature_sponsor,
         ))
         .layer(DefaultBodyLimit::max(16_384));
 
