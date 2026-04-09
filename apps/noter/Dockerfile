@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal Noter — Dockerfile
+# MemWal Noter — Dockerfile (v2 — Enoki build args)
 #
 # ⚠️  BUILD FROM MONOREPO ROOT:
 #     docker build -f apps/noter/Dockerfile -t memwal-noter .
