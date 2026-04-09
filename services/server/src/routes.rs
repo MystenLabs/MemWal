@@ -526,11 +526,11 @@ pub async fn analyze(
         }));
     }
 
-    rate_limit::charge_explicit_weight(&state, &auth, additional_weight, "/api/analyze").await?;
-
     // Check storage quota before processing all facts
     let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
     rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
+
+    rate_limit::charge_explicit_weight(&state, &auth, additional_weight, "/api/analyze").await?;
 
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
     // Each fact gets its own key from the pool so sidecar can upload them in parallel
@@ -741,10 +741,17 @@ async fn collect_bounded_results<F, T, E>(tasks: Vec<F>, concurrency: usize) -> 
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
-    stream::iter(tasks)
+    let mut indexed_results = stream::iter(tasks)
+        .enumerate()
+        .map(|(idx, task)| async move { (idx, task.await) })
         .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    indexed_results.sort_by_key(|(idx, _)| *idx);
+    indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
         .collect()
-        .await
 }
 
 /// GET /health
