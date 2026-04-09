@@ -13,6 +13,7 @@ use crate::walrus;
 
 const MAX_ANALYZE_FACTS: usize = 20;
 const ANALYZE_CONCURRENCY: usize = 5;
+const ANALYZE_MAX_OUTPUT_TOKENS: u32 = 256;
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
@@ -502,20 +503,30 @@ pub async fn analyze(
         namespace
     );
 
+    // Reserve the worst-case additional cost up front so the expensive LLM call
+    // cannot run before quota is checked.
+    let reserved_additional_weight = rate_limit::analyze_additional_weight(MAX_ANALYZE_FACTS);
+    rate_limit::charge_explicit_weight(
+        &state,
+        &auth,
+        reserved_additional_weight,
+        "/api/analyze",
+    )
+    .await?;
+
     // Step 1: Extract facts using LLM
     let extracted = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
     let total_weight = rate_limit::analyze_total_weight(facts.len());
-    let additional_weight = rate_limit::analyze_additional_weight(facts.len());
     tracing::info!(
-        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} additional_weight={})",
+        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} reserved_additional_weight={})",
         raw_fact_count,
         facts.len(),
         MAX_ANALYZE_FACTS,
         ANALYZE_CONCURRENCY,
         total_weight,
-        additional_weight
+        reserved_additional_weight
     );
 
     if facts.is_empty() {
@@ -529,8 +540,6 @@ pub async fn analyze(
     // Check storage quota before processing all facts
     let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
     rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
-
-    rate_limit::charge_explicit_weight(&state, &auth, additional_weight, "/api/analyze").await?;
 
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
     // Each fact gets its own key from the pool so sidecar can upload them in parallel
@@ -610,6 +619,7 @@ struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: f32,
+    max_tokens: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -689,6 +699,7 @@ async fn extract_facts_llm(
                 },
             ],
             temperature: 0.1,
+            max_tokens: ANALYZE_MAX_OUTPUT_TOKENS,
         })
         .send()
         .await
@@ -982,6 +993,7 @@ pub async fn ask(
                 },
             ],
             temperature: 0.7,
+            max_tokens: 512,
         })
         .send()
         .await
