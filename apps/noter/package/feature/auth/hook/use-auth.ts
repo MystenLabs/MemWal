@@ -6,6 +6,7 @@
 "use client";
 
 import { useCallback, useEffect } from "react";
+import { useDisconnectWallet } from "@mysten/dapp-kit";
 import { useAtom, useSetAtom } from "jotai";
 import {
   authAtom,
@@ -22,6 +23,9 @@ export function useAuth() {
   const setAuthenticated = useSetAtom(setAuthenticatedAtom);
   const clearAuth = useSetAtom(clearAuthAtom);
   const setLoading = useSetAtom(setLoadingAtom);
+
+  // Wallet disconnect (clears dapp-kit autoConnect state)
+  const { mutateAsync: disconnectWallet } = useDisconnectWallet();
 
   // tRPC mutations
   const connectEnokiMutation = trpc.auth.connectEnoki.useMutation();
@@ -118,18 +122,23 @@ export function useAuth() {
     [connectDelegateKeyMutation, setSession, setAuthenticated, setLoading]
   );
 
-  /** Logout — clear session and auth state. */
+  /** Logout — clear session, auth state, and disconnect wallet (prevents autoConnect). */
   const logout = useCallback(async () => {
     try {
       if (session?.sessionId) {
         await logoutMutation.mutateAsync({ sessionId: session.sessionId });
       }
-      clearAuth();
     } catch (error) {
       console.error("Logout failed:", error);
-      clearAuth();
     }
-  }, [session, logoutMutation, clearAuth]);
+    // Always disconnect wallet and clear auth, even if tRPC logout fails
+    try {
+      await disconnectWallet();
+    } catch {
+      // Wallet may already be disconnected
+    }
+    clearAuth();
+  }, [session, logoutMutation, disconnectWallet, clearAuth]);
 
   return {
     ...auth,
