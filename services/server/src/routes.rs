@@ -143,7 +143,6 @@ pub async fn remember(
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
         &state.http_client, &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         text.as_bytes(), owner, &state.config.package_id,
     );
     let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -156,7 +155,6 @@ pub async fn remember(
         .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
     ).await?;
     let blob_id = upload_result.blob_id;
@@ -220,7 +218,6 @@ pub async fn recall(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -242,7 +239,7 @@ pub async fn recall(
                 }
             };
             // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -324,7 +321,6 @@ pub async fn remember_manual(
     let upload = walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         &encrypted_bytes,
         50,
         owner,
@@ -440,7 +436,6 @@ pub async fn analyze(
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
             let encrypt_fut = seal::seal_encrypt(
                 &state.http_client, &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
                 fact_text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -450,7 +445,6 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
                 &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
             ).await?;
 
@@ -651,7 +645,6 @@ pub async fn ask(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -671,7 +664,7 @@ pub async fn ask(
                     return None;
                 }
             };
-            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -818,7 +811,6 @@ pub async fn restore(
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         owner,
         Some(namespace),
         Some(&state.config.package_id),
@@ -924,7 +916,6 @@ pub async fn restore(
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
             let private_key = private_key.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids.get(&blob_id)
@@ -933,7 +924,7 @@ pub async fn restore(
             let account_id = auth.account_id.clone();
             async move {
                 match seal::seal_decrypt(
-                    http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data,
+                    http_client, &sidecar_url, &encrypted_data,
                     &private_key, &package_id, &account_id,
                 ).await {
                     Ok(plaintext) => {
@@ -1022,14 +1013,10 @@ pub async fn sponsor_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor", state.config.sidecar_url);
-    let mut req = state.http_client
+    let resp = state.http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(body.to_vec());
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        .body(body.to_vec())
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
@@ -1052,14 +1039,10 @@ pub async fn sponsor_execute_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state.http_client
+    let resp = state.http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(body.to_vec());
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        .body(body.to_vec())
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;

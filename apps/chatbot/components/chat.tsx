@@ -88,13 +88,13 @@ export function Chat({
   });
   const [memwalKey, setMemwalKey] = useState(() => {
     if (typeof window !== 'undefined') {
-      return sessionStorage.getItem('memwalKey') || '';
+      return localStorage.getItem('memwalKey') || '';
     }
     return '';
   });
   const [memwalAccountId, setMemwalAccountId] = useState(() => {
     if (typeof window !== 'undefined') {
-      return sessionStorage.getItem('memwalAccountId') || '';
+      return localStorage.getItem('memwalAccountId') || '';
     }
     return '';
   });
@@ -115,18 +115,18 @@ export function Chat({
   useEffect(() => {
     memwalKeyRef.current = memwalKey;
     if (memwalKey) {
-      sessionStorage.setItem('memwalKey', memwalKey);
+      localStorage.setItem('memwalKey', memwalKey);
     } else {
-      sessionStorage.removeItem('memwalKey');
+      localStorage.removeItem('memwalKey');
     }
   }, [memwalKey]);
 
   useEffect(() => {
     memwalAccountIdRef.current = memwalAccountId;
     if (memwalAccountId) {
-      sessionStorage.setItem('memwalAccountId', memwalAccountId);
+      localStorage.setItem('memwalAccountId', memwalAccountId);
     } else {
-      sessionStorage.removeItem('memwalAccountId');
+      localStorage.removeItem('memwalAccountId');
     }
   }, [memwalAccountId]);
 

@@ -64,7 +64,6 @@ struct WalrusUploadResponse {
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
-    sidecar_secret: Option<&str>,
     data: &[u8],
     epochs: u64,
     owner_address: &str,
@@ -75,7 +74,7 @@ pub async fn upload_blob(
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let mut req = client
+    let resp = client
         .post(&url)
         .json(&WalrusUploadRequest {
             data: data_b64,
@@ -84,11 +83,7 @@ pub async fn upload_blob(
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),
             epochs,
-        });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        })
         .send()
         .await
         .map_err(|e| {
@@ -129,7 +124,6 @@ pub async fn upload_blob(
 pub async fn query_blobs_by_owner(
     client: &reqwest::Client,
     sidecar_url: &str,
-    sidecar_secret: Option<&str>,
     owner_address: &str,
     namespace: Option<&str>,
     package_id: Option<&str>,
@@ -144,13 +138,9 @@ pub async fn query_blobs_by_owner(
         body["packageId"] = serde_json::json!(pkg);
     }
 
-    let mut req = client
+    let resp = client
         .post(&url)
-        .json(&body);
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        .json(&body)
         .send()
         .await
         .map_err(|e| {

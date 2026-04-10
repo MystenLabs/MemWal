@@ -11,8 +11,7 @@
  *   GET  /health         → { status: "ok" }
  */
 
-import express, { Request, Response, NextFunction } from "express";
-import { timingSafeEqual } from "crypto";
+import express from "express";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
@@ -274,44 +273,20 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
-// CORS — sidecar is called only by the co-located Rust server, never by browsers.
-// Remove all CORS headers so no cross-origin access is granted.
-app.use((_req: Request, res: Response, next: NextFunction) => {
-    res.removeHeader("Access-Control-Allow-Origin");
-    res.removeHeader("Access-Control-Allow-Methods");
-    res.removeHeader("Access-Control-Allow-Headers");
+// CORS — allow frontend (any origin) to call sponsor endpoints
+app.use((_req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     if (_req.method === "OPTIONS") {
         return res.sendStatus(204);
     }
     next();
 });
 
-// Health check — placed before auth middleware so it is always reachable.
-app.get("/health", (_req: Request, res: Response) => {
+// Health check
+app.get("/health", (_req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
-});
-
-// Shared-secret authentication — protects all routes registered after this point.
-// Set SIDECAR_AUTH_TOKEN in the environment; callers must send it as Authorization: Bearer <token>.
-// Sidecar refuses to start if SIDECAR_AUTH_TOKEN is not set.
-const SIDECAR_AUTH_TOKEN = process.env.SIDECAR_AUTH_TOKEN;
-if (!SIDECAR_AUTH_TOKEN) {
-    console.error("[sidecar] FATAL: SIDECAR_AUTH_TOKEN not set. Refusing to start without auth.");
-    process.exit(1);
-}
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-    const token = req.headers.authorization?.replace("Bearer ", "");
-    const secretBuf = Buffer.from(SIDECAR_AUTH_TOKEN!);
-    const providedBuf = Buffer.from(typeof token === "string" ? token : "");
-    // timingSafeEqual prevents timing side-channel attacks on the token comparison.
-    // Buffers must be same length — if lengths differ it's already a mismatch.
-    const valid = providedBuf.length === secretBuf.length &&
-        timingSafeEqual(providedBuf, secretBuf);
-    if (!valid) {
-        return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
 });
 
 // ============================================================
@@ -898,11 +873,9 @@ app.post("/sponsor/execute", async (req, res) => {
 // ============================================================
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
-const HOST = process.env.SIDECAR_HOST || "127.0.0.1";
-app.listen(PORT, HOST, () => {
+app.listen(PORT, () => {
     console.log(JSON.stringify({
         event: "sidecar_ready",
-        host: HOST,
         port: PORT,
         pid: process.pid,
     }));
