@@ -313,7 +313,8 @@ export default function LandingPage() {
 
     const handleWalletClick = () => {
         walletClickedRef.current = true
-        setLoginOpen(false)
+        // Don't close the popover — ConnectButton opens its own modal inside it.
+        // Popover closes after wallet actually connects (see detection effect).
     }
 
     // ════════════════════════════════════════════════════════════
@@ -326,7 +327,7 @@ export default function LandingPage() {
             if (demoRef.current && !demoRef.current.contains(e.target as Node)) {
                 setDemoOpen(false)
             }
-            if (loginRef.current && !loginRef.current.contains(e.target as Node)) {
+            if (loginRef.current && !loginRef.current.contains(e.target as Node) && !walletClickedRef.current) {
                 setLoginOpen(false)
             }
         }
@@ -382,6 +383,7 @@ export default function LandingPage() {
                 setAuthMethod(persisted)
             } else if (walletClickedRef.current) {
                 walletClickedRef.current = false
+                setLoginOpen(false)
                 updateAuthMethod('wallet')
             }
         }
