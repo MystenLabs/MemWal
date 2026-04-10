@@ -39,7 +39,10 @@ struct QueryBlobsResponse {
 #[serde(rename_all = "camelCase")]
 struct WalrusUploadRequest {
     data: String,
-    private_key: String,
+    /// Index into the server-side key pool (SERVER_SUI_PRIVATE_KEYS).
+    /// The raw private key is never transmitted — the sidecar resolves
+    /// the key from this index against its own env-loaded pool.
+    key_index: usize,
     owner: String,
     namespace: String,
     package_id: String,
@@ -61,6 +64,10 @@ struct WalrusUploadResponse {
 /// The server wallet pays for gas + storage. After certify, the blob object
 /// is transferred to `owner_address`. Namespace + owner are stored as
 /// on-chain metadata attributes for discoverability.
+///
+/// `key_index` is the zero-based index into the sidecar's server-side key pool
+/// (loaded from `SERVER_SUI_PRIVATE_KEYS` at sidecar startup). The raw private
+/// key is **never** transmitted — only this numeric index is sent.
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
@@ -68,7 +75,7 @@ pub async fn upload_blob(
     data: &[u8],
     epochs: u64,
     owner_address: &str,
-    sui_private_key: &str,
+    key_index: usize,
     namespace: &str,
     package_id: &str,
 ) -> Result<UploadResult, AppError> {
@@ -79,7 +86,7 @@ pub async fn upload_blob(
         .post(&url)
         .json(&WalrusUploadRequest {
             data: data_b64,
-            private_key: sui_private_key.to_string(),
+            key_index,
             owner: owner_address.to_string(),
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),

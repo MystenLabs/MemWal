@@ -41,12 +41,24 @@ impl KeyPool {
     }
 
     /// Returns the next key in round-robin order, or `None` if the pool is empty.
+    #[allow(dead_code)]
     pub fn next(&self) -> Option<&str> {
         if self.keys.is_empty() {
             return None;
         }
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
         Some(&self.keys[idx])
+    }
+
+    /// Returns the zero-based index of the next key in round-robin order.
+    /// Callers send this index to the sidecar instead of the raw key string,
+    /// so private keys are never transmitted over the wire.
+    pub fn next_index(&self) -> Option<usize> {
+        if self.keys.is_empty() {
+            return None;
+        }
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
+        Some(idx)
     }
 
     #[allow(dead_code)]

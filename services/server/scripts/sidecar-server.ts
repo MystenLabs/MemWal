@@ -29,6 +29,27 @@ import { WalrusClient } from "@mysten/walrus";
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
 
+// ============================================================
+// Server wallet key pool — loaded ONCE at startup from env.
+// Keys are NEVER accepted from request bodies; callers send
+// a numeric index which is resolved here.
+// ============================================================
+const SERVER_SUI_PRIVATE_KEYS: string[] = (() => {
+    const multi = process.env.SERVER_SUI_PRIVATE_KEYS;
+    if (multi && multi.trim().length > 0) {
+        return multi.split(",").map(s => s.trim()).filter(s => s.length > 0);
+    }
+    const single = process.env.SERVER_SUI_PRIVATE_KEY;
+    if (single && single.trim().length > 0) {
+        return [single.trim()];
+    }
+    return [];
+})();
+
+if (SERVER_SUI_PRIVATE_KEYS.length === 0) {
+    console.error("[sidecar] WARNING: SERVER_SUI_PRIVATE_KEYS (and SERVER_SUI_PRIVATE_KEY) are not set — Walrus uploads will fail");
+}
+
 // SEAL key server object IDs (comma-separated via env var)
 const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
     .split(",")
@@ -529,15 +550,25 @@ app.post("/walrus/upload", async (req, res) => {
     try {
         const {
             data,
-            privateKey,
+            keyIndex,
             owner,
             namespace,
             packageId,
             epochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
-        if (!data || !privateKey) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey" });
+        if (!data || keyIndex === undefined || keyIndex === null) {
+            return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
         }
+
+        // Resolve private key from the server-side key pool.
+        // The caller sends only a numeric index — the raw key never leaves this process.
+        const idx = Number(keyIndex);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= SERVER_SUI_PRIVATE_KEYS.length) {
+            return res.status(400).json({
+                error: `keyIndex ${keyIndex} is out of range (pool size: ${SERVER_SUI_PRIVATE_KEYS.length})`,
+            });
+        }
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[idx];
 
         // Decode signer
         const { secretKey } = decodeSuiPrivateKey(privateKey);
