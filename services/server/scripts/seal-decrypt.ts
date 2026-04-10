@@ -114,7 +114,7 @@ async function main() {
             objectId: id,
             weight: 1,
         })),
-        verifyKeyServers: false,
+        verifyKeyServers: true,
     });
 
     // Step 1: Parse the encrypted object to get the real key ID

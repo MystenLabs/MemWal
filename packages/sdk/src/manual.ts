@@ -197,7 +197,7 @@ export class MemWalManual {
                     objectId: id,
                     weight: 1,
                 })),
-                verifyKeyServers: false,
+                verifyKeyServers: true,
             });
         }
         return this._sealClient;
