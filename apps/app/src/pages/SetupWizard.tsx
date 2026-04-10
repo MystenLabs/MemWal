@@ -3,10 +3,9 @@
  *
  * Steps:
  * 1. Intro — explain delegate keys, "generate delegate key" button
- * 2. Generate Ed25519 keypair
- * 3. Enoki: silent on-chain registration → done
- *    Wallet: show key + confirm → on-chain registration → done
- * 4. Save key to localStorage → proceed to Dashboard
+ * 2. Generate Ed25519 keypair → show key + copy + confirm (both flows)
+ * 3. On-chain registration (Enoki: sponsored/silent, Wallet: user approves)
+ * 4. Save key to sessionStorage → redirect to Dashboard
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react'
@@ -190,21 +189,10 @@ export default function SetupWizard() {
 
         try {
             const { privHex, pubHex, suiAddr } = await generateKeys()
-
-            if (isEnoki) {
-                // Enoki: silent registration, no key display
-                setStep('onchain')
-                setTxStatus('registering delegate key...')
-                const accountId = await registerOnchain(address, pubHex, suiAddr)
-                setDelegateKeys(privHex, pubHex, accountId)
-                setStep('done')
-            } else {
-                // Wallet: show key for user to save
-                setPrivateKeyHex(privHex)
-                setPublicKeyHex(pubHex)
-                setSuiAddress(suiAddr)
-                setStep('show-key')
-            }
+            setPrivateKeyHex(privHex)
+            setPublicKeyHex(pubHex)
+            setSuiAddress(suiAddr)
+            setStep('show-key')
         } catch (err) {
             console.error('Setup failed:', err)
             const message = err instanceof Error ? err.message : 'setup failed. please try again.'
@@ -213,7 +201,7 @@ export default function SetupWizard() {
         } finally {
             setupRunningRef.current = false
         }
-    }, [generateKeys, isEnoki, address, registerOnchain, setDelegateKeys])
+    }, [generateKeys])
 
     // ── Wallet: register on-chain after user confirms key ──
     const executeOnchain = useCallback(async () => {
@@ -326,7 +314,7 @@ export default function SetupWizard() {
                         </div>
                     )}
 
-                    {/* ===== Step 2: Show Key (wallet only) ===== */}
+                    {/* ===== Step 2: Show Key ===== */}
                     {step === 'show-key' && (
                         <div>
                             <div style={{ textAlign: 'center', marginBottom: 24 }}>
@@ -397,7 +385,7 @@ export default function SetupWizard() {
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
-                                register key onchain & continue →
+                                {isEnoki ? 'continue →' : 'register key onchain & continue →'}
                             </button>
                         </div>
                     )}

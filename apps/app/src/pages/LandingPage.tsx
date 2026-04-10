@@ -80,13 +80,6 @@ export default function LandingPage() {
         return () => document.removeEventListener('mousedown', handleClickOutside)
     }, [])
 
-    // ── Redirect to dashboard when connected ──
-    useEffect(() => {
-        if (currentAccount) {
-            navigate('/dashboard')
-        }
-    }, [currentAccount, navigate])
-
     // ── Detect wallet connection via ConnectButton ──
     const updateAuthMethod = useCallback((method: AuthMethod) => {
         persistAuthMethod(method)
@@ -100,8 +93,10 @@ export default function LandingPage() {
                 setLoginOpen(false)
                 updateAuthMethod('wallet')
             }
+            // Navigate to dashboard/setup after connection
+            navigate('/dashboard')
         }
-    }, [currentAccount, delegateKey, updateAuthMethod])
+    }, [currentAccount, delegateKey, updateAuthMethod, navigate])
 
     // ── Button handlers ──
     const handleEnokiConnect = () => {
