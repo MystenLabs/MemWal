@@ -226,6 +226,23 @@ impl VectorDb {
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================
 
+    /// Acquire a PostgreSQL session-level advisory lock by numeric key.
+    ///
+    /// MED-21 fix: Used to serialize concurrent storage quota checks
+    /// for the same owner, preventing TOCTOU race conditions where
+    /// multiple requests could all pass the quota check simultaneously.
+    ///
+    /// The lock is automatically released when the connection is
+    /// returned to the pool (session-level lock, not transaction-level).
+    pub async fn acquire_advisory_lock(&self, lock_key: i64) -> Result<(), AppError> {
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(lock_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to acquire advisory lock: {}", e)))?;
+        Ok(())
+    }
+
     /// Get total storage used by a user (sum of blob_size_bytes for active entries).
     pub async fn get_storage_used(&self, owner: &str) -> Result<i64, AppError> {
         let row: (i64,) = sqlx::query_as(

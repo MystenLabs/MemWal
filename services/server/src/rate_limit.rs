@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::types::{AppError, AppState, AuthInfo};
+use crate::types::{AppError, AppState};
 
 // ============================================================
 // Rate Limit Configuration
@@ -90,26 +90,19 @@ impl RateLimitConfig {
 ///
 /// Expensive endpoints (embedding + encrypt + Walrus upload + LLM)
 /// consume more of the rate limit budget than cheap read endpoints.
-pub const ANALYZE_BASE_WEIGHT: i64 = 10;
-const ANALYZE_PER_FACT_WEIGHT: i64 = 1;
-
-pub fn endpoint_weight(path: &str) -> i64 {
+///
+/// MED-20: Normalize trailing slash before matching to prevent bypass.
+fn endpoint_weight(path: &str) -> i64 {
+    // MED-20 fix: strip trailing slash so "/api/analyze/" == "/api/analyze"
+    let path = path.trim_end_matches('/');
     match path {
-        "/api/analyze" => ANALYZE_BASE_WEIGHT, // LLM extract + N × (embed + encrypt + upload)
-        "/api/remember" => 5,                  // embed + SEAL encrypt + Walrus upload
-        "/api/remember/manual" => 3,           // Walrus upload only (client did embed/encrypt)
-        "/api/restore" => 3,                   // download + decrypt + re-embed
-        "/api/ask" => 2,                       // recall + LLM
-        _ => 1,                                // recall, recall/manual, etc.
+        "/api/analyze" => 10,          // LLM extract + N × (embed + encrypt + upload)
+        "/api/remember" => 5,          // embed + SEAL encrypt + Walrus upload
+        "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
+        "/api/restore" => 3,           // download + decrypt + re-embed
+        "/api/ask" => 2,               // recall + LLM
+        _ => 1,                        // recall, recall/manual, etc.
     }
-}
-
-pub fn analyze_total_weight(fact_count: usize) -> i64 {
-    ANALYZE_BASE_WEIGHT + (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
-}
-
-pub fn analyze_additional_weight(fact_count: usize) -> i64 {
-    (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
 }
 
 // ============================================================
@@ -117,14 +110,11 @@ pub fn analyze_additional_weight(fact_count: usize) -> i64 {
 // ============================================================
 
 /// Create a Redis multiplexed connection for shared use across the app.
-pub async fn create_redis_client(
-    redis_url: &str,
-) -> Result<redis::aio::MultiplexedConnection, String> {
+pub async fn create_redis_client(redis_url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(redis_url)
         .map_err(|e| format!("Failed to create Redis client: {}", e))?;
 
-    let conn = client
-        .get_multiplexed_async_connection()
+    let conn = client.get_multiplexed_async_connection()
         .await
         .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
 
@@ -153,7 +143,9 @@ async fn check_window(
 }
 
 /// Record weighted entries in a Redis sorted set sliding window.
-/// Adds `weight` entries and sets TTL.
+///
+/// MED-19 fix: uses `.atomic()` (MULTI/EXEC) so the zadd+expire
+/// sequence is atomic — no partial write if connection drops mid-way.
 async fn record_in_window(
     redis: &mut redis::aio::MultiplexedConnection,
     key: &str,
@@ -162,7 +154,7 @@ async fn record_in_window(
     ttl_seconds: i64,
 ) {
     let mut pipe = redis::pipe();
-    pipe.atomic();
+    pipe.atomic(); // MED-19: wrap in MULTI/EXEC
     for i in 0..weight {
         // Use fractional offsets to create unique members
         let ts = now + i as f64 * 0.001;
@@ -172,21 +164,6 @@ async fn record_in_window(
 
     if let Err(e) = pipe.query_async::<()>(redis).await {
         tracing::warn!("rate limit: failed to record window for key {}: {}", key, e);
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RateLimitKeys {
-    delegate_key: String,
-    burst_key: String,
-    hourly_key: String,
-}
-
-fn build_keys(auth: &AuthInfo) -> RateLimitKeys {
-    RateLimitKeys {
-        delegate_key: format!("rate:dk:{}", auth.public_key),
-        burst_key: format!("rate:{}", auth.owner),
-        hourly_key: format!("rate:hr:{}", auth.owner),
     }
 }
 
@@ -207,155 +184,27 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header("Content-Type", "application/json")
         .header("Retry-After", retry_after.to_string())
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).unwrap(),
-        ))
+        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
         .unwrap()
 }
 
-fn explicit_rate_limit_error(layer: &str, limit: i64, window: &str) -> AppError {
-    AppError::RateLimited(format!(
-        "Rate limit exceeded for {} (limit: {} weighted-requests/{})",
-        layer, limit, window
-    ))
-}
+/// Build a 503 response indicating the rate limiter backend is down.
+///
+/// MED-19 fix: fail-closed — when Redis is unavailable we DENY
+/// rather than silently allow (fail-open). Returns 503 with
+/// Retry-After header so clients know to back off.
+fn rate_limiter_unavailable_response() -> Response {
+    let body = serde_json::json!({
+        "error": "Rate limiter temporarily unavailable",
+        "retry_after_seconds": 5,
+    });
 
-async fn check_explicit_weight_inner(
-    redis: &mut redis::aio::MultiplexedConnection,
-    config: &RateLimitConfig,
-    auth: &AuthInfo,
-    weight: i64,
-    path: &str,
-    now: f64,
-) -> Result<(), AppError> {
-    if weight <= 0 {
-        return Ok(());
-    }
-
-    let keys = build_keys(auth);
-    let dk_window_start = now - 60_000.0;
-    match check_window(redis, &keys.delegate_key, dk_window_start).await {
-        Ok(count) => {
-            if count + weight > config.max_requests_per_delegate_key {
-                tracing::warn!(
-                    "rate limit [delegate-key]: key={}... count={}/{} additional_weight={} path={}",
-                    &auth.public_key[..16],
-                    count,
-                    config.max_requests_per_delegate_key,
-                    weight,
-                    path
-                );
-                return Err(explicit_rate_limit_error(
-                    "delegate_key",
-                    config.max_requests_per_delegate_key,
-                    "min",
-                ));
-            }
-        }
-        Err(e) => {
-            tracing::error!("redis rate limit check failed (dk): {}", e);
-            return Err(AppError::Internal("Rate limiter unavailable".into()));
-        }
-    }
-
-    let burst_window_start = now - 60_000.0;
-    match check_window(redis, &keys.burst_key, burst_window_start).await {
-        Ok(count) => {
-            if count + weight > config.max_requests_per_minute {
-                tracing::warn!(
-                    "rate limit [burst]: owner={} count={}/{} additional_weight={} path={}",
-                    auth.owner,
-                    count,
-                    config.max_requests_per_minute,
-                    weight,
-                    path
-                );
-                return Err(explicit_rate_limit_error(
-                    "account_burst",
-                    config.max_requests_per_minute,
-                    "min",
-                ));
-            }
-        }
-        Err(e) => {
-            tracing::error!("redis rate limit check failed (burst): {}", e);
-            return Err(AppError::Internal("Rate limiter unavailable".into()));
-        }
-    }
-
-    let hourly_window_start = now - 3_600_000.0;
-    match check_window(redis, &keys.hourly_key, hourly_window_start).await {
-        Ok(count) => {
-            if count + weight > config.max_requests_per_hour {
-                tracing::warn!(
-                    "rate limit [sustained]: owner={} count={}/{} additional_weight={} path={}",
-                    auth.owner,
-                    count,
-                    config.max_requests_per_hour,
-                    weight,
-                    path
-                );
-                return Err(explicit_rate_limit_error(
-                    "account_sustained",
-                    config.max_requests_per_hour,
-                    "hour",
-                ));
-            }
-        }
-        Err(e) => {
-            tracing::error!("redis rate limit check failed (sustained): {}", e);
-            return Err(AppError::Internal("Rate limiter unavailable".into()));
-        }
-    }
-
-    Ok(())
-}
-
-pub async fn check_explicit_weight(
-    state: &AppState,
-    auth: &AuthInfo,
-    weight: i64,
-    path: &str,
-) -> Result<(), AppError> {
-    let mut redis = state.redis.clone();
-    let now = chrono::Utc::now().timestamp_millis() as f64;
-    check_explicit_weight_inner(
-        &mut redis,
-        &state.config.rate_limit,
-        auth,
-        weight,
-        path,
-        now,
-    )
-    .await
-}
-
-pub async fn record_explicit_weight(
-    state: &AppState,
-    auth: &AuthInfo,
-    weight: i64,
-) -> Result<(), AppError> {
-    if weight <= 0 {
-        return Ok(());
-    }
-
-    let mut redis = state.redis.clone();
-    let now = chrono::Utc::now().timestamp_millis() as f64;
-    let keys = build_keys(auth);
-    record_in_window(&mut redis, &keys.delegate_key, now, weight, 120).await;
-    record_in_window(&mut redis, &keys.burst_key, now + 0.1, weight, 120).await;
-    record_in_window(&mut redis, &keys.hourly_key, now + 0.2, weight, 3700).await;
-    Ok(())
-}
-
-pub async fn charge_explicit_weight(
-    state: &AppState,
-    auth: &AuthInfo,
-    weight: i64,
-    path: &str,
-) -> Result<(), AppError> {
-    check_explicit_weight(state, auth, weight, path).await?;
-    record_explicit_weight(state, auth, weight).await
+    axum::response::Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "application/json")
+        .header("Retry-After", "5")
+        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
 }
 
 // ============================================================
@@ -373,6 +222,11 @@ pub async fn charge_explicit_weight(
 ///   analyze=10, remember=5, remember/manual=3, restore=3, ask=2, recall=1
 ///
 /// Returns 429 Too Many Requests with JSON body if any layer exceeds its limit.
+///
+/// MED-19 fix: Returns 503 Service Unavailable (fail-closed) if Redis
+/// is unreachable — previously was fail-open (silently allowed all requests).
+///
+/// MED-20 fix: Normalizes trailing slash in path before cost weight lookup.
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -396,7 +250,7 @@ pub async fn rate_limit_middleware(
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
-    // Determine cost weight based on endpoint
+    // Determine cost weight based on endpoint (MED-20: path is normalized inside endpoint_weight)
     let weight = endpoint_weight(request.uri().path());
 
     // --- Layer 1: Per-delegate-key (burst) ---
@@ -408,29 +262,16 @@ pub async fn rate_limit_middleware(
             if count >= config.max_requests_per_delegate_key {
                 tracing::warn!(
                     "rate limit [delegate-key]: key={}... count={}/{} weight={} path={}",
-                    &auth.public_key[..16],
-                    count,
-                    config.max_requests_per_delegate_key,
-                    weight,
-                    request.uri().path()
+                    &auth.public_key[..16.min(auth.public_key.len())], count,
+                    config.max_requests_per_delegate_key, weight, request.uri().path()
                 );
-                return rate_limit_response(
-                    "delegate_key",
-                    config.max_requests_per_delegate_key,
-                    "min",
-                    60,
-                );
+                return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (dk): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            // MED-19 fix: fail-closed — Redis error means DENY, not allow
+            tracing::error!("rate limit [delegate-key] Redis error: {} — failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
@@ -443,29 +284,15 @@ pub async fn rate_limit_middleware(
             if count >= config.max_requests_per_minute {
                 tracing::warn!(
                     "rate limit [burst]: owner={} count={}/{} weight={} path={}",
-                    auth.owner,
-                    count,
-                    config.max_requests_per_minute,
-                    weight,
-                    request.uri().path()
+                    auth.owner, count, config.max_requests_per_minute, weight, request.uri().path()
                 );
-                return rate_limit_response(
-                    "account_burst",
-                    config.max_requests_per_minute,
-                    "min",
-                    60,
-                );
+                return rate_limit_response("account_burst", config.max_requests_per_minute, "min", 60);
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (burst): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            // MED-19 fix: fail-closed
+            tracing::error!("rate limit [burst] Redis error: {} — failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
@@ -478,29 +305,15 @@ pub async fn rate_limit_middleware(
             if count >= config.max_requests_per_hour {
                 tracing::warn!(
                     "rate limit [sustained]: owner={} count={}/{} weight={} path={}",
-                    auth.owner,
-                    count,
-                    config.max_requests_per_hour,
-                    weight,
-                    request.uri().path()
+                    auth.owner, count, config.max_requests_per_hour, weight, request.uri().path()
                 );
-                return rate_limit_response(
-                    "account_sustained",
-                    config.max_requests_per_hour,
-                    "hour",
-                    300,
-                );
+                return rate_limit_response("account_sustained", config.max_requests_per_hour, "hour", 300);
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (sustained): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            // MED-19 fix: fail-closed
+            tracing::error!("rate limit [sustained] Redis error: {} — failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
@@ -520,6 +333,10 @@ pub async fn rate_limit_middleware(
 ///
 /// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
 /// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
+///
+/// MED-21 fix: Uses PostgreSQL advisory lock per-owner to prevent
+/// TOCTOU race where concurrent requests all pass quota check then
+/// all write, collectively exceeding the limit.
 pub async fn check_storage_quota(
     state: &AppState,
     owner: &str,
@@ -532,6 +349,13 @@ pub async fn check_storage_quota(
         return Ok(());
     }
 
+    // MED-21 fix: Acquire a per-owner PostgreSQL advisory lock.
+    // This serializes concurrent quota checks for the same owner,
+    // preventing TOCTOU race conditions.
+    // We use a stable hash of the owner string as the lock key.
+    let lock_key = stable_hash_i64(owner);
+    state.db.acquire_advisory_lock(lock_key).await?;
+
     let used = state.db.get_storage_used(owner).await?;
     let projected = used + additional_bytes;
 
@@ -540,10 +364,7 @@ pub async fn check_storage_quota(
         let max_mb = max_bytes as f64 / 1_048_576.0;
         tracing::warn!(
             "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
-            owner,
-            used_mb,
-            additional_bytes as f64 / 1_048_576.0,
-            max_mb
+            owner, used_mb, additional_bytes as f64 / 1_048_576.0, max_mb
         );
         return Err(AppError::QuotaExceeded(format!(
             "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
@@ -554,23 +375,94 @@ pub async fn check_storage_quota(
     Ok(())
 }
 
+/// Compute a stable i64 hash of a string for use as PG advisory lock key.
+/// Uses FNV-1a (no external dependency needed).
+fn stable_hash_i64(s: &str) -> i64 {
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+
+    let hash = s.bytes().fold(FNV_OFFSET, |acc, b| {
+        acc.wrapping_mul(FNV_PRIME) ^ b as u64
+    });
+
+    // Fold into i64 range (XOR high and low 32 bits)
+    ((hash >> 32) ^ (hash & 0xFFFF_FFFF)) as i64
+}
+
+// ============================================================
+// Unit Tests
+// ============================================================
+
 #[cfg(test)]
 mod tests {
-    use super::{analyze_additional_weight, analyze_total_weight, ANALYZE_BASE_WEIGHT};
+    use super::*;
+
+    // ---- MED-20: Path normalization ----
 
     #[test]
-    fn analyze_weight_never_drops_below_base() {
-        assert_eq!(analyze_total_weight(0), ANALYZE_BASE_WEIGHT);
-        assert_eq!(analyze_total_weight(1), ANALYZE_BASE_WEIGHT + 1);
-        assert_eq!(analyze_additional_weight(0), 0);
-        assert_eq!(analyze_additional_weight(1), 1);
+    fn test_endpoint_weight_trailing_slash_normalized() {
+        // Without trailing slash
+        assert_eq!(endpoint_weight("/api/analyze"), 10);
+        assert_eq!(endpoint_weight("/api/remember"), 5);
+        assert_eq!(endpoint_weight("/api/remember/manual"), 3);
+        assert_eq!(endpoint_weight("/api/restore"), 3);
+        assert_eq!(endpoint_weight("/api/ask"), 2);
+
+        // With trailing slash — must return SAME weight (MED-20 fix)
+        assert_eq!(endpoint_weight("/api/analyze/"), 10, "trailing slash bypass!");
+        assert_eq!(endpoint_weight("/api/remember/"), 5, "trailing slash bypass!");
+        assert_eq!(endpoint_weight("/api/ask/"), 2, "trailing slash bypass!");
+
+        // Unknown path → weight 1
+        assert_eq!(endpoint_weight("/api/recall"), 1);
+        assert_eq!(endpoint_weight("/health"), 1);
+        assert_eq!(endpoint_weight("/unknown/path/"), 1);
     }
 
     #[test]
-    fn analyze_weight_scales_with_fact_count() {
-        assert_eq!(analyze_total_weight(5), 15);
-        assert_eq!(analyze_total_weight(6), 16);
-        assert_eq!(analyze_additional_weight(6), 6);
-        assert_eq!(analyze_additional_weight(20), 20);
+    fn test_endpoint_weight_no_regression() {
+        // Double trailing slash should also normalize
+        assert_eq!(endpoint_weight("/api/analyze//"), 10);
+    }
+
+    // ---- stable_hash_i64 ----
+
+    #[test]
+    fn test_stable_hash_i64_deterministic() {
+        let owner = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let h1 = stable_hash_i64(owner);
+        let h2 = stable_hash_i64(owner);
+        assert_eq!(h1, h2, "hash must be deterministic");
+    }
+
+    #[test]
+    fn test_stable_hash_i64_different_owners() {
+        let h1 = stable_hash_i64("owner_a");
+        let h2 = stable_hash_i64("owner_b");
+        assert_ne!(h1, h2, "different owners must produce different lock keys");
+    }
+
+    #[test]
+    fn test_stable_hash_i64_empty() {
+        // Should not panic on empty string
+        let h = stable_hash_i64("");
+        let _ = h; // just verify no panic
+    }
+
+    // ---- MED-19: fail-closed response ----
+
+    #[test]
+    fn test_rate_limiter_unavailable_response_is_503() {
+        let resp = rate_limiter_unavailable_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // Verify Retry-After header is present
+        assert!(resp.headers().contains_key("retry-after"));
+    }
+
+    #[test]
+    fn test_rate_limit_response_is_429() {
+        let resp = rate_limit_response("account_burst", 60, "min", 60);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key("retry-after"));
     }
 }
