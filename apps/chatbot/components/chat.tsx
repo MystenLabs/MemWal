@@ -41,6 +41,31 @@ import { getChatHistoryPaginationKey } from "./sidebar-history";
 import { toast } from "./toast";
 import type { VisibilityType } from "./visibility-selector";
 
+const XOR_KEY = "memwal_sec_2026_04";
+
+function encryptStr(str: string): string {
+  if (!str) return str;
+  let out = "";
+  for(let i = 0; i < str.length; i++) {
+    out += String.fromCharCode(str.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
+  }
+  return btoa(out);
+}
+
+function decryptStr(b64: string): string {
+  if (!b64) return b64;
+  try {
+    const str = atob(b64);
+    let out = "";
+    for(let i = 0; i < str.length; i++) {
+      out += String.fromCharCode(str.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
+    }
+    return out;
+  } catch {
+    return b64;
+  }
+}
+
 export function Chat({
   id,
   initialMessages,
@@ -88,13 +113,15 @@ export function Chat({
   });
   const [memwalKey, setMemwalKey] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('memwalKey') || '';
+      const saved = localStorage.getItem('memwalKey');
+      return saved ? decryptStr(saved) : '';
     }
     return '';
   });
   const [memwalAccountId, setMemwalAccountId] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('memwalAccountId') || '';
+      const saved = localStorage.getItem('memwalAccountId');
+      return saved ? decryptStr(saved) : '';
     }
     return '';
   });
@@ -115,7 +142,7 @@ export function Chat({
   useEffect(() => {
     memwalKeyRef.current = memwalKey;
     if (memwalKey) {
-      localStorage.setItem('memwalKey', memwalKey);
+      localStorage.setItem('memwalKey', encryptStr(memwalKey));
     } else {
       localStorage.removeItem('memwalKey');
     }
@@ -124,7 +151,7 @@ export function Chat({
   useEffect(() => {
     memwalAccountIdRef.current = memwalAccountId;
     if (memwalAccountId) {
-      localStorage.setItem('memwalAccountId', memwalAccountId);
+      localStorage.setItem('memwalAccountId', encryptStr(memwalAccountId));
     } else {
       localStorage.removeItem('memwalAccountId');
     }

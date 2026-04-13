@@ -58,7 +58,11 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    let http_client = reqwest::Client::new();
+    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
     let mut ready = false;
     for attempt in 1..=30 {
@@ -111,7 +115,6 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
-    // Shared application state
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -119,6 +122,19 @@ async fn main() {
         walrus_client,
         key_pool,
         redis,
+    });
+
+    // Spawn background task for cache eviction
+    let evict_state = state.clone();
+    tokio::spawn(async move {
+        // Run every hour
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(e) = evict_state.db.evict_expired_delegate_keys().await {
+                tracing::error!("Background eviction failed: {}", e);
+            }
+        }
     });
 
     // Build routes

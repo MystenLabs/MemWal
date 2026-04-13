@@ -286,7 +286,7 @@ app.use((_req, res, next) => {
 
 // Health check
 app.get("/health", (_req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+    res.json({ status: "ok" });
 });
 
 // ============================================================
@@ -331,6 +331,10 @@ app.post("/seal/decrypt", async (req, res) => {
             const { secretKey } = decodeSuiPrivateKey(privateKey);
             keypair = Ed25519Keypair.fromSecretKey(secretKey);
         } else {
+            // LOW-12: Validate hex format before parsing to prevent injection
+            if (!/^[0-9a-fA-F]+$/.test(privateKey) || privateKey.length !== 64) {
+                return res.status(400).json({ error: "privateKey must be 64-char hex string or suiprivkey bech32" });
+            }
             // Raw hex private key (32 bytes = 64 hex chars)
             const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
             keypair = Ed25519Keypair.fromSecretKey(keyBytes);
@@ -508,10 +512,17 @@ app.post("/walrus/upload", async (req, res) => {
             owner,
             namespace,
             packageId,
-            epochs = DEFAULT_WALRUS_EPOCHS,
+            epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
+        
+        // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
+        const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
         if (!data || !privateKey) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey" });
+        }
+        // LOW-16: Validate packageId resembles a Sui address to prevent injection
+        if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId format" });
         }
 
         // Decode signer
@@ -616,7 +627,7 @@ app.post("/walrus/upload", async (req, res) => {
 
                 const metaDigest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
                 await suiClient.waitForTransaction({ digest: metaDigest });
-                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
+                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
             } catch (metaErr: any) {
                 // Non-fatal: blob is uploaded but metadata/transfer failed
                 console.error(`[walrus/upload] metadata+transfer failed: ${metaErr.message}`);

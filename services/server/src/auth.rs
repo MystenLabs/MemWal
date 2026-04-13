@@ -64,12 +64,14 @@ pub async fn verify_signature(
         .map(String::from);
 
     // Validate timestamp (5 minute window)
+    // LOW-2: Use checked_sub to avoid potential overflow with user-supplied timestamps
     let timestamp: i64 = timestamp_str
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let now = chrono::Utc::now().timestamp();
-    if (now - timestamp).abs() > 300 {
-        tracing::warn!("Request timestamp too old: {} (now: {})", timestamp, now);
+    let age = now.checked_sub(timestamp).unwrap_or(i64::MAX);
+    if age > 300 || age < -300 {
+        tracing::warn!("Request timestamp too old or future: {} (now: {})", timestamp, now);
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -88,9 +90,13 @@ pub async fn verify_signature(
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let signature = Signature::from_bytes(&sig_array);
 
-    // Build the signed message: "{timestamp}.{method}.{path}.{body_sha256}"
+    // Build the signed message: "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}"
+    // LOW-1: Include query parameters in signed message to prevent query-param tampering
     let method = request.method().as_str().to_string();
-    let path = request.uri().path().to_string();
+    let path = request.uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
 
     // Split request to consume body
     let (mut parts, body) = request.into_parts();

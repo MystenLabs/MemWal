@@ -314,7 +314,8 @@ pub struct HealthResponse {
 // ============================================================
 
 /// Headers required for authenticated requests
-#[derive(Debug, Clone)]
+// LOW-5: Manual Debug impl to prevent delegate_key from being logged in plaintext
+#[derive(Clone)]
 pub struct AuthInfo {
     #[allow(dead_code)]
     pub public_key: String,
@@ -322,8 +323,21 @@ pub struct AuthInfo {
     pub owner: String,
     /// MemWalAccount object ID (set after onchain verification)
     pub account_id: String,
-    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
+    /// Delegate private key (hex) — used for SEAL decrypt SessionKey.
+    /// NEVER printed in logs — use AuthInfo's manual Debug impl.
     pub delegate_key: Option<String>,
+}
+
+impl std::fmt::Debug for AuthInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthInfo")
+            .field("public_key", &self.public_key)
+            .field("owner", &self.owner)
+            .field("account_id", &self.account_id)
+            // LOW-5: Never log the raw key — only presence/absence
+            .field("delegate_key", &self.delegate_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 // ============================================================

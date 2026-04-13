@@ -147,16 +147,18 @@ impl VectorDb {
 
     /// Delete a vector entry by blob_id (used for expired blob cleanup).
     /// Called reactively when Walrus returns 404 during blob download.
-    pub async fn delete_by_blob_id(&self, blob_id: &str) -> Result<u64, AppError> {
-        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1")
+    /// LOW-10: Requires owner to prevent cross-user blob deletion.
+    pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
             .bind(blob_id)
+            .bind(owner)
             .execute(&self.pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)))?;
 
         let rows = result.rows_affected();
         if rows > 0 {
-            tracing::info!("deleted expired blob from DB: blob_id={}, rows={}", blob_id, rows);
+            tracing::info!("deleted expired blob from DB: blob_id={}, owner={}, rows={}", blob_id, owner, rows);
         }
         Ok(rows)
     }
@@ -172,7 +174,7 @@ impl VectorDb {
         public_key_hex: &str,
     ) -> Result<Option<(String, String)>, AppError> {
         let result: Option<(String, String)> = sqlx::query_as(
-            "SELECT account_id, owner FROM delegate_key_cache WHERE public_key = $1",
+            "SELECT account_id, owner FROM delegate_key_cache WHERE public_key = $1 AND expires_at > NOW()",
         )
         .bind(public_key_hex)
         .fetch_optional(&self.pool)
@@ -190,10 +192,10 @@ impl VectorDb {
         owner: &str,
     ) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO delegate_key_cache (public_key, account_id, owner)
-             VALUES ($1, $2, $3)
+            "INSERT INTO delegate_key_cache (public_key, account_id, owner, expires_at)
+             VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
              ON CONFLICT (public_key)
-             DO UPDATE SET account_id = $2, owner = $3, cached_at = NOW()",
+             DO UPDATE SET account_id = $2, owner = $3, cached_at = NOW(), expires_at = NOW() + INTERVAL '24 hours'",
         )
         .bind(public_key_hex)
         .bind(account_id)
@@ -204,6 +206,20 @@ impl VectorDb {
 
         tracing::debug!("cached delegate key: {} -> account {}", public_key_hex, account_id);
         Ok(())
+    }
+
+    /// Periodically called to evict expired keys
+    pub async fn evict_expired_delegate_keys(&self) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM delegate_key_cache WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to evict expired delegate keys: {}", e)))?;
+        
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!("Evicted {} expired delegate keys from cache", rows);
+        }
+        Ok(rows)
     }
 
     // ============================================================
