@@ -297,10 +297,13 @@ fn default_restore_limit() -> usize {
     50
 }
 
+// MED-7 fix: Validate restore limit server-side to prevent oversized restore ops
+pub const MAX_RESTORE_LIMIT: usize = 200;
+
 #[derive(Debug, Deserialize)]
 pub struct RestoreRequest {
     pub namespace: String,
-    /// Max blobs to restore (default: 50)
+    /// Max blobs to restore (default: 50, max: 200)
     #[serde(default = "default_restore_limit")]
     pub limit: usize,
 }
@@ -372,14 +375,22 @@ impl std::fmt::Display for AppError {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        // MED-5 fix: Do NOT leak internal error details to HTTP responses.
+        // Internal errors are logged server-side; clients receive only a generic
+        // message + a request_id they can share with support for tracing.
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Internal(msg) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-            ),
-            AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Internal(msg) => {
+                // Log full detail internally but return generic message externally
+                let request_id = uuid::Uuid::new_v4().to_string();
+                tracing::error!(request_id = %request_id, "Internal error: {}", msg);
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("An internal error occurred. Reference ID: {}", request_id),
+                )
+            },
+            AppError::BlobNotFound(_) => (axum::http::StatusCode::NOT_FOUND, "Resource not found".to_string()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
         };

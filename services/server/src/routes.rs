@@ -30,6 +30,77 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 // ============================================================
+// Input Validation Helpers (MED-4)
+// ============================================================
+
+/// Validate a namespace string to prevent injection / path traversal.
+///
+/// Rules:
+/// - Max 64 characters
+/// - Only alphanumeric, hyphens, underscores, and dots allowed
+/// - No relative path components ("." or "..")
+/// - No control characters
+fn validate_namespace(namespace: &str) -> Result<(), AppError> {
+    if namespace.len() > 64 {
+        return Err(AppError::BadRequest(format!(
+            "namespace too long: max 64 characters, got {}",
+            namespace.len()
+        )));
+    }
+    if namespace == "." || namespace == ".." {
+        return Err(AppError::BadRequest("namespace cannot be '.' or '..'".into()));
+    }
+    let valid = namespace.chars().all(|c| {
+        c.is_alphanumeric() || c == '-' || c == '_' || c == '.'
+    });
+    if !valid {
+        return Err(AppError::BadRequest(
+            "namespace contains invalid characters: only [a-zA-Z0-9-_.] allowed".into()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    // ---- MED-4: validate_namespace ----
+
+    #[test]
+    fn test_valid_namespaces() {
+        assert!(validate_namespace("default").is_ok());
+        assert!(validate_namespace("my-app").is_ok());
+        assert!(validate_namespace("com.example.app").is_ok());
+        assert!(validate_namespace("App_v2").is_ok());
+        assert!(validate_namespace("a").is_ok());
+    }
+
+    #[test]
+    fn test_invalid_namespace_too_long() {
+        let long = "a".repeat(65);
+        assert!(validate_namespace(&long).is_err());
+        let ok = "a".repeat(64);
+        assert!(validate_namespace(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_namespace_path_traversal() {
+        assert!(validate_namespace(".").is_err());
+        assert!(validate_namespace("..").is_err());
+    }
+
+    #[test]
+    fn test_invalid_namespace_special_chars() {
+        assert!(validate_namespace("namespace/evil").is_err(), "slash should fail");
+        assert!(validate_namespace("../etc/passwd").is_err(), "path traversal should fail");
+        assert!(validate_namespace("ns\x00null").is_err(), "null byte should fail");
+        assert!(validate_namespace("ns%20enc").is_err(), "percent encoding should fail");
+        assert!(validate_namespace("ns space").is_err(), "space should fail");
+    }
+}
+
+// ============================================================
 // Embedding — OpenRouter/OpenAI API (with mock fallback)
 // ============================================================
 
@@ -1050,10 +1121,14 @@ pub async fn restore(
     if body.namespace.is_empty() {
         return Err(AppError::BadRequest("namespace cannot be empty".into()));
     }
+    // MED-4 fix: Validate namespace characters to prevent path traversal / injection
+    validate_namespace(&body.namespace)?;
+
+    // MED-7 fix: Enforce server-side limit cap regardless of what client sends
+    let limit = body.limit.min(crate::types::MAX_RESTORE_LIMIT);
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit;
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // Use delegate key for SEAL decryption
