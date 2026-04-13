@@ -256,10 +256,10 @@ pub async fn recall(
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
 
     // Step 2: Search Vector DB
-    let hits = state
-        .db
-        .search_similar(&query_vector, owner, namespace, body.limit)
-        .await?;
+    // MED-3 fix: Cap limit to prevent unbounded DB scans / memory use.
+    // Without this, an attacker could send limit=999999 to scan the entire DB.
+    let limit = body.limit.min(100);
+    let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
     let db = &state.db;
@@ -460,10 +460,9 @@ pub async fn recall_manual(
     );
 
     // Search Vector DB — return blob IDs + distances only
-    let hits = state
-        .db
-        .search_similar(&body.vector, owner, namespace, body.limit)
-        .await?;
+    // MED-3 fix: Cap limit on recall_manual as well
+    let limit = body.limit.min(100);
+    let hits = state.db.search_similar(&body.vector, owner, namespace, limit).await?;
     let total = hits.len();
 
     tracing::info!(
@@ -1179,11 +1178,15 @@ pub async fn restore(
         })
         .collect();
 
-    let downloaded: Vec<(String, Vec<u8>)> = futures::future::join_all(download_tasks)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
+    // MED-6 fix: Bounded concurrency (max 10 parallel downloads) to prevent
+    // OOM when restoring large namespaces. join_all() with hundreds of blobs
+    // would spawn all downloads simultaneously → memory spike.
+    // We use buffer_unordered(10) to cap parallelism at 10 concurrent downloads.
+    let downloaded: Vec<(String, Vec<u8>)> = futures::stream::iter(download_tasks)
+        .buffer_unordered(10)
+        .filter_map(|opt| async move { opt })
+        .collect()
+        .await;
 
     // Preserve encrypted blob sizes so restored rows still contribute to storage quota.
     let blob_sizes: std::collections::HashMap<String, i64> = downloaded

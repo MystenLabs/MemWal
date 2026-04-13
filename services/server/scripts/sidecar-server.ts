@@ -430,8 +430,10 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
-        if (items.length > 100) {
-            return res.status(400).json({ error: "Too many items: max 100 per batch" });
+        // MED-13 fix: Cap items to prevent unbounded memory allocation.
+        // Without this, an attacker could send 10,000+ items to exhaust memory.
+        if (items.length > 50) {
+            return res.status(400).json({ error: "items array exceeds maximum of 50 elements" });
         }
         if (!privateKey || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
