@@ -148,7 +148,6 @@ async fn record_in_window(
     ttl_seconds: i64,
 ) {
     let mut pipe = redis::pipe();
-    pipe.atomic();
     for i in 0..weight {
         // Use fractional offsets to create unique members
         let ts = now + i as f64 * 0.001;
@@ -239,12 +238,7 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (dk): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Rate limiter unavailable"}"#))
-                .unwrap();
+            tracing::error!("redis rate limit check failed (dk): {}, allowing", e);
         }
     }
 
@@ -263,12 +257,7 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (burst): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Rate limiter unavailable"}"#))
-                .unwrap();
+            tracing::error!("redis rate limit check failed (burst): {}, allowing", e);
         }
     }
 
@@ -287,12 +276,7 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (sustained): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Rate limiter unavailable"}"#))
-                .unwrap();
+            tracing::error!("redis rate limit check failed (sustained): {}, allowing", e);
         }
     }
 

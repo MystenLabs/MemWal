@@ -40,7 +40,6 @@ struct SealDecryptResponse {
 pub async fn seal_encrypt(
     client: &reqwest::Client,
     sidecar_url: &str,
-    sidecar_secret: Option<&str>,
     data: &[u8],
     owner_address: &str,
     package_id: &str,
@@ -48,17 +47,13 @@ pub async fn seal_encrypt(
     let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let mut req = client
+    let resp = client
         .post(&url)
         .json(&SealEncryptRequest {
             data: data_b64,
             owner: owner_address.to_string(),
             package_id: package_id.to_string(),
-        });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        })
         .send()
         .await
         .map_err(|e| {
@@ -100,7 +95,6 @@ pub async fn seal_encrypt(
 pub async fn seal_decrypt(
     client: &reqwest::Client,
     sidecar_url: &str,
-    sidecar_secret: Option<&str>,
     encrypted_data: &[u8],
     private_key: &str,
     package_id: &str,
@@ -109,18 +103,14 @@ pub async fn seal_decrypt(
     let url = format!("{}/seal/decrypt", sidecar_url);
     let data_b64 = BASE64.encode(encrypted_data);
 
-    let mut req = client
+    let resp = client
         .post(&url)
         .json(&SealDecryptRequest {
             data: data_b64,
             private_key: private_key.to_string(),
             package_id: package_id.to_string(),
             account_id: account_id.to_string(),
-        });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        })
         .send()
         .await
         .map_err(|e| {
