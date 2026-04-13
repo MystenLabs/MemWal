@@ -65,12 +65,57 @@ export class MemWal {
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    private destroyed = false;
+    private onDestroy?: () => void;
 
     private constructor(config: MemWalConfig) {
-        this.privateKey = hexToBytes(config.key);
+        // MED-17: Accept Uint8Array or hex string for key
+        this.privateKey = typeof config.key === 'string'
+            ? hexToBytes(config.key)
+            : config.key;
+        this.onDestroy = config.onDestroy;
         this.accountId = config.accountId;
         this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
         this.namespace = config.namespace ?? "default";
+
+        // MED-18: Warn for non-HTTPS non-localhost server URLs
+        this._validateServerUrl(this.serverUrl);
+    }
+
+    /**
+     * MED-18: Validate server URL — throw for non-HTTPS in non-local environments.
+     * Prevents accidental use of HTTP in production (key material in transit).
+     */
+    private _validateServerUrl(url: string): void {
+        try {
+            const parsed = new URL(url);
+            const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1';
+            if (parsed.protocol !== 'https:' && !isLocal) {
+                throw new Error(
+                    `[MemWal] Security error: serverUrl must use HTTPS in production. ` +
+                    `Got: ${url}. Use https:// or point to localhost for development.`
+                );
+            }
+        } catch (e) {
+            if (e instanceof TypeError) {
+                throw new Error(`[MemWal] Invalid serverUrl: ${url}`);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * MED-17: Zero-fill key material and mark client as destroyed.
+     * Best-effort in JS runtimes (GC may still hold references).
+     * After calling destroy(), all subsequent requests will throw.
+     */
+    destroy(): void {
+        if (!this.destroyed) {
+            this.privateKey.fill(0);
+            this.publicKey?.fill(0);
+            this.destroyed = true;
+            this.onDestroy?.();
+        }
     }
 
     /**
@@ -288,6 +333,11 @@ export class MemWal {
         path: string,
         body: object,
     ): Promise<T> {
+        // MED-17: Check if client has been destroyed
+        if (this.destroyed) {
+            throw new Error('[MemWal] Client has been destroyed. Create a new instance.');
+        }
+
         const ed = await getEd();
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
