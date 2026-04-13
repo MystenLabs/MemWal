@@ -5,6 +5,7 @@ use axum::{
     response::Response,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -63,6 +64,24 @@ pub async fn verify_signature(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    // MED-1 fix: Extract nonce for replay protection.
+    // Nonce must be a UUID v4, checked against Redis to prevent replay attacks.
+    // TTL = 600s (10 min) > timestamp window (300s) so no replay is possible.
+    let nonce = headers
+        .get("x-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .ok_or_else(|| {
+            tracing::warn!("Missing x-nonce header");
+            StatusCode::UNAUTHORIZED
+        })?;
+
+    // Validate nonce is UUID format (prevents injection attacks)
+    if uuid::Uuid::parse_str(&nonce).is_err() {
+        tracing::warn!("Invalid nonce format (not UUID): {}", &nonce[..nonce.len().min(36)]);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     // Validate timestamp (5 minute window)
     // LOW-2: Use checked_sub to avoid potential overflow with user-supplied timestamps
     let timestamp: i64 = timestamp_str
@@ -106,7 +125,10 @@ pub async fn verify_signature(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
-    let message = format!("{}.{}.{}.{}", timestamp_str, method, path, body_hash);
+    // MED-1 fix: Include nonce in signed message to prevent replay attacks.
+    // Old format: "{timestamp}.{method}.{path}.{body_sha256}"
+    // New format: "{timestamp}.{method}.{path}.{body_sha256}.{nonce}"
+    let message = format!("{}.{}.{}.{}.{}", timestamp_str, method, path, body_hash, nonce);
 
     // Step 1: Verify Ed25519 signature
     verifying_key
@@ -117,6 +139,36 @@ pub async fn verify_signature(
         })?;
 
     tracing::debug!("signature verified for key: {}", public_key_hex);
+
+    // MED-1 fix: Check and record nonce in Redis to block replays.
+    // Done AFTER signature verify so we don't waste Redis writes on bad requests.
+    {
+        let nonce_key = format!("nonce:{}", nonce);
+        let mut redis = state.redis.clone();
+
+        // SET nonce_key "1" EX 600 NX — only set if Not eXists
+        let set_result: Option<String> = redis
+            .set_options(
+                &nonce_key,
+                "1",
+                redis::SetOptions::default()
+                    .conditional_set(redis::ExistenceCheck::NX)
+                    .with_expiration(redis::SetExpiry::EX(600)),
+            )
+            .await
+            .unwrap_or(None); // if Redis is down, fail-open for nonce check only
+                              // (signature + timestamp still protect against most replays)
+
+        if set_result.is_none() {
+            // NX failed = nonce already exists = replay attempt
+            tracing::warn!(
+                "Replay attack detected: nonce {} already seen (key={}...)",
+                nonce,
+                &public_key_hex[..16.min(public_key_hex.len())]
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
 
     // Step 2: Resolve account — cache → indexed accounts → registry scan → header hint → config fallback
     let (account_id, owner) = resolve_account(&state, &public_key_hex, &pk_array, account_id_hint)

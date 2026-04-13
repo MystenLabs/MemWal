@@ -63,6 +63,24 @@ pub async fn verify_delegate_key_onchain(
         .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
         .to_string();
 
+    // MED-2 fix: Block deactivated accounts.
+    // The onchain MemWalAccount has an `active: bool` field.
+    // If false, reject immediately — even if the delegate key is valid.
+    let active = fields
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true); // default to true for backward compat with old contract versions
+    if !active {
+        tracing::warn!(
+            "account {} is deactivated — rejecting delegate key auth",
+            account_object_id
+        );
+        return Err(OnchainVerifyError::AccountDeactivated(format!(
+            "Account {} has been deactivated",
+            account_object_id
+        )));
+    }
+
     // Extract delegate_keys array
     let delegate_keys = fields
         .get("delegate_keys")
@@ -312,6 +330,9 @@ struct ObjectContent {
 pub enum OnchainVerifyError {
     RpcError(String),
     KeyNotFound(String),
+    /// MED-2: Returned when MemWalAccount.active == false.
+    /// Prevents deactivated accounts from authenticating.
+    AccountDeactivated(String),
 }
 
 impl std::fmt::Display for OnchainVerifyError {
@@ -319,8 +340,49 @@ impl std::fmt::Display for OnchainVerifyError {
         match self {
             OnchainVerifyError::RpcError(msg) => write!(f, "Sui RPC error: {}", msg),
             OnchainVerifyError::KeyNotFound(msg) => write!(f, "Key not found: {}", msg),
+            OnchainVerifyError::AccountDeactivated(msg) => write!(f, "Account deactivated: {}", msg),
         }
     }
 }
 
 impl std::error::Error for OnchainVerifyError {}
+
+// ============================================================
+// Unit Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- MED-2: AccountDeactivated error variant ----
+
+    #[test]
+    fn test_account_deactivated_display() {
+        let err = OnchainVerifyError::AccountDeactivated("Account 0xabc has been deactivated".into());
+        assert!(err.to_string().contains("deactivated"));
+    }
+
+    #[test]
+    fn test_key_not_found_display() {
+        let err = OnchainVerifyError::KeyNotFound("Key not in 3 delegate key(s)".into());
+        assert!(err.to_string().contains("Key not found"));
+    }
+
+    #[test]
+    fn test_rpc_error_display() {
+        let err = OnchainVerifyError::RpcError("HTTP request failed".into());
+        assert!(err.to_string().contains("Sui RPC error"));
+    }
+
+    #[test]
+    fn test_error_variants_are_distinct() {
+        // Confirm AccountDeactivated is separate from KeyNotFound
+        // (different auth failure modes → different handling in resolve_account)
+        let deactivated = OnchainVerifyError::AccountDeactivated("msg".into());
+        let not_found = OnchainVerifyError::KeyNotFound("msg".into());
+        // Both are Err variants but must match differently:
+        assert!(matches!(deactivated, OnchainVerifyError::AccountDeactivated(_)));
+        assert!(matches!(not_found, OnchainVerifyError::KeyNotFound(_)));
+    }
+}

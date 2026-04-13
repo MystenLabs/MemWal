@@ -277,11 +277,11 @@ export class MemWal {
     /**
      * Make a signed request to the server.
      *
-     * Signature format: "{timestamp}.{method}.{path}.{body_sha256}"
-     * Headers: x-public-key, x-signature, x-timestamp
+     * Signature format (MED-1 updated): "{timestamp}.{method}.{path}.{body_sha256}.{nonce}"
+     * Headers: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id
      *
-     * The server uses x-public-key to look up the owner via onchain
-     * MemWalAccount.delegate_keys — no need to send owner in the body.
+     * The nonce is a UUID v4 generated per-request and tracked server-side
+     * in Redis (TTL=600s) to prevent replay attacks.
      */
     private async signedRequest<T>(
         method: string,
@@ -294,8 +294,11 @@ export class MemWal {
         const bodyStr = JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
 
-        // Build message to sign
-        const message = `${timestamp}.${method}.${path}.${bodySha256}`;
+        // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
+        const nonce = crypto.randomUUID();
+
+        // Build message to sign — now includes nonce
+        const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}`;
         const msgBytes = new TextEncoder().encode(message);
 
         // Sign with Ed25519
@@ -311,6 +314,7 @@ export class MemWal {
                 "x-public-key": bytesToHex(publicKey),
                 "x-signature": bytesToHex(signature),
                 "x-timestamp": timestamp,
+                "x-nonce": nonce,           // MED-1: replay protection
                 "x-delegate-key": bytesToHex(this.privateKey),
                 "x-account-id": this.accountId,
             },
