@@ -166,16 +166,8 @@ pub async fn remember(
     let encrypted = encrypted_result?;
 
     // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let sui_key = state
-        .key_pool
-        .next()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            AppError::Internal(
-                "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                    .into(),
-            )
-        })?;
+    let key_index = state.key_pool.next_index()
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
@@ -183,7 +175,7 @@ pub async fn remember(
         &encrypted,
         50,
         owner,
-        &sui_key,
+        key_index,
         namespace,
         &state.config.package_id,
     )
@@ -385,16 +377,8 @@ pub async fn remember_manual(
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
     // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
-    let sui_key = state
-        .key_pool
-        .next()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            AppError::Internal(
-                "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                    .into(),
-            )
-        })?;
+    let key_index = state.key_pool.next_index()
+        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
 
     let upload = walrus::upload_blob(
         &state.http_client,
@@ -403,7 +387,7 @@ pub async fn remember_manual(
         &encrypted_bytes,
         50,
         owner,
-        &sui_key,
+        key_index,
         namespace,
         &state.config.package_id,
     )
@@ -548,12 +532,11 @@ pub async fn analyze(
         let fact_text = fact_text.clone();
         // Pick the next key in round-robin order at task construction time.
         // Convert to owned String *before* async move so we don't borrow-then-move `state`.
-        let sui_key: Result<String, AppError> = state.key_pool.next()
-            .map(|s| s.to_string())
+        let key_index: Result<usize, AppError> = state.key_pool.next_index()
             .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()));
         let namespace = namespace.clone();
         async move {
-            let sui_key = sui_key?;
+            let key_index = key_index?;
             // Embed + SEAL encrypt concurrently (independent operations)
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
             let encrypt_fut = seal::seal_encrypt(
@@ -569,7 +552,7 @@ pub async fn analyze(
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
                 state.config.sidecar_secret.as_deref(),
-                &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
+                &encrypted, 50, &owner, key_index, &namespace, &state.config.package_id,
             ).await?;
 
             // Store in Vector DB with namespace
