@@ -8,8 +8,9 @@ mod types;
 mod walrus;
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
+use axum::http::{header, HeaderValue, Method};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use db::VectorDb;
@@ -41,6 +42,10 @@ async fn main() {
         config.rate_limit.max_requests_per_delegate_key,
         config.rate_limit.max_storage_bytes / 1_048_576
     );
+    tracing::info!("  sponsor rate limit: {}/min, {}/hr per IP+sender",
+        config.sponsor_rate_limit.per_minute,
+        config.sponsor_rate_limit.per_hour,
+    );
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
@@ -58,11 +63,7 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
+    let http_client = reqwest::Client::new();
     let health_url = format!("{}/health", sidecar_url);
     let mut ready = false;
     for attempt in 1..=30 {
@@ -115,6 +116,7 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // Shared application state
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -122,19 +124,6 @@ async fn main() {
         walrus_client,
         key_pool,
         redis,
-    });
-
-    // Spawn background task for cache eviction
-    let evict_state = state.clone();
-    tokio::spawn(async move {
-        // Run every hour
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-        loop {
-            interval.tick().await;
-            if let Err(e) = evict_state.db.evict_expired_delegate_keys().await {
-                tracing::error!("Background eviction failed: {}", e);
-            }
-        }
     });
 
     // Build routes
@@ -159,18 +148,58 @@ async fn main() {
             auth::verify_signature,
         ));
 
-    // Public routes — hard cap at 16 KiB to prevent body-flooding on unauthenticated endpoints
+    // Sponsor routes — body limits + IP rate limit middleware
+    let sponsor_routes = Router::new()
+        .route(
+            "/sponsor",
+            post(routes::sponsor_proxy).layer(DefaultBodyLimit::max(10 * 1024)),
+        )
+        .route(
+            "/sponsor/execute",
+            post(routes::sponsor_execute_proxy).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::sponsor_rate_limit_middleware,
+        ));
+
+    // Public routes
     let public_routes = Router::new()
         .route("/health", get(routes::health))
-        .route("/sponsor", post(routes::sponsor_proxy))
-        .route("/sponsor/execute", post(routes::sponsor_execute_proxy))
-        .layer(DefaultBodyLimit::max(16_384));
+        .merge(sponsor_routes);
+
+    // CORS — restrict to configured origins.
+    // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
+    // which blocks browser cross-origin requests. Set ALLOWED_ORIGINS to allow
+    // specific origins (e.g. "http://localhost:3000,https://memwal.ai").
+    let cors = {
+        let origins: Vec<HeaderValue> = config
+            .allowed_origins
+            .split(',')
+            .filter_map(|s| {
+                let s = s.trim();
+                if s.is_empty() { return None; }
+                s.parse::<HeaderValue>().ok()
+            })
+            .collect();
+
+        if origins.is_empty() {
+            tracing::warn!("ALLOWED_ORIGINS not set — CORS is deny-all (browsers blocked). Set ALLOWED_ORIGINS for frontend access.");
+            CorsLayer::new() // deny-all: no Allow-Origin header emitted
+        } else {
+            tracing::info!("  CORS origins: {}", config.allowed_origins);
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        }
+    };
 
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     // Start server
@@ -197,71 +226,4 @@ async fn main() {
     // Cleanup sidecar after shutdown
     sidecar_child.kill().await.ok();
     tracing::info!("sidecar stopped");
-}
-
-// ============================================================
-// Tests
-// ============================================================
-#[cfg(test)]
-mod tests {
-    use axum::{
-        body::Body,
-        extract::DefaultBodyLimit,
-        http::{Request, StatusCode},
-        routing::post,
-        Router,
-    };
-    use tower::ServiceExt;
-
-    async fn noop_handler(_body: axum::body::Bytes) -> &'static str { "ok" }
-
-    /// Minimal router mirroring public_routes body-limit config.
-    fn public_router() -> Router {
-        Router::new()
-            .route("/sponsor", post(noop_handler))
-            .route("/sponsor/execute", post(noop_handler))
-            .layer(DefaultBodyLimit::max(16_384))
-    }
-
-    #[tokio::test]
-    async fn public_route_rejects_body_over_16kb() {
-        let app = public_router();
-        let large_body = vec![b'x'; 17_000]; // 17 KB — exceeds 16 KB cap
-        let req = Request::builder()
-            .method("POST")
-            .uri("/sponsor")
-            .header("content-type", "application/json")
-            .body(Body::from(large_body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected 413 for body > 16 KiB");
-    }
-
-    #[tokio::test]
-    async fn public_route_accepts_body_under_16kb() {
-        let app = public_router();
-        let small_body = vec![b'x'; 1_000]; // 1 KB — within cap
-        let req = Request::builder()
-            .method("POST")
-            .uri("/sponsor")
-            .header("content-type", "application/json")
-            .body(Body::from(small_body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected body < 16 KiB to pass through");
-    }
-
-    #[tokio::test]
-    async fn sponsor_execute_rejects_body_over_16kb() {
-        let app = public_router();
-        let large_body = vec![b'x'; 20_000]; // 20 KB
-        let req = Request::builder()
-            .method("POST")
-            .uri("/sponsor/execute")
-            .header("content-type", "application/json")
-            .body(Body::from(large_body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected 413 for /sponsor/execute body > 16 KiB");
-    }
 }

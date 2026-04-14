@@ -91,6 +91,10 @@ pub struct Config {
     pub sidecar_secret: Option<String>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
+    /// Sponsor-specific rate limiting and concurrency config
+    pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
+    pub allowed_origins: String,
 }
 
 impl Config {
@@ -142,7 +146,48 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
+            sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            allowed_origins: std::env::var("ALLOWED_ORIGINS")
+                .unwrap_or_default(),
         }
+    }
+}
+
+// ============================================================
+// Sponsor Rate Limit Config
+// ============================================================
+
+#[derive(Debug, Clone)]
+pub struct SponsorRateLimitConfig {
+    /// Max sponsor requests per minute per IP (default: 10)
+    pub per_minute: i64,
+    /// Max sponsor requests per hour per IP (default: 30)
+    pub per_hour: i64,
+}
+
+impl Default for SponsorRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 10,
+            per_hour: 30,
+        }
+    }
+}
+
+impl SponsorRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        c
     }
 }
 
@@ -319,6 +364,30 @@ pub struct RestoreResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+}
+
+// ============================================================
+// Sponsor Types
+// ============================================================
+
+/// POST /sponsor — validated request body forwarded to sidecar
+#[derive(Debug, Deserialize)]
+pub struct SponsorRequest {
+    pub sender: String,
+    #[serde(rename = "transactionBlockKindBytes")]
+    pub transaction_block_kind_bytes: String,
+}
+
+/// POST /sponsor/execute — validated request body forwarded to sidecar.
+/// `sender` is optional — when present it is validated and counted against
+/// the per-sender rate limit bucket (same axis as POST /sponsor).
+#[derive(Debug, Deserialize)]
+pub struct SponsorExecuteRequest {
+    pub digest: String,
+    pub signature: String,
+    /// Sui address of the transaction sender (0x + 64 hex). Optional but
+    /// recommended — enables per-sender rate limiting on this endpoint too.
+    pub sender: Option<String>,
 }
 
 // ============================================================
