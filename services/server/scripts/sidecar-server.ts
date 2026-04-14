@@ -12,7 +12,7 @@
  */
 
 import express, { Request, Response, NextFunction } from "express";
-import { timingSafeEqual } from "crypto";
+import { timingSafeEqual, randomUUID } from "crypto";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
@@ -285,6 +285,11 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // Express app
 // ============================================================
 
+
+function isValidSuiAddress(address: string) {
+    return /^0x[a-fA-F0-9]{64}$/.test(address);
+}
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -334,6 +339,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.post("/seal/encrypt", async (req, res) => {
     try {
         const { data, owner, packageId } = req.body;
+        if (owner && !isValidSuiAddress(owner)) return res.status(400).json({ error: "Invalid owner address format" });
         if (!data || !owner || !packageId) {
             return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
         }
@@ -349,8 +355,9 @@ app.post("/seal/encrypt", async (req, res) => {
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/encrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[seal/encrypt] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -428,8 +435,9 @@ app.post("/seal/decrypt", async (req, res) => {
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/decrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[seal/decrypt] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -540,8 +548,9 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        console.error(`[seal/decrypt-batch] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[seal/decrypt-batch] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -558,6 +567,7 @@ app.post("/walrus/upload", async (req, res) => {
             packageId,
             epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
+        if (owner && !isValidSuiAddress(owner)) return res.status(400).json({ error: "Invalid owner address format" });
         // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
         const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
 
@@ -689,8 +699,9 @@ app.post("/walrus/upload", async (req, res) => {
             objectId: blobObjectId,
         });
     } catch (err: any) {
-        console.error(`[walrus/upload] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[walrus/upload] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -756,6 +767,7 @@ async function mapConcurrent<T, R>(
 app.post("/walrus/query-blobs", async (req, res) => {
     try {
         const { owner, namespace, packageId } = req.body;
+        if (owner && !isValidSuiAddress(owner)) return res.status(400).json({ error: "Invalid owner address format" });
         if (!owner) {
             return res.status(400).json({ error: "Missing required field: owner" });
         }
@@ -867,8 +879,9 @@ app.post("/walrus/query-blobs", async (req, res) => {
         console.log(`[query-blobs] returning ${blobs.length} blobs (filtered from ${rawObjs.length}) for owner=${owner} ns=${namespace || '*'}`);
         res.json({ blobs, total: blobs.length });
     } catch (err: any) {
-        console.error(`[walrus/query-blobs] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[walrus/query-blobs] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -896,8 +909,9 @@ app.post("/sponsor", async (req, res) => {
         console.log(`[sponsor] sponsored tx created, digest=${sponsored.digest}`);
         res.json(sponsored); // { bytes, digest }
     } catch (err: any) {
-        console.error(`[sponsor] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[sponsor] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 
@@ -924,8 +938,9 @@ app.post("/sponsor/execute", async (req, res) => {
         console.log(`[sponsor/execute] tx executed, final digest=${executed.digest}`);
         res.json(executed); // { digest }
     } catch (err: any) {
-        console.error(`[sponsor/execute] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const refId = randomUUID();
+        console.error(`[sponsor/execute] error (Ref: ${refId}): ${err?.message || err}`);
+        res.status(500).json({ error: `Internal sidecar error. Reference ID: ${refId}` });
     }
 });
 

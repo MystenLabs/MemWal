@@ -375,20 +375,26 @@ impl axum::response::IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Internal(msg) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-            ),
+            AppError::Internal(msg) => {
+                let correlation_id = uuid::Uuid::new_v4().to_string();
+                tracing::error!(correlation_id = %correlation_id, "Internal error: {}", msg);
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal server error. Reference ID: {}", correlation_id),
+                )
+            }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
-            AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
+            AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
         };
 
-        let body = serde_json::json!({ "error": message });
-        (status, axum::Json(body)).into_response()
+        let body = axum::Json(serde_json::json!({
+            "error": message,
+        }));
+
+        (status, body).into_response()
     }
 }
-
 // ============================================================
 // Sidecar Types (shared by seal.rs + walrus.rs)
 // ============================================================

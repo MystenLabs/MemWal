@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::types::{AppError, AppState};
+use crate::types::{AppError, AppState, AuthInfo};
 
 // ============================================================
 // Rate Limit Configuration
@@ -96,13 +96,24 @@ fn endpoint_weight(path: &str) -> i64 {
     // MED-20 fix: strip trailing slash so "/api/analyze/" == "/api/analyze"
     let path = path.trim_end_matches('/');
     match path {
-        "/api/analyze" => 10,          // LLM extract + N × (embed + encrypt + upload)
+        "/api/analyze" => ANALYZE_BASE_WEIGHT, // LLM extract + N × (embed + encrypt + upload)
         "/api/remember" => 5,          // embed + SEAL encrypt + Walrus upload
         "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,           // download + decrypt + re-embed
         "/api/ask" => 2,               // recall + LLM
         _ => 1,                        // recall, recall/manual, etc.
     }
+}
+
+pub const ANALYZE_BASE_WEIGHT: i64 = 5;
+const ANALYZE_PER_FACT_WEIGHT: i64 = 2;
+
+pub fn analyze_total_weight(fact_count: usize) -> i64 {
+    ANALYZE_BASE_WEIGHT + (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
+}
+
+pub fn analyze_additional_weight(fact_count: usize) -> i64 {
+    (fact_count as i64) * ANALYZE_PER_FACT_WEIGHT
 }
 
 // ============================================================
@@ -205,6 +216,166 @@ fn rate_limiter_unavailable_response() -> Response {
         .header("Retry-After", "5")
         .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
         .unwrap()
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitKeys {
+    delegate_key: String,
+    burst_key: String,
+    hourly_key: String,
+}
+
+fn build_keys(auth: &AuthInfo) -> RateLimitKeys {
+    RateLimitKeys {
+        delegate_key: format!("rate:dk:{}", auth.public_key),
+        burst_key: format!("rate:{}", auth.owner),
+        hourly_key: format!("rate:hr:{}", auth.owner),
+    }
+}
+
+fn explicit_rate_limit_error(layer: &str, limit: i64, window: &str) -> AppError {
+    AppError::RateLimited(format!(
+        "Rate limit exceeded for {} (limit: {} weighted-requests/{})",
+        layer, limit, window
+    ))
+}
+
+async fn check_explicit_weight_inner(
+    redis: &mut redis::aio::MultiplexedConnection,
+    config: &RateLimitConfig,
+    auth: &AuthInfo,
+    weight: i64,
+    path: &str,
+    now: f64,
+) -> Result<(), AppError> {
+    if weight <= 0 {
+        return Ok(());
+    }
+
+    let keys = build_keys(auth);
+    let dk_window_start = now - 60_000.0;
+    match check_window(redis, &keys.delegate_key, dk_window_start).await {
+        Ok(count) => {
+            if count + weight > config.max_requests_per_delegate_key {
+                tracing::warn!(
+                    "rate limit [delegate-key]: key={}... count={}/{} additional_weight={} path={}",
+                    &auth.public_key[..16],
+                    count,
+                    config.max_requests_per_delegate_key,
+                    weight,
+                    path
+                );
+                return Err(explicit_rate_limit_error(
+                    "delegate_key",
+                    config.max_requests_per_delegate_key,
+                    "min",
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::error!("redis rate limit check failed (dk): {}", e);
+            return Err(AppError::Internal("Rate limiter unavailable".into()));
+        }
+    }
+
+    let burst_window_start = now - 60_000.0;
+    match check_window(redis, &keys.burst_key, burst_window_start).await {
+        Ok(count) => {
+            if count + weight > config.max_requests_per_minute {
+                tracing::warn!(
+                    "rate limit [burst]: owner={} count={}/{} additional_weight={} path={}",
+                    auth.owner,
+                    count,
+                    config.max_requests_per_minute,
+                    weight,
+                    path
+                );
+                return Err(explicit_rate_limit_error(
+                    "account_burst",
+                    config.max_requests_per_minute,
+                    "min",
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::error!("redis rate limit check failed (burst): {}", e);
+            return Err(AppError::Internal("Rate limiter unavailable".into()));
+        }
+    }
+
+    let hourly_window_start = now - 3_600_000.0;
+    match check_window(redis, &keys.hourly_key, hourly_window_start).await {
+        Ok(count) => {
+            if count + weight > config.max_requests_per_hour {
+                tracing::warn!(
+                    "rate limit [sustained]: owner={} count={}/{} additional_weight={} path={}",
+                    auth.owner,
+                    count,
+                    config.max_requests_per_hour,
+                    weight,
+                    path
+                );
+                return Err(explicit_rate_limit_error(
+                    "account_sustained",
+                    config.max_requests_per_hour,
+                    "hour",
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::error!("redis rate limit check failed (sustained): {}", e);
+            return Err(AppError::Internal("Rate limiter unavailable".into()));
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn check_explicit_weight(
+    state: &AppState,
+    auth: &AuthInfo,
+    weight: i64,
+    path: &str,
+) -> Result<(), AppError> {
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    check_explicit_weight_inner(
+         &mut redis,
+         &state.config.rate_limit,
+         auth,
+         weight,
+         path,
+         now,
+    )
+    .await
+}
+
+pub async fn record_explicit_weight(
+    state: &AppState,
+    auth: &AuthInfo,
+    weight: i64,
+) -> Result<(), AppError> {
+    if weight <= 0 {
+        return Ok(());
+    }
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let keys = build_keys(auth);
+    record_in_window(&mut redis, &keys.delegate_key, now, weight, 120).await;
+    record_in_window(&mut redis, &keys.burst_key, now + 0.1, weight, 120).await;
+    record_in_window(&mut redis, &keys.hourly_key, now + 0.2, weight, 3700).await;
+    Ok(())
+}
+
+pub async fn charge_explicit_weight(
+    state: &AppState,
+    auth: &AuthInfo,
+    weight: i64,
+    path: &str,
+) -> Result<(), AppError> {
+    check_explicit_weight(state, auth, weight, path).await?;
+    record_explicit_weight(state, auth, weight).await
 }
 
 // ============================================================
@@ -402,14 +573,14 @@ mod tests {
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {
         // Without trailing slash
-        assert_eq!(endpoint_weight("/api/analyze"), 10);
+        assert_eq!(endpoint_weight("/api/analyze"), 5);
         assert_eq!(endpoint_weight("/api/remember"), 5);
         assert_eq!(endpoint_weight("/api/remember/manual"), 3);
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
 
         // With trailing slash — must return SAME weight (MED-20 fix)
-        assert_eq!(endpoint_weight("/api/analyze/"), 10, "trailing slash bypass!");
+        assert_eq!(endpoint_weight("/api/analyze/"), 5, "trailing slash bypass!");
         assert_eq!(endpoint_weight("/api/remember/"), 5, "trailing slash bypass!");
         assert_eq!(endpoint_weight("/api/ask/"), 2, "trailing slash bypass!");
 
@@ -422,7 +593,7 @@ mod tests {
     #[test]
     fn test_endpoint_weight_no_regression() {
         // Double trailing slash should also normalize
-        assert_eq!(endpoint_weight("/api/analyze//"), 10);
+        assert_eq!(endpoint_weight("/api/analyze//"), 5);
     }
 
     // ---- stable_hash_i64 ----
