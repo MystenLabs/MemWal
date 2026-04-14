@@ -508,6 +508,7 @@ app.post("/walrus/upload", async (req, res) => {
             owner,
             namespace,
             packageId,
+            delegatePublicKey,
             epochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
         if (!data || !privateKey) {
@@ -611,6 +612,19 @@ app.post("/walrus/upload", async (req, res) => {
                     });
                 }
 
+                // Set memwal_delegate_key
+                if (delegatePublicKey) {
+                    metaTx.moveCall({
+                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                        arguments: [
+                            blobArg,
+                            metaTx.pure.string("memwal_delegate_key"),
+                            metaTx.pure.string(delegatePublicKey),
+                        ],
+                        typeArguments: [],
+                    });
+                }
+
                 // Transfer blob to user
                 metaTx.transferObjects([blobArg], owner);
 
@@ -637,6 +651,61 @@ app.post("/walrus/upload", async (req, res) => {
 // POST /walrus/query-blobs
 // Query user's Walrus Blob objects from Sui chain, filter by namespace
 // ============================================================
+
+/**
+ * Fetch a dynamic field with retry + exponential backoff on 429 rate limit errors.
+ */
+async function getDynamicFieldWithRetry(
+    parentId: string,
+    fieldName: { type: string; value: number[] },
+    maxRetries = 4,
+): Promise<any> {
+    let lastErr: any;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            return await suiClient.getDynamicFieldObject({
+                parentId,
+                name: fieldName,
+            });
+        } catch (err: any) {
+            lastErr = err;
+            const msg = String(err?.message || err);
+            // Retry on 429 (rate limit) or 503 (service unavailable)
+            const isRetryable = msg.includes("429") || msg.includes("503") || msg.includes("rate");
+            if (!isRetryable || attempt === maxRetries - 1) throw err;
+            const delayMs = 250 * Math.pow(2, attempt); // 250ms, 500ms, 1000ms, 2000ms
+            console.warn(`[query-blobs] getDynamicField 429/503 for ${parentId}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise(r => setTimeout(r, delayMs));
+        }
+    }
+    throw lastErr;
+}
+
+/**
+ * Run async tasks with a bounded concurrency limit.
+ * Avoids overwhelming Sui RPC with too many parallel calls (→ 429).
+ */
+async function mapConcurrent<T, R>(
+    items: T[],
+    concurrency: number,
+    fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let index = 0;
+
+    async function worker() {
+        while (true) {
+            const i = index++;
+            if (i >= items.length) break;
+            results[i] = await fn(items[i]);
+        }
+    }
+
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+    await Promise.all(workers);
+    return results;
+}
+
 app.post("/walrus/query-blobs", async (req, res) => {
     try {
         const { owner, namespace, packageId } = req.body;
@@ -644,101 +713,114 @@ app.post("/walrus/query-blobs", async (req, res) => {
             return res.status(400).json({ error: "Missing required field: owner" });
         }
 
-
         // Walrus Blob type (derived from env-driven WALRUS_PACKAGE_ID)
         const WALRUS_BLOB_TYPE = `${WALRUS_PACKAGE_ID}::blob::Blob`;
 
-        // Query all Walrus Blob objects owned by the user
-        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string }[] = [];
+        // Step 1: Collect all raw blob objects (paginated, each page = 1 RPC call)
+        type RawBlobObj = { objectId: string; rawBlobId: string | number | null };
+        const rawObjs: RawBlobObj[] = [];
         let cursor: string | null | undefined = undefined;
         let hasMore = true;
 
         while (hasMore) {
             const result = await suiClient.getOwnedObjects({
                 owner,
-                filter: {
-                    StructType: WALRUS_BLOB_TYPE,
-                },
-                options: {
-                    showContent: true,
-                },
+                filter: { StructType: WALRUS_BLOB_TYPE },
+                options: { showContent: true },
                 cursor: cursor ?? undefined,
                 limit: 50,
             });
-
 
             for (const obj of result.data) {
                 if (!obj.data?.content || obj.data.content.dataType !== "moveObject") continue;
                 const fields = (obj.data.content as any).fields;
                 if (!fields) continue;
-
-                // Extract blob_id (may be numeric or string) and convert to base64url
                 const rawBlobId = fields.blob_id ?? fields.blobId ?? null;
-                const objectId = obj.data.objectId;
-
-                // Read metadata from dynamic field (Walrus stores metadata as dynamic field on Blob UID)
-                let blobNamespace = "default";
-                let blobOwner = "";
-                let blobPackageId = "";
-
-                try {
-                    // getDynamicFieldObject: key type is "vector<u8>", value is b"metadata"
-                    const dynField = await suiClient.getDynamicFieldObject({
-                        parentId: objectId,
-                        name: {
-                            type: "vector<u8>",
-                            value: [109, 101, 116, 97, 100, 97, 116, 97], // b"metadata"
-                        },
-                    });
-
-                    if (dynField.data?.content && dynField.data.content.dataType === "moveObject") {
-                        const dynFields = (dynField.data.content as any).fields;
-                        // Path: fields.value.fields.metadata.fields.contents[]
-                        const contents = dynFields?.value?.fields?.metadata?.fields?.contents;
-                        if (Array.isArray(contents)) {
-                            for (const entry of contents) {
-                                const key = entry?.fields?.key;
-                                const value = entry?.fields?.value;
-                                if (key === "memwal_namespace") blobNamespace = value;
-                                if (key === "memwal_owner") blobOwner = value;
-                                if (key === "memwal_package_id") blobPackageId = value;
-                            }
-                        }
-                    }
-                } catch {
-                    // No dynamic field = no metadata = use defaults
-                }
-
-
-                // Filter by namespace if specified
-                if (namespace && blobNamespace !== namespace) continue;
-
-                // Filter by packageId if specified
-                if (packageId && blobPackageId !== packageId) continue;
-
-                if (rawBlobId) {
-                    // blob_id from chain is a big integer (U256) — convert to base64url (little-endian!)
-                    let blobIdStr = String(rawBlobId);
-                    if (/^\d+$/.test(blobIdStr) && blobIdStr.length > 20) {
-                        try {
-                            const bigInt = BigInt(blobIdStr);
-                            const hex = bigInt.toString(16).padStart(64, '0');
-                            // Convert hex to bytes (big-endian), then REVERSE to little-endian
-                            const bytesBE = hex.match(/.{2}/g)!.map(b => parseInt(b, 16));
-                            const bytesLE = new Uint8Array(bytesBE.reverse());
-                            blobIdStr = Buffer.from(bytesLE).toString('base64url');
-                        } catch {
-                            // Keep as-is if conversion fails
-                        }
-                    }
-                    blobs.push({ blobId: blobIdStr, objectId, namespace: blobNamespace, packageId: blobPackageId });
-                }
+                rawObjs.push({ objectId: obj.data.objectId, rawBlobId });
             }
 
             hasMore = result.hasNextPage;
             cursor = result.nextCursor;
         }
 
+        console.log(`[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner}`);
+
+        // Step 2: Fetch metadata for each blob with bounded concurrency (5 at a time)
+        // to avoid overwhelming Sui RPC and hitting 429 rate limits.
+        const METADATA_FIELD_NAME = {
+            type: "vector<u8>",
+            value: [109, 101, 116, 97, 100, 97, 116, 97], // b"metadata"
+        };
+
+        type BlobMeta = {
+            objectId: string;
+            rawBlobId: string | number | null;
+            blobNamespace: string;
+            blobOwner: string;
+            blobPackageId: string;
+            blobDelegateKey: string;
+        };
+
+        const metas: BlobMeta[] = await mapConcurrent(rawObjs, 5, async (obj) => {
+            let blobNamespace = "default";
+            let blobOwner = "";
+            let blobPackageId = "";
+            let blobDelegateKey = "";
+
+            try {
+                const dynField = await getDynamicFieldWithRetry(obj.objectId, METADATA_FIELD_NAME);
+
+                if (dynField.data?.content && dynField.data.content.dataType === "moveObject") {
+                    const dynFields = (dynField.data.content as any).fields;
+                    // Path: fields.value.fields.metadata.fields.contents[]
+                    const contents = dynFields?.value?.fields?.metadata?.fields?.contents;
+                    if (Array.isArray(contents)) {
+                        for (const entry of contents) {
+                            const key = entry?.fields?.key;
+                            const value = entry?.fields?.value;
+                            if (key === "memwal_namespace") blobNamespace = value;
+                            if (key === "memwal_owner") blobOwner = value;
+                            if (key === "memwal_package_id") blobPackageId = value;
+                            if (key === "memwal_delegate_key") blobDelegateKey = value;
+                        }
+                    }
+                }
+            } catch {
+                // No dynamic field = no metadata = use defaults
+            }
+
+            return { ...obj, blobNamespace, blobOwner, blobPackageId, blobDelegateKey };
+        });
+
+        // Step 3: Filter + convert blob IDs
+        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string; delegateKey: string }[] = [];
+
+        for (const meta of metas) {
+            // Filter by namespace if specified
+            if (namespace && meta.blobNamespace !== namespace) continue;
+            // Filter by packageId if specified
+            if (packageId && meta.blobPackageId !== packageId) continue;
+
+            if (meta.rawBlobId) {
+                // blob_id from chain is a big integer (U256) — convert to base64url (little-endian!)
+                let blobIdStr = String(meta.rawBlobId);
+                if (/^\d+$/.test(blobIdStr) && blobIdStr.length > 20) {
+                    try {
+                        const bigInt = BigInt(blobIdStr);
+                        const hex = bigInt.toString(16).padStart(64, '0');
+                        // Convert hex to bytes (big-endian), then REVERSE to little-endian
+                        const bytesBE = hex.match(/.{2}/g)!.map(b => parseInt(b, 16));
+                        const bytesLE = new Uint8Array(bytesBE.reverse());
+                        blobIdStr = Buffer.from(bytesLE).toString('base64url');
+                    } catch {
+                        // Keep as-is if conversion fails
+                    }
+                }
+                blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, delegateKey: meta.blobDelegateKey });
+            }
+        }
+
+        console.log(`[query-blobs] returning ${blobs.length} blobs (filtered from ${rawObjs.length}) for owner=${owner} ns=${namespace || '*'}`);
         res.json({ blobs, total: blobs.length });
     } catch (err: any) {
         console.error(`[walrus/query-blobs] error: ${err.message || err}`);

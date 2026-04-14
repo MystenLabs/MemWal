@@ -27,10 +27,25 @@ COPY apps/researcher/ .
 # Next.js collects telemetry by default — disable it
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Build needs these env vars at build time (set dummies for `next build`)
-# Real values are injected at runtime
+# Server-only env vars — dummies for build, real values at runtime
 ENV POSTGRES_URL="postgresql://dummy:dummy@localhost:5432/dummy"
 ENV AUTH_SECRET="build-time-placeholder"
+
+# NEXT_PUBLIC_* vars are inlined into the client bundle at build time.
+# Railway passes env vars as Docker build args automatically.
+ARG NEXT_PUBLIC_ENOKI_API_KEY
+ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ARG NEXT_PUBLIC_SUI_NETWORK
+ARG NEXT_PUBLIC_MEMWAL_PACKAGE_ID
+ARG NEXT_PUBLIC_MEMWAL_REGISTRY_ID
+ARG NEXT_PUBLIC_MEMWAL_SERVER_URL
+
+ENV NEXT_PUBLIC_ENOKI_API_KEY=$NEXT_PUBLIC_ENOKI_API_KEY
+ENV NEXT_PUBLIC_GOOGLE_CLIENT_ID=$NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ENV NEXT_PUBLIC_SUI_NETWORK=$NEXT_PUBLIC_SUI_NETWORK
+ENV NEXT_PUBLIC_MEMWAL_PACKAGE_ID=$NEXT_PUBLIC_MEMWAL_PACKAGE_ID
+ENV NEXT_PUBLIC_MEMWAL_REGISTRY_ID=$NEXT_PUBLIC_MEMWAL_REGISTRY_ID
+ENV NEXT_PUBLIC_MEMWAL_SERVER_URL=$NEXT_PUBLIC_MEMWAL_SERVER_URL
 
 RUN bunx next build
 

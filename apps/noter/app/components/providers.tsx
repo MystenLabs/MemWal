@@ -13,13 +13,16 @@
 import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/shared/components/ui/tooltip";
 import { TRPCProvider } from "@/shared/lib/trpc/provider";
+import { SuiProviders } from "@/app/components/sui-providers";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <TRPCProvider>
-      <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-        <TooltipProvider>{children}</TooltipProvider>
-      </ThemeProvider>
+      <SuiProviders>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <TooltipProvider>{children}</TooltipProvider>
+        </ThemeProvider>
+      </SuiProviders>
     </TRPCProvider>
   );
 }

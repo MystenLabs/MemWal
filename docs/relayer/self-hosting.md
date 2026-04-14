@@ -6,14 +6,32 @@ Self-hosting means running your own relayer — either pointing at an existing M
 
 The managed relayer provided by Walrus Foundation is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
-## When to Self-Host
+## Personas & When to Self-Host
 
-The most common reasons are removing the trust assumption on a third-party relayer or running your own MemWal instance entirely:
+There are two primary personas who typically self-host the relayer:
 
-- **Control the trust boundary** — a self-hosted relayer keeps plaintext, encryption, and embedding under your own control
-- **Run your own MemWal instance** — deploy your own contract with a separate package ID, SEAL encryption keys, and data isolation
-- **Choose your own embedding provider** — use your own OpenAI-compatible API and credentials
-- **Guarantee availability** — the managed relayer is a beta service with no SLA
+1. **Builders & Teams**: Self-hosting for their own agentic needs or internal team usage, keeping the trust boundary, encryption, and embeddings under their control.
+2. **Infra Operators / Managed Service Providers (MSPs)**: Hosting the relayer as a reliable platform or service for *other* external development teams and agentic builders.
+
+The most common reasons to self-host include:
+
+- **Control the trust boundary** — keeping plaintext, encryption, and embedding under your own control rather than trusting a third-party.
+- **Run your own MemWal instance** — deploying your own contract with a separate package ID, SEAL encryption keys, and hard data isolation.
+- **Choose your own embedding provider** — using your own OpenAI-compatible API and credentials.
+- **Guarantee availability** — the managed relayer is a beta service with no SLA.
+
+## Data Isolation (Namespaces)
+
+With the current architecture, MemWal isolates data strictly by **User (Owner address)** and **Namespace**.
+Because the relayer inherently scopes all vector searches and storage operations by `owner + namespace`, multiple agents or applications can safely share the same relayer deployment simply by using different namespaces or operating under different delegate keys.
+
+## Horizontal Scaling
+
+If you are a Managed Service Provider or need to handle high agentic throughput, you can horizontally scale your hosted relayer natively. To run multiple instances of the relayer behind a load balancer for the *same* account/package ID:
+
+1. Point all relayer instances to the **same PostgreSQL database**.
+2. Supply the **same `SERVER_SUI_PRIVATE_KEYS` pool** to all instances so they can seamlessly execute concurrent Walrus uploads.
+3. Configure the **same Redis cluster** (`REDIS_URL`) across all nodes so that the rate limiter sliding window accurately tracks global user quotas across your deployment.
 
 ## What Runs
 
@@ -79,6 +97,15 @@ Set these to use a dedicated embedding provider independently of the LLM:
 ### LLM Model (optional)
 
 - `LLM_MODEL` — model used by `/api/analyze` and `/api/ask` (default: `openai/gpt-4o-mini`); accepts any OpenRouter or OpenAI-compatible model identifier
+### Rate Limits & Storage (Optional)
+
+By default, the relayer enforces rate limits and storage quotas via Redis to prevent abuse. You can customize these limits:
+
+- `RATE_LIMIT_REQUESTS_PER_MINUTE` — max burst weighted-requests per minute per user (default: 60)
+- `RATE_LIMIT_REQUESTS_PER_HOUR` — max sustained weighted-requests per hour per user (default: 500)
+- `RATE_LIMIT_DELEGATE_KEY_PER_MINUTE` — max weighted-requests per minute per delegate key (default: 30)
+- `RATE_LIMIT_STORAGE_BYTES` — max storage per user in bytes (default: 1 GB, `1073741824`)
+- `REDIS_URL` — required to track sliding windows for rate limits (default: `redis://localhost:6379`)
 
 ### Defaults
 
