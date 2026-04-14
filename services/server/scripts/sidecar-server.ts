@@ -79,7 +79,7 @@ const sealClient = new SealClient({
         objectId: id,
         weight: 1,
     })),
-    verifyKeyServers: false,
+    verifyKeyServers: true,
 });
 
 const walrusClient = new WalrusClient({
