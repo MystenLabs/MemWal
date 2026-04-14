@@ -44,6 +44,8 @@ struct WalrusUploadRequest {
     namespace: String,
     package_id: String,
     epochs: u64,
+    #[serde(rename = "delegatePublicKey", skip_serializing_if = "Option::is_none")]
+    delegate_public_key: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -70,6 +72,7 @@ pub async fn upload_blob(
     sui_private_key: &str,
     namespace: &str,
     package_id: &str,
+    delegate_public_key: Option<&str>,
 ) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -83,7 +86,12 @@ pub async fn upload_blob(
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),
             epochs,
-        })
+            delegate_public_key: delegate_public_key.map(|s| s.to_string()),
+        });
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| {
