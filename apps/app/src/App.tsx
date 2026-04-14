@@ -39,7 +39,7 @@ const { networkConfig } = createNetworkConfig({
 const queryClient = new QueryClient()
 
 // ============================================================
-// Delegate Key Context (stored in localStorage)
+// Delegate Key Context (stored in sessionStorage — cleared on tab close, never persists across sessions)
 // ============================================================
 
 interface DelegateKeyState {
@@ -65,48 +65,23 @@ export function useDelegateKey() {
   return ctx
 }
 
-const XOR_KEY = "memwal_sec_2026_04";
-
-function encryptObj(obj: any): string {
-  const str = JSON.stringify(obj);
-  let out = "";
-  for(let i = 0; i < str.length; i++) {
-    out += String.fromCharCode(str.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
-  }
-  return btoa(out);
-}
-
-function decryptObj(b64: string): any {
-  try {
-    const str = atob(b64);
-    let out = "";
-    for(let i = 0; i < str.length; i++) {
-      out += String.fromCharCode(str.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length));
-    }
-    return JSON.parse(out);
-  } catch {
-    // Fallback to plain JSON parse for backward compatibility
-    return JSON.parse(b64);
-  }
-}
-
 function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<DelegateKeyState>(() => {
-    const saved = localStorage.getItem('memwal_delegate')
+    const saved = sessionStorage.getItem('memwal_delegate')
     if (saved) {
-      try { return decryptObj(saved) } catch { /* ignore */ }
+      try { return JSON.parse(saved) } catch { /* ignore */ }
     }
     return { delegateKey: null, delegatePublicKey: null, accountObjectId: null }
   })
 
   const setDelegateKeys = useCallback((privateKey: string, publicKey: string, accountId: string) => {
     const next = { delegateKey: privateKey, delegatePublicKey: publicKey, accountObjectId: accountId }
-    localStorage.setItem('memwal_delegate', encryptObj(next))
+    sessionStorage.setItem('memwal_delegate', JSON.stringify(next))
     setState(next)
   }, [])
 
   const clearDelegateKeys = useCallback(() => {
-    localStorage.removeItem('memwal_delegate')
+    sessionStorage.removeItem('memwal_delegate')
     setState({ delegateKey: null, delegatePublicKey: null, accountObjectId: null })
   }, [])
 

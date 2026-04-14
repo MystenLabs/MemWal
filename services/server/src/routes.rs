@@ -128,15 +128,6 @@ pub async fn remember(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
-    // LOW-6: Cap text at 50KB to prevent memory/processing abuse
-    const MAX_TEXT_BYTES: usize = 50 * 1024; // 50KB
-    if body.text.len() > MAX_TEXT_BYTES {
-        return Err(AppError::BadRequest(format!(
-            "Text too large: max {} KB, got {} KB",
-            MAX_TEXT_BYTES / 1024,
-            body.text.len() / 1024
-        )));
-    }
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
@@ -144,15 +135,15 @@ pub async fn remember(
     let namespace = &body.namespace;
     tracing::info!("remember: text=\"{}...\" owner={} ns={}", truncate_str(text, 50), owner, namespace);
 
-    // LOW-11: Use estimated encrypted size (text * 1.2 overhead) for quota tracking
-    // so that quota correctly accounts for actual Walrus storage used
-    let estimated_encrypted_bytes = (text.as_bytes().len() as f64 * 1.2) as i64;
-    rate_limit::check_storage_quota(&state, owner, estimated_encrypted_bytes).await?;
+    // Check storage quota before processing
+    let text_bytes = text.as_bytes().len() as i64;
+    rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
         &state.http_client, &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
         text.as_bytes(), owner, &state.config.package_id,
     );
     let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -165,6 +156,7 @@ pub async fn remember(
         .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
         &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
     ).await?;
     let blob_id = upload_result.blob_id;
@@ -228,6 +220,7 @@ pub async fn recall(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
+        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -240,7 +233,7 @@ pub async fn recall(
                 Err(AppError::BlobNotFound(msg)) => {
                     // Blob expired on Walrus — clean up from DB reactively
                     tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id, &owner).await;
+                    cleanup_expired_blob(db, &blob_id).await;
                     return None;
                 }
                 Err(e) => {
@@ -249,7 +242,7 @@ pub async fn recall(
                 }
             };
             // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -265,7 +258,7 @@ pub async fn recall(
                         || err_str.contains("decrypt failed");
                     if is_permanent {
                         tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
-                        cleanup_expired_blob(db, &blob_id, &owner).await;
+                        cleanup_expired_blob(db, &blob_id).await;
                     } else {
                         tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
                     }
@@ -331,6 +324,7 @@ pub async fn remember_manual(
     let upload = walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
         &encrypted_bytes,
         50,
         owner,
@@ -446,6 +440,7 @@ pub async fn analyze(
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
             let encrypt_fut = seal::seal_encrypt(
                 &state.http_client, &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
                 fact_text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -455,6 +450,7 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
                 &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
             ).await?;
 
@@ -655,6 +651,7 @@ pub async fn ask(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
+        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -666,7 +663,7 @@ pub async fn ask(
                 Err(AppError::BlobNotFound(msg)) => {
                     // Blob expired on Walrus — clean up from DB reactively
                     tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id, &owner).await;
+                    cleanup_expired_blob(db, &blob_id).await;
                     return None;
                 }
                 Err(e) => {
@@ -674,7 +671,7 @@ pub async fn ask(
                     return None;
                 }
             };
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -711,13 +708,10 @@ pub async fn ask(
         format!("Known facts about this user:\n{}", lines.join("\n"))
     };
 
-    // LOW-8: Add explicit delimiter between system context and user query
-    // to prevent prompt injection via crafted memory content
     let system_prompt = format!(
         "You are a helpful AI assistant with access to the user's personal memories stored in memwal. \
         Use the following context to provide personalized answers. If the memories don't contain relevant \
-        information, say so honestly.\n\n{}",
-        memory_context
+        information, say so honestly.\n\n{}", memory_context
     );
 
     // Step 3: Call LLM
@@ -734,8 +728,7 @@ pub async fn ask(
             model: "openai/gpt-4o-mini".to_string(),
             messages: vec![
                 ChatMessage { role: "system".to_string(), content: system_prompt },
-                // LOW-8: Delimiter between context and user-controlled content
-                ChatMessage { role: "user".to_string(), content: format!("\n\n---USER QUERY---\n\n{}", body.question) },
+                ChatMessage { role: "user".to_string(), content: body.question.clone() },
             ],
             temperature: 0.7,
         })
@@ -769,13 +762,12 @@ pub async fn ask(
 /// Reactively delete an expired blob from the vector DB.
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
-/// LOW-10: Requires owner to scope deletion correctly.
-async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &str) {
-    match db.delete_by_blob_id(blob_id, owner).await {
+async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str) {
+    match db.delete_by_blob_id(blob_id).await {
         Ok(rows) => {
             tracing::info!(
-                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
-                rows, blob_id, owner
+                "reactive cleanup: deleted {} vector entries for expired blob_id={}",
+                rows, blob_id
             );
         }
         Err(e) => {
@@ -826,6 +818,7 @@ pub async fn restore(
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
         owner,
         Some(namespace),
         Some(&state.config.package_id),
@@ -889,7 +882,7 @@ pub async fn restore(
                 Ok(data) => Some((blob_id, data)),
                 Err(AppError::BlobNotFound(msg)) => {
                     tracing::warn!("restore: blob expired, skipping: {}", msg);
-                    cleanup_expired_blob(db, &blob_id, owner).await;
+                    cleanup_expired_blob(db, &blob_id).await;
                     None
                 }
                 Err(e) => {
@@ -931,6 +924,7 @@ pub async fn restore(
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_secret = state.config.sidecar_secret.clone();
             let private_key = private_key.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids.get(&blob_id)
@@ -939,7 +933,7 @@ pub async fn restore(
             let account_id = auth.account_id.clone();
             async move {
                 match seal::seal_decrypt(
-                    http_client, &sidecar_url, &encrypted_data,
+                    http_client, &sidecar_url, sidecar_secret.as_deref(), &encrypted_data,
                     &private_key, &package_id, &account_id,
                 ).await {
                     Ok(plaintext) => {
@@ -1028,10 +1022,14 @@ pub async fn sponsor_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor", state.config.sidecar_url);
-    let resp = state.http_client
+    let mut req = state.http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(body.to_vec())
+        .body(body.to_vec());
+    if let Some(secret) = state.config.sidecar_secret.as_deref() {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
@@ -1054,10 +1052,14 @@ pub async fn sponsor_execute_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let resp = state.http_client
+    let mut req = state.http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(body.to_vec())
+        .body(body.to_vec());
+    if let Some(secret) = state.config.sidecar_secret.as_deref() {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;

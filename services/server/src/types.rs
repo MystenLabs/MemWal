@@ -78,6 +78,8 @@ pub struct Config {
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
+    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
+    pub sidecar_secret: Option<String>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
 }
@@ -129,6 +131,7 @@ impl Config {
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
         }
     }
@@ -314,8 +317,7 @@ pub struct HealthResponse {
 // ============================================================
 
 /// Headers required for authenticated requests
-// LOW-5: Manual Debug impl to prevent delegate_key from being logged in plaintext
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AuthInfo {
     #[allow(dead_code)]
     pub public_key: String,
@@ -323,21 +325,8 @@ pub struct AuthInfo {
     pub owner: String,
     /// MemWalAccount object ID (set after onchain verification)
     pub account_id: String,
-    /// Delegate private key (hex) — used for SEAL decrypt SessionKey.
-    /// NEVER printed in logs — use AuthInfo's manual Debug impl.
+    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
     pub delegate_key: Option<String>,
-}
-
-impl std::fmt::Debug for AuthInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthInfo")
-            .field("public_key", &self.public_key)
-            .field("owner", &self.owner)
-            .field("account_id", &self.account_id)
-            // LOW-5: Never log the raw key — only presence/absence
-            .field("delegate_key", &self.delegate_key.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
 }
 
 // ============================================================
