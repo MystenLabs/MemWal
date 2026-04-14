@@ -52,4 +52,10 @@ ENV SIDECAR_URL=http://localhost:9000
 ENV SIDECAR_SCRIPTS_DIR=/app/scripts
 EXPOSE ${PORT}
 
+# MED-22: Run as non-root user for least-privilege security
+# This prevents container breakout privilege escalation
+RUN groupadd --system appgroup && useradd --system --gid appgroup --no-create-home appuser
+RUN chown -R appuser:appgroup /app
+USER appuser
+
 CMD ["./memwal-server"]

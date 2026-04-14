@@ -10,14 +10,24 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string). This is the delegate key from app.memwal.com */
-    key: string;
+    /**
+     * Ed25519 private key — the delegate key from app.memwal.com.
+     * MED-17: Accepts hex string or raw Uint8Array for ergonomic use
+     * with hardware wallets / Uint8Array-native environments.
+     */
+    key: string | Uint8Array;
     /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
+    /**
+     * MED-17: Optional destroy callback — called to zero-fill key material
+     * when the client is done. Best-effort in JS environments.
+     * @example client.destroy() // clears sensitive key from memory
+     */
+    onDestroy?: () => void;
 }
 
 // ============================================================
@@ -123,8 +133,11 @@ export interface RestoreResult {
 
 /** Config for MemWalManual (full client-side: SEAL + Walrus + embedding) */
 export interface MemWalManualConfig {
-    /** Ed25519 delegate private key (hex) for server auth */
-    key: string;
+    /**
+     * Ed25519 delegate private key for server auth.
+     * MED-17: Accepts hex string or raw Uint8Array.
+     */
+    key: string | Uint8Array;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
     /**
