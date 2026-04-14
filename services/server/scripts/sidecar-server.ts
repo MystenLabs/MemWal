@@ -759,6 +759,10 @@ app.post("/walrus/query-blobs", async (req, res) => {
         if (!owner) {
             return res.status(400).json({ error: "Missing required field: owner" });
         }
+        // MED-11: Validate owner is a valid Sui address format to prevent injection
+        if (!/^0x[0-9a-fA-F]{1,64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid owner format: must be a Sui address (0x...)" });
+        }
 
         // Walrus Blob type (derived from env-driven WALRUS_PACKAGE_ID)
         const WALRUS_BLOB_TYPE = `${WALRUS_PACKAGE_ID}::blob::Blob`;
