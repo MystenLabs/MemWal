@@ -87,11 +87,7 @@ pub async fn upload_blob(
             package_id: package_id.to_string(),
             epochs,
             delegate_public_key: delegate_public_key.map(|s| s.to_string()),
-        });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        })
         .send()
         .await
         .map_err(|e| {
