@@ -7,7 +7,7 @@ mod sui;
 mod types;
 mod walrus;
 
-use axum::{middleware, routing::{get, post}, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -143,11 +143,12 @@ async fn main() {
             auth::verify_signature,
         ));
 
-    // Public routes
+    // Public routes — hard cap at 16 KiB to prevent body-flooding on unauthenticated endpoints
     let public_routes = Router::new()
         .route("/health", get(routes::health))
         .route("/sponsor", post(routes::sponsor_proxy))
-        .route("/sponsor/execute", post(routes::sponsor_execute_proxy));
+        .route("/sponsor/execute", post(routes::sponsor_execute_proxy))
+        .layer(DefaultBodyLimit::max(16_384));
 
     let app = Router::new()
         .merge(protected_routes)
@@ -180,4 +181,71 @@ async fn main() {
     // Cleanup sidecar after shutdown
     sidecar_child.kill().await.ok();
     tracing::info!("sidecar stopped");
+}
+
+// ============================================================
+// Tests
+// ============================================================
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        extract::DefaultBodyLimit,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    async fn noop_handler(_body: axum::body::Bytes) -> &'static str { "ok" }
+
+    /// Minimal router mirroring public_routes body-limit config.
+    fn public_router() -> Router {
+        Router::new()
+            .route("/sponsor", post(noop_handler))
+            .route("/sponsor/execute", post(noop_handler))
+            .layer(DefaultBodyLimit::max(16_384))
+    }
+
+    #[tokio::test]
+    async fn public_route_rejects_body_over_16kb() {
+        let app = public_router();
+        let large_body = vec![b'x'; 17_000]; // 17 KB — exceeds 16 KB cap
+        let req = Request::builder()
+            .method("POST")
+            .uri("/sponsor")
+            .header("content-type", "application/json")
+            .body(Body::from(large_body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected 413 for body > 16 KiB");
+    }
+
+    #[tokio::test]
+    async fn public_route_accepts_body_under_16kb() {
+        let app = public_router();
+        let small_body = vec![b'x'; 1_000]; // 1 KB — within cap
+        let req = Request::builder()
+            .method("POST")
+            .uri("/sponsor")
+            .header("content-type", "application/json")
+            .body(Body::from(small_body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected body < 16 KiB to pass through");
+    }
+
+    #[tokio::test]
+    async fn sponsor_execute_rejects_body_over_16kb() {
+        let app = public_router();
+        let large_body = vec![b'x'; 20_000]; // 20 KB
+        let req = Request::builder()
+            .method("POST")
+            .uri("/sponsor/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(large_body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "expected 413 for /sponsor/execute body > 16 KiB");
+    }
 }

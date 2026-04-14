@@ -272,7 +272,7 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // ============================================================
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
@@ -425,6 +425,9 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         const { items, privateKey, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
+        }
+        if (items.length > 100) {
+            return res.status(400).json({ error: "Too many items: max 100 per batch" });
         }
         if (!privateKey || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
