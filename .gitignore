@@ -116,3 +116,10 @@ tmp-smashblob/
 
 # Railway sensitive docs
 railway-*.md
+
+# Local review & audit files — never commit
+flow.md
+res.md
+review0704/
+review0804/
+*.audit.md
