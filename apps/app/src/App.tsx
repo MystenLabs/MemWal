@@ -39,7 +39,7 @@ const { networkConfig } = createNetworkConfig({
 const queryClient = new QueryClient()
 
 // ============================================================
-// Delegate Key Context (stored in localStorage)
+// Delegate Key Context (stored in sessionStorage — cleared on tab close, never persists across sessions)
 // ============================================================
 
 interface DelegateKeyState {
@@ -67,7 +67,7 @@ export function useDelegateKey() {
 
 function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<DelegateKeyState>(() => {
-    const saved = localStorage.getItem('memwal_delegate')
+    const saved = sessionStorage.getItem('memwal_delegate')
     if (saved) {
       try { return JSON.parse(saved) } catch { /* ignore */ }
     }
@@ -76,12 +76,12 @@ function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
 
   const setDelegateKeys = useCallback((privateKey: string, publicKey: string, accountId: string) => {
     const next = { delegateKey: privateKey, delegatePublicKey: publicKey, accountObjectId: accountId }
-    localStorage.setItem('memwal_delegate', JSON.stringify(next))
+    sessionStorage.setItem('memwal_delegate', JSON.stringify(next))
     setState(next)
   }, [])
 
   const clearDelegateKeys = useCallback(() => {
-    localStorage.removeItem('memwal_delegate')
+    sessionStorage.removeItem('memwal_delegate')
     setState({ delegateKey: null, delegatePublicKey: null, accountObjectId: null })
   }, [])
 

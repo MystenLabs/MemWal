@@ -78,6 +78,8 @@ pub struct Config {
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
+    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
+    pub sidecar_secret: Option<String>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
 }
@@ -129,6 +131,7 @@ impl Config {
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
         }
     }
