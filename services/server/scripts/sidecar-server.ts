@@ -508,7 +508,7 @@ app.post("/walrus/upload", async (req, res) => {
             owner,
             namespace,
             packageId,
-            delegatePublicKey,
+            agentId,
             epochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
         if (!data || !privateKey) {
@@ -612,14 +612,14 @@ app.post("/walrus/upload", async (req, res) => {
                     });
                 }
 
-                // Set memwal_delegate_key
-                if (delegatePublicKey) {
+                // Set memwal_agent_id
+                if (agentId) {
                     metaTx.moveCall({
                         target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
                         arguments: [
                             blobArg,
-                            metaTx.pure.string("memwal_delegate_key"),
-                            metaTx.pure.string(delegatePublicKey),
+                            metaTx.pure.string("memwal_agent_id"),
+                            metaTx.pure.string(agentId),
                         ],
                         typeArguments: [],
                     });
@@ -758,14 +758,14 @@ app.post("/walrus/query-blobs", async (req, res) => {
             blobNamespace: string;
             blobOwner: string;
             blobPackageId: string;
-            blobDelegateKey: string;
+            blobAgentId: string;
         };
 
         const metas: BlobMeta[] = await mapConcurrent(rawObjs, 5, async (obj) => {
             let blobNamespace = "default";
             let blobOwner = "";
             let blobPackageId = "";
-            let blobDelegateKey = "";
+            let blobAgentId = "";
 
             try {
                 const dynField = await getDynamicFieldWithRetry(obj.objectId, METADATA_FIELD_NAME);
@@ -781,7 +781,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
                             if (key === "memwal_namespace") blobNamespace = value;
                             if (key === "memwal_owner") blobOwner = value;
                             if (key === "memwal_package_id") blobPackageId = value;
-                            if (key === "memwal_delegate_key") blobDelegateKey = value;
+                            if (key === "memwal_agent_id") blobAgentId = value;
                         }
                     }
                 }
@@ -789,11 +789,11 @@ app.post("/walrus/query-blobs", async (req, res) => {
                 // No dynamic field = no metadata = use defaults
             }
 
-            return { ...obj, blobNamespace, blobOwner, blobPackageId, blobDelegateKey };
+            return { ...obj, blobNamespace, blobOwner, blobPackageId, blobAgentId };
         });
 
         // Step 3: Filter + convert blob IDs
-        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string; delegateKey: string }[] = [];
+        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string; agentId: string }[] = [];
 
         for (const meta of metas) {
             // Filter by namespace if specified
@@ -816,7 +816,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
                         // Keep as-is if conversion fails
                     }
                 }
-                blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, delegateKey: meta.blobDelegateKey });
+                blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, agentId: meta.blobAgentId });
             }
         }
 
