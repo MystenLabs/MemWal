@@ -39,7 +39,7 @@ struct QueryBlobsResponse {
 #[serde(rename_all = "camelCase")]
 struct WalrusUploadRequest {
     data: String,
-    private_key: String,
+    key_index: usize,
     owner: String,
     namespace: String,
     package_id: String,
@@ -68,7 +68,7 @@ pub async fn upload_blob(
     data: &[u8],
     epochs: u64,
     owner_address: &str,
-    sui_private_key: &str,
+    key_index: usize,
     namespace: &str,
     package_id: &str,
 ) -> Result<UploadResult, AppError> {
@@ -79,7 +79,7 @@ pub async fn upload_blob(
         .post(&url)
         .json(&WalrusUploadRequest {
             data: data_b64,
-            private_key: sui_private_key.to_string(),
+            key_index,
             owner: owner_address.to_string(),
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),

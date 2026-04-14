@@ -39,6 +39,20 @@ if (SEAL_KEY_SERVERS.length === 0) {
     console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
 }
 
+// Server Sui Private Keys for Walrus uploads
+const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+if (SERVER_SUI_PRIVATE_KEYS.length === 0 && process.env.SERVER_SUI_PRIVATE_KEY) {
+    SERVER_SUI_PRIVATE_KEYS.push(process.env.SERVER_SUI_PRIVATE_KEY.trim());
+}
+
+if (SERVER_SUI_PRIVATE_KEYS.length === 0) {
+    console.error("[sidecar] WARNING: SERVER_SUI_PRIVATE_KEYS env var is empty — Walrus uploads will fail");
+}
+
 // Walrus package ID (for on-chain Move calls: metadata, blob type queries)
 const WALRUS_PACKAGE_ID = process.env.WALRUS_PACKAGE_ID || (
     SUI_NETWORK === "testnet"
@@ -538,18 +552,22 @@ app.post("/walrus/upload", async (req, res) => {
     try {
         const {
             data,
-            privateKey,
+            keyIndex,
             owner,
             namespace,
             packageId,
             epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
-
         // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
         const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
 
-        if (!data || !privateKey) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey" });
+        if (!data || keyIndex === undefined) {
+            return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
+        }
+
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[keyIndex];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
         }
 
         // LOW-16: Validate packageId resembles a Sui address to prevent injection
