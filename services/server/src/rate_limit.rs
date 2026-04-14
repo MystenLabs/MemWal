@@ -213,6 +213,25 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
         .unwrap()
 }
 
+/// Build a 503 response indicating the rate limiter backend is down.
+///
+/// MEM-18: fail-closed — when Redis is unavailable we DENY
+/// rather than silently allow (fail-open). Returns 503 with
+/// Retry-After header so clients know to back off.
+fn rate_limiter_unavailable_response() -> Response {
+    let body = serde_json::json!({
+        "error": "Rate limiter temporarily unavailable",
+        "retry_after_seconds": 5,
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "application/json")
+        .header("Retry-After", "5")
+        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
 fn explicit_rate_limit_error(layer: &str, limit: i64, window: &str) -> AppError {
     AppError::RateLimited(format!(
         "Rate limit exceeded for {} (limit: {} weighted-requests/{})",
@@ -423,14 +442,8 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (dk): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            tracing::error!("rate limit [dk] Redis error: {} - failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
@@ -458,14 +471,8 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (burst): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            tracing::error!("rate limit [burst] Redis error: {} - failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
@@ -493,14 +500,8 @@ pub async fn rate_limit_middleware(
             }
         }
         Err(e) => {
-            tracing::error!("redis rate limit check failed (sustained): {}", e);
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Rate limiter unavailable"}"#,
-                ))
-                .unwrap();
+            tracing::error!("rate limit [sustained] Redis error: {} - failing closed (503)", e);
+            return rate_limiter_unavailable_response();
         }
     }
 
