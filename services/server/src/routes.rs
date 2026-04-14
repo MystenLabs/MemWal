@@ -29,6 +29,20 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+fn validate_namespace(ns: &str) -> Result<(), AppError> {
+    if ns.is_empty() || ns.len() > 64 {
+        return Err(AppError::BadRequest(
+            "namespace must be between 1 and 64 characters".into(),
+        ));
+    }
+    if !ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(AppError::BadRequest(
+            "namespace can only contain alphanumeric characters, hyphens, and underscores".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ============================================================
 // Embedding — OpenRouter/OpenAI API (with mock fallback)
 // ============================================================
@@ -78,10 +92,8 @@ async fn generate_embedding(
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(AppError::Internal(format!(
-                    "Embedding API error ({}): {}",
-                    status, body
-                )));
+                tracing::error!("Embedding API error ({}): {}", status, body);
+                return Err(AppError::Internal("Embedding API error".into()));
             }
 
             let api_resp: EmbeddingApiResponse = resp.json().await.map_err(|e| {
@@ -135,6 +147,7 @@ pub async fn remember(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
@@ -222,6 +235,7 @@ pub async fn recall(
     if body.query.is_empty() {
         return Err(AppError::BadRequest("Query cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
@@ -267,6 +281,7 @@ pub async fn recall(
             let private_key = private_key.to_string();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
+            let owner_clone = auth.owner.clone();
             async move {
                 // Download encrypted blob from Walrus (native Rust)
                 let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
@@ -274,7 +289,7 @@ pub async fn recall(
                     Err(AppError::BlobNotFound(msg)) => {
                         // Blob expired on Walrus — clean up from DB reactively
                         tracing::warn!("Blob expired, cleaning up: {}", msg);
-                        cleanup_expired_blob(db, &blob_id).await;
+                        cleanup_expired_blob(db, &blob_id, &owner_clone).await;
                         return None;
                     }
                     Err(e) => {
@@ -315,7 +330,7 @@ pub async fn recall(
                                 blob_id,
                                 e
                             );
-                            cleanup_expired_blob(db, &blob_id).await;
+                            cleanup_expired_blob(db, &blob_id, &owner_clone).await;
                         } else {
                             tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
                         }
@@ -358,6 +373,7 @@ pub async fn remember_manual(
     if body.vector.is_empty() {
         return Err(AppError::BadRequest("vector cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -432,6 +448,7 @@ pub async fn recall_manual(
     if body.vector.is_empty() {
         return Err(AppError::BadRequest("vector cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -476,6 +493,7 @@ pub async fn analyze(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -688,10 +706,8 @@ async fn extract_facts_llm(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "LLM API error ({}): {}",
-            status, body
-        )));
+        tracing::error!("LLM API error ({}): {}", status, body);
+        return Err(AppError::Internal("LLM API error".into()));
     }
 
     let api_resp: ChatCompletionResponse = resp
@@ -720,6 +736,8 @@ fn parse_extracted_facts(content: &str) -> ExtractedFacts {
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && l != "NONE")
+        .filter(|f| f.len() <= 500)
+        .take(MAX_ANALYZE_FACTS)
         .collect();
 
     let raw_count = facts.len();
@@ -786,7 +804,7 @@ mod tests {
             .join("\n");
         let parsed = parse_extracted_facts(&content);
 
-        assert_eq!(parsed.raw_count, MAX_ANALYZE_FACTS + 3);
+        assert_eq!(parsed.raw_count, MAX_ANALYZE_FACTS);
         assert_eq!(parsed.facts.len(), MAX_ANALYZE_FACTS);
         assert_eq!(parsed.facts.first().map(String::as_str), Some("Fact 0"));
         assert_eq!(parsed.facts.last().map(String::as_str), Some("Fact 19"));
@@ -832,6 +850,7 @@ pub async fn ask(
     if body.question.is_empty() {
         return Err(AppError::BadRequest("Question cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -876,13 +895,14 @@ pub async fn ask(
             let private_key = private_key.to_string();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
+            let owner_clone = auth.owner.clone();
             async move {
                 let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                     Ok(data) => data,
                     Err(AppError::BlobNotFound(msg)) => {
                         // Blob expired on Walrus — clean up from DB reactively
                         tracing::warn!("Blob expired, cleaning up: {}", msg);
-                        cleanup_expired_blob(db, &blob_id).await;
+                        cleanup_expired_blob(db, &blob_id, &owner_clone).await;
                         return None;
                     }
                     Err(e) => {
@@ -982,10 +1002,8 @@ pub async fn ask(
     if !resp.status().is_success() {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "LLM error ({}): {}",
-            status, body_text
-        )));
+        tracing::error!("LLM error ({}): {}", status, body_text);
+        return Err(AppError::Internal("LLM API error".into()));
     }
 
     let api_resp: ChatCompletionResponse = resp
@@ -1015,8 +1033,8 @@ pub async fn ask(
 /// Reactively delete an expired blob from the vector DB.
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
-async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str) {
-    match db.delete_by_blob_id(blob_id).await {
+async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &str) {
+    match db.delete_by_blob_id(blob_id, owner).await {
         Ok(rows) => {
             tracing::info!(
                 "reactive cleanup: deleted {} vector entries for expired blob_id={}",
@@ -1050,6 +1068,7 @@ pub async fn restore(
     if body.namespace.is_empty() {
         return Err(AppError::BadRequest("namespace cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -1144,12 +1163,13 @@ pub async fn restore(
         .map(|blob_id| {
             let walrus_client = &state.walrus_client;
             let blob_id = blob_id.clone();
+            let owner_clone = owner.clone();
             async move {
                 match walrus::download_blob(walrus_client, &blob_id).await {
                     Ok(data) => Some((blob_id, data)),
                     Err(AppError::BlobNotFound(msg)) => {
                         tracing::warn!("restore: blob expired, skipping: {}", msg);
-                        cleanup_expired_blob(db, &blob_id).await;
+                        cleanup_expired_blob(db, &blob_id, &owner_clone).await;
                         None
                     }
                     Err(e) => {
