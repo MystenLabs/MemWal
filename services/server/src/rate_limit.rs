@@ -354,9 +354,9 @@ pub async fn check_storage_quota(
     // preventing TOCTOU race conditions.
     // We use a stable hash of the owner string as the lock key.
     let lock_key = stable_hash_i64(owner);
-    state.db.acquire_advisory_lock(lock_key).await?;
-
-    let used = state.db.get_storage_used(owner).await?;
+    
+    // Use the combined method which uses an explicit transaction and pg_advisory_xact_lock
+    let used = state.db.get_storage_used_with_lock(owner, lock_key).await?;
     let projected = used + additional_bytes;
 
     if projected > max_bytes {

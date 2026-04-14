@@ -226,32 +226,30 @@ impl VectorDb {
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================
 
-    /// Acquire a PostgreSQL session-level advisory lock by numeric key.
+    /// Acquire an advisory lock and get storage used within a single transaction.
     ///
-    /// MED-21 fix: Used to serialize concurrent storage quota checks
-    /// for the same owner, preventing TOCTOU race conditions where
-    /// multiple requests could all pass the quota check simultaneously.
-    ///
-    /// The lock is automatically released when the connection is
-    /// returned to the pool (session-level lock, not transaction-level).
-    pub async fn acquire_advisory_lock(&self, lock_key: i64) -> Result<(), AppError> {
-        sqlx::query("SELECT pg_advisory_lock($1)")
+    /// MED-21 bugfix: using `pg_advisory_lock` with a connection pool causes deadlocks
+    /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
+    /// transaction so the lock is automatically released on commit/rollback.
+    pub async fn get_storage_used_with_lock(&self, owner: &str, lock_key: i64) -> Result<i64, AppError> {
+        let mut tx = self.pool.begin().await
+            .map_err(|e| AppError::Internal(format!("Failed to begin tx: {}", e)))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to acquire advisory lock: {}", e)))?;
-        Ok(())
-    }
 
-    /// Get total storage used by a user (sum of blob_size_bytes for active entries).
-    pub async fn get_storage_used(&self, owner: &str) -> Result<i64, AppError> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
         )
         .bind(owner)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
+
+        tx.commit().await.map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
         Ok(row.0)
     }
