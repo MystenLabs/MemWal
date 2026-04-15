@@ -238,6 +238,14 @@ pub struct RecallRequest {
 pub struct RecallResponse {
     pub results: Vec<RecallResult>,
     pub total: usize,
+    /// LOW-7: Count of matches whose blob download / SEAL decrypt / UTF-8 decode
+    /// failed and were silently omitted from `results`. Zero on the happy path.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub dropped_count: usize,
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -395,7 +403,7 @@ pub struct SponsorExecuteRequest {
 // ============================================================
 
 /// Headers required for authenticated requests
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthInfo {
     #[allow(dead_code)]
     pub public_key: String,
@@ -405,6 +413,22 @@ pub struct AuthInfo {
     pub account_id: String,
     /// Delegate private key (hex) — used for SEAL decrypt SessionKey
     pub delegate_key: Option<String>,
+}
+
+// LOW-5: Manual Debug redacts `delegate_key` so accidental `{:?}` formatting
+// never leaks delegate private key material into logs.
+impl std::fmt::Debug for AuthInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthInfo")
+            .field("public_key", &self.public_key)
+            .field("owner", &self.owner)
+            .field("account_id", &self.account_id)
+            .field(
+                "delegate_key",
+                &self.delegate_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 // ============================================================

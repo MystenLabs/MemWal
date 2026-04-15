@@ -35,7 +35,7 @@ import type {
     RecallManualMemory,
     RestoreResult,
 } from "./types.js";
-import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
+import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
 
 // ============================================================
 // Constants
@@ -79,7 +79,9 @@ export class MemWalManual {
             throw new Error("MemWalManual: provide suiPrivateKey OR walletSigner, not both");
         }
         this.delegatePrivateKey = hexToBytes(config.key);
-        this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
+        // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
+        // against non-localhost hosts.
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://api.memwal.com");
         this.walletSigner = config.walletSigner ?? null;
         this.config = config;
         this.namespace = config.namespace ?? "default";
@@ -240,9 +242,11 @@ export class MemWalManual {
         const ns = namespace ?? this.namespace;
 
         // Step 1 & 2: Embed + SEAL encrypt concurrently
+        // LOW-24: Scope SEAL encryption id by namespace so a delegate key
+        // authorized for one namespace cannot unwrap ciphertext for another.
         const [vector, encrypted] = await Promise.all([
             this.embed(text),
-            this.sealEncrypt(new TextEncoder().encode(text)),
+            this.sealEncrypt(new TextEncoder().encode(text), ns),
         ]);
 
         // Step 3: Send encrypted bytes (base64) + vector to server.
@@ -447,14 +451,39 @@ export class MemWalManual {
     // Internal: SEAL Encrypt
     // ============================================================
 
-    private async sealEncrypt(plaintext: Uint8Array): Promise<Uint8Array> {
+    /**
+     * SEAL-encrypt a payload.
+     *
+     * LOW-24: The `id` passed to SEAL is the on-chain policy identifier used
+     * by `seal_approve` to gate decryption. Previously this was just the
+     * owner's Sui address, which meant every memory the owner ever encrypted
+     * shared one decryption scope — a delegate authorized for namespace "A"
+     * could obtain keys for namespace "B" ciphertext.
+     *
+     * We now include both the account id and the namespace:
+     *   id = hex(accountId) || ":" || hex(utf8(namespace))
+     *
+     * NOTE (breaking change): Ciphertext produced before this fix was scoped
+     * by ownerAddress only. Legacy blobs created with the old id will still
+     * decrypt against SEAL (the id travels inside the EncryptedObject), but
+     * any on-chain `seal_approve` policy that now expects namespace-scoped
+     * ids will need to be updated in lockstep.
+     */
+    private async sealEncrypt(plaintext: Uint8Array, namespace: string): Promise<Uint8Array> {
         const sealClient = await this.getSealClient();
-        const ownerAddress = await this.getOwnerAddress();
+
+        // Build a namespace-scoped SEAL id. Hex-encode both components so
+        // the id is a stable ASCII hex string (SEAL expects a hex id).
+        const accountHex = this.config.accountId.startsWith("0x")
+            ? this.config.accountId.slice(2)
+            : this.config.accountId;
+        const nsHex = bytesToHex(new TextEncoder().encode(namespace));
+        const scopedId = `${accountHex}${nsHex}`;
 
         const result = await sealClient.encrypt({
             threshold: 1,
             packageId: this.config.packageId,
-            id: ownerAddress,
+            id: scopedId,
             data: plaintext,
         });
 
@@ -526,6 +555,14 @@ export class MemWalManual {
         return this.delegatePublicKey;
     }
 
+    /**
+     * Make a signed request to the server.
+     *
+     * Signature format (LOW-1 + MED-1 + LOW-23):
+     *   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
+     *
+     * Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
+     */
     private async signedRequest<T>(
         method: string,
         path: string,
@@ -537,7 +574,12 @@ export class MemWalManual {
         const bodyStr = JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
 
-        const message = `${timestamp}.${method}.${path}.${bodySha256}`;
+        // MED-1: per-request nonce for replay protection.
+        const nonce = crypto.randomUUID();
+
+        // LOW-23: include x-account-id in the canonical signed message so an
+        // intermediary cannot rebind a signed request to a different account.
+        const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.config.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
         const signature = await ed.signAsync(msgBytes, this.delegatePrivateKey);
@@ -551,13 +593,25 @@ export class MemWalManual {
                 "x-public-key": bytesToHex(publicKey),
                 "x-signature": bytesToHex(signature),
                 "x-timestamp": timestamp,
+                "x-nonce": nonce,
+                "x-account-id": this.config.accountId,
             },
             body: bodyStr,
         });
 
         if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`MemWal API error (${res.status}): ${errText}`);
+            // LOW-26: sanitize server error bodies before re-throwing.
+            const raw = await res.text();
+            const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
+            const err = new Error(sanitized) as Error & {
+                status?: number;
+                serverCode?: string;
+                cause?: string;
+            };
+            err.status = res.status;
+            if (serverCode) err.serverCode = serverCode;
+            err.cause = raw;
+            throw err;
         }
 
         return res.json() as Promise<T>;

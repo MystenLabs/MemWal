@@ -231,8 +231,10 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
             new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
         );
 
+        // LOW-15: Defense-in-depth — encode digest before path interpolation.
+        const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
         const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${sponsored.digest}`,
+            `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
             {
                 digest: sponsored.digest,
                 signature: signature.signature,
@@ -679,14 +681,29 @@ app.post("/walrus/upload", async (req, res) => {
                 await suiClient.waitForTransaction({ digest: metaDigest });
                 console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
             } catch (metaErr: any) {
-                // Non-fatal: blob is uploaded but metadata/transfer failed
-                console.error(`[walrus/upload] metadata+transfer failed: ${metaErr.message}`);
+                // LOW-14: Previously the metadata-set + transfer failure was swallowed
+                // and /walrus/upload returned 200 with the blob_id, leaving the blob
+                // owned by the server wallet and the client unable to observe the
+                // failure. We still can't delete the blob from Walrus (no delete
+                // primitive after certify), so at minimum we log loudly AND return
+                // 500 so the caller can react (retry / mark stored-but-not-owned).
+                console.error(
+                    `[walrus/upload] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
+                    `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
+                );
+                return res.status(500).json({
+                    error: "Blob uploaded but metadata/transfer to owner failed",
+                    blobId: blob.blobId,
+                    objectId: blobObjectId,
+                    transferStatus: "failed",
+                });
             }
         }
 
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
+            transferStatus: "ok",
         });
     } catch (err: any) {
         console.error(`[walrus/upload] error: ${err.message || err}`);
@@ -886,14 +903,17 @@ app.post("/sponsor", async (req, res) => {
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        console.log(`[sponsor] creating sponsored tx for sender=${sender}`);
+        // LOW-18: Redact full sender address (PII / deanonymisation) — log only
+        // a short prefix for correlation. Never log the full digest here either.
+        const senderPrefix = typeof sender === "string" ? sender.slice(0, 10) : "unknown";
+        console.log(`[sponsor] creating sponsored tx for sender=${senderPrefix}...`);
         const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
             network: enokiNetwork,
             transactionBlockKindBytes,
             sender,
         });
 
-        console.log(`[sponsor] sponsored tx created, digest=${sponsored.digest}`);
+        console.log(`[sponsor] sponsored tx created (digest_len=${sponsored.digest.length})`);
         res.json(sponsored); // { bytes, digest }
     } catch (err: any) {
         console.error(`[sponsor] error: ${err.message || err}`);
@@ -915,13 +935,22 @@ app.post("/sponsor/execute", async (req, res) => {
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        console.log(`[sponsor/execute] executing sponsored tx digest=${digest}`);
+        // LOW-15: Percent-encode digest before path interpolation. The digest is
+        // attacker-controlled when the sidecar is reached directly (no auth,
+        // S1 in audit) or via the Rust proxy which validates base58 but the
+        // sidecar must not rely on that. encodeURIComponent neutralises any
+        // path traversal (`..`), query injection (`?`), or fragment (`#`)
+        // payloads in the digest segment.
+        const encodedDigest = encodeURIComponent(digest);
         const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${digest}`,
+            `/transaction-blocks/sponsor/${encodedDigest}`,
             { digest, signature }
         );
 
-        console.log(`[sponsor/execute] tx executed, final digest=${executed.digest}`);
+        // LOW-18: Redact digest from console logs — it's a high-cardinality
+        // value that ties log lines to individual user transactions. Log only
+        // a length indicator for diagnostics.
+        console.log(`[sponsor/execute] executed sponsored tx (digest_len=${digest.length})`);
         res.json(executed); // { digest }
     } catch (err: any) {
         console.error(`[sponsor/execute] error: ${err.message || err}`);

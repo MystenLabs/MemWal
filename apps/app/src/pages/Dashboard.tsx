@@ -208,11 +208,16 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
+    // LOW-30: Never render any portion (prefix/suffix) of the real private key
+    // in DOM / copyable snippets. Use a static placeholder instead.
+    const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
+    const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
+
     const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
-  key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
-  accountId: "${accountObjectId?.slice(0, 10)}...",
+  key: "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -228,8 +233,8 @@ import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
-  key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
-  accountId: "${accountObjectId?.slice(0, 10)}...",
+  key: "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 

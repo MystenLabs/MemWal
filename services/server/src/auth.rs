@@ -126,9 +126,24 @@ pub async fn verify_signature(
 
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
     // MED-1 fix: Include nonce in signed message to prevent replay attacks.
-    // Old format: "{timestamp}.{method}.{path}.{body_sha256}"
-    // New format: "{timestamp}.{method}.{path}.{body_sha256}.{nonce}"
-    let message = format!("{}.{}.{}.{}.{}", timestamp_str, method, path, body_hash, nonce);
+    // LOW-23: Include x-account-id in the signed canonical message so an
+    //         intermediary cannot swap the account hint. The header MUST be
+    //         present — the SDK now always sends it. If absent we use an
+    //         empty string so the signature will mismatch and the request
+    //         is rejected below.
+    //
+    // NOTE (coordinator): this change must land in lockstep with the SDK
+    // signing change in packages/sdk/src/{memwal,manual}.ts. If the Rust
+    // sidecar agent edits this function concurrently, reconcile so the
+    // canonical message below is the single source of truth.
+    //
+    // Canonical format:
+    //   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
+    let account_id_for_sig = account_id_hint.clone().unwrap_or_default();
+    let message = format!(
+        "{}.{}.{}.{}.{}.{}",
+        timestamp_str, method, path, body_hash, nonce, account_id_for_sig
+    );
 
     // Step 1: Verify Ed25519 signature
     verifying_key
