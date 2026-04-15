@@ -155,7 +155,9 @@ async fn record_in_window(
     }
     pipe.expire(key, ttl_seconds);
 
-    let _: Result<(), _> = pipe.query_async(redis).await;
+    if let Err(e) = pipe.query_async::<()>(redis).await {
+        tracing::warn!("rate limit: failed to record window for key {}: {}", key, e);
+    }
 }
 
 // ============================================================

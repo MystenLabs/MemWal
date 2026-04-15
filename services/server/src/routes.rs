@@ -156,6 +156,7 @@ pub async fn remember(
     let upload_result = walrus::upload_blob(
         &state.http_client, &state.config.sidecar_url,
         &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
+        Some(&auth.public_key),
     ).await?;
     let blob_id = upload_result.blob_id;
 
@@ -327,6 +328,7 @@ pub async fn remember_manual(
         &sui_key,
         namespace,
         &state.config.package_id,
+        Some(&auth.public_key),
     )
     .await?;
 
@@ -420,10 +422,12 @@ pub async fn analyze(
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
     // Each fact gets its own key from the pool so sidecar can upload them in parallel
     // (different signer addresses bypass the per-signer serialization lock).
+    let auth_pubkey_base = auth.public_key.clone();
     let tasks: Vec<_> = facts.iter().map(|fact_text| {
         let state = Arc::clone(&state);
         let owner = owner.clone();
         let fact_text = fact_text.clone();
+        let auth_pubkey = auth_pubkey_base.clone();
         // Pick the next key in round-robin order at task construction time.
         // Convert to owned String *before* async move so we don't borrow-then-move `state`.
         let sui_key: Result<String, AppError> = state.key_pool.next()
@@ -446,6 +450,7 @@ pub async fn analyze(
             let upload_result = walrus::upload_blob(
                 &state.http_client, &state.config.sidecar_url,
                 &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
+                Some(&auth_pubkey),
             ).await?;
 
             // Store in Vector DB with namespace
