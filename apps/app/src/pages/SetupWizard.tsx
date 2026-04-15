@@ -2,13 +2,13 @@
  * Setup Wizard — Generate delegate key + create MemWalAccount onchain
  *
  * Steps:
- * 1. Generate Ed25519 keypair
- * 2. Create MemWalAccount onchain (if not exists)
- * 3. Add delegate key onchain
- * 4. Save key to localStorage → proceed to Dashboard
+ * 1. Intro — explain delegate keys, "generate delegate key" button
+ * 2. Generate Ed25519 keypair → show key + copy + confirm (both flows)
+ * 3. On-chain registration (Enoki: sponsored/silent, Wallet: user approves)
+ * 4. Save key to sessionStorage → redirect to Dashboard
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
@@ -17,12 +17,18 @@ import {
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
-type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done'
+type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
+
+const AUTH_METHOD_KEY = 'memwal_auth_method'
+
+function getPersistedAuthMethod(): string | null {
+    return sessionStorage.getItem(AUTH_METHOD_KEY)
+}
 
 export default function SetupWizard() {
     const currentAccount = useCurrentAccount()
@@ -30,6 +36,7 @@ export default function SetupWizard() {
     const { mutateAsync: signAndExecute } = useSponsoredTransaction()
     const suiClient = useSuiClient()
     const { setDelegateKeys } = useDelegateKey()
+    const navigate = useNavigate()
 
     const [step, setStep] = useState<Step>('intro')
     const [privateKeyHex, setPrivateKeyHex] = useState('')
@@ -40,168 +47,197 @@ export default function SetupWizard() {
     const [error, setError] = useState('')
     const [suiAddress, setSuiAddress] = useState('')
 
+    const setupRunningRef = useRef(false)
     const address = currentAccount?.address || ''
+    const isEnoki = getPersistedAuthMethod() === 'enoki'
 
-    // --------------------------------------------------------
-    // Step 1: Generate Ed25519 keypair
-    // --------------------------------------------------------
-    const generateKeypair = useCallback(async () => {
+    // ── Done: redirect to dashboard ──
+    useEffect(() => {
+        if (step === 'done') {
+            sessionStorage.removeItem(AUTH_METHOD_KEY)
+            const timer = setTimeout(() => navigate('/dashboard'), 1500)
+            return () => clearTimeout(timer)
+        }
+    }, [step, navigate])
+
+    // ── Generate Ed25519 keypair (shared) ──
+    const generateKeys = useCallback(async () => {
+        const ed = await import('@noble/ed25519')
+        const { blake2b } = await import('@noble/hashes/blake2.js')
+        const privateKey = new Uint8Array(32)
+        crypto.getRandomValues(privateKey)
+        const publicKey = await ed.getPublicKeyAsync(privateKey)
+
+        const privHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('')
+        const pubHex = Array.from(publicKey).map(b => b.toString(16).padStart(2, '0')).join('')
+
+        const input = new Uint8Array(33)
+        input[0] = 0x00
+        input.set(publicKey, 1)
+        const addressBytes = blake2b(input, { dkLen: 32 })
+        const suiAddr = '0x' + Array.from(new Uint8Array(addressBytes)).map((b: number) => b.toString(16).padStart(2, '0')).join('')
+
+        return { privHex, pubHex, suiAddr }
+    }, [])
+
+    // ── Register delegate key on-chain (shared) ──
+    const registerOnchain = useCallback(async (
+        ownerAddress: string,
+        pubKeyHex: string,
+        delegateSuiAddress: string,
+    ): Promise<string> => {
+        let knownAccountId: string | null = null
+
+        try {
+            const registryObj = await suiClient.getObject({
+                id: config.memwalRegistryId,
+                options: { showContent: true },
+            })
+            if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
+                const fields = registryObj.data.content.fields as any
+                const tableId = fields?.accounts?.fields?.id?.id
+                if (tableId) {
+                    const dynField = await suiClient.getDynamicFieldObject({
+                        parentId: tableId,
+                        name: { type: 'address', value: ownerAddress },
+                    })
+                    if (dynField?.data?.content && 'fields' in dynField.data.content) {
+                        knownAccountId = (dynField.data.content.fields as any).value as string
+                    }
+                }
+            }
+        } catch {
+            // Dynamic field not found → no account yet
+        }
+
+        const pubKeyBytes = Array.from(
+            { length: pubKeyHex.length / 2 },
+            (_, i) => parseInt(pubKeyHex.slice(i * 2, i * 2 + 2), 16)
+        )
+
+        if (knownAccountId) {
+            setTxStatus('account found! adding delegate key...')
+            const tx = new Transaction()
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::add_delegate_key`,
+                arguments: [
+                    tx.object(knownAccountId),
+                    tx.pure('vector<u8>', pubKeyBytes),
+                    tx.pure('address', delegateSuiAddress),
+                    tx.pure('string', 'Web App'),
+                    tx.object('0x6'),
+                ],
+            })
+            const result = await signAndExecute({ transaction: tx })
+            await suiClient.waitForTransaction({ digest: result.digest })
+        } else {
+            setTxStatus('creating account...')
+            const tx = new Transaction()
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::create_account`,
+                arguments: [
+                    tx.object(config.memwalRegistryId),
+                    tx.object('0x6'),
+                ],
+            })
+            const createResult = await signAndExecute({ transaction: tx })
+            await suiClient.waitForTransaction({ digest: createResult.digest })
+
+            const txDetails = await suiClient.getTransactionBlock({
+                digest: createResult.digest,
+                options: { showObjectChanges: true },
+            })
+            const createdObj = txDetails.objectChanges?.find(
+                (c) => c.type === 'created' &&
+                    'objectType' in c &&
+                    c.objectType.includes('MemWalAccount')
+            )
+            if (createdObj && 'objectId' in createdObj) {
+                knownAccountId = createdObj.objectId
+            }
+
+            if (!knownAccountId) {
+                throw new Error('Account created but object ID not found in transaction. Please try again.')
+            }
+
+            setTxStatus('adding delegate key...')
+            const tx2 = new Transaction()
+            tx2.moveCall({
+                target: `${config.memwalPackageId}::account::add_delegate_key`,
+                arguments: [
+                    tx2.object(knownAccountId),
+                    tx2.pure('vector<u8>', pubKeyBytes),
+                    tx2.pure('address', delegateSuiAddress),
+                    tx2.pure('string', 'Web App'),
+                    tx2.object('0x6'),
+                ],
+            })
+            const addResult = await signAndExecute({ transaction: tx2 })
+            await suiClient.waitForTransaction({ digest: addResult.digest })
+        }
+
+        return knownAccountId!
+    }, [suiClient, signAndExecute])
+
+    // ── "Generate delegate key" button handler ──
+    const handleGenerate = useCallback(async () => {
+        if (setupRunningRef.current) return
+        setupRunningRef.current = true
+
         setStep('generating')
         setError('')
 
         try {
-            const ed = await import('@noble/ed25519')
-            const { blake2b } = await import('@noble/hashes/blake2.js')
-            const privateKey = new Uint8Array(32)
-            crypto.getRandomValues(privateKey)
-            const publicKey = await ed.getPublicKeyAsync(privateKey)
-
-            const privHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('')
-            const pubHex = Array.from(publicKey).map(b => b.toString(16).padStart(2, '0')).join('')
-
-            // Derive Sui address: blake2b256(0x00 || public_key)
-            const input = new Uint8Array(33)
-            input[0] = 0x00 // Ed25519 scheme flag
-            input.set(publicKey, 1)
-            const addressBytes = blake2b(input, { dkLen: 32 })
-            const suiAddr = '0x' + Array.from(new Uint8Array(addressBytes)).map((b: number) => b.toString(16).padStart(2, '0')).join('')
-
+            const { privHex, pubHex, suiAddr } = await generateKeys()
             setPrivateKeyHex(privHex)
             setPublicKeyHex(pubHex)
             setSuiAddress(suiAddr)
             setStep('show-key')
         } catch (err) {
-            console.error('Key generation failed:', err)
-            setError('failed to generate key. please try again.')
-            setStep('intro')
+            console.error('Setup failed:', err)
+            const message = err instanceof Error ? err.message : 'setup failed. please try again.'
+            setError(message)
+            setStep('error')
+        } finally {
+            setupRunningRef.current = false
         }
-    }, [])
+    }, [generateKeys])
 
-    // --------------------------------------------------------
-    // Step 2: Onchain — create account + add delegate key
-    // --------------------------------------------------------
+    // ── Wallet: register on-chain after user confirms key ──
     const executeOnchain = useCallback(async () => {
+        if (setupRunningRef.current) return
+        setupRunningRef.current = true
+
         setStep('onchain')
         setError('')
+        setTxStatus('checking existing account...')
 
         try {
-            // Check if user already has a MemWalAccount via registry lookup
-            setTxStatus('checking existing account...')
-            let knownAccountId: string | null = null
-
-            try {
-                // First, get the registry object to find the Table's inner ID
-                // (Move Table stores dynamic fields on its own UID, not the parent's)
-                const registryObj = await suiClient.getObject({
-                    id: config.memwalRegistryId,
-                    options: { showContent: true },
-                })
-                if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-                    const fields = registryObj.data.content.fields as any
-                    const tableId = fields?.accounts?.fields?.id?.id
-                    if (tableId) {
-                        const dynField = await suiClient.getDynamicFieldObject({
-                            parentId: tableId,
-                            name: { type: 'address', value: address },
-                        })
-                        if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                            knownAccountId = (dynField.data.content.fields as any).value as string
-                        }
-                    }
-                }
-            } catch {
-                // Dynamic field not found → no account yet
-            }
-
-            const pubKeyBytes = Array.from(
-                { length: publicKeyHex.length / 2 },
-                (_, i) => parseInt(publicKeyHex.slice(i * 2, i * 2 + 2), 16)
-            )
-
-            if (knownAccountId) {
-                // Account exists — add user delegate key
-                setTxStatus('account found! adding delegate key...')
-                const tx = new Transaction()
-
-                tx.moveCall({
-                    target: `${config.memwalPackageId}::account::add_delegate_key`,
-                    arguments: [
-                        tx.object(knownAccountId),
-                        tx.pure('vector<u8>', pubKeyBytes),
-                        tx.pure('address', suiAddress),
-                        tx.pure('string', 'Web App'),
-                        tx.object('0x6'),
-                    ],
-                })
-
-                const result = await signAndExecute({ transaction: tx })
-                await suiClient.waitForTransaction({ digest: result.digest })
-            } else {
-                // Step A: Create account first (now creates a shared object)
-                setTxStatus('creating account...')
-                const tx = new Transaction()
-
-                tx.moveCall({
-                    target: `${config.memwalPackageId}::account::create_account`,
-                    arguments: [
-                        tx.object(config.memwalRegistryId),
-                        tx.object('0x6'),
-                    ],
-                })
-
-                const createResult = await signAndExecute({ transaction: tx })
-                await suiClient.waitForTransaction({ digest: createResult.digest })
-
-                // Find the created MemWalAccount object (now shared)
-                const txDetails = await suiClient.getTransactionBlock({
-                    digest: createResult.digest,
-                    options: { showObjectChanges: true },
-                })
-                const createdObj = txDetails.objectChanges?.find(
-                    (c) => c.type === 'created' &&
-                        'objectType' in c &&
-                        c.objectType.includes('MemWalAccount')
-                )
-                if (createdObj && 'objectId' in createdObj) {
-                    knownAccountId = createdObj.objectId
-                }
-
-                // Step B: Add user's delegate key
-                setTxStatus('adding delegate key...')
-                const tx2 = new Transaction()
-                tx2.moveCall({
-                    target: `${config.memwalPackageId}::account::add_delegate_key`,
-                    arguments: [
-                        tx2.object(knownAccountId!),
-                        tx2.pure('vector<u8>', pubKeyBytes),
-                        tx2.pure('address', suiAddress),
-                        tx2.pure('string', 'Web App'),
-                        tx2.object('0x6'),
-                    ],
-                })
-
-                const addResult = await signAndExecute({ transaction: tx2 })
-                await suiClient.waitForTransaction({ digest: addResult.digest })
-            }
-
+            const accountId = await registerOnchain(address, publicKeyHex, suiAddress)
             setTxStatus('delegate key registered onchain!')
-
-            // Save to localStorage (including account object ID)
-            setDelegateKeys(privateKeyHex, publicKeyHex, knownAccountId || '')
+            setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
+            setPrivateKeyHex('')
             setStep('done')
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)
             const message = err instanceof Error ? err.message : 'transaction failed. please try again.'
             setError(message)
-            setStep('show-key') // Go back to key display
+            setStep('show-key')
+        } finally {
+            setupRunningRef.current = false
         }
-    }, [address, publicKeyHex, privateKeyHex, suiAddress, suiClient, signAndExecute, setDelegateKeys])
+    }, [address, publicKeyHex, privateKeyHex, suiAddress, registerOnchain, setDelegateKeys])
 
     const copyKey = useCallback(async () => {
         await navigator.clipboard.writeText(privateKeyHex)
         setCopied(true)
         setTimeout(() => setCopied(false), 2000)
     }, [privateKeyHex])
+
+    const handleRetry = useCallback(() => {
+        setError('')
+        setStep('intro')
+    }, [])
 
     return (
         <>
@@ -264,7 +300,7 @@ export default function SetupWizard() {
                                 </div>
                             </div>
 
-                            <button className="lp-btn-yellow" onClick={generateKeypair}>
+                            <button className="lp-btn-yellow" onClick={handleGenerate}>
                                 generate delegate key
                             </button>
                         </div>
@@ -349,19 +385,36 @@ export default function SetupWizard() {
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
-                                register key onchain & continue →
+                                {isEnoki ? 'continue →' : 'register key onchain & continue →'}
                             </button>
                         </div>
                     )}
 
-                    {/* ===== Step 3: Onchain tx in progress ===== */}
+                    {/* ===== Onchain tx in progress ===== */}
                     {step === 'onchain' && (
                         <div style={{ textAlign: 'center', padding: '60px 0' }}>
                             <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>{txStatus}</p>
                             <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                                please approve the transaction in your wallet
+                                {isEnoki
+                                    ? 'this may take a few seconds...'
+                                    : 'please approve the transaction in your wallet'}
                             </p>
+                        </div>
+                    )}
+
+                    {/* ===== Error ===== */}
+                    {step === 'error' && (
+                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                            <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8, color: 'var(--danger)' }}>
+                                setup failed
+                            </h2>
+                            <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: '0.85rem' }}>
+                                {error}
+                            </p>
+                            <button className="lp-btn-yellow" onClick={handleRetry}>
+                                try again
+                            </button>
                         </div>
                     )}
 
