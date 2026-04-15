@@ -12,7 +12,7 @@
  */
 
 import express, { Request, Response, NextFunction } from "express";
-import { timingSafeEqual } from "crypto";
+import { timingSafeEqual, randomUUID } from "crypto";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
@@ -38,6 +38,8 @@ const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
 if (SEAL_KEY_SERVERS.length === 0) {
     console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
 }
+
+const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
 
 // Server Sui Private Keys for Walrus uploads
 const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
@@ -342,7 +344,7 @@ app.post("/seal/encrypt", async (req, res) => {
 
         const plaintext = Buffer.from(data, "base64");
         const result = await sealClient.encrypt({
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
             packageId,
             id: owner,
             data: new Uint8Array(plaintext),
@@ -351,8 +353,9 @@ app.post("/seal/encrypt", async (req, res) => {
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/encrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/encrypt] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
@@ -361,9 +364,10 @@ app.post("/seal/encrypt", async (req, res) => {
 // ============================================================
 app.post("/seal/decrypt", async (req, res) => {
     try {
-        const { data, privateKey, packageId, accountId } = req.body;
+        const { data, packageId, accountId } = req.body;
+        const privateKey = req.headers["x-delegate-key"] as string | undefined;
         if (!data || !privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey, packageId, accountId" });
+            return res.status(400).json({ error: "Missing required fields: data, packageId, accountId, or x-delegate-key header" });
         }
 
         // Decode delegate keypair — supports both bech32 (suiprivkey1...) and raw hex
@@ -396,7 +400,7 @@ app.post("/seal/decrypt", async (req, res) => {
         const sessionKey = await SessionKey.create({
             address: signerAddress,
             packageId,
-            ttlMin: 30,
+            ttlMin: 5,
             signer: keypair,
             suiClient: suiClient as any,
         });
@@ -417,7 +421,7 @@ app.post("/seal/decrypt", async (req, res) => {
             ids: [fullId],
             txBytes,
             sessionKey,
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
         });
 
         // Decrypt locally
@@ -430,8 +434,9 @@ app.post("/seal/decrypt", async (req, res) => {
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/decrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/decrypt] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
@@ -442,7 +447,8 @@ app.post("/seal/decrypt", async (req, res) => {
 // ============================================================
 app.post("/seal/decrypt-batch", async (req, res) => {
     try {
-        const { items, privateKey, packageId, accountId } = req.body;
+        const { items, packageId, accountId } = req.body;
+        const privateKey = req.headers["x-delegate-key"] as string | undefined;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
@@ -452,7 +458,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
             return res.status(400).json({ error: "items array exceeds maximum of 50 elements" });
         }
         if (!privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
+            return res.status(400).json({ error: "Missing required fields: packageId, accountId, or x-delegate-key header" });
         }
 
         // Decode delegate keypair
@@ -491,7 +497,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         const sessionKey = await SessionKey.create({
             address: signerAddress,
             packageId,
-            ttlMin: 30,
+            ttlMin: 5,
             signer: keypair,
             suiClient: suiClient as any,
         });
@@ -517,7 +523,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
             ids: allIds,
             txBytes,
             sessionKey,
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
         });
 
         // Decrypt each blob using the shared sessionKey
@@ -542,8 +548,9 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        console.error(`[seal/decrypt-batch] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/decrypt-batch] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
@@ -575,6 +582,11 @@ app.post("/walrus/upload", async (req, res) => {
         // LOW-16: Validate packageId resembles a Sui address to prevent injection
         if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
             return res.status(400).json({ error: "Invalid packageId format" });
+        }
+
+        // MED-11: Validate owner address format
+        if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid owner address format" });
         }
 
         // Decode signer
@@ -706,8 +718,9 @@ app.post("/walrus/upload", async (req, res) => {
             transferStatus: "ok",
         });
     } catch (err: any) {
-        console.error(`[walrus/upload] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[walrus/upload] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 

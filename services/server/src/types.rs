@@ -18,6 +18,8 @@ pub struct AppState {
     pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
+    /// In-memory token bucket fallback for when Redis is unavailable
+    pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
 }
 
 // ============================================================

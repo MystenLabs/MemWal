@@ -6,7 +6,22 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::types::{AppError, AppState};
+use crate::types::{AppError, AppState, AuthInfo};
+
+// ============================================================
+// Sponsor Rate Limit Result
+// ============================================================
+
+/// Result of a per-sender (or per-IP) sponsor rate limit check.
+#[derive(Debug, PartialEq)]
+pub enum SponsorRlResult {
+    /// Request is within limits — proceed.
+    Allowed,
+    /// Per-minute bucket exhausted.
+    MinuteLimitExceeded,
+    /// Per-hour bucket exhausted.
+    HourLimitExceeded,
+}
 
 // ============================================================
 // Rate Limit Configuration
@@ -41,7 +56,7 @@ impl Default for RateLimitConfig {
             max_requests_per_hour: 500,
             max_requests_per_delegate_key: 30,
             max_storage_bytes: 1_073_741_824, // 1 GB
-            redis_url: "redis://localhost:6379".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
         }
     }
 }
@@ -96,7 +111,7 @@ fn endpoint_weight(path: &str) -> i64 {
     // MED-20 fix: strip trailing slash so "/api/analyze/" == "/api/analyze"
     let path = path.trim_end_matches('/');
     match path {
-        "/api/analyze" => 10,          // LLM extract + N × (embed + encrypt + upload)
+        "/api/analyze" => 5,           // LLM extract + N × (1 pt per fact)
         "/api/remember" => 5,          // embed + SEAL encrypt + Walrus upload
         "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,           // download + decrypt + re-embed
@@ -168,6 +183,64 @@ async fn record_in_window(
 }
 
 // ============================================================
+// In-Memory Token Bucket Fallback
+// ============================================================
+
+#[derive(Default)]
+pub struct InMemoryFallback {
+    pub buckets: std::collections::HashMap<String, TokenBucket>,
+    pub cleanup_counter: usize,
+}
+
+impl InMemoryFallback {
+    pub fn can_consume(&mut self, key: &str, weight: f64, capacity: f64, refill_duration_secs: f64) -> bool {
+        let refill_rate = capacity / refill_duration_secs;
+        let bucket = self.buckets.entry(key.to_string()).or_insert_with(|| TokenBucket::new(capacity));
+        bucket.peek(weight, capacity, refill_rate)
+    }
+
+    pub fn consume(&mut self, key: &str, weight: f64, capacity: f64, refill_duration_secs: f64) {
+        let refill_rate = capacity / refill_duration_secs;
+        if let Some(bucket) = self.buckets.get_mut(key) {
+            bucket.consume(weight, capacity, refill_rate);
+        }
+        
+        self.cleanup_counter += 1;
+        if self.cleanup_counter >= 1000 {
+            self.cleanup_counter = 0;
+            let now = std::time::Instant::now();
+            self.buckets.retain(|_, b| now.duration_since(b.last_update).as_secs_f64() < 7200.0);
+        }
+    }
+}
+
+pub struct TokenBucket {    
+    pub tokens: f64,
+    pub last_update: std::time::Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: f64) -> Self {
+        Self { tokens: capacity, last_update: std::time::Instant::now() }
+    }
+
+    pub fn peek(&self, weight: f64, capacity: f64, refill_rate_per_sec: f64) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        let projected = (self.tokens + elapsed * refill_rate_per_sec).min(capacity);
+        projected >= weight
+    }
+
+    pub fn consume(&mut self, weight: f64, capacity: f64, refill_rate_per_sec: f64) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        let projected = (self.tokens + elapsed * refill_rate_per_sec).min(capacity);
+        self.tokens = projected - weight;
+        self.last_update = now;
+    }
+}
+
+// ============================================================
 // Rate Limit Response
 // ============================================================
 
@@ -188,21 +261,19 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
         .unwrap()
 }
 
-/// Build a 503 response indicating the rate limiter backend is down.
-///
-/// MED-19 fix: fail-closed — when Redis is unavailable we DENY
-/// rather than silently allow (fail-open). Returns 503 with
-/// Retry-After header so clients know to back off.
+/// Build a 503 response when Redis is completely unreachable and the
+/// in-memory fallback also cannot be used (e.g., lock poisoned).
+/// HIGH-2 fix: previously Redis errors silently allowed requests through.
 fn rate_limiter_unavailable_response() -> Response {
     let body = serde_json::json!({
         "error": "Rate limiter temporarily unavailable",
-        "retry_after_seconds": 5,
+        "retry_after_seconds": 30,
     });
 
     axum::response::Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header("Content-Type", "application/json")
-        .header("Retry-After", "5")
+        .header("Retry-After", "30")
         .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
         .unwrap()
 }
@@ -253,68 +324,78 @@ pub async fn rate_limit_middleware(
     // Determine cost weight based on endpoint (MED-20: path is normalized inside endpoint_weight)
     let weight = endpoint_weight(request.uri().path());
 
+    // --- Key definitions for all three rate-limit buckets ---
+    let dk_key           = format!("rate:dk:{}", auth.public_key);
+    let burst_key        = format!("rate:{}", auth.owner);
+    let hourly_key       = format!("rate:hr:{}", auth.owner);
+
+    let dk_window_start      = now - 60_000.0;      // 1-min window (ms)
+    let burst_window_start   = now - 60_000.0;      // 1-min window (ms)
+    let hourly_window_start  = now - 3_600_000.0;   // 1-hr  window (ms)
+
     // --- Layer 1: Per-delegate-key (burst) ---
-    let dk_key = format!("rate:dk:{}", auth.public_key);
-    let dk_window_start = now - 60_000.0; // 1 min window
+
+    let mut redis_down = false;
 
     match check_window(&mut redis, &dk_key, dk_window_start).await {
-        Ok(count) => {
-            if count >= config.max_requests_per_delegate_key {
-                tracing::warn!(
-                    "rate limit [delegate-key]: key={}... count={}/{} weight={} path={}",
-                    &auth.public_key[..16.min(auth.public_key.len())], count,
-                    config.max_requests_per_delegate_key, weight, request.uri().path()
-                );
-                return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
-            }
+        Ok(count) if count >= config.max_requests_per_delegate_key => {
+            tracing::warn!("rate limit [delegate-key]: key={}... count={}/{}", &auth.public_key[..16.min(auth.public_key.len())], count, config.max_requests_per_delegate_key);
+            return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
         }
         Err(e) => {
-            // MED-19 fix: fail-closed — Redis error means DENY, not allow
-            tracing::error!("rate limit [delegate-key] Redis error: {} — failing closed (503)", e);
-            return rate_limiter_unavailable_response();
+            tracing::warn!("rate limit [delegate-key] Redis error: {}", e);
+            redis_down = true;
         }
+        _ => {}
     }
 
-    // --- Layer 2: Per-account burst (1 min) ---
-    let burst_key = format!("rate:{}", auth.owner);
-    let burst_window_start = now - 60_000.0;
-
-    match check_window(&mut redis, &burst_key, burst_window_start).await {
-        Ok(count) => {
-            if count >= config.max_requests_per_minute {
-                tracing::warn!(
-                    "rate limit [burst]: owner={} count={}/{} weight={} path={}",
-                    auth.owner, count, config.max_requests_per_minute, weight, request.uri().path()
-                );
+    if !redis_down {
+        match check_window(&mut redis, &burst_key, burst_window_start).await {
+            Ok(count) if count >= config.max_requests_per_minute => {
+                tracing::warn!("rate limit [burst]: owner={} count={}/{}", auth.owner, count, config.max_requests_per_minute);
                 return rate_limit_response("account_burst", config.max_requests_per_minute, "min", 60);
             }
-        }
-        Err(e) => {
-            // MED-19 fix: fail-closed
-            tracing::error!("rate limit [burst] Redis error: {} — failing closed (503)", e);
-            return rate_limiter_unavailable_response();
+            Err(e) => {
+                tracing::warn!("rate limit [burst] Redis error: {}", e);
+                redis_down = true;
+            }
+            _ => {}
         }
     }
 
-    // --- Layer 3: Per-account sustained (1 hour) ---
-    let hourly_key = format!("rate:hr:{}", auth.owner);
-    let hourly_window_start = now - 3_600_000.0;
-
-    match check_window(&mut redis, &hourly_key, hourly_window_start).await {
-        Ok(count) => {
-            if count >= config.max_requests_per_hour {
-                tracing::warn!(
-                    "rate limit [sustained]: owner={} count={}/{} weight={} path={}",
-                    auth.owner, count, config.max_requests_per_hour, weight, request.uri().path()
-                );
+    if !redis_down {
+        match check_window(&mut redis, &hourly_key, hourly_window_start).await {
+            Ok(count) if count >= config.max_requests_per_hour => {
+                tracing::warn!("rate limit [sustained]: owner={} count={}/{}", auth.owner, count, config.max_requests_per_hour);
                 return rate_limit_response("account_sustained", config.max_requests_per_hour, "hour", 300);
             }
+            Err(e) => {
+                tracing::warn!("rate limit [sustained] Redis error: {}", e);
+                redis_down = true;
+            }
+            _ => {}
         }
-        Err(e) => {
-            // MED-19 fix: fail-closed
-            tracing::error!("rate limit [sustained] Redis error: {} — failing closed (503)", e);
-            return rate_limiter_unavailable_response();
+    }
+
+    if redis_down {
+        tracing::warn!("rate limit: Redis is unreachable, using in-memory fallback");
+        let mut fallback = state.fallback_rate_limit.lock().await;
+
+        if !fallback.can_consume(&dk_key, weight as f64, config.max_requests_per_delegate_key as f64, 60.0) {
+            return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
         }
+        if !fallback.can_consume(&burst_key, weight as f64, config.max_requests_per_minute as f64, 60.0) {
+            return rate_limit_response("account_burst", config.max_requests_per_minute, "min", 60);
+        }
+        if !fallback.can_consume(&hourly_key, weight as f64, config.max_requests_per_hour as f64, 3600.0) {
+            return rate_limit_response("account_sustained", config.max_requests_per_hour, "hour", 300);
+        }
+
+        fallback.consume(&dk_key, weight as f64, config.max_requests_per_delegate_key as f64, 60.0);
+        fallback.consume(&burst_key, weight as f64, config.max_requests_per_minute as f64, 60.0);
+        fallback.consume(&hourly_key, weight as f64, config.max_requests_per_hour as f64, 3600.0);
+
+        return next.run(request).await;
     }
 
     // --- All checks passed: record weighted entries in all 3 windows ---
@@ -390,6 +471,242 @@ fn stable_hash_i64(s: &str) -> i64 {
 }
 
 // ============================================================
+// Sponsor — per-sender rate limit (called from routes)
+// ============================================================
+
+/// Check whether a sender (Sui address) has exceeded the sponsor rate limits.
+///
+/// Uses a sliding-window counter in Redis just like the authenticated route
+/// middleware, but keyed by sender address rather than owner/delegate-key.
+///
+/// Returns `SponsorRlResult::Allowed` when the request can proceed, or the
+/// appropriate `MinuteLimitExceeded` / `HourLimitExceeded` variant otherwise.
+///
+/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
+/// fallback. Returns `Err(())` only if both Redis and the fallback are
+/// unavailable (lock poisoned), in which case callers should deny or log.
+pub async fn check_sender_rate_limit(
+    state: &crate::types::AppState,
+    sender: &str,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = format!("rate:sponsor:min:{}", sender);
+    let hr_key  = format!("rate:sponsor:hr:{}",  sender);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start  = now - 3_600_000.0;
+
+    let mut redis_down = false;
+
+    // --- Minute bucket ---
+    match check_window(&mut redis, &min_key, min_window_start).await {
+        Ok(count) if count >= per_minute => return Ok(SponsorRlResult::MinuteLimitExceeded),
+        Err(e) => {
+            tracing::warn!("check_sender_rate_limit: Redis error (minute): {} — switching to in-memory fallback", e);
+            redis_down = true;
+        }
+        _ => {}
+    }
+
+    // --- Hour bucket ---
+    if !redis_down {
+        match check_window(&mut redis, &hr_key, hr_window_start).await {
+            Ok(count) if count >= per_hour => return Ok(SponsorRlResult::HourLimitExceeded),
+            Err(e) => {
+                tracing::warn!("check_sender_rate_limit: Redis error (hour): {} — switching to in-memory fallback", e);
+                redis_down = true;
+            }
+            _ => {}
+        }
+    }
+
+    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
+    if redis_down {
+        let mut fallback = state.fallback_rate_limit.lock().await;
+        if !fallback.can_consume(&min_key, 1.0, per_minute as f64, 60.0) {
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        if !fallback.can_consume(&hr_key, 1.0, per_hour as f64, 3600.0) {
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        fallback.consume(&min_key, 1.0, per_minute as f64, 60.0);
+        fallback.consume(&hr_key,  1.0, per_hour as f64, 3600.0);
+        return Ok(SponsorRlResult::Allowed);
+    }
+
+    // --- Record one entry in both windows ---
+    record_in_window(&mut redis, &min_key, now,       1, 120).await;
+    record_in_window(&mut redis, &hr_key,  now + 0.1, 1, 3700).await;
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+// ============================================================
+// Analyze — explicit weight helpers (called from routes)
+// ============================================================
+
+/// Cost of the /api/analyze endpoint already reserved by the middleware
+/// for the first (LLM extraction) step. The weight value must match
+/// `endpoint_weight("/api/analyze")` = 5.
+const ANALYZE_BASE_WEIGHT: i64 = 5;
+
+/// Additional weight to charge after fact-count is known.
+///
+/// Each stored fact costs 1 point. The formula is:
+///
+///   additional = fact_count
+///
+/// This ensures the total cost of an analyze call is proportional to the
+/// number of facts produced, and caps at 5 + 20 = 25 points.
+pub fn analyze_additional_weight(fact_count: usize) -> i64 {
+    fact_count as i64
+}
+
+/// Total effective weight of an `/api/analyze` call given `fact_count`.
+pub fn analyze_total_weight(fact_count: usize) -> i64 {
+    ANALYZE_BASE_WEIGHT + analyze_additional_weight(fact_count)
+}
+
+/// Charge an explicit extra weight against all rate-limit buckets for an
+/// authenticated user. Called by `/api/analyze` after fact-count is known.
+///
+/// If `weight` is zero, this is a no-op. Returns `Ok(())` on success or
+/// when Redis is unavailable (we prefer not to block the request for a
+/// bookkeeping failure after the expensive work is already done).
+pub async fn charge_explicit_weight(
+    state: &AppState,
+    auth: &AuthInfo,
+    weight: i64,
+    _path: &str,
+) -> Result<(), AppError> {
+    if weight <= 0 {
+        return Ok(());
+    }
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let dk_key    = format!("rate:dk:{}", auth.public_key);
+    let burst_key = format!("rate:{}", auth.owner);
+    let hr_key    = format!("rate:hr:{}", auth.owner);
+
+    record_in_window(&mut redis, &dk_key,    now,       weight, 120).await;
+    record_in_window(&mut redis, &burst_key, now + 0.1, weight, 120).await;
+    record_in_window(&mut redis, &hr_key,    now + 0.2, weight, 3700).await;
+
+    Ok(())
+}
+
+// ============================================================
+// Sponsor Rate Limit Middleware (IP-based, unauthenticated)
+// ============================================================
+
+/// Rate limiting middleware for the unauthenticated `/sponsor` routes.
+///
+/// Enforces a per-IP sliding-window limit using the same Redis counters as
+/// the authenticated middleware. Defaults: 10 req/min, 30 req/hr per IP.
+///
+/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
+/// instead of failing open. If the fallback mutex is also unavailable,
+/// returns 503 (fail-closed). Per-sender limits in the route handler itself
+/// provide an additional backstop.
+pub async fn sponsor_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Extract client IP from X-Forwarded-For (set by reverse proxy) or
+    // fall back to the direct connection address stored by axum.
+    let ip: Option<String> = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        });
+
+    let ip = match ip {
+        Some(ip) => ip,
+        None => {
+            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
+            tracing::warn!("sponsor_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.sponsor_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:sponsor:ip:min:{}", ip);
+    let hr_key  = format!("rate:sponsor:ip:hr:{}",  ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start  = now - 3_600_000.0;
+
+    let mut redis_down = false;
+
+    // --- Minute bucket ---
+    match check_window(&mut redis, &min_key, min_window_start).await {
+        Ok(count) if count >= config.per_minute => {
+            tracing::warn!("sponsor rate limit [IP/min]: ip={} count={}/{}", ip, count, config.per_minute);
+            return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::warn!("sponsor_rate_limit_middleware: Redis error (minute bucket): {} — switching to in-memory fallback", e);
+            redis_down = true;
+        }
+        _ => {}
+    }
+
+    // --- Hour bucket ---
+    if !redis_down {
+        match check_window(&mut redis, &hr_key, hr_window_start).await {
+            Ok(count) if count >= config.per_hour => {
+                tracing::warn!("sponsor rate limit [IP/hr]: ip={} count={}/{}", ip, count, config.per_hour);
+                return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
+            }
+            Err(e) => {
+                tracing::warn!("sponsor_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
+                redis_down = true;
+            }
+            _ => {}
+        }
+    }
+
+    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
+    if redis_down {
+        tracing::warn!("sponsor_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
+        let mut fallback = state.fallback_rate_limit.lock().await;
+
+        if !fallback.can_consume(&min_key, 1.0, config.per_minute as f64, 60.0) {
+            return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
+        }
+        if !fallback.can_consume(&hr_key, 1.0, config.per_hour as f64, 3600.0) {
+            return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
+        }
+
+        fallback.consume(&min_key, 1.0, config.per_minute as f64, 60.0);
+        fallback.consume(&hr_key,  1.0, config.per_hour as f64, 3600.0);
+
+        return next.run(request).await;
+    }
+
+    // --- Record in Redis ---
+    record_in_window(&mut redis, &min_key, now,       1, 120).await;
+    record_in_window(&mut redis, &hr_key,  now + 0.1, 1, 3700).await;
+
+    next.run(request).await
+}
+
+// ============================================================
 // Unit Tests
 // ============================================================
 
@@ -402,14 +719,14 @@ mod tests {
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {
         // Without trailing slash
-        assert_eq!(endpoint_weight("/api/analyze"), 10);
+        assert_eq!(endpoint_weight("/api/analyze"), 5);
         assert_eq!(endpoint_weight("/api/remember"), 5);
         assert_eq!(endpoint_weight("/api/remember/manual"), 3);
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
 
         // With trailing slash — must return SAME weight (MED-20 fix)
-        assert_eq!(endpoint_weight("/api/analyze/"), 10, "trailing slash bypass!");
+        assert_eq!(endpoint_weight("/api/analyze/"), 5, "trailing slash bypass!");
         assert_eq!(endpoint_weight("/api/remember/"), 5, "trailing slash bypass!");
         assert_eq!(endpoint_weight("/api/ask/"), 2, "trailing slash bypass!");
 
@@ -422,7 +739,7 @@ mod tests {
     #[test]
     fn test_endpoint_weight_no_regression() {
         // Double trailing slash should also normalize
-        assert_eq!(endpoint_weight("/api/analyze//"), 10);
+        assert_eq!(endpoint_weight("/api/analyze//"), 5);
     }
 
     // ---- stable_hash_i64 ----

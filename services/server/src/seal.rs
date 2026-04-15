@@ -20,7 +20,6 @@ struct SealEncryptResponse {
 #[serde(rename_all = "camelCase")]
 struct SealDecryptRequest {
     data: String,
-    private_key: String,
     package_id: String,
     account_id: String,
 }
@@ -111,9 +110,9 @@ pub async fn seal_decrypt(
 
     let mut req = client
         .post(&url)
+        .header("x-delegate-key", private_key)
         .json(&SealDecryptRequest {
             data: data_b64,
-            private_key: private_key.to_string(),
             package_id: package_id.to_string(),
             account_id: account_id.to_string(),
         });

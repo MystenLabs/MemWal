@@ -36,6 +36,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
+        let migration_004 = include_str!("../migrations/004_delegate_key_cache_expires.sql");
+        sqlx::raw_sql(migration_004)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
+
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })

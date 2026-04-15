@@ -7,14 +7,14 @@
         "sidecar": "tsx sidecar-server.ts"
     },
     "dependencies": {
-        "@mysten/seal": "^1.1.0",
-        "@mysten/sui": "^2.5.0",
-        "@mysten/walrus": "^1.0.3",
-        "express": "^5.1.0",
-        "tsx": "^4.19.0"
+        "@mysten/seal": "1.1.0",
+        "@mysten/sui": "2.5.0",
+        "@mysten/walrus": "1.0.3",
+        "express": "5.1.0",
+        "tsx": "4.19.0"
     },
     "devDependencies": {
-        "@types/express": "^5.0.0",
-        "typescript": "^5.6.0"
+        "@types/express": "5.0.0",
+        "typescript": "5.6.0"
     }
 }

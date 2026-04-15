@@ -1446,9 +1446,8 @@ pub async fn sponsor_proxy(
     // Runs after validation so we only count well-formed requests against the sender.
     {
         let config = &state.config.sponsor_rate_limit;
-        let mut redis = state.redis.clone();
         match rate_limit::check_sender_rate_limit(
-            &mut redis,
+            &state,
             &req.sender,
             config.per_minute,
             config.per_hour,
@@ -1470,8 +1469,13 @@ pub async fn sponsor_proxy(
                 ));
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
-            Err(e) => {
-                tracing::error!("sponsor sender rate limit redis error: {e}, allowing");
+            Err(_) => {
+                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
+                tracing::error!("sponsor sender rate limit unavailable for sponsor_proxy, denying request");
+                return Ok(json_error_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Rate limiter temporarily unavailable",
+                ));
             }
         }
     }
@@ -1544,8 +1548,7 @@ pub async fn sponsor_execute_proxy(
             return Err(AppError::BadRequest("Invalid sender address".into()));
         }
         let config = &state.config.sponsor_rate_limit;
-        let mut redis = state.redis.clone();
-        match rate_limit::check_sender_rate_limit(&mut redis, sender, config.per_minute, config.per_hour).await {
+        match rate_limit::check_sender_rate_limit(&state, sender, config.per_minute, config.per_hour).await {
             Ok(rate_limit::SponsorRlResult::MinuteLimitExceeded) => {
                 tracing::warn!("sponsor/execute rate limit [sender/min]: sender={}...", &sender[..16]);
                 return Ok(json_error_response(axum::http::StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"));
@@ -1555,8 +1558,13 @@ pub async fn sponsor_execute_proxy(
                 return Ok(json_error_response(axum::http::StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"));
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
-            Err(e) => {
-                tracing::error!("sponsor/execute sender rate limit redis error: {e}, allowing");
+            Err(_) => {
+                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
+                tracing::error!("sponsor/execute sender rate limit unavailable, denying request");
+                return Ok(json_error_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Rate limiter temporarily unavailable",
+                ));
             }
         }
     }
@@ -1608,7 +1616,7 @@ pub async fn sponsor_execute_proxy(
 // ============================================================
 
 #[cfg(test)]
-mod tests {
+mod more_tests {
     use super::*;
 
     // ---- validate_sui_address ----

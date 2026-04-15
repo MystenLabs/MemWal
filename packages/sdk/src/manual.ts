@@ -78,7 +78,7 @@ export class MemWalManual {
         if (config.suiPrivateKey && config.walletSigner) {
             throw new Error("MemWalManual: provide suiPrivateKey OR walletSigner, not both");
         }
-        this.delegatePrivateKey = hexToBytes(config.key);
+        this.delegatePrivateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://api.memwal.com");
@@ -101,6 +101,19 @@ export class MemWalManual {
      */
     static create(config: MemWalManualConfig): MemWalManual {
         return new MemWalManual(config);
+    }
+
+    /**
+     * Securely wipe the delegate private and public keys from memory.
+     * Prevents key extraction from V8 heap dumps.
+     */
+    destroy(): void {
+        if (this.delegatePrivateKey) {
+            this.delegatePrivateKey.fill(0);
+        }
+        if (this.delegatePublicKey) {
+            this.delegatePublicKey.fill(0);
+        }
     }
 
     /** Whether this client uses a connected wallet signer (vs raw keypair) */

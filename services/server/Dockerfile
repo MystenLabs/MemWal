@@ -20,30 +20,30 @@ COPY migrations/ migrations/
 RUN touch src/main.rs
 RUN cargo build --release
 
-# ── Stage 2: Runtime (Debian slim + Node.js) ────────────────
-FROM debian:bookworm-slim AS runtime
+# ── Stage 2: Runtime (Node.js slim) ─────────────────────────
+FROM node:22-bookworm-slim AS runtime
 
-# Install runtime deps + Node.js 22
+# Install Rust runtime deps (ca-certificates and libssl3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     libssl3 \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Add non-root user
+RUN useradd -ms /bin/bash appuser
+USER appuser
 WORKDIR /app
 
 # Copy Rust binary
-COPY --from=builder /app/target/release/memwal-server ./memwal-server
+COPY --from=builder --chown=appuser:appuser /app/target/release/memwal-server ./memwal-server
 
 # Copy TS sidecar scripts + install deps
-COPY scripts/package.json scripts/package-lock.json ./scripts/
+COPY --chown=appuser:appuser scripts/package.json scripts/package-lock.json ./scripts/
 RUN cd scripts && npm ci --omit=dev
-COPY scripts/*.ts ./scripts/
+COPY --chown=appuser:appuser scripts/*.ts ./scripts/
 
 # Copy migrations (for reference / manual runs)
-COPY migrations/ ./migrations/
+COPY --chown=appuser:appuser migrations/ ./migrations/
 
 # Port config — must match defaults in types.rs + sidecar-server.ts
 ENV PORT=8000

@@ -128,6 +128,7 @@ async fn main() {
         walrus_client,
         key_pool,
         redis,
+        fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
     });
 
     // Spawn background task for cache eviction

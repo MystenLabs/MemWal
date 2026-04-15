@@ -67,7 +67,7 @@ export class MemWal {
     private accountId: string;
 
     private constructor(config: MemWalConfig) {
-        this.privateKey = hexToBytes(config.key);
+        this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
@@ -84,6 +84,19 @@ export class MemWal {
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
+    }
+
+    /**
+     * Securely wipe the private and public keys from memory.
+     * Prevents key extraction from V8 heap dumps.
+     */
+    destroy(): void {
+        if (this.privateKey) {
+            this.privateKey.fill(0);
+        }
+        if (this.publicKey) {
+            this.publicKey.fill(0);
+        }
     }
 
     // ============================================================
