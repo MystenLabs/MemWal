@@ -45,7 +45,8 @@ import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerEr
 // Users can override via SEAL_KEY_SERVERS in their environment
 const DEFAULT_KEY_SERVERS: Record<string, string[]> = {
     mainnet: [
-        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open) 
+        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open)
+        "0xe0eb52eba9261b96e895bbb4deca10dcd64fbc626a1133017adcd5131353fd10", // Studio Mirai (Open)
     ],
     testnet: [
         "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
@@ -218,6 +219,11 @@ export class MemWalManual {
         return this._sealClient;
     }
 
+    /** MED-10: SEAL threshold — must match sidecar SEAL_THRESHOLD (default 2). */
+    private get sealThreshold(): number {
+        return this.config.sealThreshold ?? 2;
+    }
+
     private async getWalrusClient() {
         if (!this._walrusClient) {
             // @ts-ignore — optional peer dependency
@@ -381,7 +387,7 @@ export class MemWalManual {
                     ids: [fullId],
                     txBytes,
                     sessionKey,
-                    threshold: 1,
+                    threshold: this.sealThreshold,
                 });
 
                 // Decrypt locally
@@ -496,7 +502,7 @@ export class MemWalManual {
         const scopedId = `${accountHex}${nsHex}`;
 
         const result = await sealClient.encrypt({
-            threshold: 1,
+            threshold: this.sealThreshold,
             packageId: this.config.packageId,
             id: scopedId,
             data: plaintext,

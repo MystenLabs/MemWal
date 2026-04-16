@@ -162,6 +162,12 @@ export interface MemWalManualConfig {
      * If omitted, uses built-in defaults for the selected suiNetwork.
      */
     sealKeyServers?: string[];
+    /**
+     * SEAL threshold — number of key server shares required for encrypt/decrypt.
+     * Must be ≤ number of entries in sealKeyServers.
+     * Default: 2 (matches sidecar SEAL_THRESHOLD default).
+     */
+    sealThreshold?: number;
     /** Walrus storage epochs (default: 50) */
     walrusEpochs?: number;
     /** Walrus aggregator URL for direct blob downloads (default: mainnet aggregator) */
