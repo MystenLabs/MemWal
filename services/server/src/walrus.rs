@@ -44,6 +44,8 @@ struct WalrusUploadRequest {
     namespace: String,
     package_id: String,
     epochs: u64,
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -72,6 +74,7 @@ pub async fn upload_blob(
     key_index: usize,
     namespace: &str,
     package_id: &str,
+    agent_id: Option<&str>,
 ) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -85,6 +88,7 @@ pub async fn upload_blob(
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),
             epochs,
+            agent_id: agent_id.map(|s| s.to_string()),
         });
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
