@@ -17,7 +17,6 @@ Tests that require a slow/mock sidecar are marked SKIP_NO_SIDECAR.
 import json
 import os
 import sys
-import time
 import uuid
 import base64
 import urllib.request
@@ -602,7 +601,7 @@ def run_all():
         ("CORS allowed origin passes",              test_cors_allowed_origin_gets_header),
     ]
 
-    passed = failed = skipped = 0
+    passed = failed = 0
     for name, fn in tests:
         try:
             fn()
