@@ -8,6 +8,7 @@ mod types;
 mod walrus;
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
+use std::net::SocketAddr;
 use axum::http::{header, HeaderValue, Method};
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -215,7 +216,17 @@ async fn main() {
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::AUTHORIZATION,
+                    // SDK auth headers (required for Ed25519 signed requests)
+                    "x-public-key".parse::<header::HeaderName>().unwrap(),
+                    "x-signature".parse::<header::HeaderName>().unwrap(),
+                    "x-timestamp".parse::<header::HeaderName>().unwrap(),
+                    "x-nonce".parse::<header::HeaderName>().unwrap(),
+                    "x-account-id".parse::<header::HeaderName>().unwrap(),
+                    "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+                ])
         }
     };
 
@@ -242,7 +253,7 @@ async fn main() {
         tracing::info!("shutting down...");
     };
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown)
         .await
         .expect("Server failed");
