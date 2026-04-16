@@ -13,10 +13,17 @@ import {
 } from "@/lib/db/queries";
 import { getTextFromMessage } from "@/lib/utils";
 import { auth } from "@/app/(auth)/auth";
+import { isProductionEnvironment } from "@/lib/constants";
 
 export async function saveChatModelAsCookie(model: string) {
   const cookieStore = await cookies();
-  cookieStore.set("chat-model", model);
+  // LOW-33: Set Secure (in prod), SameSite=Lax, and constrain path so the
+  // cookie is not sent cross-site and is protected in transit.
+  cookieStore.set("chat-model", model, {
+    path: "/",
+    sameSite: "lax",
+    secure: isProductionEnvironment,
+  });
 }
 
 export async function generateTitleFromUserMessage({
