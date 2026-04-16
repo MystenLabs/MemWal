@@ -146,6 +146,9 @@ async fn main() {
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
+    // HIGH-13: 256 KiB covers the largest realistic JSON body (64 KiB plaintext
+    // + base64 overhead + JSON framing) while blocking abusive uploads before
+    // auth + rate-limit middleware even sees the request.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route("/api/recall", post(routes::recall))
@@ -164,7 +167,8 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(256 * 1024));
 
     // Sponsor routes — body limits + IP rate limit middleware
     let sponsor_routes = Router::new()
@@ -182,8 +186,10 @@ async fn main() {
         ));
 
     // Public routes
+    // HIGH-13: /health accepts no body — cap at 16 KiB to reject oversized
+    // unauthenticated requests before they reach any handler.
     let public_routes = Router::new()
-        .route("/health", get(routes::health))
+        .route("/health", get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)))
         .merge(sponsor_routes);
 
     // CORS — restrict to configured origins.

@@ -18,11 +18,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+        reservations:
+          memory: 128m
+          cpus: "0.25"
 
   redis:
     image: redis:7-alpine
     container_name: memwal-redis
     restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -32,6 +44,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 300m
+          cpus: "0.5"
+        reservations:
+          memory: 64m
+          cpus: "0.1"
 
 volumes:
   memwal_pgdata:

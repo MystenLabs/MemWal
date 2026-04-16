@@ -80,7 +80,7 @@ export class MemWal {
      * Create a new MemWal client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
-     * @param config.serverUrl - Server URL (default: http://localhost:8000)
+     * @param config.serverUrl - Server URL (default: https://api.memwal.com)
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);

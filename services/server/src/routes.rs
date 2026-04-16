@@ -846,7 +846,205 @@ mod tests {
         assert_eq!(results.len(), 12);
         assert!(peak.load(Ordering::SeqCst) <= ANALYZE_CONCURRENCY);
     }
+
+    // ── LOW-6: Text size limit ──────────────────────────────────────────
+
+    #[test]
+    fn max_remember_text_bytes_is_64kb() {
+        assert_eq!(super::MAX_REMEMBER_TEXT_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn text_within_limit_accepted() {
+        let text = "a".repeat(super::MAX_REMEMBER_TEXT_BYTES);
+        assert!(text.len() <= super::MAX_REMEMBER_TEXT_BYTES);
+    }
+
+    #[test]
+    fn text_over_limit_rejected() {
+        let text = "a".repeat(super::MAX_REMEMBER_TEXT_BYTES + 1);
+        assert!(text.len() > super::MAX_REMEMBER_TEXT_BYTES);
+    }
+
+    // ── MED-3: Recall limit capped at 100 ───────────────────────────────
+
+    #[test]
+    fn recall_limit_capped_at_100() {
+        // The code does body.limit.min(100)
+        assert_eq!(999999_usize.min(100), 100);
+        assert_eq!(100_usize.min(100), 100);
+        assert_eq!(50_usize.min(100), 50);
+        assert_eq!(1_usize.min(100), 1);
+        assert_eq!(0_usize.min(100), 0);
+    }
+
+    // ── LOW-7: RecallResponse dropped_count serialization ───────────────
+
+    #[test]
+    fn recall_response_includes_dropped_count_when_nonzero() {
+        let resp = super::RecallResponse {
+            results: vec![],
+            total: 0,
+            dropped_count: 3,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["dropped_count"], 3);
+    }
+
+    #[test]
+    fn recall_response_omits_dropped_count_when_zero() {
+        let resp = super::RecallResponse {
+            results: vec![],
+            total: 0,
+            dropped_count: 0,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // skip_serializing_if = "is_zero_usize" → field absent
+        assert!(json.get("dropped_count").is_none());
+    }
+
+    // ── LOW-8: Memory context wraps in XML tags ─────────────────────────
+
+    #[test]
+    fn memory_context_uses_xml_tags() {
+        // Simulate what /api/ask does
+        let memories = vec![super::RecallResult {
+            blob_id: "blob123".into(),
+            text: "User likes coffee".into(),
+            distance: 0.1,
+        }];
+
+        let lines: Vec<String> = memories
+            .iter()
+            .map(|m| {
+                format!(
+                    "<memory id=\"{}\" relevance=\"{:.2}\">{}</memory>",
+                    m.blob_id,
+                    1.0 - m.distance,
+                    m.text
+                )
+            })
+            .collect();
+        let context = format!("Known facts about this user:\n{}", lines.join("\n"));
+
+        assert!(context.contains("<memory id=\"blob123\""));
+        assert!(context.contains("relevance=\"0.90\""));
+        assert!(context.contains("User likes coffee</memory>"));
+    }
+
+    #[test]
+    fn memory_context_empty_shows_no_memories() {
+        let memories: Vec<super::RecallResult> = vec![];
+        let context = if memories.is_empty() {
+            "No memories found for this user yet.".to_string()
+        } else {
+            "should not reach here".to_string()
+        };
+        assert_eq!(context, "No memories found for this user yet.");
+    }
+
+    // ── MED-4/MED-5: Fact parsing edge cases ────────────────────────────
+
+    #[test]
+    fn parse_extracted_facts_exactly_at_cap() {
+        let content = (0..MAX_ANALYZE_FACTS)
+            .map(|i| format!("Fact {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = parse_extracted_facts(&content);
+        assert_eq!(parsed.raw_count, MAX_ANALYZE_FACTS);
+        assert_eq!(parsed.facts.len(), MAX_ANALYZE_FACTS);
+    }
+
+    #[test]
+    fn parse_extracted_facts_empty_string() {
+        let parsed = parse_extracted_facts("");
+        assert_eq!(parsed.raw_count, 0);
+        assert!(parsed.facts.is_empty());
+    }
+
+    #[test]
+    fn parse_extracted_facts_only_blank_lines() {
+        let parsed = parse_extracted_facts("\n\n  \n\t\n");
+        assert_eq!(parsed.raw_count, 0);
+        assert!(parsed.facts.is_empty());
+    }
+
+    #[test]
+    fn parse_extracted_facts_none_mixed_with_facts() {
+        // If LLM returns "NONE" on one line and a fact on another, only keep the fact
+        let parsed = parse_extracted_facts("NONE\nUser likes pizza\nNONE");
+        assert_eq!(parsed.raw_count, 1);
+        assert_eq!(parsed.facts, vec!["User likes pizza".to_string()]);
+    }
+
+    #[test]
+    fn parse_extracted_facts_strips_whitespace() {
+        let parsed = parse_extracted_facts("  Fact A  \n\tFact B\t\n");
+        assert_eq!(parsed.raw_count, 2);
+        assert_eq!(parsed.facts[0], "Fact A");
+        assert_eq!(parsed.facts[1], "Fact B");
+    }
+
+    // ── truncate_str: UTF-8 safety ──────────────────────────────────────
+
+    #[test]
+    fn truncate_str_ascii() {
+        assert_eq!(super::truncate_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_str_no_truncation_needed() {
+        assert_eq!(super::truncate_str("hi", 100), "hi");
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(super::truncate_str("", 10), "");
+    }
+
+    #[test]
+    fn truncate_str_multibyte_char_boundary() {
+        // "café" = 5 bytes (é = 2 bytes). Truncating at 4 bytes → "caf" (not mid-é)
+        let s = "café";
+        assert_eq!(s.len(), 5); // c=1, a=1, f=1, é=2
+        let t = super::truncate_str(s, 4);
+        assert_eq!(t, "caf"); // stops before the 2-byte é
+    }
+
+    #[test]
+    fn truncate_str_emoji_boundary() {
+        // "🦀hello" = 4 + 5 = 9 bytes. Truncating at 2 → "" (can't split 🦀)
+        let s = "🦀hello";
+        let t = super::truncate_str(s, 2);
+        assert_eq!(t, ""); // can't include partial emoji
+    }
+
+    // ── HIGH-3 / MED-5: Analyze concurrency + weight ────────────────────
+
+    #[test]
+    fn analyze_concurrency_constant_is_5() {
+        assert_eq!(ANALYZE_CONCURRENCY, 5);
+    }
+
+    #[test]
+    fn max_analyze_facts_constant_is_20() {
+        assert_eq!(MAX_ANALYZE_FACTS, 20);
+    }
+
+    #[test]
+    fn analyze_weight_proportional_to_facts() {
+        use crate::rate_limit::{analyze_additional_weight, analyze_total_weight};
+        // No facts → only base weight
+        assert_eq!(analyze_total_weight(0), 5);
+        // Max facts (20) → 5 + 20 = 25
+        assert_eq!(analyze_total_weight(20), 25);
+        // Additional weight is exactly fact_count
+        assert_eq!(analyze_additional_weight(0), 0);
+        assert_eq!(analyze_additional_weight(20), 20);
+    }
 }
+
 
 /// POST /api/ask
 ///

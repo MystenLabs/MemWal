@@ -229,6 +229,32 @@ impl VectorDb {
         Ok(rows)
     }
 
+    /// LOW-3 fix: Immediately remove a single stale/revoked delegate key from the cache.
+    ///
+    /// Called when `verify_delegate_key_onchain` returns `Err` for a cached entry,
+    /// meaning the key has been revoked on-chain. Without this, every subsequent
+    /// request with the revoked key would hit the cache, fail the RPC verify, log
+    /// noise, and waste an RPC call — in an infinite loop until TTL expiry.
+    pub async fn delete_cached_key(&self, public_key_hex: &str) -> Result<u64, AppError> {
+        let result =
+            sqlx::query("DELETE FROM delegate_key_cache WHERE public_key = $1")
+                .bind(public_key_hex)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to delete stale cached key: {}", e))
+                })?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!(
+                "LOW-3: evicted stale/revoked delegate key from cache: {}",
+                public_key_hex
+            );
+        }
+        Ok(rows)
+    }
+
     // ============================================================
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================

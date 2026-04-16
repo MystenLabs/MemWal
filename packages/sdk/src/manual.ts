@@ -340,11 +340,13 @@ export class MemWalManual {
         const signer = await this.createSigner(callerAddress);
 
         // Create session key ONCE (triggers one wallet popup)
+        // HIGH-7 / LOW-13: Reduced from 30 to 5 minutes to limit the exposure
+        // window if a session token is compromised.
         try {
             sessionKey = await SessionKey.create({
                 address: callerAddress,
                 packageId: this.config.packageId,
-                ttlMin: 30,
+                ttlMin: 5,
                 signer,
                 suiClient,
             });

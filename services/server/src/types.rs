@@ -493,3 +493,164 @@ impl axum::response::IntoResponse for AppError {
 pub struct SidecarError {
     pub error: String,
 }
+
+// ============================================================
+// Unit Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
+
+    #[test]
+    fn auth_info_debug_redacts_delegate_key() {
+        let auth = AuthInfo {
+            public_key: "aabbccdd".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: Some("supersecretprivatekeyinhex1234567890abcdef".to_string()),
+        };
+
+        let debug_str = format!("{:?}", auth);
+
+        // Must contain the redacted marker
+        assert!(
+            debug_str.contains("<redacted>"),
+            "delegate_key must be redacted in Debug output, got: {}",
+            debug_str
+        );
+        // Must NOT contain the actual key
+        assert!(
+            !debug_str.contains("supersecretprivatekeyinhex"),
+            "actual delegate key leaked in Debug output: {}",
+            debug_str
+        );
+        // Public fields are still visible
+        assert!(debug_str.contains("aabbccdd"));
+        assert!(debug_str.contains("0xowner"));
+        assert!(debug_str.contains("0xaccount"));
+    }
+
+    #[test]
+    fn auth_info_debug_shows_none_when_no_delegate_key() {
+        let auth = AuthInfo {
+            public_key: "aabb".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: None,
+        };
+
+        let debug_str = format!("{:?}", auth);
+
+        // None variant should render as None
+        assert!(debug_str.contains("None"), "expected None in debug: {}", debug_str);
+        assert!(!debug_str.contains("<redacted>"));
+    }
+
+    // ── AppError: status code mapping ───────────────────────────────────
+
+    #[test]
+    fn app_error_bad_request_status() {
+        let err = AppError::BadRequest("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn app_error_unauthorized_status() {
+        let err = AppError::Unauthorized("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn app_error_internal_status() {
+        let err = AppError::Internal("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn app_error_blob_not_found_status() {
+        let err = AppError::BlobNotFound("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn app_error_rate_limited_status() {
+        let err = AppError::RateLimited("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn app_error_quota_exceeded_status() {
+        let err = AppError::QuotaExceeded("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
+    }
+
+    // ── KeyPool: round-robin selection ───────────────────────────────────
+
+    #[test]
+    fn key_pool_round_robin() {
+        let pool = KeyPool::new(vec![
+            "key_a".into(),
+            "key_b".into(),
+            "key_c".into(),
+        ]);
+
+        assert_eq!(pool.next(), Some("key_a"));
+        assert_eq!(pool.next(), Some("key_b"));
+        assert_eq!(pool.next(), Some("key_c"));
+        assert_eq!(pool.next(), Some("key_a")); // wraps around
+    }
+
+    #[test]
+    fn key_pool_empty_returns_none() {
+        let pool = KeyPool::new(vec![]);
+        assert_eq!(pool.next(), None);
+        assert_eq!(pool.next_index(), None);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn key_pool_single_key() {
+        let pool = KeyPool::new(vec!["only_key".into()]);
+        assert_eq!(pool.next(), Some("only_key"));
+        assert_eq!(pool.next(), Some("only_key"));
+        assert!(!pool.is_empty());
+    }
+
+    #[test]
+    fn key_pool_next_index_wraps() {
+        let pool = KeyPool::new(vec!["a".into(), "b".into()]);
+        assert_eq!(pool.next_index(), Some(0));
+        assert_eq!(pool.next_index(), Some(1));
+        assert_eq!(pool.next_index(), Some(0));
+    }
+
+    // ── SponsorRateLimitConfig defaults ─────────────────────────────────
+
+    #[test]
+    fn sponsor_rate_limit_default_values() {
+        let config = SponsorRateLimitConfig::default();
+        assert_eq!(config.per_minute, 10);
+        assert_eq!(config.per_hour, 30);
+    }
+
+    // ── AppError Display implementations ────────────────────────────────
+
+    #[test]
+    fn app_error_display_all_variants() {
+        assert!(AppError::BadRequest("x".into()).to_string().contains("Bad Request"));
+        assert!(AppError::Unauthorized("x".into()).to_string().contains("Unauthorized"));
+        assert!(AppError::Internal("x".into()).to_string().contains("Internal"));
+        assert!(AppError::BlobNotFound("x".into()).to_string().contains("Blob Not Found"));
+        assert!(AppError::RateLimited("x".into()).to_string().contains("Rate Limited"));
+        assert!(AppError::QuotaExceeded("x".into()).to_string().contains("Quota Exceeded"));
+    }
+}

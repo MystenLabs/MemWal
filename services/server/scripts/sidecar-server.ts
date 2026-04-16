@@ -290,7 +290,12 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // ============================================================
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+// HIGH-13: Use a conservative global default — routes that need more bytes
+// (e.g. /walrus/upload, /seal/decrypt-batch) apply their own per-route
+// json() middleware that overrides this default.
+// Global floor: 256 KiB is enough for every metadata-only JSON body
+// (seal/encrypt, seal/decrypt, walrus/query-blobs, sponsor, sponsor/execute).
+app.use(express.json({ limit: "256kb" }));
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
@@ -445,17 +450,20 @@ app.post("/seal/decrypt", async (req, res) => {
 // Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
 // Avoids "Not enough shares" errors when decrypting many blobs at once.
 // ============================================================
-app.post("/seal/decrypt-batch", async (req, res) => {
+// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB)
+// Apply a per-route json() that overrides the 256 KiB global for this endpoint only.
+app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res) => {
     try {
         const { items, packageId, accountId } = req.body;
         const privateKey = req.headers["x-delegate-key"] as string | undefined;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
-        // MED-13 fix: Cap items to prevent unbounded memory allocation.
-        // Without this, an attacker could send 10,000+ items to exhaust memory.
-        if (items.length > 50) {
-            return res.status(400).json({ error: "items array exceeds maximum of 50 elements" });
+        // HIGH-13 / MED-13: Cap items. 25 × max-item body = ~8 MB (matches the
+        // per-route body limit above). Tightened from 50 to 25 so worst-case
+        // in-memory allocation stays bounded even at the new limit.
+        if (items.length > 25) {
+            return res.status(400).json({ error: "items array exceeds maximum of 25 elements" });
         }
         if (!privateKey || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: packageId, accountId, or x-delegate-key header" });
@@ -557,7 +565,11 @@ app.post("/seal/decrypt-batch", async (req, res) => {
 // ============================================================
 // POST /walrus/upload
 // ============================================================
-app.post("/walrus/upload", async (req, res) => {
+// HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
+// be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
+// The 10 MB ceiling matches the sidecar's original global Walrus limit and is
+// well above any realistic single-memory upload size.
+app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => {
     try {
         const {
             data,
