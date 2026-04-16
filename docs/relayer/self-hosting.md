@@ -82,9 +82,21 @@ curl http://localhost:8000/health
 
 ### Recommended
 
-- `OPENAI_API_KEY` — enables real embeddings (falls back to mock embeddings without it)
+- `OPENAI_API_KEY` — enables real embeddings and LLM calls (falls back to mock embeddings without it)
 - `OPENAI_API_BASE` — point to an OpenAI-compatible provider like OpenRouter
 
+### Embedding Provider (optional)
+
+Set these to use a dedicated embedding provider independently of the LLM:
+
+- `EMBEDDING_API_KEY` — API key for your embedding provider (e.g. Jina, Cohere)
+- `EMBEDDING_API_BASE` — base URL for your embedding provider
+- `EMBEDDING_MODEL` — model identifier (default: `openai/text-embedding-3-small`)
+- `EMBEDDING_DIMENSIONS` — output dimension override (e.g. `1024` for Jina); omitted from the API call when unset
+
+### LLM Model (optional)
+
+- `LLM_MODEL` — model used by `/api/analyze` and `/api/ask` (default: `openai/gpt-4o-mini`); accepts any OpenRouter or OpenAI-compatible model identifier
 ### Rate Limits & Storage (Optional)
 
 By default, the relayer enforces rate limits and storage quotas via Redis to prevent abuse. You can customize these limits:
@@ -136,7 +148,7 @@ Using official key server of SDK is recommended.
 
 The relayer requires PostgreSQL with the `pgvector` extension. The relayer runs migrations automatically on boot, creating these tables:
 
-- `vector_entries` — 1536-dimensional embeddings with HNSW index for cosine similarity search
+- `vector_entries` — embeddings with HNSW index for cosine similarity search (dimension is flexible; default provider produces 1536-dim vectors)
 - `delegate_key_cache` — auth optimization (delegate key → account mapping)
 - `accounts` — populated by the indexer (account → owner mapping)
 - `indexer_state` — indexer cursor tracking
@@ -150,7 +162,8 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 - Connection pool: 10 max connections (relayer), 3 max connections (indexer)
 - `/health` is the basic service check, API routes live under `/api/*`
 - The indexer is recommended for fast account lookup in production — without it, the relayer falls back to onchain registry scans
-- Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based) — useful for local testing but not production
+- Without `OPENAI_API_KEY` (and without `EMBEDDING_API_KEY`), the server uses deterministic mock embeddings (hash-based) — useful for local testing but not production
+- **Do not mix embedding dimensions within the same namespace.** Switching providers mid-deployment requires truncating `vector_entries` and running `ALTER TABLE vector_entries ALTER COLUMN embedding TYPE vector(<n>);` before restarting. The server logs a `WARN` at boot if the schema dimension does not match `EMBEDDING_DIMENSIONS`
 
 ## Docker
 

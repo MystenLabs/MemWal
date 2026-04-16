@@ -33,6 +33,8 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 struct EmbeddingApiRequest {
     model: String,
     input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<u32>,
 }
 
 /// OpenAI-compatible embedding response
@@ -47,24 +49,28 @@ struct EmbeddingData {
 }
 
 /// Generate an embedding vector from text.
-/// Uses OpenRouter/OpenAI API when OPENAI_API_KEY is set, mock otherwise.
+/// Uses the configured embedding provider (EMBEDDING_API_KEY/EMBEDDING_API_BASE/EMBEDDING_MODEL),
+/// falling back to OPENAI_API_KEY/OPENAI_API_BASE when embedding-specific vars are unset.
 async fn generate_embedding(
     client: &reqwest::Client,
     config: &Config,
     text: &str,
 ) -> Result<Vec<f32>, AppError> {
-    match &config.openai_api_key {
+    let effective_key = config.embedding_api_key.as_ref().or(config.openai_api_key.as_ref());
+    match effective_key {
         Some(api_key) => {
-            // Real embedding via OpenRouter/OpenAI-compatible API
-            let url = format!("{}/embeddings", config.openai_api_base);
+            // Real embedding via configured provider (OpenRouter, Jina, OpenAI, etc.)
+            let base = config.embedding_api_base.as_deref().unwrap_or(&config.openai_api_base);
+            let url = format!("{}/embeddings", base);
 
             let resp = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
                 .json(&EmbeddingApiRequest {
-                    model: "openai/text-embedding-3-small".to_string(),
+                    model: config.embedding_model.clone(),
                     input: text.to_string(),
+                    dimensions: config.embedding_dimensions,
                 })
                 .send()
                 .await
@@ -91,13 +97,14 @@ async fn generate_embedding(
         }
         None => {
             // Mock embedding (deterministic hash-based)
-            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY set)");
+            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY or EMBEDDING_API_KEY set)");
             use sha2::Digest;
             let hash = sha2::Sha256::digest(text.as_bytes());
+            let dims = config.embedding_dimensions.unwrap_or(1536) as usize;
             let mock_vector: Vec<f32> = hash
                 .iter()
                 .cycle()
-                .take(1536)
+                .take(dims)
                 .enumerate()
                 .map(|(i, &b)| {
                     let val = (b as f32 / 255.0) * 2.0 - 1.0;
@@ -555,7 +562,7 @@ async fn extract_facts_llm(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&ChatCompletionRequest {
-            model: "openai/gpt-4o-mini".to_string(),
+            model: config.llm_model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
@@ -723,7 +730,7 @@ pub async fn ask(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&ChatCompletionRequest {
-            model: "openai/gpt-4o-mini".to_string(),
+            model: state.config.llm_model.clone(),
             messages: vec![
                 ChatMessage { role: "system".to_string(), content: system_prompt },
                 ChatMessage { role: "user".to_string(), content: body.question.clone() },
