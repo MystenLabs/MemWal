@@ -1,21 +1,85 @@
 # MemWal Benchmark Configuration
-# Copy to config.yaml and fill in credentials.
+#
+# Copy this file to config.yaml and fill in the credentials below.
+# config.yaml is gitignored — never commit real keys.
+#
+# This is the benchmark harness config only. MemWal server config is
+# separate and lives in services/server/.env (see .env.example there).
+# The benchmark harness only needs (1) how to reach the server and
+# (2) an LLM provider for answer generation and judging.
 
+# ─────────────────────────────────────────────────────────────────────
+# MemWal server connection
+# ─────────────────────────────────────────────────────────────────────
 server:
+  # URL of the running MemWal server. Default is the local dev port.
+  # If the server runs elsewhere (Docker, remote host), update this.
   url: http://localhost:3001
-  delegate_key: ""          # Ed25519 delegate private key (hex, 32 bytes)
-  account_id: ""            # MemWal account object ID (0x...)
 
+  # Ed25519 delegate private key (raw hex, 32 bytes = 64 hex chars).
+  # Where to get one:
+  #   1. Via the memwal app: register an account, export delegate key
+  #   2. Via the @mysten-incubation/memwal SDK: generateDelegateKey()
+  # The key's public half must be registered on-chain as a delegate
+  # for the account_id below, otherwise every request gets 401.
+  delegate_key: ""
+
+  # MemWal account object ID on Sui (0x... hex).
+  # Found in the app settings, or returned by the SDK's create account
+  # flow. Required because a single delegate key can be associated
+  # with multiple accounts; this header picks which one.
+  account_id: ""
+
+# ─────────────────────────────────────────────────────────────────────
+# LLM judge — evaluates generated answers vs ground truth
+# ─────────────────────────────────────────────────────────────────────
 judge:
-  model: gpt-4o             # LLM for answer evaluation (must match published methodology)
-  api_key: ""               # OpenAI or OpenRouter API key
-  api_base: https://api.openai.com/v1
+  # Model used for judging. Published benchmarks (Mem0, LongMemEval,
+  # ConvoMem) all use GPT-4o — keep this consistent for comparable
+  # numbers. Other models will produce different scores.
+  model: openai/gpt-4o
 
+  # OpenRouter or OpenAI API key. Required.
+  api_key: ""
+
+  # API base URL. OpenRouter is cost-effective and we use it in our
+  # MemWal server config too. Swap for OpenAI direct if preferred:
+  #   api_base: https://api.openai.com/v1
+  #   model: gpt-4o   (no vendor prefix for OpenAI direct)
+  api_base: https://openrouter.ai/api/v1
+
+# ─────────────────────────────────────────────────────────────────────
+# Answer generation — produces the response to judge
+# ─────────────────────────────────────────────────────────────────────
 answer:
-  model: gpt-4o-mini        # LLM for generating answers from recalled memories
-  # Uses same api_key and api_base as judge
+  # A smaller, cheaper model is fine here since it's just stitching
+  # together recalled memories into an answer. Uses the same api_key
+  # and api_base as the judge.
+  model: openai/gpt-4o-mini
 
+# ─────────────────────────────────────────────────────────────────────
+# Benchmark execution tuning
+# ─────────────────────────────────────────────────────────────────────
 benchmarks:
-  concurrency: 5            # max parallel API calls during ingestion
-  recall_limit: 10          # top-K results per recall query
-  eval_runs: 3              # repeated judge evaluations for variance measurement
+  # Parallel workers during ingestion (analyze calls).
+  # Higher = faster ingestion, but the MemWal server's rate limits
+  # and OpenRouter's rate limits cap practical throughput. 5-10 is a
+  # good default for localhost.
+  concurrency: 10
+
+  # Parallel workers during eval (recall + answer + judge).
+  # Can go higher than ingestion since these don't hit Walrus.
+  # 8-20 works well. Too high and you trigger 429s from the server
+  # or OpenRouter — client retries with backoff but it slows you down.
+  eval_concurrency: 20
+
+  # Top-K memories retrieved per query. LOCOMO/LongMemEval run with 10.
+  # Bumping to 20-30 can help recall at cost of more LLM context size.
+  recall_limit: 10
+
+  # How many times to run the judge per query.
+  # 1 = fastest, 1 data point per query. Judge has some variance
+  #     (~±2-3 points) but retrieval is deterministic given fixed
+  #     weights, so 1 is often enough for preset comparisons.
+  # 3-5 = publication quality, lets you report mean ± std.
+  eval_runs: 1

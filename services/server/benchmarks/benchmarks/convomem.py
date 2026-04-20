@@ -1,15 +1,35 @@
 """
-ConvoMem benchmark adapter.
+ConvoMem benchmark adapter — UNVALIDATED STUB.
 
 Source: Salesforce Research, 2025
 Access: HuggingFace Salesforce/ConvoMem
+Size:   75,336 QA pairs, 100 personas, 15 context sizes (1-300 conversations)
+Total download: ~27 GB
 
-75,336 QA pairs, 100 personas, 15 context sizes (1-300 conversations).
-Categories: user_evidence, assistant_evidence, changing_evidence,
-            abstention, preference, implicit_connection
+Status
+------
+This adapter exists as scaffolding. The parser code is BASED ON A GUESS
+at the dataset schema and has NOT been verified against the real files.
+Running the full benchmark would cost ~$330 and ~75 hours — impractical
+without a carefully chosen subset.
 
-The "changing_evidence" category tests recency decay and update handling.
-The context-size scaling reveals when memory retrieval outperforms full context.
+Before using this adapter:
+1. Download a single context-size shard from HuggingFace (not the full dump)
+2. Inspect the real JSON schema and compare with `load()` below
+3. Update `load()` if needed (likely will need changes)
+4. Test on ~10 queries end-to-end before a larger run
+5. Remove the NotImplementedError raise in `load()`
+
+Categories (from ConvoMem paper):
+- user_evidence       (user states fact, system recalls)
+- assistant_evidence  (assistant provides info, user recalls)
+- changing_evidence   (evolving information, 2-6 variations — tests recency)
+- abstention          (no answer in conversation)
+- preference          (user preference for recommendations)
+- implicit_connection (multi-hop reasoning)
+
+Published finding: full-context reaches 70-82% under 150 interactions;
+RAG systems (including Mem0) reach only 30-45% on the same data.
 """
 
 from __future__ import annotations
@@ -28,6 +48,9 @@ logger = logging.getLogger(__name__)
 class ConvoMemBenchmark(BenchmarkAdapter):
 
     name = "ConvoMem"
+
+    # Flip to True after validating the parser against real data.
+    VALIDATED = False
     categories = [
         "user_evidence", "assistant_evidence", "changing_evidence",
         "abstention", "preference", "implicit_connection",
@@ -56,6 +79,16 @@ class ConvoMemBenchmark(BenchmarkAdapter):
             raise
 
     def load(self, cache_dir: Path) -> tuple[list[Conversation], list[Query]]:
+        if not self.VALIDATED:
+            raise NotImplementedError(
+                "ConvoMem adapter is an unvalidated stub. The parser below is "
+                "based on a guess at the dataset schema and has not been "
+                "verified against real data. Download a single shard, inspect "
+                "the real JSON structure, update load() to match, then set "
+                "VALIDATED = True on this class. See the module docstring for "
+                "full instructions."
+            )
+
         target = cache_dir / "convomem" / "data.json"
         if not target.exists():
             raise FileNotFoundError(
