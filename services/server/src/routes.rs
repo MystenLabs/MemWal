@@ -161,18 +161,6 @@ pub async fn remember(
     let text_bytes = text.as_bytes().len() as i64;
     rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
 
-    // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
-    let embed_fut = generate_embedding(&state.http_client, &state.config, text);
-    let encrypt_fut = seal::seal_encrypt(
-        &state.http_client, &state.config.sidecar_url,
-        text.as_bytes(), owner, &state.config.package_id,
-    );
-    let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-    let vector = vector_result?;
-    let encrypted = encrypted_result?;
-
-    // Step 2: Reserve, upload, and finalize the entry in one transaction.
-    let blob_size = encrypted.len() as i64;
     let memory_type_str = body.memory_type.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "fact".to_string());
     let importance = body.importance.unwrap_or(0.5).clamp(0.0, 1.0);
 
@@ -187,22 +175,41 @@ pub async fn remember(
         meta
     };
 
-    let (is_new, actual_id, actual_blob_id) = store_memory_with_transaction(
-        &state,
-        owner,
-        namespace,
-        &vector,
-        &encrypted,
-        blob_size,
-        content_hash.clone(),
-        InsertMemoryMeta {
-            memory_type: memory_type_str.clone(),
-            importance,
-            source: "user".to_string(),
-            metadata,
-            content_hash: Some(content_hash.clone()),
-        },
-    ).await?;
+    let insert_meta = InsertMemoryMeta {
+        memory_type: memory_type_str.clone(),
+        importance,
+        source: "user".to_string(),
+        metadata,
+        content_hash: Some(content_hash.clone()),
+    };
+
+    let (is_new, actual_id, actual_blob_id) = if state.config.benchmark_mode {
+        // Benchmark mode: embed only, skip SEAL + Walrus, store plaintext.
+        let vector = generate_embedding(&state.http_client, &state.config, text).await?;
+        store_memory_plaintext(&state, owner, namespace, text, &vector, insert_meta).await?
+    } else {
+        // Production: Embed text + SEAL encrypt concurrently (independent), then upload.
+        let embed_fut = generate_embedding(&state.http_client, &state.config, text);
+        let encrypt_fut = seal::seal_encrypt(
+            &state.http_client, &state.config.sidecar_url,
+            text.as_bytes(), owner, &state.config.package_id,
+        );
+        let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+        let vector = vector_result?;
+        let encrypted = encrypted_result?;
+        let blob_size = encrypted.len() as i64;
+
+        store_memory_with_transaction(
+            &state,
+            owner,
+            namespace,
+            &vector,
+            &encrypted,
+            blob_size,
+            content_hash.clone(),
+            insert_meta,
+        ).await?
+    };
 
     let mut response_memory_type = memory_type_str.clone();
     let mut response_importance = importance;
@@ -278,6 +285,7 @@ pub async fn recall(
         .iter()
         .map(|hit| (hit.blob_id.clone(), hit.id.clone()))
         .collect();
+    let benchmark_mode = state.config.benchmark_mode;
     let tasks: Vec<_> = hits.iter().map(|hit| {
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
@@ -293,25 +301,59 @@ pub async fn recall(
         let account_id = auth.account_id.clone();
         let scoring = scoring.clone();
         async move {
-            // Download encrypted blob from Walrus (native Rust)
-            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                Ok(data) => data,
-                Err(AppError::BlobNotFound(msg)) => {
-                    // Blob expired on Walrus — clean up from DB reactively
-                    tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
-                    return None;
+            // Resolve plaintext: benchmark mode reads from DB, production downloads + decrypts.
+            let text_opt: Option<String> = if benchmark_mode {
+                match db.fetch_plaintext_by_blob_id(&blob_id).await {
+                    Ok(Some(t)) => Some(t),
+                    Ok(None) => {
+                        tracing::warn!("Benchmark row missing plaintext: {}", blob_id);
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch plaintext for {}: {}", blob_id, e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to download blob {}: {}", blob_id, e);
-                    return None;
+            } else {
+                // Download encrypted blob from Walrus (native Rust)
+                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                    Ok(data) => data,
+                    Err(AppError::BlobNotFound(msg)) => {
+                        // Blob expired on Walrus — clean up from DB reactively
+                        tracing::warn!("Blob expired, cleaning up: {}", msg);
+                        cleanup_expired_blob(db, &blob_id).await;
+                        return None;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to download blob {}: {}", blob_id, e);
+                        return None;
+                    }
+                };
+                // Decrypt using SEAL (via sidecar HTTP)
+                match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
+                    Ok(plaintext) => match String::from_utf8(plaintext) {
+                        Ok(t) => Some(t),
+                        Err(e) => {
+                            tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        let is_permanent = err_str.contains("Not enough shares")
+                            || err_str.contains("decrypt failed");
+                        if is_permanent {
+                            tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
+                            cleanup_expired_blob(db, &blob_id).await;
+                        } else {
+                            tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
+                        }
+                        None
+                    }
                 }
             };
-            // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
-                Ok(plaintext) => {
-                    match String::from_utf8(plaintext) {
-                        Ok(text) => {
+
+            if let Some(text) = text_opt {
                             // Compute composite score
                             let semantic_score = 1.0 - distance;
                             let importance_score = importance.unwrap_or(0.5) as f64;
@@ -351,25 +393,8 @@ pub async fn recall(
                                 created_at,
                                 access_count,
                             })
-                        }
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    let is_permanent = err_str.contains("Not enough shares")
-                        || err_str.contains("decrypt failed");
-                    if is_permanent {
-                        tracing::warn!("SEAL decrypt permanently failed for blob {}, cleaning up: {}", blob_id, e);
-                        cleanup_expired_blob(db, &blob_id).await;
-                    } else {
-                        tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
-                    }
-                    None
-                }
+            } else {
+                None
             }
         }
     }).collect();
@@ -648,31 +673,49 @@ pub async fn analyze(
     let mut decrypted_old_memories: std::collections::HashMap<String, String> = std::collections::HashMap::new(); // id → plaintext
 
     if !unique_old_memories.is_empty() {
-        let private_key_opt = auth.delegate_key.clone().or_else(|| state.config.sui_private_key.clone());
-        if let Some(private_key) = private_key_opt {
-            // Dedup by blob_id (multiple memory IDs can share the same blob_id)
-            let mut blob_to_ids: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-            for (id, blob_id) in &unique_old_memories {
-                blob_to_ids.entry(blob_id.clone()).or_default().push(id.clone());
+        if state.config.benchmark_mode {
+            // Benchmark: read plaintext directly from DB, no SEAL/Walrus involved.
+            for (id, _blob_id) in &unique_old_memories {
+                match state.db.fetch_plaintext(id).await {
+                    Ok(Some(text)) => {
+                        decrypted_old_memories.insert(id.clone(), text);
+                    }
+                    Ok(None) => {
+                        tracing::warn!("Benchmark row {} has no plaintext", id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch plaintext for {}: {}", id, e);
+                    }
+                }
             }
+            tracing::info!("  → Loaded {} old memories for batch consolidation (benchmark mode)", decrypted_old_memories.len());
+        } else {
+            let private_key_opt = auth.delegate_key.clone().or_else(|| state.config.sui_private_key.clone());
+            if let Some(private_key) = private_key_opt {
+                // Dedup by blob_id (multiple memory IDs can share the same blob_id)
+                let mut blob_to_ids: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                for (id, blob_id) in &unique_old_memories {
+                    blob_to_ids.entry(blob_id.clone()).or_default().push(id.clone());
+                }
 
-            for (blob_id, ids) in &blob_to_ids {
-                if let Ok(encrypted) = walrus::download_blob(&state.walrus_client, blob_id).await {
-                    if let Ok(plaintext_bytes) = seal::seal_decrypt(
-                        &state.http_client, &state.config.sidecar_url, &encrypted,
-                        &private_key, &state.config.package_id, &auth.account_id,
-                    ).await {
-                        if let Ok(text) = String::from_utf8(plaintext_bytes) {
-                            for id in ids {
-                                decrypted_old_memories.insert(id.clone(), text.clone());
+                for (blob_id, ids) in &blob_to_ids {
+                    if let Ok(encrypted) = walrus::download_blob(&state.walrus_client, blob_id).await {
+                        if let Ok(plaintext_bytes) = seal::seal_decrypt(
+                            &state.http_client, &state.config.sidecar_url, &encrypted,
+                            &private_key, &state.config.package_id, &auth.account_id,
+                        ).await {
+                            if let Ok(text) = String::from_utf8(plaintext_bytes) {
+                                for id in ids {
+                                    decrypted_old_memories.insert(id.clone(), text.clone());
+                                }
                             }
                         }
                     }
                 }
+                tracing::info!("  → Decrypted {} old memories for batch consolidation", decrypted_old_memories.len());
+            } else {
+                tracing::warn!("No decryption key available for consolidation, all facts will be ADD");
             }
-            tracing::info!("  → Decrypted {} old memories for batch consolidation", decrypted_old_memories.len());
-        } else {
-            tracing::warn!("No decryption key available for consolidation, all facts will be ADD");
         }
     }
 
@@ -789,12 +832,21 @@ pub async fn analyze(
                     content_hash.clone()
                 };
 
-                let encrypt_result = seal::seal_encrypt(
-                    &state.http_client, &state.config.sidecar_url,
-                    final_text.as_bytes(), owner, &state.config.package_id,
-                ).await?;
+                // In benchmark mode, skip SEAL — plaintext goes straight into the DB.
+                let encrypt_result: Vec<u8> = if state.config.benchmark_mode {
+                    Vec::new() // placeholder, unused in benchmark branch below
+                } else {
+                    seal::seal_encrypt(
+                        &state.http_client, &state.config.sidecar_url,
+                        final_text.as_bytes(), owner, &state.config.package_id,
+                    ).await?
+                };
 
-                let blob_size = encrypt_result.len() as i64;
+                let blob_size = if state.config.benchmark_mode {
+                    final_text.as_bytes().len() as i64
+                } else {
+                    encrypt_result.len() as i64
+                };
 
                 // Derive metadata from target if UPDATE, else default
                 let meta = if decision.action == ConsolidationAction::Update {
@@ -838,17 +890,22 @@ pub async fn analyze(
                     }
                 };
 
-                // Store with enriched metadata via reserve -> upload -> finalize transaction
-                let (_, actual_id, actual_blob_id) = store_memory_with_transaction(
-                    &state,
-                    owner,
-                    namespace,
-                    &final_vector,
-                    &encrypt_result,
-                    blob_size,
-                    final_content_hash.clone(),
-                    meta,
-                ).await?;
+                // Store with enriched metadata — benchmark mode goes direct to DB,
+                // production goes via reserve -> upload -> finalize transaction.
+                let (_, actual_id, actual_blob_id) = if state.config.benchmark_mode {
+                    store_memory_plaintext(&state, owner, namespace, final_text, &final_vector, meta).await?
+                } else {
+                    store_memory_with_transaction(
+                        &state,
+                        owner,
+                        namespace,
+                        &final_vector,
+                        &encrypt_result,
+                        blob_size,
+                        final_content_hash.clone(),
+                        meta,
+                    ).await?
+                };
 
                 // If UPDATE, supersede the old memory
                 if decision.action == ConsolidationAction::Update {
@@ -1341,6 +1398,27 @@ Decision rules:
 /// The reservation is committed only after the Walrus upload and blob_id update
 /// succeed, which keeps duplicate content-hash writers serialized and avoids
 /// orphan uploads when a duplicate request loses the race.
+/// Benchmark-mode store: skips SEAL encryption + Walrus upload entirely.
+/// Stores plaintext directly in the vector_entries row. Used only when
+/// config.benchmark_mode is true.
+///
+/// The unique content_hash index still provides duplicate protection —
+/// no advisory lock or transaction needed for this fast path.
+async fn store_memory_plaintext(
+    state: &Arc<AppState>,
+    owner: &str,
+    namespace: &str,
+    plaintext: &str,
+    vector: &[f32],
+    meta: InsertMemoryMeta,
+) -> Result<(bool, String, String), AppError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .insert_vector_plaintext(&id, owner, namespace, plaintext, vector, meta)
+        .await
+}
+
 async fn store_memory_with_transaction(
     state: &Arc<AppState>,
     owner: &str,
@@ -1655,23 +1733,31 @@ pub async fn consolidate(
                             .cloned()
                             .unwrap_or_else(|| ("fact".to_string(), 0.5, 0));
 
-                        let encrypt_result = match seal::seal_encrypt(
-                            &state.http_client, &state.config.sidecar_url,
-                            new_text.as_bytes(), owner, &state.config.package_id,
-                        ).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "consolidate UPDATE skipped for {}: SEAL encrypt failed: {}",
-                                    target_id, e
-                                );
-                                unchanged += 1;
-                                continue;
+                        let encrypt_result: Vec<u8> = if state.config.benchmark_mode {
+                            Vec::new() // unused in benchmark branch below
+                        } else {
+                            match seal::seal_encrypt(
+                                &state.http_client, &state.config.sidecar_url,
+                                new_text.as_bytes(), owner, &state.config.package_id,
+                            ).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "consolidate UPDATE skipped for {}: SEAL encrypt failed: {}",
+                                        target_id, e
+                                    );
+                                    unchanged += 1;
+                                    continue;
+                                }
                             }
                         };
 
                         // Net-neutral quota check uses encrypted bytes (same unit as blob_size_bytes).
-                        let new_blob_size = encrypt_result.len() as i64;
+                        let new_blob_size = if state.config.benchmark_mode {
+                            new_text.as_bytes().len() as i64
+                        } else {
+                            encrypt_result.len() as i64
+                        };
                         let size_delta = new_blob_size - old_blob_size;
                         if size_delta > 0 {
                             if let Err(e) = rate_limit::check_storage_quota(&state, owner, size_delta).await {
@@ -1701,22 +1787,28 @@ pub async fn consolidate(
                             hex::encode(sha2::Sha256::digest(new_text.as_bytes()))
                         };
                         
-                        let (_, actual_id, _) = match store_memory_with_transaction(
-                            &state,
-                            owner,
-                            namespace,
-                            &vector,
-                            &encrypt_result,
-                            encrypt_result.len() as i64,
-                            content_hash.clone(),
-                            InsertMemoryMeta {
-                                memory_type: orig_type,
-                                importance: orig_importance,
-                                source: "system".to_string(),
-                                metadata: serde_json::json!({}),
-                                content_hash: Some(content_hash),
-                            },
-                        ).await {
+                        let store_meta = InsertMemoryMeta {
+                            memory_type: orig_type,
+                            importance: orig_importance,
+                            source: "system".to_string(),
+                            metadata: serde_json::json!({}),
+                            content_hash: Some(content_hash.clone()),
+                        };
+                        let store_res = if state.config.benchmark_mode {
+                            store_memory_plaintext(&state, owner, namespace, new_text, &vector, store_meta).await
+                        } else {
+                            store_memory_with_transaction(
+                                &state,
+                                owner,
+                                namespace,
+                                &vector,
+                                &encrypt_result,
+                                encrypt_result.len() as i64,
+                                content_hash.clone(),
+                                store_meta,
+                            ).await
+                        };
+                        let (_, actual_id, _) = match store_res {
                             Ok(v) => v,
                             Err(e) => {
                                 tracing::warn!(
@@ -1752,20 +1844,30 @@ pub async fn consolidate(
             }
             ConsolidationAction::Add => {
                 if let Some(ref new_text) = decision.text {
-                    let encrypt_result = match seal::seal_encrypt(
-                        &state.http_client, &state.config.sidecar_url,
-                        new_text.as_bytes(), owner, &state.config.package_id,
-                    ).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!("consolidate ADD skipped: SEAL encrypt failed: {}", e);
-                            unchanged += 1;
-                            continue;
+                    let encrypt_result: Vec<u8> = if state.config.benchmark_mode {
+                        Vec::new()
+                    } else {
+                        match seal::seal_encrypt(
+                            &state.http_client, &state.config.sidecar_url,
+                            new_text.as_bytes(), owner, &state.config.package_id,
+                        ).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!("consolidate ADD skipped: SEAL encrypt failed: {}", e);
+                                unchanged += 1;
+                                continue;
+                            }
                         }
                     };
 
+                    let quota_bytes = if state.config.benchmark_mode {
+                        new_text.as_bytes().len() as i64
+                    } else {
+                        encrypt_result.len() as i64
+                    };
+
                     // Quota check uses encrypted bytes (same unit as persisted blob_size_bytes).
-                    if let Err(e) = rate_limit::check_storage_quota(&state, owner, encrypt_result.len() as i64).await {
+                    if let Err(e) = rate_limit::check_storage_quota(&state, owner, quota_bytes).await {
                         tracing::warn!("consolidate ADD skipped: quota check failed: {}", e);
                         unchanged += 1;
                         continue;
@@ -1783,22 +1885,28 @@ pub async fn consolidate(
                         use sha2::Digest;
                         hex::encode(sha2::Sha256::digest(new_text.as_bytes()))
                     };
-                    if let Err(e) = store_memory_with_transaction(
-                        &state,
-                        owner,
-                        namespace,
-                        &vector,
-                        &encrypt_result,
-                        encrypt_result.len() as i64,
-                        content_hash.clone(),
-                        InsertMemoryMeta {
-                            memory_type: context_type.clone(),
-                            importance: context_importance,
-                            source: "system".to_string(),
-                            metadata: serde_json::json!({}),
-                            content_hash: Some(content_hash),
-                        },
-                    ).await {
+                    let store_meta = InsertMemoryMeta {
+                        memory_type: context_type.clone(),
+                        importance: context_importance,
+                        source: "system".to_string(),
+                        metadata: serde_json::json!({}),
+                        content_hash: Some(content_hash.clone()),
+                    };
+                    let store_res = if state.config.benchmark_mode {
+                        store_memory_plaintext(&state, owner, namespace, new_text, &vector, store_meta).await
+                    } else {
+                        store_memory_with_transaction(
+                            &state,
+                            owner,
+                            namespace,
+                            &vector,
+                            &encrypt_result,
+                            encrypt_result.len() as i64,
+                            content_hash.clone(),
+                            store_meta,
+                        ).await
+                    };
+                    if let Err(e) = store_res {
                         tracing::warn!("consolidate ADD skipped: DB insert failed: {}", e);
                         unchanged += 1;
                         continue;
