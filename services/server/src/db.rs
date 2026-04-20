@@ -261,40 +261,36 @@ impl VectorDb {
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
-        // Build dynamic query with optional filters
-        let mut conditions = vec![
-            "owner = $2".to_string(),
-            "namespace = $3".to_string(),
-        ];
-        if exclude_expired {
-            conditions.push("(valid_until IS NULL AND superseded_by IS NULL)".to_string());
-        }
-        if let Some(types) = memory_types {
-            if !types.is_empty() {
-                let type_list: Vec<String> = types.iter().map(|t| format!("'{}'", t.replace('\'', "''"))).collect();
-                conditions.push(format!("memory_type IN ({})", type_list.join(",")));
-            }
-        }
-        if let Some(min_imp) = min_importance {
-            conditions.push(format!("importance >= {}", min_imp));
-        }
+        // Normalize filter params for static query:
+        // - apply_types ($7) gates the ANY check; when false the condition short-circuits to true
+        //   regardless of $6, avoiding the NULL-propagation behaviour of ANY(NULL)
+        // - min_importance: None → 0.0 (no effective lower bound)
+        let types_filter: Option<Vec<String>> = memory_types
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_vec());
+        let min_imp = min_importance.unwrap_or(0.0_f32);
+        let apply_types = types_filter.is_some();
 
-        let where_clause = conditions.join(" AND ");
-        let query = format!(
-            "SELECT id, blob_id, (embedding <=> $1)::float8 AS distance, \
-             memory_type, importance::float4, created_at::text, access_count \
-             FROM vector_entries \
-             WHERE {} \
-             ORDER BY embedding <=> $1 \
-             LIMIT $4",
-            where_clause
-        );
-
-        let rows: Vec<(String, String, f64, Option<String>, Option<f32>, Option<String>, Option<i32>)> = sqlx::query_as(&query)
+        let rows: Vec<(String, String, f64, Option<String>, Option<f32>, Option<String>, Option<i32>)> = sqlx::query_as(
+            "SELECT id, blob_id, (embedding <=> $1)::float8 AS distance,
+                    memory_type, importance::float4, created_at::text, access_count
+             FROM vector_entries
+             WHERE owner = $2
+               AND namespace = $3
+               AND (NOT $5 OR (valid_until IS NULL AND superseded_by IS NULL))
+               AND (NOT $7 OR memory_type = ANY($6))
+               AND importance >= $8
+             ORDER BY embedding <=> $1
+             LIMIT $4"
+        )
             .bind(embedding)
             .bind(owner)
             .bind(namespace)
             .bind(limit as i64)
+            .bind(exclude_expired)
+            .bind(types_filter.as_deref())
+            .bind(apply_types)
+            .bind(min_imp)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)))?;
