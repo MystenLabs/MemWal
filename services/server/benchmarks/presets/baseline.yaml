@@ -1,0 +1,7 @@
+# Pure cosine similarity — no composite scoring adjustments
+name: baseline
+weights:
+  semantic: 1.0
+  importance: 0.0
+  recency: 0.0
+  frequency: 0.0

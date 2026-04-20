@@ -1,0 +1,7 @@
+# MemWal default balanced weights for general-purpose retrieval
+name: default
+weights:
+  semantic: 0.5
+  importance: 0.2
+  recency: 0.2
+  frequency: 0.1

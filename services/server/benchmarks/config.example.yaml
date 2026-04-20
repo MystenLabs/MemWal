@@ -1,0 +1,21 @@
+# MemWal Benchmark Configuration
+# Copy to config.yaml and fill in credentials.
+
+server:
+  url: http://localhost:3001
+  delegate_key: ""          # Ed25519 delegate private key (hex, 32 bytes)
+  account_id: ""            # MemWal account object ID (0x...)
+
+judge:
+  model: gpt-4o             # LLM for answer evaluation (must match published methodology)
+  api_key: ""               # OpenAI or OpenRouter API key
+  api_base: https://api.openai.com/v1
+
+answer:
+  model: gpt-4o-mini        # LLM for generating answers from recalled memories
+  # Uses same api_key and api_base as judge
+
+benchmarks:
+  concurrency: 5            # max parallel API calls during ingestion
+  recall_limit: 10          # top-K results per recall query
+  eval_runs: 3              # repeated judge evaluations for variance measurement
