@@ -81,6 +81,10 @@ pub struct Config {
     pub sidecar_url: String,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
+    /// Benchmark mode: skips SEAL encryption + Walrus upload, stores plaintext
+    /// directly in Postgres. For retrieval-quality benchmarks only — must never
+    /// be enabled in production. Default: false.
+    pub benchmark_mode: bool,
 }
 
 impl Config {
@@ -131,6 +135,9 @@ impl Config {
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             rate_limit: RateLimitConfig::from_env(),
+            benchmark_mode: std::env::var("BENCHMARK_MODE")
+                .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false),
         }
     }
 }

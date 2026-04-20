@@ -235,6 +235,92 @@ impl VectorDb {
         Ok(())
     }
 
+    // ================================================================
+    // Benchmark mode — plaintext storage (no SEAL/Walrus)
+    //
+    // These methods are used ONLY when the server is started with
+    // BENCHMARK_MODE=true. They store plaintext in the vector_entries
+    // row and skip the SEAL encrypt + Walrus upload path entirely.
+    //
+    // Rows inserted by these methods are visually distinguishable by:
+    //   - blob_id prefix "bench:{uuid}"
+    //   - non-NULL plaintext column
+    // ================================================================
+
+    /// Insert a plaintext vector entry. No encryption, no Walrus.
+    /// Returns (is_new, actual_id, actual_blob_id).
+    pub async fn insert_vector_plaintext(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        plaintext: &str,
+        vector: &[f32],
+        meta: InsertMemoryMeta,
+    ) -> Result<(bool, String, String), AppError> {
+        let embedding = Vector::from(vector.to_vec());
+        let blob_id = format!("bench:{}", id);
+        let blob_size = plaintext.as_bytes().len() as i64;
+
+        let row: (String, String) = sqlx::query_as(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, plaintext, embedding, blob_size_bytes, memory_type, importance, source, metadata, content_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT (owner, namespace, content_hash)
+             WHERE content_hash IS NOT NULL AND valid_until IS NULL AND superseded_by IS NULL
+             DO UPDATE SET access_count = vector_entries.access_count + 1,
+                           last_accessed_at = NOW()
+             RETURNING id, blob_id",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(&blob_id)
+        .bind(plaintext)
+        .bind(embedding)
+        .bind(blob_size)
+        .bind(&meta.memory_type)
+        .bind(meta.importance)
+        .bind(&meta.source)
+        .bind(&meta.metadata)
+        .bind(&meta.content_hash)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)))?;
+
+        let actual_id = row.0;
+        let actual_blob_id = row.1;
+        let is_new = actual_id == id;
+        Ok((is_new, actual_id, actual_blob_id))
+    }
+
+    /// Fetch plaintext by memory id. Used by recall and consolidation
+    /// when running in benchmark mode.
+    pub async fn fetch_plaintext(&self, id: &str) -> Result<Option<String>, AppError> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT plaintext FROM vector_entries WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
+
+        Ok(row.and_then(|(pt,)| pt))
+    }
+
+    /// Fetch plaintext by blob_id (for code paths that only have blob_id).
+    /// Benchmark blob_ids have the "bench:{uuid}" format.
+    pub async fn fetch_plaintext_by_blob_id(&self, blob_id: &str) -> Result<Option<String>, AppError> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT plaintext FROM vector_entries WHERE blob_id = $1",
+        )
+        .bind(blob_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext by blob_id: {}", e)))?;
+
+        Ok(row.and_then(|(pt,)| pt))
+    }
+
     /// Search for similar vectors using pgvector cosine distance (<=>)
     /// Returns blob_id, distance, and enriched metadata for composite scoring.
     /// By default, excludes expired/superseded memories.

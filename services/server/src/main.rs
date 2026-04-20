@@ -42,44 +42,60 @@ async fn main() {
         config.rate_limit.max_storage_bytes / 1_048_576
     );
 
-    // Start TS sidecar HTTP server (SEAL + Walrus operations)
-    let sidecar_url = config.sidecar_url.clone();
-    tracing::info!("  sidecar: starting at {}", sidecar_url);
-    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
-    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    let mut sidecar_child = tokio::process::Command::new("npx")
-        .args(["tsx", "sidecar-server.ts"])
-        .current_dir(&scripts_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("Failed to start TS sidecar. Is Node.js installed?");
+    if config.benchmark_mode {
+        tracing::warn!("========================================================");
+        tracing::warn!("BENCHMARK_MODE=true — blockchain layer DISABLED");
+        tracing::warn!("  - SEAL encryption: SKIPPED");
+        tracing::warn!("  - Walrus upload/download: SKIPPED");
+        tracing::warn!("  - Plaintext stored directly in Postgres");
+        tracing::warn!("DO NOT RUN THIS CONFIGURATION IN PRODUCTION");
+        tracing::warn!("========================================================");
+    }
 
-    // Wait for sidecar to be ready (health check with retry)
+    // Sidecar is only needed for SEAL + Walrus. Skip entirely in benchmark mode.
     let http_client = reqwest::Client::new();
-    let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
+    let sidecar_url = config.sidecar_url.clone();
+    let sidecar_child_opt: Option<tokio::process::Child> = if config.benchmark_mode {
+        tracing::info!("  sidecar: SKIPPED (benchmark mode)");
+        None
+    } else {
+        tracing::info!("  sidecar: starting at {}", sidecar_url);
+        // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
+        let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
+        let mut sidecar_child = tokio::process::Command::new("npx")
+            .args(["tsx", "sidecar-server.ts"])
+            .current_dir(&scripts_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("Failed to start TS sidecar. Is Node.js installed?");
+
+        // Wait for sidecar to be ready (health check with retry)
+        let health_url = format!("{}/health", sidecar_url);
+        let mut ready = false;
+        for attempt in 1..=30 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            match http_client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("  sidecar: ready (attempt {})", attempt);
+                    ready = true;
+                    break;
+                }
+                _ => {
+                    if attempt % 5 == 0 {
+                        tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
+                    }
                 }
             }
         }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
-        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
-    }
+        if !ready {
+            sidecar_child.kill().await.ok();
+            panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
+        }
+        Some(sidecar_child)
+    };
 
     // Initialize database (PostgreSQL + pgvector)
     let db = VectorDb::new(&config.database_url)
@@ -180,7 +196,9 @@ async fn main() {
         .await
         .expect("Server failed");
 
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
+    // Cleanup sidecar after shutdown (only if it was spawned)
+    if let Some(mut sidecar_child) = sidecar_child_opt {
+        sidecar_child.kill().await.ok();
+        tracing::info!("sidecar stopped");
+    }
 }
