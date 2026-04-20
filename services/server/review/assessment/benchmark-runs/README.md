@@ -6,10 +6,12 @@ Each subfolder in this directory is a **complete benchmark run** — the scoring
 
 ## Runs so far
 
-| Date | Benchmark | Folder | Overall Score | vs Baseline |
-|---|---|---|---|---|
-| 2026-04-20 | LOCOMO | [2026-04-20-locomo/](./2026-04-20-locomo/) | 52.01 (baseline) | — |
-| _planned_ | LongMemEval | _pending_ | — | — |
+| Date | Benchmark | Folder | Best Preset | Overall J-score | vs published |
+|---|---|---|---|---|---|
+| 2026-04-20 | LOCOMO | [2026-04-20-locomo/](./2026-04-20-locomo/) | baseline | 52.01 | -15 vs Mem0 (52.01 vs 55-73) |
+| 2026-04-20 | LongMemEval | [2026-04-20-longmemeval/](./2026-04-20-longmemeval/) | default (composite) | 65.90 | +17 vs Mem0 (49.0), +2 vs Zep (63.8) |
+
+**Overall finding across runs**: MemWal's composite scoring is **net-positive on LongMemEval** (+0.73 vs pure cosine) but **net-negative on LOCOMO** (-0.73). The benchmarks exercise very different conditions — see each run's analysis for why. LongMemEval's mini-haystack structure and real timestamps are closer to real-world use cases.
 
 ---
 
