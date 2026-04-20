@@ -3,11 +3,29 @@ LongMemEval benchmark adapter.
 
 Source: UMass/Microsoft, ICLR 2025
 Access: HuggingFace xiaowu0162/longmemeval-cleaned
+Paper:  https://arxiv.org/abs/2410.10813
 
-500 QA pairs testing 5 memory abilities:
-  extraction, multi_session, temporal, knowledge_updates, abstention
+500 QA pairs testing 6 memory abilities:
+  - single-session-user        (fact from one user turn)
+  - single-session-assistant   (fact from one assistant turn)
+  - single-session-preference  (user preference from one session)
+  - multi-session              (compose across sessions)
+  - temporal-reasoning         (date arithmetic, event ordering)
+  - knowledge-update           (user contradicts earlier info — recency test)
 
-The "knowledge_updates" category directly tests recency decay and supersede logic.
+Each instance has:
+  - question, answer, question_type, question_date
+  - haystack_sessions: list[list[turn]] — sessions of turns
+  - haystack_session_ids: list[str] — 1:1 with haystack_sessions
+  - haystack_dates: list[str] — timestamps matching sessions
+  - answer_session_ids: list[str] — which sessions contain the answer (ground truth)
+
+Turn format: {role: "user"|"assistant", content: str, has_answer: bool}
+
+Dataset variants available:
+  - longmemeval_oracle.json  (smallest, evidence-only, used here)
+  - longmemeval_s_cleaned.json  (~115K tokens per instance)
+  - longmemeval_m_cleaned.json  (up to 1.5M tokens per instance)
 """
 
 from __future__ import annotations
@@ -22,14 +40,32 @@ from .base import BenchmarkAdapter
 
 logger = logging.getLogger(__name__)
 
+# Map LongMemEval question types to our internal category names
+CATEGORY_MAP: dict[str, str] = {
+    "single-session-user": "single_session_user",
+    "single-session-assistant": "single_session_assistant",
+    "single-session-preference": "preference",
+    "multi-session": "multi_session",
+    "temporal-reasoning": "temporal",
+    "knowledge-update": "knowledge_update",
+}
+
 
 class LongMemEvalBenchmark(BenchmarkAdapter):
 
     name = "LongMemEval"
-    categories = ["extraction", "multi_session", "temporal", "knowledge_updates", "abstention"]
+    categories = [
+        "single_session_user",
+        "single_session_assistant",
+        "preference",
+        "multi_session",
+        "temporal",
+        "knowledge_update",
+    ]
 
     def download(self, cache_dir: Path) -> None:
-        target = cache_dir / "longmemeval" / "oracle.json"
+        """Download LongMemEval oracle variant via the HuggingFace Hub."""
+        target = cache_dir / "longmemeval" / "longmemeval_oracle.json"
         if target.exists():
             logger.info("LongMemEval already cached at %s", target)
             return
@@ -37,64 +73,116 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
         target.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            from datasets import load_dataset
-            logger.info("Downloading LongMemEval from HuggingFace...")
-            ds = load_dataset("xiaowu0162/longmemeval-cleaned")
-            # Use the oracle variant (smallest, pure retrieval testing)
-            oracle = ds.get("oracle", ds.get("train"))
-            records = [dict(row) for row in oracle]
-            target.write_text(json.dumps(records, indent=2))
-            logger.info("Saved %d instances to %s", len(records), target)
+            from huggingface_hub import hf_hub_download
+            logger.info("Downloading LongMemEval oracle from HuggingFace...")
+            downloaded = hf_hub_download(
+                repo_id="xiaowu0162/longmemeval-cleaned",
+                filename="longmemeval_oracle.json",
+                repo_type="dataset",
+                local_dir=str(target.parent),
+            )
+            logger.info("Downloaded LongMemEval to %s", downloaded)
         except Exception as e:
-            logger.error("Download failed: %s", e)
+            logger.error("LongMemEval download failed: %s", e)
             raise
 
     def load(self, cache_dir: Path) -> tuple[list[Conversation], list[Query]]:
-        target = cache_dir / "longmemeval" / "oracle.json"
+        """Parse LongMemEval JSON into internal types."""
+        target = cache_dir / "longmemeval" / "longmemeval_oracle.json"
         if not target.exists():
             raise FileNotFoundError(
                 f"LongMemEval not found at {target}. Run 'python run.py download longmemeval' first."
             )
 
         raw = json.loads(target.read_text())
+        if not isinstance(raw, list):
+            raise ValueError(f"Expected list of instances, got {type(raw).__name__}")
+
         conversations: list[Conversation] = []
         queries: list[Query] = []
 
-        # LongMemEval format: each instance has haystack sessions + a question
         for idx, item in enumerate(raw):
-            conv_id = str(item.get("id", f"lme-{idx:04d}"))
+            conv_id = str(item.get("question_id", f"lme-{idx:04d}"))
 
-            # Parse sessions from haystack
-            sessions = []
-            for sess_idx, sess in enumerate(item.get("haystack", [])):
-                turns = []
-                for turn in sess.get("turns", sess if isinstance(sess, list) else []):
-                    role = turn.get("role", "user")
-                    content = turn.get("content", "")
-                    if content:
-                        turns.append(Turn(
-                            speaker=role,
-                            text=content,
-                            turn_id=f"{conv_id}/s{sess_idx}/t{len(turns)}",
-                        ))
+            sessions_raw = item.get("haystack_sessions", [])
+            session_ids = item.get("haystack_session_ids", [])
+            session_dates = item.get("haystack_dates", [])
+
+            # Build sessions — each haystack_sessions entry is a list of turns.
+            sessions: list[Session] = []
+            for sess_idx, turns_raw in enumerate(sessions_raw):
+                # Prefer the real session_id from the dataset when available; fall back
+                # to a positional id. Real ids let us match answer_session_ids later.
+                session_id = (
+                    session_ids[sess_idx]
+                    if sess_idx < len(session_ids)
+                    else f"{conv_id}-s{sess_idx:03d}"
+                )
+                session_date = (
+                    session_dates[sess_idx]
+                    if sess_idx < len(session_dates)
+                    else None
+                )
+
+                turns: list[Turn] = []
+                for turn_idx, turn_raw in enumerate(turns_raw):
+                    if not isinstance(turn_raw, dict):
+                        continue
+                    role = turn_raw.get("role", "user")
+                    content = turn_raw.get("content", "")
+                    if not content:
+                        continue
+                    turns.append(Turn(
+                        speaker=role,
+                        text=content,
+                        turn_id=f"{session_id}/t{turn_idx:03d}",
+                        timestamp=session_date,
+                    ))
+
                 if turns:
-                    sessions.append(Session(session_id=f"s-{sess_idx:03d}", turns=turns))
+                    sessions.append(Session(
+                        session_id=session_id,
+                        turns=turns,
+                    ))
 
             if sessions:
-                conversations.append(Conversation(conversation_id=conv_id, sessions=sessions))
+                conversations.append(Conversation(
+                    conversation_id=conv_id,
+                    sessions=sessions,
+                ))
 
-            # Parse question
-            category = item.get("type", item.get("category", "unknown"))
+            # Build the query. Evidence session IDs are in answer_session_ids.
+            category_raw = item.get("question_type", "unknown")
+            category = CATEGORY_MAP.get(category_raw, category_raw)
+
+            # Some answers are integers (32 out of 500). Normalize to string.
+            answer = item.get("answer", "")
+            if not isinstance(answer, str):
+                answer = str(answer)
+
+            evidence_session_ids = [str(sid) for sid in item.get("answer_session_ids", [])]
+
             queries.append(Query(
-                query_id=f"{conv_id}/q",
+                query_id=conv_id,
                 conversation_id=conv_id,
-                question=item.get("question", ""),
+                question=str(item.get("question", "")),
                 category=category,
-                ground_truth_answer=item.get("answer", ""),
+                ground_truth_answer=answer,
+                evidence_turn_ids=evidence_session_ids,
             ))
 
         conversations.sort(key=lambda c: c.conversation_id)
         queries.sort(key=lambda q: q.query_id)
 
-        logger.info("Loaded LongMemEval: %d conversations, %d queries", len(conversations), len(queries))
+        cat_counts = {
+            cat: sum(1 for q in queries if q.category == cat)
+            for cat in self.categories
+        }
+        logger.info(
+            "Loaded LongMemEval: %d conversations, %d queries (%s)",
+            len(conversations),
+            len(queries),
+            ", ".join(f"{c}: {n}" for c, n in cat_counts.items()),
+        )
+
         return conversations, queries
