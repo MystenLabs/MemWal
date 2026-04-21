@@ -1,100 +1,64 @@
 import { defineConfig, devices } from "@playwright/test";
-
-/**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
- */
 import { config } from "dotenv";
 
-config({
-  path: ".env.local",
-});
+config({ path: ".env.local" });
 
-/* Use process.env.PORT by default and fallback to port 3000 */
-const PORT = process.env.PORT || 3000;
-
-/**
- * Set webServer.url and use.baseURL with the location
- * of the WebServer respecting the correct set port
- */
+// Match the dev script's actual port (next dev --port 3001).
+const PORT = process.env.PORT || "3001";
 const baseURL = `http://localhost:${PORT}`;
 
-/**
- * See https://playwright.dev/docs/test-configuration.
- */
+const isCI = !!process.env.CI;
+
 export default defineConfig({
-  testDir: "./tests",
-  /* Run tests in files in parallel */
+  testDir: "./tests/playwright",
+  outputDir: "./test-results",
   fullyParallel: true,
-  /* Fail the build on CI if you accidentally left test.only in the source code. */
-  forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
-  retries: 0,
-  /* Limit workers to prevent browser crashes */
-  workers: process.env.CI ? 2 : 2,
-  /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: "html",
-  /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
+  forbidOnly: isCI,
+  retries: isCI ? 2 : 0,
+  workers: isCI ? 2 : 2,
+  reporter: isCI
+    ? [
+        ["html", { open: "never", outputFolder: "playwright-report" }],
+        ["github"],
+        ["list"],
+        ["junit", { outputFile: "playwright-report/junit.xml" }],
+      ]
+    : [["html", { open: "never", outputFolder: "playwright-report" }], ["list"]],
+
+  globalSetup: require.resolve("./tests/playwright/global-setup"),
+
   use: {
-    /* Base URL to use in actions like `await page.goto('/')`. */
     baseURL,
-
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: "retain-on-failure",
+    video: isCI ? "retain-on-failure" : "off",
+    screenshot: "only-on-failure",
+    actionTimeout: 10_000,
+    navigationTimeout: 15_000,
   },
 
-  /* Configure global timeout for each test */
-  timeout: 240 * 1000, // 120 seconds
-  expect: {
-    timeout: 240 * 1000,
-  },
+  timeout: 60_000,
+  expect: { timeout: 10_000 },
 
-  /* Configure projects */
   projects: [
     {
       name: "e2e",
-      testMatch: /e2e\/.*.test.ts/,
-      use: {
-        ...devices["Desktop Chrome"],
-      },
+      testMatch: /e2e\/.*\.test\.ts$/,
+      use: { ...devices["Desktop Chrome"] },
     },
-
-    // {
-    //   name: 'firefox',
-    //   use: { ...devices['Desktop Firefox'] },
-    // },
-
-    // {
-    //   name: 'webkit',
-    //   use: { ...devices['Desktop Safari'] },
-    // },
-
-    /* Test against mobile viewports. */
-    // {
-    //   name: 'Mobile Chrome',
-    //   use: { ...devices['Pixel 5'] },
-    // },
-    // {
-    //   name: 'Mobile Safari',
-    //   use: { ...devices['iPhone 12'] },
-    // },
-
-    /* Test against branded browsers. */
-    // {
-    //   name: 'Microsoft Edge',
-    //   use: { ...devices['Desktop Edge'], channel: 'msedge' },
-    // },
-    // {
-    //   name: 'Google Chrome',
-    //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-    // },
   ],
 
-  /* Run your local dev server before starting the tests */
   webServer: {
     command: "pnpm dev",
     url: `${baseURL}/ping`,
-    timeout: 120 * 1000,
-    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+    reuseExistingServer: !isCI,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      // Force the mock AI provider (lib/ai/providers.ts → isTestEnvironment path).
+      PLAYWRIGHT: "True",
+      // Ensure the webServer binds the port baseURL targets.
+      PORT,
+    },
   },
 });
