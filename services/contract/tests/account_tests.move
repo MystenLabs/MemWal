@@ -661,10 +661,13 @@ module memwal::account_tests {
         {
             let mut account = scenario.take_shared<MemWalAccount>();
             let clock = clock::create_for_testing(scenario.ctx());
-            let mut i = 0;
+            // MAX_DELEGATE_KEYS = 20; loop 21 times so the 21st call triggers
+            // ETooManyDelegateKeys. Build a 32-byte key (31-byte base + 1 byte
+            // varying per iteration) so it passes the length check and reaches
+            // the max-limit check.
+            let mut i: u64 = 0;
             while (i <= 20) {
                 let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-                pk.push_back((i as u8));
                 pk.push_back((i as u8));
                 account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
                 i = i + 1;
