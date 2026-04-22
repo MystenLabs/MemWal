@@ -45,6 +45,48 @@ export interface RecallResult {
     total: number;
 }
 
+/** One item in a bulk remember request */
+export interface RememberBulkItem {
+    /** The text to remember */
+    text: string;
+    /** Optional per-item namespace override (falls back to client default) */
+    namespace?: string;
+}
+
+/** Options for remember bulk polling behaviour */
+export interface RememberBulkOptions {
+    /** How often to poll each job_id (default: 1500ms) */
+    pollIntervalMs?: number;
+    /** Max total wait time before throwing (default: 120_000ms) */
+    timeoutMs?: number;
+}
+
+/** Per-item result returned from rememberBulk() */
+export interface RememberBulkItemResult {
+    /** job_id returned by the server */
+    id: string;
+    /** Walrus blob_id once the job completes ("" if failed) */
+    blob_id: string;
+    /** Final status reported by the server: "done" | "failed" | "timeout" */
+    status: "done" | "failed" | "timeout";
+    /** Namespace the memory was stored under */
+    namespace: string;
+    /** Error message if status !== "done" */
+    error?: string;
+}
+
+/** Result from rememberBulk() */
+export interface RememberBulkResult {
+    /** One result per input item, in the same order */
+    results: RememberBulkItemResult[];
+    /** Total items submitted */
+    total: number;
+    /** Count of items that reached status=done */
+    succeeded: number;
+    /** Count of items that failed or timed out */
+    failed: number;
+}
+
 /** Result from embed() */
 export interface EmbedResult {
     vector: number[];

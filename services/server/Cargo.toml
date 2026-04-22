@@ -22,6 +22,10 @@ hex = "0.4"
 # SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
 # (no Rust crypto deps needed)
 
+# Background job queue — persistent metadata+transfer tasks (ENG-1406)
+apalis     = { version = "0.7", default-features = false, features = ["tracing"] }
+apalis-sql = { version = "0.7", features = ["postgres", "migrate"] }
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,3 +54,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 percent-encoding = "2"
+
+# In-memory LRU cache (Walrus blob ciphertext cache for warm recall path)
+lru = "0.12"

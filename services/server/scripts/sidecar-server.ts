@@ -639,9 +639,10 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
             await flow.upload({ digest: registerDigest });
 
             const certifyTx = flow.certify();
-            // Wait until certify tx is confirmed before returning this upload.
-            const certifyDigest = await executeWithEnokiSponsor(certifyTx, signer);
-            await suiClient.waitForTransaction({ digest: certifyDigest });
+            // ENG-1406: Do NOT await waitForTransaction here — the upload relay
+            // already verifies that the blob is certified before returning from
+            // flow.upload(), so a second wait is redundant and adds ~300–600 ms.
+            await executeWithEnokiSponsor(certifyTx, signer);
 
             return flow.getBlob();
         });
@@ -658,90 +659,12 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
         // Walrus package for on-chain Move calls (from env-driven WALRUS_PACKAGE_ID)
         const WALRUS_PKG = WALRUS_PACKAGE_ID;
 
-        // Set on-chain metadata + transfer blob to user in a single transaction
-        if (owner && owner !== signerAddress && blobObjectId) {
-            try {
-                const metaTx = new Transaction();
-                const blobArg = metaTx.object(blobObjectId);
-
-                // Set memwal_namespace metadata on-chain
-                metaTx.moveCall({
-                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_namespace"),
-                        metaTx.pure.string(namespace || "default"),
-                    ],
-                    typeArguments: [],
-                });
-
-                // Set memwal_owner
-                metaTx.moveCall({
-                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_owner"),
-                        metaTx.pure.string(owner),
-                    ],
-                    typeArguments: [],
-                });
-
-                // Set memwal_package_id
-                if (packageId) {
-                    metaTx.moveCall({
-                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                        arguments: [
-                            blobArg,
-                            metaTx.pure.string("memwal_package_id"),
-                            metaTx.pure.string(packageId),
-                        ],
-                        typeArguments: [],
-                    });
-                }
-
-                // Set memwal_agent_id
-                if (agentId) {
-                    metaTx.moveCall({
-                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                        arguments: [
-                            blobArg,
-                            metaTx.pure.string("memwal_agent_id"),
-                            metaTx.pure.string(agentId),
-                        ],
-                        typeArguments: [],
-                    });
-                }
-
-                // Transfer blob to user
-                metaTx.transferObjects([blobArg], owner);
-
-                const metaDigest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
-                await suiClient.waitForTransaction({ digest: metaDigest });
-                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
-            } catch (metaErr: any) {
-                // LOW-14: Previously the metadata-set + transfer failure was swallowed
-                // and /walrus/upload returned 200 with the blob_id, leaving the blob
-                // owned by the server wallet and the client unable to observe the
-                // failure. We still can't delete the blob from Walrus (no delete
-                // primitive after certify), so at minimum we log loudly AND return
-                // 500 so the caller can react (retry / mark stored-but-not-owned).
-                console.error(
-                    `[walrus/upload] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
-                    `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
-                );
-                return res.status(500).json({
-                    error: "Blob uploaded but metadata/transfer to owner failed",
-                    blobId: blob.blobId,
-                    objectId: blobObjectId,
-                    transferStatus: "failed",
-                });
-            }
-        }
-
+        // ENG-1406: metadata+transfer is handled by the Apalis background worker
+        // (Rust side, src/jobs.rs). The worker calls POST /walrus/set-metadata below.
+        // /walrus/upload just returns the blob coordinates immediately after certify.
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
-            transferStatus: "ok",
         });
     } catch (err: any) {
         const traceId = randomUUID();
@@ -749,6 +672,226 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
         res.status(500).json({ error: "Internal server error", traceId });
     }
 });
+
+// ============================================================
+// POST /walrus/set-metadata
+//
+// ENG-1406: Called by the Apalis background worker (src/jobs.rs) to
+// set memwal_* on-chain attributes and transfer the Blob object to the
+// user's wallet, AFTER the main upload + certify has completed.
+//
+// Because this runs in a background job (not on the HTTP request path),
+// it is safe to await waitForTransaction here.
+// ============================================================
+app.post("/walrus/set-metadata", express.json({ limit: "64kb" }), async (req, res) => {
+    try {
+        const { blobObjectId, owner, namespace, packageId, agentId, keyIndex } = req.body;
+        if (!blobObjectId || !owner) {
+            return res.status(400).json({ error: "Missing required fields: blobObjectId, owner" });
+        }
+
+        // LOW-16: Validate packageId format if provided
+        if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId format" });
+        }
+        // MED-11: Validate owner address format
+        if (!/^0x[0-9a-fA-F]{64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid owner address format" });
+        }
+
+        const idx = typeof keyIndex === "number" ? keyIndex : 0;
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[idx];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${idx}` });
+        }
+
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        const signer = Ed25519Keypair.fromSecretKey(secretKey);
+        const signerAddress = signer.toSuiAddress();
+
+        const WALRUS_PKG = WALRUS_PACKAGE_ID;
+        const metaTx = new Transaction();
+        const blobArg = metaTx.object(blobObjectId);
+
+        // Set memwal_namespace
+        metaTx.moveCall({
+            target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_namespace"),
+                metaTx.pure.string(namespace || "default"),
+            ],
+            typeArguments: [],
+        });
+
+        // Set memwal_owner
+        metaTx.moveCall({
+            target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_owner"),
+                metaTx.pure.string(owner),
+            ],
+            typeArguments: [],
+        });
+
+        // Set memwal_package_id (optional)
+        if (packageId) {
+            metaTx.moveCall({
+                target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_package_id"),
+                    metaTx.pure.string(packageId),
+                ],
+                typeArguments: [],
+            });
+        }
+
+        // Set memwal_agent_id (optional)
+        if (agentId) {
+            metaTx.moveCall({
+                target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_agent_id"),
+                    metaTx.pure.string(agentId),
+                ],
+                typeArguments: [],
+            });
+        }
+
+        // Transfer blob to user
+        metaTx.transferObjects([blobArg], owner);
+
+        // Execute and wait — safe here because this runs in a background job
+        const metaDigest = await executeWithEnokiSponsor(
+            metaTx,
+            signer,
+            dedupeAddresses([signerAddress, owner]),
+        );
+        await suiClient.waitForTransaction({ digest: metaDigest });
+
+        console.log(`[walrus/set-metadata] ok blob=${blobObjectId} digest=${metaDigest} ns=${namespace || "default"}`);
+        res.json({ ok: true, digest: metaDigest });
+    } catch (err: any) {
+        const traceId = randomUUID();
+        console.error(`[walrus/set-metadata] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
+    }
+});
+
+// ============================================================
+// POST /walrus/set-metadata-batch  (ENG-1408)
+//
+// Batch variant of /walrus/set-metadata.
+// Builds a SINGLE Programmable Transaction Block (PTB) that:
+//   1. Calls blob::insert_or_update_metadata_pair for every attribute of every blob
+//   2. Transfers ALL blob objects to `owner` in one transferObjects call
+//
+// This reduces the number of Sui transactions from N (one per blob) to 1
+// for the set-metadata + transfer step of a bulk-remember batch.
+//
+// Body: {
+//   blobs: [{ blobObjectId: string, namespace: string }],
+//   owner: string,        // recipient for all blobs
+//   packageId?: string,   // MEMWAL_PACKAGE_ID
+//   agentId?: string,     // memwal_agent_id attribute
+//   keyIndex: number,     // SERVER_SUI_PRIVATE_KEYS index
+// }
+// ============================================================
+app.post("/walrus/set-metadata-batch", express.json({ limit: "512kb" }), async (req, res) => {
+    try {
+        const { blobs, owner, packageId, agentId, keyIndex } = req.body as {
+            blobs: Array<{ blobObjectId: string; namespace: string }>;
+            owner: string;
+            packageId?: string;
+            agentId?: string;
+            keyIndex?: number;
+        };
+
+        if (!blobs || !Array.isArray(blobs) || blobs.length === 0) {
+            return res.status(400).json({ error: "Missing or empty required field: blobs" });
+        }
+        if (!owner || !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid or missing owner address" });
+        }
+        if (blobs.length > 20) {
+            return res.status(400).json({ error: "blobs array exceeds maximum of 20 elements" });
+        }
+        if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId format" });
+        }
+
+        const idx = typeof keyIndex === "number" ? keyIndex : 0;
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[idx];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${idx}` });
+        }
+
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        const signer = Ed25519Keypair.fromSecretKey(secretKey);
+        const signerAddress = signer.toSuiAddress();
+
+        const WALRUS_PKG = WALRUS_PACKAGE_ID;
+
+        const digest = await runExclusiveBySigner(signerAddress, async () => {
+            const tx = new Transaction();
+
+            // Collect all blob object args up front so we can reuse them
+            const blobArgs = blobs.map((b) => tx.object(b.blobObjectId));
+
+            for (let i = 0; i < blobs.length; i++) {
+                const blob = blobs[i];
+                const blobArg = blobArgs[i];
+
+                // memwal_namespace
+                tx.moveCall({
+                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                    arguments: [blobArg, tx.pure.string("memwal_namespace"), tx.pure.string(blob.namespace || "default")],
+                });
+                // memwal_owner
+                tx.moveCall({
+                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                    arguments: [blobArg, tx.pure.string("memwal_owner"), tx.pure.string(owner)],
+                });
+                // memwal_package_id (optional)
+                if (packageId) {
+                    tx.moveCall({
+                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                        arguments: [blobArg, tx.pure.string("memwal_package_id"), tx.pure.string(packageId)],
+                    });
+                }
+                // memwal_agent_id (optional)
+                if (agentId) {
+                    tx.moveCall({
+                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
+                        arguments: [blobArg, tx.pure.string("memwal_agent_id"), tx.pure.string(agentId)],
+                    });
+                }
+            }
+
+            // Transfer ALL blobs to the user in one transferObjects call
+            tx.transferObjects(blobArgs, owner);
+
+            const txDigest = await executeWithEnokiSponsor(
+                tx,
+                signer,
+                dedupeAddresses([signerAddress, owner]),
+            );
+            await suiClient.waitForTransaction({ digest: txDigest });
+            return txDigest;
+        });
+
+        console.log(`[walrus/set-metadata-batch] ok ${blobs.length} blobs digest=${digest} owner=${owner.slice(0, 10)}...`);
+        res.json({ ok: true, digest, count: blobs.length });
+    } catch (err: any) {
+        const traceId = randomUUID();
+        console.error(`[walrus/set-metadata-batch] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
+    }
+});
+
 
 // ============================================================
 // POST /walrus/query-blobs
