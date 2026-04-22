@@ -187,10 +187,14 @@ async fn main() {
         ));
 
     // Public routes
-    // HIGH-13: /health accepts no body — cap at 16 KiB to reject oversized
-    // unauthenticated requests before they reach any handler.
+    // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
+    // oversized unauthenticated requests before they reach any handler.
+    // ENG-1697: /config exposes non-secret deployment parameters (packageId,
+    // network, sui_rpc_url) so the SDK can build SEAL SessionKey without
+    // the user adding packageId to MemWalConfig.
     let public_routes = Router::new()
         .route("/health", get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)))
+        .route("/config", get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)))
         .merge(sponsor_routes);
 
     // CORS — restrict to configured origins.
@@ -226,6 +230,8 @@ async fn main() {
                     "x-nonce".parse::<header::HeaderName>().unwrap(),
                     "x-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+                    // ENG-1697: SessionKey envelope replacing x-delegate-key
+                    "x-seal-session".parse::<header::HeaderName>().unwrap(),
                 ])
         }
     };

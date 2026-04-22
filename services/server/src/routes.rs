@@ -249,16 +249,18 @@ pub async fn recall(
         namespace
     );
 
-    // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth
-        .delegate_key
-        .as_deref()
-        .or(state.config.sui_private_key.as_deref())
-        .ok_or_else(|| {
-            AppError::Internal(
-                "Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into(),
-            )
-        })?;
+    // ENG-1697: Prefer the client-built SessionKey (x-seal-session); fall
+    // back to the legacy x-delegate-key; finally fall back to the server's
+    // own key for background operation.
+    let credential = seal::SealCredential::from_auth_or_fallback(
+        &auth,
+        state.config.sui_private_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        AppError::Internal(
+            "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)".into(),
+        )
+    })?;
 
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
@@ -280,7 +282,7 @@ pub async fn recall(
             let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
-            let private_key = private_key.to_string();
+            let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
             let owner_for_cleanup = owner.clone();
@@ -305,7 +307,7 @@ pub async fn recall(
                     &sidecar_url,
                     sidecar_secret.as_deref(),
                     &encrypted_data,
-                    &private_key,
+                    &credential,
                     &package_id,
                     &account_id,
                 )
@@ -795,6 +797,26 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// GET /config
+///
+/// ENG-1697: public, unauthenticated endpoint returning deployment
+/// parameters the SDK needs to build a SEAL `SessionKey` client-side —
+/// specifically the Move `packageId` and the Sui network/RPC URL.
+///
+/// These values are public on-chain metadata (not secrets), so no auth is
+/// required. Exposing them here lets the SDK migrate from transmitting
+/// the raw delegate private key (`x-delegate-key`) to transmitting an
+/// exported SessionKey (`x-seal-session`) without forcing users to add
+/// `packageId` to their `MemWalConfig` — preserving backward-compatible
+/// UX for v0.3.x apps that only passed `{ key, accountId }`.
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
+    Json(ConfigResponse {
+        package_id: state.config.package_id.clone(),
+        network: state.config.sui_network.clone(),
+        sui_rpc_url: state.config.sui_rpc_url.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1091,16 +1113,17 @@ pub async fn ask(
         .search_similar(&query_vector, owner, namespace, limit)
         .await?;
 
-    // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth
-        .delegate_key
-        .as_deref()
-        .or(state.config.sui_private_key.as_deref())
-        .ok_or_else(|| {
-            AppError::Internal(
-                "Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into(),
-            )
-        })?;
+    // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
+    // delegate key, then to the server's own key.
+    let credential = seal::SealCredential::from_auth_or_fallback(
+        &auth,
+        state.config.sui_private_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        AppError::Internal(
+            "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)".into(),
+        )
+    })?;
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
@@ -1113,7 +1136,7 @@ pub async fn ask(
             let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
-            let private_key = private_key.to_string();
+            let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
             let owner_for_cleanup = owner.clone();
@@ -1136,7 +1159,7 @@ pub async fn ask(
                     &sidecar_url,
                     sidecar_secret.as_deref(),
                     &encrypted_data,
-                    &private_key,
+                    &credential,
                     &package_id,
                     &account_id,
                 )
@@ -1324,15 +1347,17 @@ pub async fn restore(
     let limit = body.limit;
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
-    // Use delegate key for SEAL decryption
-    let private_key = auth
-        .delegate_key
-        .as_deref()
-        .or(state.config.sui_private_key.as_deref())
-        .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for restore".into())
-        })?
-        .to_string();
+    // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
+    // delegate key, then to the server's own key for restore operations.
+    let credential = seal::SealCredential::from_auth_or_fallback(
+        &auth,
+        state.config.sui_private_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        AppError::Internal(
+            "SEAL credential required for restore (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)".into(),
+        )
+    })?;
 
     // Step 1: Discover all blob_ids from on-chain (source of truth)
     tracing::info!(
@@ -1470,7 +1495,7 @@ pub async fn restore(
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
             let sidecar_secret = state.config.sidecar_secret.clone();
-            let private_key = private_key.clone();
+            let credential = credential.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids
                 .get(&blob_id)
@@ -1483,7 +1508,7 @@ pub async fn restore(
                     &sidecar_url,
                     sidecar_secret.as_deref(),
                     &encrypted_data,
-                    &private_key,
+                    &credential,
                     &package_id,
                     &account_id,
                 )

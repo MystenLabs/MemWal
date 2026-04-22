@@ -75,6 +75,10 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
+    /// ENG-1697: network name (mainnet/testnet/devnet). Surfaced via
+    /// `GET /config` so the SDK can select the matching Sui fullnode
+    /// without the user having to configure it.
+    pub sui_network: String,
     pub memwal_account_id: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_api_base: String,
@@ -118,6 +122,7 @@ impl Config {
                 .expect("DATABASE_URL must be set (e.g. postgresql://memwal:memwal_secret@localhost:5432/memwal)"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
                 .unwrap_or_else(|_| default_rpc.to_string()),
+            sui_network: network.clone(),
             memwal_account_id: std::env::var("MEMWAL_ACCOUNT_ID").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE")
@@ -376,6 +381,19 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+/// GET /config response (ENG-1697).
+///
+/// Public deployment parameters the SDK needs to build a SEAL SessionKey
+/// client-side. All fields are non-secret (on-chain / public RPC URL).
+#[derive(Debug, Serialize)]
+pub struct ConfigResponse {
+    #[serde(rename = "packageId")]
+    pub package_id: String,
+    pub network: String,
+    #[serde(rename = "suiRpcUrl")]
+    pub sui_rpc_url: String,
+}
+
 // ============================================================
 // Sponsor Types
 // ============================================================
@@ -413,12 +431,20 @@ pub struct AuthInfo {
     pub owner: String,
     /// MemWalAccount object ID (set after onchain verification)
     pub account_id: String,
-    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
+    /// Delegate private key (hex) — legacy path for SEAL decrypt. Optional;
+    /// modern SDKs send `seal_session` instead. Retained during the
+    /// transition so older clients keep working.
     pub delegate_key: Option<String>,
+    /// Exported SEAL SessionKey (base64-encoded JSON) — replaces the raw
+    /// delegate private key on the wire. When present it is preferred over
+    /// `delegate_key`. TTL-bounded, package-scoped, signed by the delegate
+    /// key on the client; the server never handles private-key material.
+    pub seal_session: Option<String>,
 }
 
-// LOW-5: Manual Debug redacts `delegate_key` so accidental `{:?}` formatting
-// never leaks delegate private key material into logs.
+// LOW-5 / ENG-1697: Manual Debug redacts both credential fields so accidental
+// `{:?}` formatting never leaks delegate private key material or session
+// tokens into logs.
 impl std::fmt::Debug for AuthInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthInfo")
@@ -428,6 +454,10 @@ impl std::fmt::Debug for AuthInfo {
             .field(
                 "delegate_key",
                 &self.delegate_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "seal_session",
+                &self.seal_session.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -511,6 +541,7 @@ mod tests {
             owner: "0xowner".to_string(),
             account_id: "0xaccount".to_string(),
             delegate_key: Some("supersecretprivatekeyinhex1234567890abcdef".to_string()),
+            seal_session: None,
         };
 
         let debug_str = format!("{:?}", auth);
@@ -540,6 +571,7 @@ mod tests {
             owner: "0xowner".to_string(),
             account_id: "0xaccount".to_string(),
             delegate_key: None,
+            seal_session: None,
         };
 
         let debug_str = format!("{:?}", auth);
@@ -547,6 +579,27 @@ mod tests {
         // None variant should render as None
         assert!(debug_str.contains("None"), "expected None in debug: {}", debug_str);
         assert!(!debug_str.contains("<redacted>"));
+    }
+
+    // ENG-1697: seal_session must also be redacted in Debug output. While
+    // less catastrophic than the raw private key (bounded TTL, bounded
+    // scope), it is still an authorization token and must not surface in
+    // structured logs.
+    #[test]
+    fn auth_info_debug_redacts_seal_session() {
+        let auth = AuthInfo {
+            public_key: "aabbccdd".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: None,
+            seal_session: Some(
+                "eyJhZGRyZXNzIjoiMHhhYmMiLCJwYWNrYWdlSWQiOiIweGRlZiJ9".to_string(),
+            ),
+        };
+
+        let debug_str = format!("{:?}", auth);
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("eyJhZGRyZXNzIjo"));
     }
 
     // ── AppError: status code mapping ───────────────────────────────────

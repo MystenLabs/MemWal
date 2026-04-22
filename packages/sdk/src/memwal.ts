@@ -59,12 +59,44 @@ async function getEd() {
 // MemWal Client
 // ============================================================
 
+// ENG-1697: SEAL SessionKey cache layout. `bytes` holds the
+// base64(JSON(ExportedSessionKey)) envelope transmitted in the
+// `x-seal-session` header. `expiresAt` is an absolute epoch-millis
+// deadline with a safety margin applied so we refresh before the SEAL
+// key servers observe the session as expired.
+interface SessionCacheEntry {
+    bytes: string;
+    expiresAt: number;
+}
+
+interface ServerConfig {
+    packageId: string;
+    network: string;
+    suiRpcUrl: string;
+}
+
+const SEAL_SESSION_TTL_MIN = 5;
+// Refresh 30 seconds before SEAL's 5-minute TTL to avoid the window where
+// the client thinks the session is valid but a just-received request hits
+// a key server that sees it as expired.
+const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+
 export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+
+    // ENG-1697 state — all internal, never surfaced to user code.
+    // The public API (`MemWal.create({ key, accountId })`) is unchanged.
+    private sessionCache: SessionCacheEntry | null = null;
+    private serverConfig: ServerConfig | null = null;
+    /** null = not probed yet; false = peer deps missing or probe failed. */
+    private sealSessionAvailable: boolean | null = null;
+    /** Single-flight guard so concurrent requests share one SessionKey build. */
+    private sessionBuildPromise: Promise<string | null> | null = null;
+    private sealFallbackWarned = false;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -97,6 +129,10 @@ export class MemWal {
         if (this.publicKey) {
             this.publicKey.fill(0);
         }
+        // ENG-1697: drop cached session material too — once destroyed the
+        // instance must not leak authorization tokens either.
+        this.sessionCache = null;
+        this.serverConfig = null;
     }
 
     // ============================================================
@@ -154,6 +190,10 @@ export class MemWal {
      * Remember (manual mode) — user handles SEAL encrypt, embedding,
      * and Walrus upload externally. Server only stores the vector ↔ blobId mapping.
      *
+     * Trust boundary (ENG-1696): the delegate private key is NOT transmitted on
+     * this request. Manual-mode handlers on the server never invoke SEAL
+     * decrypt, so the key stays client-side as the name implies.
+     *
      * @param opts.blobId - Walrus blob ID (user already uploaded encrypted data)
      * @param opts.vector - Embedding vector (user already generated, e.g. 1536-dim)
      * @returns RememberManualResult with id, blob_id, owner
@@ -169,17 +209,26 @@ export class MemWal {
      * ```
      */
     async rememberManual(opts: RememberManualOptions): Promise<RememberManualResult> {
-        return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
-            blob_id: opts.blobId,
-            vector: opts.vector,
-            namespace: opts.namespace ?? this.namespace,
-        });
+        return this.signedRequest<RememberManualResult>(
+            "POST",
+            "/api/remember/manual",
+            {
+                blob_id: opts.blobId,
+                vector: opts.vector,
+                namespace: opts.namespace ?? this.namespace,
+            },
+            { includeDelegateKey: false },
+        );
     }
 
     /**
      * Recall (manual mode) — user provides a pre-computed query vector.
      * Server returns matching blobIds + distances.
      * User then downloads from Walrus + SEAL decrypts on their own.
+     *
+     * Trust boundary (ENG-1696): the delegate private key is NOT transmitted on
+     * this request. Server returns blob IDs only; decryption happens entirely
+     * on the client.
      *
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
@@ -202,11 +251,16 @@ export class MemWal {
      * ```
      */
     async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
-        return this.signedRequest<RecallManualResult>("POST", "/api/recall/manual", {
-            vector: opts.vector,
-            limit: opts.limit ?? 10,
-            namespace: opts.namespace ?? this.namespace,
-        });
+        return this.signedRequest<RecallManualResult>(
+            "POST",
+            "/api/recall/manual",
+            {
+                vector: opts.vector,
+                limit: opts.limit ?? 10,
+                namespace: opts.namespace ?? this.namespace,
+            },
+            { includeDelegateKey: false },
+        );
     }
 
     /**
@@ -304,6 +358,169 @@ export class MemWal {
         return this.publicKey;
     }
 
+    // ============================================================
+    // ENG-1697: SEAL SessionKey discovery & build
+    //
+    // The SDK used to transmit the raw delegate private key in
+    // `x-delegate-key` on every request. That credential, once captured,
+    // lets an attacker retroactively decrypt every ciphertext the account
+    // ever produced (until the user rotates on-chain) and sign arbitrary
+    // Sui transactions from the delegate address.
+    //
+    // We now build a SEAL `SessionKey` on the client (ephemeral, scoped to
+    // a single `packageId`, 5-minute TTL, signed by the delegate key) and
+    // ship only the exported session bytes via `x-seal-session`. The raw
+    // private key never leaves the client.
+    //
+    // `packageId` is fetched from the server's public `/config` endpoint
+    // the first time it's needed so the user API (`new MemWal({ key,
+    // accountId })`) stays unchanged — past users upgrading to v0.4 do not
+    // have to touch their config.
+    //
+    // If the peer deps (`@mysten/seal`, `@mysten/sui`) are not installed,
+    // or `/config` is unreachable, we fall back to the legacy header and
+    // warn once. The server accepts both headers during the deprecation
+    // window so existing apps continue to work.
+    // ============================================================
+
+    private async fetchServerConfig(): Promise<ServerConfig> {
+        if (this.serverConfig) return this.serverConfig;
+        const res = await fetch(`${this.serverUrl}/config`, { method: "GET" });
+        if (!res.ok) {
+            throw new Error(`GET /config returned ${res.status}`);
+        }
+        const body = (await res.json()) as Partial<ServerConfig>;
+        if (!body.packageId || !body.network || !body.suiRpcUrl) {
+            throw new Error("GET /config response missing packageId / network / suiRpcUrl");
+        }
+        this.serverConfig = {
+            packageId: body.packageId,
+            network: body.network,
+            suiRpcUrl: body.suiRpcUrl,
+        };
+        return this.serverConfig;
+    }
+
+    private async buildSealSessionInner(): Promise<string | null> {
+        try {
+            const cfg = await this.fetchServerConfig();
+            // Dynamic imports: these are optional peer deps, so users on
+            // older setups without them still work via the legacy fallback.
+            // @mysten/sui renamed/moved `SuiClient` between minor versions:
+            //   - pre-2.6:  `SuiClient` in `@mysten/sui/client`
+            //   - 2.6+:     `SuiJsonRpcClient` in `@mysten/sui/jsonRpc`
+            // Probe both paths so the SDK works across the supported range.
+            const sealMod = (await import("@mysten/seal")) as any;
+            const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
+            const SessionKey = sealMod.SessionKey;
+            const Ed25519Keypair = ed25519Mod.Ed25519Keypair;
+
+            let SuiClient: any = undefined;
+            try {
+                const mod = (await import("@mysten/sui/client")) as any;
+                SuiClient = mod.SuiClient;
+            } catch {
+                /* not present on this version */
+            }
+            if (typeof SuiClient !== "function") {
+                try {
+                    const mod = (await import("@mysten/sui/jsonRpc")) as any;
+                    SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+                } catch {
+                    /* not present on this version either */
+                }
+            }
+            if (typeof SuiClient !== "function" || typeof Ed25519Keypair !== "function") {
+                throw new Error(
+                    "SuiClient/SuiJsonRpcClient or Ed25519Keypair not found in @mysten/sui. " +
+                    "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
+                );
+            }
+
+            const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
+            const suiClient = new SuiClient({ url: cfg.suiRpcUrl });
+
+            const session = await SessionKey.create({
+                address: keypair.getPublicKey().toSuiAddress(),
+                packageId: cfg.packageId,
+                ttlMin: SEAL_SESSION_TTL_MIN,
+                signer: keypair,
+                suiClient: suiClient as any,
+            });
+
+            // Eagerly sign the personal message so the exported envelope is
+            // fully self-contained. `SessionKey.create()` defers this signing
+            // until first use, which would break the migration: the sidecar
+            // imports without a signer and must be able to get a certificate
+            // from the exported state alone. Calling
+            // setPersonalMessageSignature() here populates the
+            // `personalMessageSignature` field in the subsequent export().
+            const personalMessage = session.getPersonalMessage();
+            const signResult = await keypair.signPersonalMessage(personalMessage);
+            await session.setPersonalMessageSignature(signResult.signature);
+
+            const exported = session.export();
+            // SEAL intentionally installs a throwing `toJSON` on the
+            // exported object to catch accidental serialization. The
+            // migration to `x-seal-session` IS the intended on-wire
+            // format, so we project the primitive fields into a fresh
+            // object before stringifying. The sidecar's
+            // `SessionKey.import()` expects this exact shape.
+            const jsonStr = JSON.stringify({
+                address: exported.address,
+                packageId: exported.packageId,
+                mvrName: exported.mvrName,
+                creationTimeMs: exported.creationTimeMs,
+                ttlMin: exported.ttlMin,
+                personalMessageSignature: exported.personalMessageSignature,
+                sessionKey: exported.sessionKey,
+            });
+            const bytes =
+                typeof btoa === "function"
+                    ? btoa(jsonStr)
+                    : Buffer.from(jsonStr, "utf8").toString("base64");
+
+            this.sessionCache = {
+                bytes,
+                expiresAt:
+                    Date.now() +
+                    SEAL_SESSION_TTL_MIN * 60_000 -
+                    SEAL_SESSION_SAFETY_MARGIN_MS,
+            };
+            this.sealSessionAvailable = true;
+            return bytes;
+        } catch (err) {
+            this.sealSessionAvailable = false;
+            if (!this.sealFallbackWarned) {
+                this.sealFallbackWarned = true;
+                // eslint-disable-next-line no-console
+                console.warn(
+                    "[memwal] Could not build SEAL SessionKey — falling back to " +
+                    "legacy x-delegate-key header. Install @mysten/seal + " +
+                    "@mysten/sui peer deps to enable the secure path. " +
+                    `Reason: ${err instanceof Error ? err.message : String(err)}`,
+                );
+            }
+            return null;
+        }
+    }
+
+    private async buildSealSession(): Promise<string | null> {
+        // Fast path: cached session still fresh.
+        if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
+            return this.sessionCache.bytes;
+        }
+        // We already tried and failed once — don't keep probing.
+        if (this.sealSessionAvailable === false) return null;
+        // Single-flight: concurrent requests share one build.
+        if (this.sessionBuildPromise) return this.sessionBuildPromise;
+
+        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
+            this.sessionBuildPromise = null;
+        });
+        return this.sessionBuildPromise;
+    }
+
     /**
      * Make a signed request to the server.
      *
@@ -319,11 +536,26 @@ export class MemWal {
      * an intermediary cannot swap the account hint without invalidating the
      * signature. Server-side verification in services/server/src/auth.rs must
      * use the matching message format.
+     *
+     * ENG-1696: Callers set `includeDelegateKey: false` on Manual-mode routes
+     * so the delegate private key is not transmitted. Manual-mode docstrings
+     * promise the key stays client-side; the server does not need it on those
+     * routes because Manual-mode handlers never invoke SEAL decrypt.
+     *
+     * ENG-1697: On Relayer-mode routes the SDK prefers a SEAL SessionKey
+     * built client-side (emitted via `x-seal-session`) over the legacy raw
+     * delegate private key (`x-delegate-key`). The SessionKey is ephemeral
+     * (5-min TTL, scoped to the server's `packageId`) so a wire capture has
+     * a bounded blast radius. If the SEAL peer deps are not installed or
+     * `/config` is unreachable the SDK warns once and falls back to the
+     * legacy header — the server accepts both during the deprecation
+     * window.
      */
     private async signedRequest<T>(
         method: string,
         path: string,
         body: object,
+        options: { includeDelegateKey?: boolean } = {},
     ): Promise<T> {
         const ed = await getEd();
 
@@ -344,17 +576,32 @@ export class MemWal {
 
         // Make HTTP request
         const url = `${this.serverUrl}${path}`;
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "x-public-key": bytesToHex(publicKey),
+            "x-signature": bytesToHex(signature),
+            "x-timestamp": timestamp,
+            "x-nonce": nonce,           // MED-1: replay protection
+            "x-account-id": this.accountId,
+        };
+        // ENG-1696 / ENG-1697: attach a SEAL credential only on Relayer-
+        // mode routes where the server needs it for server-side SEAL
+        // decrypt. Manual-mode methods (rememberManual, recallManual) opt
+        // out and transmit no decrypt credential at all.
+        if (options.includeDelegateKey !== false) {
+            const sessionBytes = await this.buildSealSession();
+            if (sessionBytes) {
+                headers["x-seal-session"] = sessionBytes;
+            } else {
+                // Legacy fallback during the deprecation window. The
+                // server dual-accepts both headers until EOL; at that
+                // point users without SEAL peer deps must install them.
+                headers["x-delegate-key"] = bytesToHex(this.privateKey);
+            }
+        }
         const res = await fetch(url, {
             method,
-            headers: {
-                "Content-Type": "application/json",
-                "x-public-key": bytesToHex(publicKey),
-                "x-signature": bytesToHex(signature),
-                "x-timestamp": timestamp,
-                "x-nonce": nonce,           // MED-1: replay protection
-                "x-delegate-key": bytesToHex(this.privateKey),
-                "x-account-id": this.accountId,
-            },
+            headers,
             body: bodyStr,
         });
 

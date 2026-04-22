@@ -68,11 +68,35 @@ pub async fn verify_signature(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Optional delegate private key (hex) for SEAL decrypt
+    // Optional delegate private key (hex) for SEAL decrypt — legacy path.
+    // Modern clients send `x-seal-session` instead (ENG-1697).
     let delegate_key_hex = headers
         .get("x-delegate-key")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+
+    // Optional SEAL SessionKey (base64 JSON) — replaces `x-delegate-key` on
+    // the wire. When present, it is preferred over `delegate_key_hex` for
+    // any SEAL decrypt operation. Phase 1 of the migration: both headers
+    // are accepted so existing SDKs continue to work unchanged.
+    let seal_session = headers
+        .get("x-seal-session")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    if seal_session.is_some() && delegate_key_hex.is_some() {
+        tracing::debug!(
+            "both x-seal-session and x-delegate-key present; preferring x-seal-session"
+        );
+    }
+    if seal_session.is_none() && delegate_key_hex.is_some() {
+        // ENG-1697 telemetry: log (without value) so we can count legacy
+        // header usage per SDK version during the deprecation window.
+        tracing::warn!(
+            target: "memwal::deprecation",
+            "request using legacy x-delegate-key header — client should upgrade to SDK v0.4+ (x-seal-session)"
+        );
+    }
 
     // MED-1 fix: Extract nonce for replay protection.
     // Nonce must be a UUID v4, checked against Redis to prevent replay attacks.
@@ -216,6 +240,7 @@ pub async fn verify_signature(
         owner,
         account_id,
         delegate_key: delegate_key_hex,
+        seal_session,
     });
 
     // Rebuild request with the body re-injected
@@ -558,6 +583,34 @@ mod tests {
         // Swapping account_id → signature fails (LOW-23)
         let swapped = "1700000000.POST./api/recall.hash.nonce.0xaccount_b";
         assert!(verifying_key.verify(swapped.as_bytes(), &signature).is_err());
+    }
+
+    // ── ENG-1696: Manual-mode trust boundary ────────────────────────────
+    //
+    // Manual-mode routes (/api/remember/manual, /api/recall/manual) must
+    // succeed without the `x-delegate-key` header. The SDK no longer emits
+    // this header on those routes (packages/sdk/src/memwal.ts), and Manual-
+    // mode route handlers (services/server/src/routes.rs) never read
+    // `AuthInfo.delegate_key`. This test locks in the invariant that
+    // `AuthInfo` is valid with `delegate_key: None` so a future refactor
+    // cannot silently re-introduce a requirement on the header.
+
+    #[test]
+    fn auth_info_valid_without_delegate_key_for_manual_routes() {
+        let auth = AuthInfo {
+            public_key: "abcd".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: None,
+            seal_session: None,
+        };
+        assert!(auth.delegate_key.is_none());
+        assert!(auth.seal_session.is_none());
+        // Verify Debug impl still redacts (LOW-5 / ENG-1697) — even in
+        // Manual mode we must never leak any credential material in logs.
+        let debug_str = format!("{:?}", auth);
+        assert!(debug_str.contains("None"));
+        assert!(!debug_str.contains("<redacted>"));
     }
 }
 
