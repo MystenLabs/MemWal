@@ -453,9 +453,10 @@ module memwal::account_tests {
         scenario.end();
     }
 
+    /// LOW-20 / SEC-281: owners must be able to purge delegate keys even after
+    /// the account is frozen, so that compromised keys can be removed.
     #[test]
-    #[expected_failure(abort_code = account::EAccountDeactivated)]
-    fun test_deactivated_blocks_remove_key() {
+    fun test_deactivated_allows_remove_key() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
 
@@ -470,15 +471,17 @@ module memwal::account_tests {
             test_scenario::return_shared(account);
         };
 
-        // Deactivate then try to remove key
+        // Deactivate then remove key — should succeed despite frozen state
         scenario.next_tx(OWNER);
         {
             let mut account = scenario.take_shared<MemWalAccount>();
             account::deactivate_account(&mut account, scenario.ctx());
+            assert!(!account.is_active());
 
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            // Should fail — account is deactivated
             account::remove_delegate_key(&mut account, pk, scenario.ctx());
+            assert!(account.delegate_count() == 0);
+            assert!(!account.is_delegate(&pk));
 
             test_scenario::return_shared(account);
         };
@@ -661,11 +664,12 @@ module memwal::account_tests {
         {
             let mut account = scenario.take_shared<MemWalAccount>();
             let clock = clock::create_for_testing(scenario.ctx());
-            let mut i = 0;
+            let mut i: u64 = 0;
             while (i <= 20) {
-                let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                // 30-byte base + 2 push_back = 32 bytes (Ed25519 key length)
+                let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
                 pk.push_back((i as u8));
-                pk.push_back((i as u8));
+                pk.push_back(((i + 1) as u8));
                 account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
                 i = i + 1;
             };
@@ -718,6 +722,472 @@ module memwal::account_tests {
             
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    // ============================================================
+    // LOW-19 — Idempotent deactivate/reactivate (SEC-279)
+    // ============================================================
+
+    #[test]
+    #[expected_failure(abort_code = account::EAccountDeactivated)]
+    fun test_double_deactivate_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::deactivate_account(&mut account, scenario.ctx());
+            // Second call must abort to avoid spurious event emission
+            account::deactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EAccountAlreadyActive)]
+    fun test_reactivate_active_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            // Account starts active — reactivating must abort
+            account::reactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    // ============================================================
+    // LOW-21 — Label length validation (SEC-282)
+    // ============================================================
+
+    #[test]
+    #[expected_failure(abort_code = account::ELabelTooLong)]
+    fun test_add_delegate_key_label_too_long_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            // 65-byte label exceeds MAX_LABEL_LENGTH (64)
+            let label = string::utf8(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, label, &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun test_add_delegate_key_label_at_max_succeeds() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            // Exactly 64 bytes — at the boundary
+            let label = string::utf8(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, label, &clock, scenario.ctx());
+            assert!(account.delegate_count() == 1);
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    // ============================================================
+    // HIGH-14 — Version gating (SEC-303)
+    // ============================================================
+
+    #[test]
+    fun test_new_objects_have_current_version() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let registry = scenario.take_shared<AccountRegistry>();
+            let account = scenario.take_shared<MemWalAccount>();
+            assert!(account::registry_version(&registry) == account::current_version());
+            assert!(account::account_version(&account) == account::current_version());
+            test_scenario::return_shared(account);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_account_blocks_add_key() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        // Simulate a legacy account that pre-dates the version-gating upgrade.
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_account_blocks_remove_key() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        // Add a key first while at current VERSION
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        // Strip the version (simulate legacy) and try to remove
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            account::remove_delegate_key(&mut account, pk, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_account_blocks_deactivate() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            account::deactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_account_blocks_reactivate() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        // Deactivate while on current version
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::deactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        // Strip version and try to reactivate
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            account::reactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_account_blocks_seal_approve() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let account = scenario.take_shared<MemWalAccount>();
+            let owner_bytes = sui::bcs::to_bytes(&OWNER);
+            account::seal_approve(owner_bytes, &account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EWrongVersion)]
+    fun test_legacy_registry_blocks_create_account() {
+        let mut scenario = test_scenario::begin(OWNER);
+
+        scenario.next_tx(OWNER);
+        {
+            account::test_init(scenario.ctx());
+        };
+
+        // Strip the registry's version to simulate legacy registry
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::test_strip_registry_version(&mut registry);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            let clock = clock::create_for_testing(scenario.ctx());
+            account::create_account(&mut registry, &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun test_migrate_account_owner_success() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        // Strip version to simulate legacy state
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            assert!(account::account_version(&account) == 1);
+            test_scenario::return_shared(account);
+        };
+
+        // Owner migrates
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::migrate_account(&mut account, scenario.ctx());
+            assert!(account::account_version(&account) == account::current_version());
+            test_scenario::return_shared(account);
+        };
+
+        // After migration owner can call mutating entries again
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            assert!(account.delegate_count() == 1);
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENotOwner)]
+    fun test_migrate_account_non_owner_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.next_tx(OTHER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::migrate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EAlreadyMigrated)]
+    fun test_migrate_account_already_at_version_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            // account is freshly created → already at VERSION
+            account::migrate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun test_admin_migrate_account_with_valid_cap() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let cap = account::test_make_upgrade_cap(scenario.ctx());
+            account::admin_migrate_account(&cap, &mut account);
+            assert!(account::account_version(&account) == account::current_version());
+            sui::package::make_immutable(cap);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENotUpgradeAuthority)]
+    fun test_admin_migrate_account_with_foreign_cap_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::test_strip_account_version(&mut account);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let cap = account::test_make_foreign_upgrade_cap(scenario.ctx());
+            account::admin_migrate_account(&cap, &mut account);
+            sui::package::make_immutable(cap);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun test_migrate_registry_with_valid_cap() {
+        let mut scenario = test_scenario::begin(OWNER);
+
+        scenario.next_tx(OWNER);
+        {
+            account::test_init(scenario.ctx());
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::test_strip_registry_version(&mut registry);
+            assert!(account::registry_version(&registry) == 1);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            let cap = account::test_make_upgrade_cap(scenario.ctx());
+            account::migrate_registry(&cap, &mut registry);
+            assert!(account::registry_version(&registry) == account::current_version());
+            sui::package::make_immutable(cap);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENotUpgradeAuthority)]
+    fun test_migrate_registry_with_foreign_cap_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+
+        scenario.next_tx(OWNER);
+        {
+            account::test_init(scenario.ctx());
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::test_strip_registry_version(&mut registry);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            let cap = account::test_make_foreign_upgrade_cap(scenario.ctx());
+            account::migrate_registry(&cap, &mut registry);
+            sui::package::make_immutable(cap);
+            test_scenario::return_shared(registry);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EAlreadyMigrated)]
+    fun test_migrate_registry_already_at_version_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+
+        scenario.next_tx(OWNER);
+        {
+            account::test_init(scenario.ctx());
+        };
+
+        scenario.next_tx(OWNER);
+        {
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            // registry is freshly created → already at VERSION
+            let cap = account::test_make_upgrade_cap(scenario.ctx());
+            account::migrate_registry(&cap, &mut registry);
+            sui::package::make_immutable(cap);
+            test_scenario::return_shared(registry);
         };
 
         scenario.end();
