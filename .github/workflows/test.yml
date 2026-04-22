@@ -1,0 +1,94 @@
+name: test
+
+on:
+  pull_request:
+    branches: [dev, staging, main]
+  push:
+    branches: [dev, staging, main, "sec/**", "eng-**", "feat/**", "fix/**", "ci/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  chatbot-e2e:
+    name: Chatbot / Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memwal
+          POSTGRES_PASSWORD: memwal_secret
+          POSTGRES_DB: memwal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memwal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_URL: postgresql://memwal:memwal_secret@localhost:5432/memwal
+      REDIS_URL: redis://localhost:6379
+      AUTH_SECRET: ci-test-secret-not-for-production
+      OPENROUTER_API_KEY: mock-not-used-tests-use-local-mocks
+      PORT: "3001"
+      PLAYWRIGHT: "True"
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of chatbot)
+        run: pnpm build:sdk
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pw-${{ runner.os }}-
+
+      - name: Install Playwright (Chromium + OS deps)
+        run: pnpm --filter @memwal/chatbot playwright:install
+
+      - name: Run Playwright E2E
+        run: pnpm --filter @memwal/chatbot test:e2e
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-chatbot
+          path: |
+            apps/chatbot/playwright-report
+            apps/chatbot/test-results
+          retention-days: 14
+          if-no-files-found: ignore
