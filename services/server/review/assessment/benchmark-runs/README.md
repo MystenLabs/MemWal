@@ -6,12 +6,17 @@ Each subfolder in this directory is a **complete benchmark run** — the scoring
 
 ## Runs so far
 
-| Date | Benchmark | Folder | Best Preset | Overall J-score | vs published |
+| Date | Benchmark | Folder | Notes | Best J | vs published |
 |---|---|---|---|---|---|
-| 2026-04-20 | LOCOMO | [2026-04-20-locomo/](./2026-04-20-locomo/) | baseline | 52.01 | -15 vs Mem0 (52.01 vs 55-73) |
-| 2026-04-20 | LongMemEval | [2026-04-20-longmemeval/](./2026-04-20-longmemeval/) | default (composite) | 65.90 | +17 vs Mem0 (49.0), +2 vs Zep (63.8) |
+| 2026-04-20 | LOCOMO | [2026-04-20-locomo/](./2026-04-20-locomo/) | Session-dump ingestion (adapter flaw) | 52.01 | -15 vs Mem0 (52.01 vs 55-73) |
+| 2026-04-20 | LongMemEval | [2026-04-20-longmemeval/](./2026-04-20-longmemeval/) | Session-dump ingestion (small haystacks, less affected) | 65.90 | +17 vs Mem0 (49.0), +2 vs Zep (63.8) |
+| **2026-04-21** | **LOCOMO** | [2026-04-21-locomo/](./2026-04-21-locomo/) | **Per-turn ingestion (matches SDK + Mem0 protocol)** | **54.25** | **multi_hop +2.3 over Mem0 (53.4 vs 51.15)** |
 
-**Overall finding across runs**: MemWal's composite scoring is **net-positive on LongMemEval** (+0.73 vs pure cosine) but **net-negative on LOCOMO** (-0.73). The benchmarks exercise very different conditions — see each run's analysis for why. LongMemEval's mini-haystack structure and real timestamps are closer to real-world use cases.
+**Cross-run findings**:
+
+- **Adapter matters**: switching LOCOMO from session-dump (2026-04-20) to per-turn (2026-04-21) recovered +2.24 overall J. The earlier run was stress-testing a usage pattern MemWal's SDK never produces in production.
+- **Composite scoring verdict**: on LongMemEval it's net-positive (+0.73 vs cosine) because real timestamps and focused haystacks give the importance/recency signals room to discriminate. On LOCOMO even with per-turn ingestion, composite is roughly flat (-0.68) because recency signal is still dead without session timestamps.
+- **Where MemWal is competitive**: LongMemEval overall (beats Mem0 +17, edges Zep +2), LOCOMO multi_hop (beats Mem0 +2.3). Other LOCOMO categories still trail 12-25 J — explained by Mem0's server-side context management layer that MemWal doesn't have.
 
 ---
 
