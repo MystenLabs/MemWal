@@ -24,6 +24,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -111,13 +112,41 @@ def stage_download(benchmark_name: str):
     print(f"Done. Dataset cached at {DATASETS_DIR}/{benchmark_name}/")
 
 
+def _session_map_path(run_id: str, benchmark_name: str) -> Path:
+    """Path to the session→memory-id map persisted alongside results."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    return RESULTS_DIR / f"{run_id}-{benchmark_name}-session_map.json"
+
+
+def session_map_key(conversation_id: str, session_id: str) -> str:
+    """
+    Canonical key format for the session→memory-id map.
+
+    Used by BOTH the ingestion writer and the evaluation reader so they
+    can't drift apart. A tuple would be more obviously safe, but JSON
+    serializes dict keys as strings anyway — so we use a structured string
+    with an unambiguous separator and document that adapters must not
+    include the separator in conversation_id or session_id values.
+    """
+    # Use an unlikely-to-collide separator. Explicit so anyone reading
+    # the JSON can understand the key layout without needing this helper.
+    return f"{conversation_id}::{session_id}"
+
+
 def stage_ingest(
     benchmark_name: str,
     client: MemWalClient,
     run_id: str,
     config: dict,
 ) -> IngestionStats:
-    """Ingest benchmark conversations into MemWal via /api/analyze."""
+    """
+    Ingest benchmark conversations into MemWal via /api/analyze.
+
+    Also records a session_label → list[memory_id] map so later recall metric
+    calculations can check whether retrieved memories came from the expected
+    evidence sessions. The map is saved as JSON alongside the run's results
+    so `--skip-ingest` eval runs can still compute Recall@K.
+    """
     adapter_cls = BENCHMARKS[benchmark_name]
     adapter = adapter_cls()
     conversations, _ = adapter.load(DATASETS_DIR)
@@ -128,31 +157,103 @@ def stage_ingest(
 
     concurrency = config.get("benchmarks", {}).get("concurrency", 10)
 
-    # Build the full list of ingest tasks: (namespace, label, text)
-    tasks: list[tuple[str, str, str]] = []
+    # Build tasks grouped by conversation. Each conversation's chunks are
+    # processed SERIALLY (to mirror real-time message ordering and avoid
+    # advisory-lock contention on the same namespace), while different
+    # conversations run in PARALLEL.
+    #
+    # Label shape is controlled by the adapter's build_ingest_text helper.
+    # The framework-canonical session→memory key is rebuilt using
+    # session_map_key(conv_id, session_id) — NOT the adapter's label —
+    # so adapter label choice can't drift from the resolver in run.py.
+    #
+    # To map a chunk back to its (conv_id, session_id), we parse the
+    # label which is "{conversation_id}/{session_id}" by framework
+    # convention. This is the contract documented on both
+    # build_ingest_text_naive_concat and build_ingest_text_per_turn.
+    def _parse_label(label: str, conv_id: str) -> str:
+        """Extract session_id from an adapter-produced label."""
+        prefix = f"{conv_id}/"
+        if label.startswith(prefix):
+            return label[len(prefix):]
+        # Fallback: use the whole label as the session_id. Happens if an
+        # adapter deviates from the convention — not fatal, just less
+        # aggregatable in the session map.
+        return label
+
+    # Group (label, text) chunks by conversation so we can process each
+    # conversation's chunks serially in one worker.
+    conv_tasks: list[tuple[str, str, list[tuple[str, str, str]]]] = []
+    # each entry: (conv_id, namespace, [(session_id, label, text), ...])
+    total_chunk_count = 0
     for conv in conversations:
         namespace = f"bench-{benchmark_name}-{conv.conversation_id}-{run_id}"
-        for label, text in adapter.build_ingest_text(conv):
-            tasks.append((namespace, label, text))
+        pairs = adapter.build_ingest_text(conv)
+        chunks: list[tuple[str, str, str]] = []
+        for label, text in pairs:
+            session_id = _parse_label(label, conv.conversation_id)
+            chunks.append((session_id, label, text))
+        conv_tasks.append((conv.conversation_id, namespace, chunks))
+        total_chunk_count += len(chunks)
 
-    def ingest_one(task):
-        ns, label, text = task
-        try:
-            result = client.analyze(text, ns)
-            return result.total
-        except Exception as e:
-            logger.error("Ingestion failed for %s: %s", label, e)
-            return 0
+    # Thread-safe accumulator for the session map. Each conversation has
+    # its own namespace/session keys — no cross-conversation collisions.
+    session_to_memories: dict[str, list[str]] = {}
+    session_map_lock = threading.Lock()
 
-    # Parallel ingestion. analyze is independent per session; MemWal serializes
-    # dedup via advisory locks on content hash, so concurrent duplicates are safe.
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(ingest_one, t) for t in tasks]
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Ingesting sessions"):
-            stats.memories_stored += fut.result()
+    # Thread-safe stats accumulator.
+    stats_lock = threading.Lock()
+
+    # Shared progress bar over CHUNKS (not conversations) so users see
+    # fine-grained progress even though parallelism is at conv granularity.
+    pbar = tqdm(total=total_chunk_count, desc="Ingesting turns")
+
+    def ingest_one_conversation(task):
+        conv_id, namespace, chunks = task
+        local_memories: dict[str, list[str]] = {}
+        local_stored = 0
+        for session_id, label, text in chunks:
+            try:
+                result = client.analyze(text, namespace)
+                memory_ids = [fact.get("id", "") for fact in result.facts if fact.get("id")]
+                if memory_ids:
+                    key = session_map_key(conv_id, session_id)
+                    local_memories.setdefault(key, []).extend(memory_ids)
+                local_stored += result.total
+            except Exception as e:
+                logger.error("Ingestion failed for %s: %s", label, e)
+            finally:
+                pbar.update(1)
+        return local_memories, local_stored
+
+    # Parallelism is BY CONVERSATION, not by chunk. Within a conversation,
+    # turns/chunks are processed serially. This (a) mirrors real-time
+    # message ordering that a chatbot would produce, (b) avoids advisory
+    # lock contention because all serial calls share a namespace, and (c)
+    # is how Mem0's own LOCOMO evaluation replays conversations.
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = [pool.submit(ingest_one_conversation, t) for t in conv_tasks]
+            for fut in as_completed(futures):
+                local_memories, local_stored = fut.result()
+                with session_map_lock:
+                    for k, v in local_memories.items():
+                        session_to_memories.setdefault(k, []).extend(v)
+                with stats_lock:
+                    stats.memories_stored += local_stored
+    finally:
+        pbar.close()
+
+    # Persist the map so --skip-ingest can still compute Recall@K.
+    map_path = _session_map_path(run_id, benchmark_name)
+    map_path.write_text(json.dumps(session_to_memories, indent=2))
 
     stats.duration_seconds = time.time() - start
-    print(f"Ingestion complete: {stats.memories_stored} memories from {stats.conversations_processed} conversations ({stats.duration_seconds:.0f}s)")
+    print(
+        f"Ingestion complete: {stats.memories_stored} memories from "
+        f"{stats.conversations_processed} conversations ({stats.duration_seconds:.0f}s). "
+        f"Session map: {map_path}"
+    )
     return stats
 
 
@@ -175,6 +276,36 @@ def stage_eval(
     eval_runs = config.get("benchmarks", {}).get("eval_runs", 1) if mode == "e2e" else 1
     eval_concurrency = config.get("benchmarks", {}).get("eval_concurrency", 20)
 
+    # Load the session→memory-ids map written by stage_ingest (if present).
+    # Needed to compute Recall@K for session-kind evidence. Turn-kind evidence
+    # (e.g., LOCOMO's "D1:3" dialog IDs) cannot be resolved from this map
+    # because ingestion concatenates turns into session blobs.
+    session_map_path = _session_map_path(run_id, benchmark_name)
+    if session_map_path.exists():
+        session_to_memories: dict[str, list[str]] = json.loads(session_map_path.read_text())
+        logger.info("Loaded session map from %s (%d sessions)", session_map_path, len(session_to_memories))
+    else:
+        session_to_memories = {}
+        logger.warning(
+            "No session map at %s. Recall@K will be 0 for session-evidence "
+            "benchmarks. Run `ingest` (or `full` without --skip-ingest) to "
+            "produce the map.",
+            session_map_path,
+        )
+
+    def _resolve_evidence_memory_ids(query) -> set[str]:
+        """
+        Resolve a query's evidence to the set of memory IDs we expect recall
+        to surface. Skips turn-kind evidence (not resolvable).
+        """
+        resolved: set[str] = set()
+        for ev in query.evidence:
+            if ev.kind != "session":
+                continue  # unresolvable for now
+            key = session_map_key(query.conversation_id, ev.value)
+            resolved.update(session_to_memories.get(key, []))
+        return resolved
+
     def process_query(query):
         """Full per-query pipeline: recall → answer → judge. Thread-safe."""
         namespace = f"bench-{benchmark_name}-{query.conversation_id}-{run_id}"
@@ -194,15 +325,40 @@ def stage_eval(
         memory_texts = [m.text for m in memories]
         memory_ids = [m.memory_id for m in memories]
 
-        relevant = set(query.evidence_turn_ids) if query.evidence_turn_ids else set()
-        query_metric = {
+        # Record evidence kinds used (for downstream reporting / debugging).
+        evidence_kinds = sorted({ev.kind for ev in query.evidence})
+        # Recall/MRR/nDCG are only meaningful if we can resolve evidence to
+        # a NON-EMPTY set of memory IDs. Emit them only in that case.
+        #
+        # Two failure modes we deliberately skip (not 0, not 1.0):
+        #   (a) Evidence is turn/unknown kind — we can't resolve at all.
+        #   (b) Evidence is session kind but the session map is missing
+        #       or the referenced session produced zero extracted facts.
+        #
+        # If we silently fell back to the "empty relevant = perfect recall"
+        # convention from the metric helpers, aggregate means would show
+        # 1.0 for these unreachable cases, inflating reported scores.
+        query_metric: dict = {
             "query_id": query.query_id,
             "category": query.category,
-            "recall_at_5": compute_recall_at_k(memory_ids, relevant, 5),
-            "recall_at_10": compute_recall_at_k(memory_ids, relevant, 10),
-            "mrr": compute_mrr(memory_ids, relevant),
-            "ndcg_at_10": compute_ndcg(memory_ids, relevant, 10),
+            "evidence_kinds": evidence_kinds,
         }
+        if "session" in evidence_kinds:
+            relevant = _resolve_evidence_memory_ids(query)
+            if relevant:
+                query_metric.update({
+                    "recall_at_5": compute_recall_at_k(memory_ids, relevant, 5),
+                    "recall_at_10": compute_recall_at_k(memory_ids, relevant, 10),
+                    "mrr": compute_mrr(memory_ids, relevant),
+                    "ndcg_at_10": compute_ndcg(memory_ids, relevant, 10),
+                })
+            else:
+                # Session evidence couldn't be resolved to any memories.
+                # Most likely causes: missing session map (ran eval without
+                # ingest), or extraction yielded zero facts for that session.
+                query_metric["recall_skipped_reason"] = "no_resolvable_memories"
+        # Otherwise (turn/unknown evidence): keep recall fields absent.
+        # j_score is still computed below.
 
         judgment = None
         generated_answer = ""

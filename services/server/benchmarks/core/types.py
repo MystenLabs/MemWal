@@ -9,6 +9,7 @@ exclusively with these types — never with benchmark-specific formats.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 # ============================================================
@@ -38,6 +39,28 @@ class Conversation:
     sessions: list[Session]
 
 
+EvidenceKind = Literal["turn", "session", "unknown"]
+
+
+@dataclass
+class Evidence:
+    """
+    A single piece of ground-truth evidence for a query.
+
+    `kind` tells the framework how to interpret `value`:
+      - "session" : value is a session_id matching one produced during ingestion.
+                    Recall@K can be computed by checking whether retrieved
+                    memories trace back to these sessions.
+      - "turn"    : value is a turn/dialog id (e.g., LOCOMO's "D1:3").
+                    Recall@K is NOT currently computable from these because our
+                    ingestion concatenates turns into session-level blobs and
+                    loses per-turn provenance. Included for documentation.
+      - "unknown" : fallback when the dataset doesn't specify.
+    """
+    kind: EvidenceKind
+    value: str
+
+
 @dataclass
 class Query:
     """A benchmark question with ground truth."""
@@ -46,7 +69,7 @@ class Query:
     question: str
     category: str           # "single_hop", "multi_hop", "temporal", "open_domain", etc.
     ground_truth_answer: str
-    evidence_turn_ids: list[str] = field(default_factory=list)
+    evidence: list[Evidence] = field(default_factory=list)
 
 
 # ============================================================

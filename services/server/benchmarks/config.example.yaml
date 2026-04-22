@@ -34,9 +34,9 @@ server:
 # LLM judge — evaluates generated answers vs ground truth
 # ─────────────────────────────────────────────────────────────────────
 judge:
-  # Model used for judging. Published benchmarks (Mem0, LongMemEval,
-  # ConvoMem) all use GPT-4o — keep this consistent for comparable
-  # numbers. Other models will produce different scores.
+  # Model used for judging. Published benchmarks (Mem0, LongMemEval)
+  # all use GPT-4o — keep this consistent for comparable numbers.
+  # Other models will produce different scores.
   model: openai/gpt-4o
 
   # OpenRouter or OpenAI API key. Required.

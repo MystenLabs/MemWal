@@ -34,7 +34,7 @@ import json
 import logging
 from pathlib import Path
 
-from core.types import Conversation, Session, Turn, Query
+from core.types import Conversation, Session, Turn, Query, Evidence
 
 from .base import BenchmarkAdapter
 
@@ -62,6 +62,18 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
         "temporal",
         "knowledge_update",
     ]
+
+    def build_ingest_text(self, conversation):
+        # EXPLICIT CHOICE: per-turn chunking.
+        # Switched from naive session-concat (2026-04-20 run, 65.90 overall)
+        # to per-turn for consistency with LOCOMO and to match how the
+        # MemWal SDK drives /api/analyze in production — one call per user
+        # message. LongMemEval's small haystacks (~22 turns) were already
+        # handled well by session-concat (19% "no info"), so we don't
+        # expect a large delta here; the change is about methodology
+        # alignment across benchmarks. LongMemEval turns are raw text
+        # without speaker prefix, so the helper adds "User:"/"Assistant:".
+        return self.build_ingest_text_per_turn(conversation)
 
     def download(self, cache_dir: Path) -> None:
         """Download LongMemEval oracle variant via the HuggingFace Hub."""
@@ -160,7 +172,15 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
             if not isinstance(answer, str):
                 answer = str(answer)
 
-            evidence_session_ids = [str(sid) for sid in item.get("answer_session_ids", [])]
+            # LongMemEval evidence is session_ids — these match the session_id
+            # values we use as ingestion namespaces, so Recall@K can be
+            # computed by checking whether retrieved memories came from these
+            # sessions (requires tracking the session → memory mapping during
+            # ingestion, see run.py stage_ingest).
+            evidence = [
+                Evidence(kind="session", value=str(sid))
+                for sid in item.get("answer_session_ids", [])
+            ]
 
             queries.append(Query(
                 query_id=conv_id,
@@ -168,7 +188,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
                 question=str(item.get("question", "")),
                 category=category,
                 ground_truth_answer=answer,
-                evidence_turn_ids=evidence_session_ids,
+                evidence=evidence,
             ))
 
         conversations.sort(key=lambda c: c.conversation_id)

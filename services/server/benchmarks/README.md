@@ -8,7 +8,6 @@ A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemE
 |---|---|---|---|
 | LOCOMO | ✅ Validated | ~$9 | 90 min |
 | LongMemEval | ✅ Validated | ~$2 | 30 min |
-| ConvoMem | ⚠️ Unvalidated stub | (n/a) | (n/a) |
 
 **Completed runs** are archived in `../review/assessment/benchmark-runs/`.
 
@@ -230,7 +229,6 @@ benchmarks/
     base.py                # BenchmarkAdapter contract
     locomo.py              # ✅ validated
     longmemeval.py         # ✅ validated
-    convomem.py            # ⚠️ unvalidated stub (raises NotImplementedError)
 
   presets/                 # Scoring weight configurations
     baseline.yaml

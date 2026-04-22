@@ -43,7 +43,7 @@ import logging
 import re
 from pathlib import Path
 
-from core.types import Conversation, Session, Turn, Query
+from core.types import Conversation, Session, Turn, Query, Evidence
 
 from .base import BenchmarkAdapter
 
@@ -65,6 +65,17 @@ class LocomoBenchmark(BenchmarkAdapter):
 
     name = "LOCOMO"
     categories = ["single_hop", "multi_hop", "temporal", "open_domain", "adversarial"]
+
+    def build_ingest_text(self, conversation):
+        # EXPLICIT CHOICE: per-turn chunking.
+        # Matches how the MemWal SDK wrapper (withMemWal) drives /api/analyze
+        # in production — one call per user message — and how Mem0 runs its
+        # own LOCOMO evaluation (turn-by-turn replay). The prior session-
+        # concat approach produced a 53% "no info" rate because dumping
+        # 17-23 turns into a single extract call overwhelmed the extractor.
+        # LOCOMO text already includes the speaker name prefix
+        # ("Caroline: ...") which the helper detects and preserves.
+        return self.build_ingest_text_per_turn(conversation)
 
     def download(self, cache_dir: Path) -> None:
         """Download official LOCOMO dataset from the Snap Research GitHub repo."""
@@ -120,7 +131,14 @@ class LocomoBenchmark(BenchmarkAdapter):
                 category_raw = qa.get("category", 0)
                 category = CATEGORY_MAP.get(category_raw, f"category_{category_raw}")
 
-                evidence_ids = [str(e) for e in qa.get("evidence", [])]
+                # LOCOMO evidence is dialog-turn IDs like "D1:3" — turn-level,
+                # which we cannot currently resolve to memory IDs because our
+                # ingestion concatenates turns into session blobs. Flagged as
+                # "turn" kind so Recall@K calculations can skip them cleanly.
+                evidence = [
+                    Evidence(kind="turn", value=str(e))
+                    for e in qa.get("evidence", [])
+                ]
                 answer = qa.get("answer", "")
                 # Some LOCOMO answers are non-string (int, list, etc.)
                 if not isinstance(answer, str):
@@ -132,7 +150,7 @@ class LocomoBenchmark(BenchmarkAdapter):
                     question=str(qa.get("question", "")),
                     category=category,
                     ground_truth_answer=answer,
-                    evidence_turn_ids=evidence_ids,
+                    evidence=evidence,
                 ))
 
         conversations.sort(key=lambda c: c.conversation_id)

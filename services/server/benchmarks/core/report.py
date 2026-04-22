@@ -5,37 +5,91 @@ Produces markdown comparison tables suitable for:
 - Terminal output
 - Notion/GitHub documentation
 - Assessment documents
+
+Published baselines are loaded from YAML files in the reference_scores/
+directory at import time. To add a baseline for a new benchmark, drop a
+file named <benchmark>.yaml alongside the existing ones — no code change.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+from functools import lru_cache
 from pathlib import Path
+
+import yaml
 from tabulate import tabulate
 
+logger = logging.getLogger(__name__)
 
-# Published baselines for comparison
-PUBLISHED_BASELINES = {
-    "locomo": {
-        "Mem0 Base": {
-            "single_hop": 67.13,
-            "multi_hop": 51.15,
-            "temporal": 55.51,
-            "open_domain": 72.93,
-        },
-        "Mem0 Graph": {
-            "single_hop": 65.71,
-            "multi_hop": 47.19,
-            "temporal": 58.13,
-            "open_domain": 75.71,
-        },
-    },
-    "longmemeval": {
-        "Supermemory": {"overall": 85.4},
-        "Zep": {"overall": 63.8},
-        "Mem0": {"overall": 49.0},
-    },
-}
+# Reference scores live in benchmarks/reference_scores/<benchmark>.yaml
+# (two directories up from this file: core/report.py → benchmarks/ → reference_scores/).
+_REFERENCE_SCORES_DIR = Path(__file__).resolve().parent.parent / "reference_scores"
+
+
+@lru_cache(maxsize=None)
+def _load_reference_scores(benchmark: str) -> dict[str, dict]:
+    """
+    Load published baseline scores for a benchmark from its YAML file.
+
+    Returns a dict shaped like:
+        {
+          "Mem0 Base": {
+              "scores": {"single_hop": 67.13, ...},
+              "source": "...",
+              "version": "...",
+              "notes": "...",
+          },
+          ...
+        }
+
+    Returns an empty dict if the benchmark has no reference file yet.
+    """
+    path = _REFERENCE_SCORES_DIR / f"{benchmark}.yaml"
+    if not path.exists():
+        logger.debug("No reference_scores file for benchmark '%s' at %s", benchmark, path)
+        return {}
+
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as e:
+        logger.warning("Malformed reference_scores/%s.yaml: %s", benchmark, e)
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.warning("reference_scores/%s.yaml must be a mapping at top level", benchmark)
+        return {}
+
+    # Validate each entry has a `scores` dict; drop anything malformed rather
+    # than crashing the whole report on one bad entry.
+    cleaned: dict[str, dict] = {}
+    for system_name, entry in raw.items():
+        if not isinstance(entry, dict) or "scores" not in entry:
+            logger.warning(
+                "reference_scores/%s.yaml: entry '%s' missing 'scores' key, skipping",
+                benchmark, system_name,
+            )
+            continue
+        if not isinstance(entry["scores"], dict):
+            logger.warning(
+                "reference_scores/%s.yaml: entry '%s' has non-dict scores, skipping",
+                benchmark, system_name,
+            )
+            continue
+        cleaned[system_name] = entry
+    return cleaned
+
+
+def _baseline_scores_dict(benchmark: str) -> dict[str, dict[str, float]]:
+    """
+    Backward-compatible view: {system_name: {category: score}}.
+    Used by the table rendering below.
+    """
+    return {
+        name: entry.get("scores", {})
+        for name, entry in _load_reference_scores(benchmark).items()
+    }
 
 
 def generate_comparison_table(
@@ -48,7 +102,7 @@ def generate_comparison_table(
 
     Args:
         results: list of run artifacts (dicts loaded from JSON)
-        benchmark: "locomo", "longmemeval", or "convomem"
+        benchmark: "locomo" or "longmemeval"
         metric: which metric to display ("j_score", "recall_at_5", etc.)
 
     Returns:
@@ -66,7 +120,7 @@ def generate_comparison_table(
 
     # Build header: Category | Preset1 | Preset2 | ... | Baseline1 | ...
     presets = [r.get("preset", "unknown") for r in results]
-    baselines = PUBLISHED_BASELINES.get(benchmark, {})
+    baselines = _baseline_scores_dict(benchmark)
     headers = ["Category"] + presets + list(baselines.keys())
 
     # Build rows

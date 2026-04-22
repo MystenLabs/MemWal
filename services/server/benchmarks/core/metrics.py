@@ -101,17 +101,30 @@ def aggregate_metrics(
 
     Input: list of dicts, each with keys like "recall_at_5", "mrr", "j_score", etc.
     Output: dict of {"recall_at_5": {"mean": ..., "std": ...}, ...}
+
+    Note: not every query has every field. For example, queries with
+    unresolvable evidence skip the recall fields entirely. We compute the
+    mean over whatever entries DO have a numeric value for each field,
+    rather than treating missing values as zero. That's what makes skipping
+    unresolvable queries honest rather than silently inflating scores.
     """
     if not per_query:
         return {}
 
-    keys = per_query[0].keys()
+    # Union of keys across ALL entries — the first entry may not carry
+    # every field, since different query classes (e.g., session vs turn
+    # evidence) populate different subsets.
+    keys: set[str] = set()
+    for q in per_query:
+        keys.update(q.keys())
+
     result = {}
     for key in keys:
-        # Only aggregate numeric fields; skip query_id, category, etc.
+        # Only aggregate numeric fields; skip query_id, category, evidence_kinds, etc.
         values = [
             q[key] for q in per_query
             if key in q and q[key] is not None and isinstance(q[key], (int, float))
+            and not isinstance(q[key], bool)  # bool is a subclass of int; exclude it
         ]
         if values:
             result[key] = {

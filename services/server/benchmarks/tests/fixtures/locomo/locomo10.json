@@ -1,0 +1,1089 @@
+[
+  {
+    "qa": [
+      {
+        "question": "When did Caroline go to the LGBTQ support group?",
+        "answer": "7 May 2023",
+        "evidence": [
+          "D1:3"
+        ],
+        "category": 2
+      },
+      {
+        "question": "What fields would Caroline be likely to pursue in her educaton?",
+        "answer": "Psychology, counseling certification",
+        "evidence": [
+          "D1:9",
+          "D1:11"
+        ],
+        "category": 3
+      },
+      {
+        "question": "What did Caroline research?",
+        "answer": "Adoption agencies",
+        "evidence": [
+          "D2:8"
+        ],
+        "category": 1
+      }
+    ],
+    "conversation": {
+      "speaker_a": "Caroline",
+      "speaker_b": "Melanie",
+      "session_1_date_time": "1:56 pm on 8 May, 2023",
+      "session_1": [
+        {
+          "speaker": "Caroline",
+          "dia_id": "D1:1",
+          "text": "Hey Mel! Good to see you! How have you been?"
+        },
+        {
+          "speaker": "Melanie",
+          "dia_id": "D1:2",
+          "text": "Hey Caroline! Good to see you! I'm swamped with the kids & work. What's up with you? Anything new?"
+        },
+        {
+          "speaker": "Caroline",
+          "dia_id": "D1:3",
+          "text": "I went to a LGBTQ support group yesterday and it was so powerful."
+        }
+      ],
+      "session_2_date_time": "1:14 pm on 25 May, 2023",
+      "session_2": [
+        {
+          "speaker": "Melanie",
+          "dia_id": "D2:1",
+          "text": "Hey Caroline, since we last chatted, I've had a lot of things happening to me. I ran a charity race for mental health last Saturday \u2013 it was really rewarding. Really made me think about taking care of our minds."
+        },
+        {
+          "speaker": "Caroline",
+          "dia_id": "D2:2",
+          "text": "That charity race sounds great, Mel! Making a difference & raising awareness for mental health is super rewarding - I'm really proud of you for taking part!"
+        },
+        {
+          "speaker": "Melanie",
+          "dia_id": "D2:3",
+          "text": "Thanks, Caroline! The event was really thought-provoking. I'm starting to realize that self-care is really important. It's a journey for me, but when I look after myself, I'm able to better look after my family."
+        }
+      ]
+    },
+    "event_summary": {
+      "events_session_1": {
+        "Caroline": [
+          "Caroline attends an LGBTQ support group for the first time."
+        ],
+        "Melanie": [],
+        "date": "8 May, 2023"
+      },
+      "events_session_2": {
+        "Caroline": [
+          "Caroline is inspired by her supportive friends and mentors to start researching adoption agencies."
+        ],
+        "Melanie": [],
+        "date": "25 May, 2023"
+      },
+      "events_session_3": {
+        "Caroline": [
+          "Caroline speaks at her school and encourages students to get involved in the LGBTQ community."
+        ],
+        "Melanie": [],
+        "date": "9 June, 2023"
+      },
+      "events_session_4": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie takes her family camping for a weekend to bond."
+        ],
+        "date": "27 June, 2023"
+      },
+      "events_session_5": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie registers for a pottery class."
+        ],
+        "date": "3 July, 2023"
+      },
+      "events_session_6": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie takes her kids to the local musuem for a day of fun."
+        ],
+        "date": "6 July, 2023"
+      },
+      "events_session_7": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie begins running longer distances to destress."
+        ],
+        "date": "12 July, 2023"
+      },
+      "events_session_8": {
+        "Caroline": [
+          "Caroline attends an adoption council meeting."
+        ],
+        "Melanie": [],
+        "date": "15 July, 2023"
+      },
+      "events_session_9": {
+        "Caroline": [
+          "Caroline joins a mentorship program for LGBTQ youth."
+        ],
+        "Melanie": [],
+        "date": "17 July, 2023"
+      },
+      "events_session_10": {
+        "Caroline": [
+          "Caroline joins a group of connected LGBTQ activists."
+        ],
+        "Melanie": [
+          "Melanie and her family takes a trip to the beach"
+        ],
+        "date": "20 July, 2023"
+      },
+      "events_session_11": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie and her family attend an outdoor concert to celebrate her daughter's birthday."
+        ],
+        "date": "14 August, 2023"
+      },
+      "events_session_12": {
+        "Caroline": [
+          "Caroline meets a group of religious conservatives on a hike, and they make an unwelcoming comment about her transition."
+        ],
+        "Melanie": [
+          "Melanie finishes her first pottery project."
+        ],
+        "date": "17 August, 2023"
+      },
+      "events_session_13": {
+        "Caroline": [
+          "Caroline begins the adoption process by applying to multiple agencies.",
+          "Caroline attends a meeting to receive special adoption advice and assistance from the supportive group."
+        ],
+        "Melanie": [],
+        "date": "23 August, 2023"
+      },
+      "events_session_14": {
+        "Caroline": [
+          "Caroline writes a letter to the people she encountered on her hike to apologize for the negative experience they had."
+        ],
+        "Melanie": [
+          "Melanie and her family volunteer at a local homeless shelter."
+        ],
+        "date": "25 August, 2023"
+      },
+      "events_session_15": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie takes her kids to a local park"
+        ],
+        "date": "28 August, 2023"
+      },
+      "events_session_16": {
+        "Caroline": [
+          "Caroline spends a day out outdoors bike riding and sight seeing with her friends."
+        ],
+        "Melanie": [],
+        "date": "13 September, 2023"
+      },
+      "events_session_17": {
+        "Caroline": [
+          "Caroline calls on her mentor for adoption advice."
+        ],
+        "Melanie": [],
+        "date": "13 October, 2023"
+      },
+      "events_session_18": {
+        "Caroline": [],
+        "Melanie": [
+          "Melanie's family takes a roadtrip to the Grand Canyon.",
+          "Melanie's son gets in a car accident while on the roadtrip.",
+          "Melanie and her family take a roadtrip to visit a nearby national park."
+        ],
+        "date": "20 October, 2023"
+      },
+      "events_session_19": {
+        "Caroline": [
+          "Caroline passes the adoption agency interviews."
+        ],
+        "Melanie": [],
+        "date": "22 October, 2023"
+      }
+    },
+    "observation": {
+      "session_1_observation": {
+        "Caroline": [
+          [
+            "Caroline attended an LGBTQ support group recently and found the transgender stories inspiring.",
+            "D1:3"
+          ],
+          [
+            "The support group has made Caroline feel accepted and given her courage to embrace herself.",
+            "D1:7"
+          ],
+          [
+            "Caroline is planning to continue her education and explore career options in counseling or mental health to support those with similar issues.",
+            "D1:9"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie is currently managing kids and work and finds it overwhelming.",
+            "D1:2"
+          ],
+          [
+            "Melanie painted a lake sunrise last year which holds special meaning to her.",
+            "D1:14"
+          ],
+          [
+            "Painting is a fun way for Melanie to express her feelings and get creative, helping her relax after a long day.",
+            "D1:16"
+          ],
+          [
+            "Melanie is going swimming with the kids after the conversation.",
+            "D1:18"
+          ]
+        ]
+      },
+      "session_2_observation": {
+        "Melanie": [
+          [
+            "Melanie ran a charity race for mental health last Saturday.",
+            "D2:1"
+          ],
+          [
+            "Melanie is realizing the importance of self-care and its impact on her family.",
+            "D2:3"
+          ],
+          [
+            "Melanie carves out me-time each day for activities like running, reading, or playing the violin.",
+            "D2:5"
+          ],
+          [
+            "Melanie's kids are excited about summer break and they are considering going camping next month.",
+            "D2:7"
+          ]
+        ],
+        "Caroline": [
+          [
+            "Caroline is researching adoption agencies with the dream of having a family and providing a loving home to kids in need.",
+            "D2:8"
+          ],
+          [
+            "Caroline chose an adoption agency that helps LGBTQ+ folks with adoption due to their inclusivity and support.",
+            "D2:12"
+          ],
+          [
+            "Caroline is excited to create a family for kids who need one, even though she anticipates challenges as a single parent.",
+            "D2:14"
+          ]
+        ]
+      },
+      "session_3_observation": {
+        "Caroline": [
+          [
+            "Caroline started transitioning three years ago.",
+            "D3:1"
+          ],
+          [
+            "Caroline gave a talk at a school event about her transgender journey and encouraged students to get involved in the LGBTQ community.",
+            "D3:1"
+          ],
+          [
+            "Caroline believes conversations about gender identity and inclusion are necessary and is thankful for being able to give a voice to the trans community.",
+            "D3:3"
+          ],
+          [
+            "Caroline feels sharing experiences is important to help promote understanding and acceptance.",
+            "D3:5"
+          ],
+          [
+            "Caroline feels blessed with a lot of love and support throughout her journey.",
+            "D3:5"
+          ],
+          [
+            "Caroline aims to pass on the love and support she has received by sharing stories to build a strong and supportive community of hope.",
+            "D3:5"
+          ],
+          [
+            "Caroline's friends, family, and mentors are her rocks, motivating her and giving her strength to push on.",
+            "D3:11"
+          ],
+          [
+            "Caroline has known her friends for 4 years, since moving from her home country, and values their love and help, especially after a tough breakup.",
+            "D3:13"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie is supportive of Caroline and proud of her for spreading awareness and inspiring others in the LGBTQ community.",
+            "D3:2"
+          ],
+          [
+            "Melanie believes talking about inclusivity and acceptance is crucial.",
+            "D3:4"
+          ],
+          [
+            "Melanie values family moments and feels they make life awesome, alive, and happy.",
+            "D3:20"
+          ],
+          [
+            "Melanie has a husband and kids who keep her motivated.",
+            "D3:14"
+          ],
+          [
+            "Melanie has been married for 5 years.",
+            "D3:16"
+          ],
+          [
+            "Melanie cherishes time with family and feels most alive and happy during those moments.",
+            "D3:22"
+          ]
+        ]
+      },
+      "session_4_observation": {
+        "Caroline": [
+          [
+            "Caroline received a special necklace as a gift from her grandmother in Sweden, symbolizing love, faith, and strength.",
+            "D4:3"
+          ],
+          [
+            "Caroline treasures a hand-painted bowl made by a friend for her 18th birthday, which reminds her of art and self-expression.",
+            "D4:5"
+          ],
+          [
+            "Caroline is considering a career in counseling and mental health, particularly working with trans people to help them accept themselves and support their mental health.",
+            "D4:11"
+          ],
+          [
+            "Caroline attended an LGBTQ+ counseling workshop focused on therapeutic methods and supporting trans individuals, finding it enlightening and inspiring.",
+            "D4:13"
+          ],
+          [
+            "Caroline's motivation to pursue counseling comes from her own journey, the support she received, and the positive impact counseling had on her life.",
+            "D4:15"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie went camping with her family in the mountains last week and had a great time exploring nature, roasting marshmallows, and hiking.",
+            "D4:8"
+          ],
+          [
+            "Melanie values family time and finds it to be special and important.",
+            "D4:10"
+          ]
+        ]
+      },
+      "session_5_observation": {
+        "Caroline": [
+          [
+            "Caroline attended an LGBTQ+ pride parade last week and felt a sense of belonging and happiness.",
+            "D5:1"
+          ],
+          [
+            "Caroline is considering a career in counseling and mental health to help others.",
+            "D5:3"
+          ],
+          [
+            "Caroline is currently learning the piano to get creative.",
+            "D5:5"
+          ],
+          [
+            "Caroline is looking forward to attending a transgender conference this month to meet others in the community and learn about advocacy.",
+            "D5:13"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie signed up for a pottery class and finds it therapeutic for self-expression and creativity.",
+            "D5:4"
+          ],
+          [
+            "Melanie is a big fan of pottery and finds it calming and creative.",
+            "D5:6"
+          ],
+          [
+            "Melanie made a black and white bowl in her pottery class which she is proud of.",
+            "D5:8"
+          ],
+          [
+            "Pottery is a significant part of Melanie's life as it helps her express her emotions and brings her joy.",
+            "D5:10"
+          ]
+        ]
+      },
+      "session_6_observation": {
+        "Caroline": [
+          [
+            "Caroline has been looking into counseling or mental health work and is passionate about helping people and making a positive impact.",
+            "D6:3"
+          ],
+          [
+            "Caroline is creating a library for when she has kids, as she looks forward to reading to them and opening up their minds.",
+            "D6:7"
+          ],
+          [
+            "Caroline has a collection of kids' books in her library including classics, stories from different cultures, and educational books.",
+            "D6:9"
+          ],
+          [
+            "Caroline appreciates the importance of friendship and compassion in her life and is lucky to have friends and family helping with her transition.",
+            "D6:11"
+          ],
+          [
+            "Caroline's friends and family have been there for her every step of the way, providing love, guidance, and acceptance during her transition.",
+            "D6:13"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie took her kids to the museum recently and enjoyed seeing their excitement at the dinosaur exhibit.",
+            "D6:4"
+          ],
+          [
+            "Melanie loves spending time with her kids and seeing the joy in their eyes when exploring new things.",
+            "D6:4"
+          ],
+          [
+            "Melanie and her family enjoy camping at the beach as it brings them closer together.",
+            "D6:16"
+          ]
+        ]
+      },
+      "session_7_observation": {
+        "Caroline": [
+          [
+            "Caroline attended an LGBTQ conference recently and felt accepted and supported, emphasizing the importance of fighting for trans rights and spreading awareness.",
+            "D7:1"
+          ],
+          [
+            "Caroline is looking into counseling and mental health jobs to provide support to others, motivated by her own struggles with mental health and the help she received.",
+            "D7:5"
+          ],
+          [
+            "Caroline's favorite guiding book is 'Becoming Nicole' by Amy Ellis Nutt, a true story about a trans girl and her family that gave her hope and connection.",
+            "D7:11"
+          ],
+          [
+            "According to 'Becoming Nicole,' Caroline learned the importance of self-acceptance, finding support, and the existence of hope and love.",
+            "D7:13"
+          ],
+          [
+            "Caroline values the role of pets in bringing joy and comfort.",
+            "D7:13"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie finds LGBTQ events like the conference Caroline attended to be reminding of the strength of community.",
+            "D7:2"
+          ],
+          [
+            "Melanie supports Caroline's drive to make a difference in LGBTQ rights.",
+            "D7:4"
+          ],
+          [
+            "Melanie reminds Caroline to pursue her dreams and appreciates the power of books in guiding and motivating her.",
+            "D7:8"
+          ],
+          [
+            "Melanie has a dog named Luna and a cat named Oliver that bring joy and liveliness to her home.",
+            "D7:18"
+          ],
+          [
+            "Melanie got new running shoes for running, which she finds great for destressing and clearing her mind.",
+            "D7:20"
+          ],
+          [
+            "Running has been great for Melanie's mental health and mood.",
+            "D7:24"
+          ]
+        ]
+      },
+      "session_8_observation": {
+        "Caroline": [
+          [
+            "Caroline attended a council meeting for adoption last Friday and found it inspiring and emotional.",
+            "D8:9"
+          ],
+          [
+            "Caroline went to a pride parade a few weeks ago and felt accepted and happy being around people who celebrated her.",
+            "D8:19"
+          ],
+          [
+            "Caroline felt proud and grateful at the pride parade feeling accepted by the community.",
+            "D8:21"
+          ],
+          [
+            "Caroline expressed feeling comforted by being around accepting and loving people.",
+            "D8:21"
+          ],
+          [
+            "Caroline mentioned the importance of finding peace and mental health through expressions of authentic self.",
+            "D8:25"
+          ],
+          [
+            "Caroline expressed pride in the courage to transition, finding freedom in expressing herself authentically.",
+            "D8:25"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie took her kids to a pottery workshop last Friday where they made their own pots.",
+            "D8:2"
+          ],
+          [
+            "Melanie and her kids enjoy nature-inspired painting projects.",
+            "D8:6"
+          ],
+          [
+            "Melanie's favorite part of her wedding was marrying her partner and promising to be together forever.",
+            "D8:16"
+          ],
+          [
+            "Melanie finds joy in flowers which represent growth, beauty, and appreciating small moments.",
+            "D8:12"
+          ],
+          [
+            "Melanie shared that family and creativity keep her at peace.",
+            "D8:28"
+          ],
+          [
+            "Melanie's family has been supportive and loving during tough times and helped her through.",
+            "D8:32"
+          ]
+        ]
+      },
+      "session_9_observation": {
+        "Melanie": [
+          [
+            "Melanie went camping with her family two weekends ago.",
+            "D9:1"
+          ],
+          [
+            "Melanie enjoys unplugging and hanging out with her kids.",
+            "D9:1"
+          ],
+          [
+            "Melanie and her kids finished a painting before the conversation.",
+            "D9:17"
+          ]
+        ],
+        "Caroline": [
+          [
+            "Caroline joined a mentorship program for LGBTQ youth over the weekend.",
+            "D9:2"
+          ],
+          [
+            "Caroline mentors a transgender teen and they work on building confidence and positive strategies.",
+            "D9:6"
+          ],
+          [
+            "Caroline and her mentee had a great time at the LGBT pride event the previous month.",
+            "D9:6"
+          ],
+          [
+            "Caroline is planning an LGBTQ art show with her paintings for next month.",
+            "D9:12"
+          ],
+          [
+            "Caroline painted a piece inspired by a visit to an LGBTQ center, aiming to capture unity and strength.",
+            "D9:16"
+          ]
+        ]
+      },
+      "session_10_observation": {
+        "Caroline": [
+          [
+            "Caroline joined a new LGBTQ activist group called 'Connected LGBTQ Activists' last Tuesday.",
+            "D10:3"
+          ],
+          [
+            "Caroline and her LGBTQ activist group plan events and campaigns to support each other and positive changes.",
+            "D10:5"
+          ],
+          [
+            "Caroline and her activist group participated in a pride parade last weekend to celebrate love and diversity.",
+            "D10:7"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie enjoys family beach trips with her kids once or twice a year.",
+            "D10:8"
+          ],
+          [
+            "Melanie's family tradition includes a camping trip where they roast marshmallows and tell stories around the campfire.",
+            "D10:12"
+          ],
+          [
+            "Melanie and her family watched the Perseid meteor shower during a camping trip last year and it was a memorable experience.",
+            "D10:14"
+          ],
+          [
+            "Melanie treasures the memory of her youngest child taking her first steps.",
+            "D10:20"
+          ]
+        ]
+      },
+      "session_11_observation": {
+        "Melanie": [
+          [
+            "Melanie celebrated her daughter's birthday with a concert featuring Matt Patterson.",
+            "D11:1"
+          ],
+          [
+            "Melanie values special moments with her kids and is grateful for them.",
+            "D11:1"
+          ],
+          [
+            "Melanie appreciates cultivating a loving and accepting environment for her kids.",
+            "D11:7"
+          ],
+          [
+            "Melanie values inclusivity in her interactions and work as an artist.",
+            "D11:7"
+          ],
+          [
+            "Melanie admires Caroline's art and appreciates the themes of self-acceptance and love.",
+            "D11:13"
+          ]
+        ],
+        "Caroline": [
+          [
+            "Caroline attended a pride parade recently and felt inspired by the community's energy and support for LGBTQ rights.",
+            "D11:4"
+          ],
+          [
+            "Caroline represents inclusivity and diversity in her art and uses it to advocate for the LGBTQ+ community.",
+            "D11:8"
+          ],
+          [
+            "Caroline's art focuses on expressing her trans experience and educating others about the trans community.",
+            "D11:10"
+          ],
+          [
+            "Caroline's painting 'Embracing Identity' symbolizes self-acceptance, love, and the journey to being oneself.",
+            "D11:12"
+          ],
+          [
+            "Caroline finds art to be healing and a way to connect with her self-discovery and acceptance journey.",
+            "D11:14"
+          ],
+          [
+            "Caroline values sharing her art and experiences with others, such as Melanie.",
+            "D11:16"
+          ]
+        ]
+      },
+      "session_12_observation": {
+        "Caroline": [
+          [
+            "Caroline had a not-so-great experience on a hike where she ran into a group of religious conservatives who upset her.",
+            "D12:1"
+          ],
+          [
+            "Caroline values having people around her who accept and support her.",
+            "D12:1"
+          ],
+          [
+            "Caroline expresses that surrounding herself with things that bring joy is important because life is too short.",
+            "D12:9"
+          ],
+          [
+            "Caroline values happy moments and believes they are essential to keep going, especially during tough times.",
+            "D12:11"
+          ],
+          [
+            "Caroline expresses appreciation for her friendship with Melanie.",
+            "D12:13"
+          ],
+          [
+            "Caroline had a great time with the whole gang at the Pride fest last year and values supportive friends.",
+            "D12:15"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie finished another pottery project and expresses pride in her work.",
+            "D12:2"
+          ],
+          [
+            "Melanie's pottery project was a source of happiness and fulfillment for her.",
+            "D12:8"
+          ],
+          [
+            "Melanie has a strong connection to art, considering it both a sanctuary and a source of comfort.",
+            "D12:8"
+          ],
+          [
+            "Melanie values friendship with Caroline and expresses appreciation for it.",
+            "D12:14"
+          ],
+          [
+            "Melanie suggests doing a family outing or planning something special for the summer with Caroline to make awesome memories.",
+            "D12:16"
+          ]
+        ]
+      },
+      "session_13_observation": {
+        "Caroline": [
+          [
+            "Caroline took the first step towards becoming a mom by applying to adoption agencies.",
+            "D13:1"
+          ],
+          [
+            "Caroline attended an adoption advice/assistance group to help with her decision.",
+            "D13:1"
+          ],
+          [
+            "Caroline has a guinea pig named Oscar.",
+            "D13:3"
+          ],
+          [
+            "Caroline used to go horseback riding with her dad when she was a kid.",
+            "D13:7"
+          ],
+          [
+            "Caroline loves horses and has a love for them.",
+            "D13:7"
+          ],
+          [
+            "Caroline expresses herself through painting and values art for exploring identity and being therapeutic.",
+            "D13:13"
+          ],
+          [
+            "Caroline values supportive people, promotes LGBTQ rights, and aims to live authentically.",
+            "D13:15"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie has pets including another cat named Bailey.",
+            "D13:4"
+          ],
+          [
+            "Melanie shared a photo of her horse painting that she recently did.",
+            "D13:8"
+          ],
+          [
+            "Melanie enjoys painting animals and finds it peaceful and special.",
+            "D13:10"
+          ],
+          [
+            "Melanie expresses herself through painting and values art for showing who we really are and getting in touch with ourselves.",
+            "D13:14"
+          ]
+        ]
+      },
+      "session_14_observation": {
+        "Caroline": [
+          [
+            "Caroline went hiking last week and got into a bad spot with some people but tried to apologize.",
+            "D14:1"
+          ],
+          [
+            "Caroline painted a vivid sunset inspired by a beach visit.",
+            "D14:7"
+          ],
+          [
+            "Caroline transitioned and joined the transgender community seeking acceptance and support.",
+            "D14:13"
+          ],
+          [
+            "Caroline created a rainbow flag mural symbolizing courage and strength of the trans community.",
+            "D14:15"
+          ],
+          [
+            "Caroline made a stained glass window showcasing personal journey as a transgender woman and the acceptance of growth and change.",
+            "D14:19"
+          ],
+          [
+            "Caroline found a vibrant rainbow sidewalk during Pride Month, which reminded her of love and acceptance.",
+            "D14:23"
+          ],
+          [
+            "Caroline is organizing an LGBTQ art show next month to showcase paintings and talents of LGBTQ artists aimed at spreading understanding and acceptance.",
+            "D14:33"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie made a plate in pottery class and finds pottery relaxing and creative.",
+            "D14:4"
+          ],
+          [
+            "Melanie loves painting landscapes and still life.",
+            "D14:30"
+          ],
+          [
+            "Melanie volunteered with her family at a homeless shelter to make a difference.",
+            "D14:10"
+          ],
+          [
+            "Melanie appreciates and admires Caroline's courage as a trans person.",
+            "D14:16"
+          ],
+          [
+            "Melanie created a painting inspired by autumn.",
+            "D14:32"
+          ]
+        ]
+      },
+      "session_15_observation": {
+        "Caroline": [
+          [
+            "Caroline had the opportunity to volunteer at an LGBTQ+ youth center and found it gratifying to support and guide the young people there.",
+            "D15:3"
+          ],
+          [
+            "Caroline shared her story with the young people at the LGBTQ+ youth center and felt fulfilled by the experience.",
+            "D15:5"
+          ],
+          [
+            "Caroline plans to continue volunteering at the youth center as she believes in community and supporting others.",
+            "D15:9"
+          ],
+          [
+            "Caroline is involved in organizing a talent show for the kids at the youth center.",
+            "D15:11"
+          ],
+          [
+            "Caroline mentioned that playing the guitar helps her express her emotions.",
+            "D15:19"
+          ],
+          [
+            "Caroline started playing acoustic guitar about five years ago as a way to express herself and escape in her emotions.",
+            "D15:21"
+          ],
+          [
+            "Caroline finds the song \"Brave\" by Sara Bareilles significant and inspiring as it resonates with her journey and determination to make a difference.",
+            "D15:23"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie took her kids to a park and enjoyed seeing them have fun exploring and playing.",
+            "D15:2"
+          ],
+          [
+            "Melanie plays the clarinet as a way to express herself and relax.",
+            "D15:26"
+          ],
+          [
+            "Melanie enjoys classical music like Bach and Mozart, as well as modern music like Ed Sheeran's \"Perfect\".",
+            "D15:28"
+          ]
+        ]
+      },
+      "session_16_observation": {
+        "Caroline": [
+          [
+            "Caroline spends time with friends biking and exploring nature.",
+            "D16:1"
+          ],
+          [
+            "Caroline is very focused on making a difference for the LGBTQ+ community through her work.",
+            "D16:5"
+          ],
+          [
+            "Caroline has been creating art since the age of 17.",
+            "D16:7"
+          ],
+          [
+            "Caroline uses art to express her feelings and explore her gender identity.",
+            "D16:9"
+          ],
+          [
+            "Caroline made a painting representing her journey as a trans woman.",
+            "D16:13"
+          ],
+          [
+            "Caroline's relationships have changed due to her journey, some friends were not able to handle the changes.",
+            "D16:15"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie enjoys camping with her kids, exploring the forest, and hiking.",
+            "D16:2"
+          ],
+          [
+            "Melanie finds inspiration in seeing her kids excited about learning new things about nature.",
+            "D16:4"
+          ],
+          [
+            "Melanie has been into art for seven years, finding a passion for painting and pottery.",
+            "D16:8"
+          ],
+          [
+            "Melanie uses painting and pottery as a calming and satisfying creative outlet.",
+            "D16:8"
+          ]
+        ]
+      },
+      "session_17_observation": {
+        "Caroline": [
+          [
+            "Caroline is looking into adoption and contacted her mentor for advice.",
+            "D17:1"
+          ],
+          [
+            "Caroline sees adoption as a way to share her love and provide a safe, loving home for kids in need.",
+            "D17:3"
+          ],
+          [
+            "Caroline recommends doing research, preparing emotionally, and gathering necessary documents when starting the adoption process.",
+            "D17:7"
+          ],
+          [
+            "Caroline recently went to a transgender poetry reading event that was empowering and celebrated self-expression.",
+            "D17:19"
+          ],
+          [
+            "Caroline is inspired by freedom and being true to oneself.",
+            "D17:23"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie had a setback due to an injury that led her to take a break from pottery, which she uses for self-expression and peace.",
+            "D17:8"
+          ],
+          [
+            "Melanie continued expressing herself through reading and painting during her break from pottery.",
+            "D17:10"
+          ],
+          [
+            "Melanie enjoys expressing emotions through art, like painting inspired by sunsets and abstract art.",
+            "D17:13"
+          ],
+          [
+            "Melanie finds blue a calming color and uses it to convey tranquility in her art.",
+            "D17:16"
+          ]
+        ]
+      },
+      "session_18_observation": {
+        "Melanie": [
+          [
+            "Melanie went on a road trip with her family which started off with an accident involving her son.",
+            "D18:1"
+          ],
+          [
+            "Melanie's son got into an accident during the road trip.",
+            "D18:1"
+          ],
+          [
+            "Melanie's family visited the Grand Canyon and enjoyed it.",
+            "D18:5"
+          ],
+          [
+            "Melanie finds peace and serenity in nature, particularly during camping trips with her family.",
+            "D18:19"
+          ],
+          [
+            "Melanie believes that being in nature refreshes her soul and helps her reset and recharge.",
+            "D18:21"
+          ]
+        ],
+        "Caroline": [
+          [
+            "Caroline acknowledged the traumatic experience of Melanie's family being in an accident during the road trip.",
+            "D18:2"
+          ],
+          [
+            "Caroline believes that loved ones give strength to tackle challenges.",
+            "D18:10"
+          ],
+          [
+            "Caroline appreciates seeing Melanie's love for her family and acknowledges that they are her rock.",
+            "D18:12"
+          ],
+          [
+            "Caroline finds nature refreshing and discussed how it can bring peace.",
+            "D18:18"
+          ],
+          [
+            "Caroline appreciates the peaceful and calming nature of spending quality time with family in nature.",
+            "D18:22"
+          ]
+        ]
+      },
+      "session_19_observation": {
+        "Caroline": [
+          [
+            "Caroline passed the adoption agency interviews last Friday and is excited about building her own family through adoption.",
+            "D19:1"
+          ],
+          [
+            "Caroline's vision for the future includes creating a safe and loving home for needy kids to experience love and acceptance.",
+            "D19:3"
+          ],
+          [
+            "Caroline finds empowerment in making a positive difference in someone's life by offering love and support.",
+            "D19:7"
+          ],
+          [
+            "Caroline went through a tough process of finding self-acceptance but is now ready to help others who need support.",
+            "D19:7"
+          ],
+          [
+            "Caroline received invaluable help from friends, family, and role models during the process of finding acceptance.",
+            "D19:9"
+          ],
+          [
+            "Caroline's journey of self-discovery has been amazing and she finds joy in bringing comfort and support to others.",
+            "D19:9"
+          ]
+        ],
+        "Melanie": [
+          [
+            "Melanie bought figurines that remind her of family love.",
+            "D19:2"
+          ],
+          [
+            "Melanie appreciates Caroline's passion for helping kids and finds her inspiring.",
+            "D19:6"
+          ],
+          [
+            "Melanie respects Caroline's journey of finding acceptance and admires her strength and inspiration to help others.",
+            "D19:8"
+          ],
+          [
+            "Melanie is supportive and expresses happiness for Caroline finding her true self and helping others.",
+            "D19:10"
+          ],
+          [
+            "Melanie values the mutual support they provide to each other and appreciates the encouragement of close ones.",
+            "D19:13"
+          ]
+        ]
+      }
+    },
+    "session_summary": {
+      "session_1_summary": "Caroline and Melanie had a conversation on 8 May 2023 at 1:56 pm. Caroline mentioned that she attended an LGBTQ support group and was inspired by the transgender stories she heard. The support group made her feel accepted and gave her the courage to embrace herself. Caroline plans to continue her education and explore career options, particularly in counseling or working in mental health. Melanie praised Caroline's empathy and mentioned that she painted a lake sunrise last year as a way of expressing herself. Caroline complimented Melanie's painting and agreed that painting is a great outlet for relaxation and self-expression. They both emphasized the importance of taking care of oneself. Caroline was going to do some research, while Melanie planned to go swimming with her kids.",
+      "session_2_summary": "On May 25, 2023 at 1:14 pm, Melanie tells Caroline about her recent experience running a charity race for mental health. Caroline expresses pride and agrees that taking care of oneself is important. Melanie shares her struggle with self-care but mentions that she is carving out time each day for activities that refresh her. Caroline encourages Melanie and praises her efforts. Melanie then asks Caroline about her plans for the summer, to which Caroline replies that she is researching adoption agencies as she wants to give a loving home to children in need. Melanie praises Caroline's decision and expresses excitement for her future family. Caroline explains that she chose an adoption agency that supports the LGBTQ+ community because of its inclusivity and support. Melanie commends Caroline's choice and asks what she is looking forward to in the adoption process. Caroline says she is thrilled to create a family for kids who need one, despite the challenges of being a single parent. Melanie encourages Caroline and expresses confidence in her ability to provide a safe and loving home. The conversation ends with Melanie expressing her excitement for Caroline's new chapter.",
+      "session_3_summary": "Caroline and Melanie had a conversation at 7:55 pm on 9 June, 2023. Caroline shared about her school event last week where she talked about her transgender journey and encouraged students to get involved in the LGBTQ community. Melanie praised Caroline for spreading awareness and inspiring others with her strength and courage. They discussed the importance of conversations about gender identity and inclusion. Caroline expressed gratitude for the support she has received and the opportunity to give a voice to the trans community. Melanie commended Caroline for using her voice to create love, acceptance, and hope. They talked about the power of sharing personal stories and the impact it can have on others. They both expressed a desire to make a positive difference and support each other. Melanie mentioned that her family motivates her, while Caroline mentioned that her friends, family, and mentors are her support system. They shared photos of their loved ones and talked about the length of their relationships. Melanie mentioned being married for 5 years and Caroline expressed congratulations and well-wishes. They discussed the importance of cherishing family moments and finding happiness in them. They both agreed that family is everything.",
+      "session_4_summary": "Caroline and Melanie catch up after a long time. Caroline shows Melanie her special necklace, which was a gift from her grandmother in Sweden and represents love, faith, and strength. Melanie admires it and asks if Caroline has any other treasured items. Caroline mentions a hand-painted bowl made by a friend on her 18th birthday, which reminds her of art and self-expression. Melanie shares that she recently went camping with her family and had a great time exploring nature and bonding with her kids. They discuss the importance of family moments. Caroline reveals that she is looking into a career in counseling and mental health, specifically wanting to work with trans people. She attended an LGBTQ+ counseling workshop and found it enlightening. Melanie praises Caroline for her dedication and asks about her motivation to pursue counseling. Caroline shares how her own journey and the support she received inspired her to help others. Melanie commends Caroline's hard work and passion. Caroline expresses gratitude for Melanie's kind words, and Melanie congratulates Caroline for pursuing what she cares about.",
+      "session_5_summary": "Caroline had recently attended an LGBTQ+ pride parade and felt a sense of belonging and community. This experience inspired her to use her own story to help others, possibly through counseling or mental health work. Melanie, in turn, shared that she had recently signed up for a pottery class as a way to express herself and find calmness. The two discussed their creative endeavors, with Melanie showing Caroline a bowl she had made in her class. Caroline praised Melanie's work and expressed her excitement for the upcoming transgender conference she would be attending. Melanie wished her a great time at the conference and encouraged her to have fun and stay safe.",
+      "session_6_summary": "Caroline and Melanie caught up with each other at 8:18 pm on 6 July, 2023. Caroline shared that since their last chat, she has been exploring counseling or mental health work because she is passionate about helping people. Melanie praised Caroline for following her dreams. Melanie mentioned that she recently took her kids to the museum and enjoyed watching their excitement. Caroline was curious about what had them so excited, and Melanie explained that they loved the dinosaur exhibit. Caroline mentioned that she is creating a library for future kids and looks forward to reading to them. Melanie asked about the books she has in her library, and Caroline mentioned classics, stories from different cultures, and educational books. Melanie shared that her favorite book from childhood was \"Charlotte's Web,\" and Caroline agreed that it showed the importance of friendship and compassion. Caroline mentioned that her friends and family have been a great support system during her transition. Melanie praised Caroline for having people who support her and shared a photo of her family camping at the beach.",
+      "session_7_summary": "Caroline and Melanie had a conversation at 4:33 pm on 12 July, 2023. Caroline talked about attending an LGBTQ conference recently, where she felt accepted and connected with others who have similar experiences. She expressed her gratitude for the LGBTQ community and her desire to fight for trans rights. Melanie praised Caroline for her drive to make a difference and asked about her plan to contribute. Caroline mentioned that she is looking into counseling and mental health jobs, as she wants to provide support for others. Melanie commended Caroline for her inspiring goal and mentioned a book she read that reminds her to pursue her dreams. They discussed the power of books, and Caroline recommended \"Becoming Nicole\" by Amy Ellis Nutt, which had a positive impact on her own life. She mentioned that the book taught her about self-acceptance and finding support. Melanie agreed and added that pets also bring joy and comfort. They talked about their own pets and shared pictures. Melanie mentioned that she has been running more to destress and clear her mind. Caroline encouraged her to keep it up and take care of her mental health. Melanie expressed her gratitude for the improvements in her mental health.",
+      "session_8_summary": "Caroline and Melanie spoke at 1:51 pm on 15 July, 2023. Melanie mentioned that she took her kids to a pottery workshop and they all made their own pots. Caroline commented on how cute the cup that the kids made was and how she loved seeing kids express their personalities through art. Melanie also mentioned that she and the kids enjoy painting together, particularly nature-inspired paintings. Caroline admired their latest painting and Melanie mentioned that they found lovely flowers to paint. Caroline then shared that she attended a council meeting for adoption, which inspired her to adopt in the future. Melanie complimented a photo of a blue vase that Caroline shared and they discussed the meanings of flowers. Melanie mentioned that flowers remind her of her wedding and Caroline expressed regret for not knowing Melanie back then. Melanie said that her wedding day was full of love and joy and her favorite part was marrying her partner. Caroline then shared a special memory of attending a pride parade and how accepting and happy she felt. They discussed the importance of a supportive community. Caroline mentioned that the best part was realizing she could be herself without fear and having the courage to transition. Melanie expressed admiration for Caroline's courage and the importance of finding peace. Melanie mentioned that her family has been supportive during her move. Caroline commented on",
+      "session_9_summary": "Caroline has joined a mentorship program for LGBTQ youth, which she finds rewarding. She has been supporting a transgender teen and they had a great time at an LGBT pride event. Caroline is also preparing for an LGBTQ art show next month. Melanie thinks Caroline's painting for the art show is awesome and asks what inspired her. Caroline explains that she painted it after visiting an LGBTQ center and wanted to capture unity and strength. Meanwhile, Melanie and her kids have finished another painting.",
+      "session_10_summary": "Caroline and Melanie had a conversation at 8:56 pm on 20 July, 2023. Caroline told Melanie that she recently joined a new LGBTQ activist group and is enjoying making a difference. Melanie expressed her happiness for Caroline and wanted to know more about the group. Caroline explained that the group, \"Connected LGBTQ Activists,\" is focused on positive changes and supporting each other. Melanie praised the group and asked if Caroline has participated in any events or campaigns. Caroline mentioned a recent pride parade in their city and how it was a powerful reminder of the fight for equality. Melanie shared that she recently went to the beach with her kids, which they thoroughly enjoyed. Caroline inquired about other summer traditions, and Melanie mentioned their family camping trip as the highlight of their summer. She recalled witnessing the Perseid meteor shower and how it made her feel in awe of the universe. Caroline asked about the experience, and Melanie described it as breathtaking, making her appreciate life. Melanie then shared another special memory of her youngest child taking her first steps. Caroline found it sweet and mentioned that such milestones remind us of the special bonds we have. Melanie agreed and expressed gratitude for her family. Caroline praised Melanie for having an awesome family. Melanie thanked Caroline and expressed her happiness for having a",
+      "session_11_summary": "On August 14, 2023, at 2:24 pm, Melanie and Caroline had a conversation. Melanie shared that she had a great time at a concert celebrating her daughter's birthday, while Caroline attended an advocacy event that focused on love and support. Melanie asked Caroline about her experience at the pride parade, to which Caroline responded by expressing her pride in being part of the LGBTQ community and fighting for equality. Melanie then shared a picture from the concert and discussed the importance of creating a loving and inclusive environment for their kids. Caroline mentioned that she incorporates inclusivity and diversity in her artwork and uses it to advocate for acceptance of the LGBTQ+ community. Melanie praised Caroline's art and asked about its main message, to which Caroline replied that her art is about expressing her trans experience and helping people understand the trans community. Melanie requested to see another painting, and Caroline shared one called \"Embracing Identity,\" which represents self-acceptance and love. Caroline explained that art has helped her in her own self-discovery and acceptance journey. Melanie acknowledged the healing power of art and thanked Caroline for sharing her work. They ended the conversation by inviting each other to reach out anytime.",
+      "session_12_summary": "Caroline tells Melanie about a negative experience she had with religious conservatives while hiking, which reminds her of the work still needed for LGBTQ rights. She expresses gratitude for the support and acceptance she has from those around her. Melanie sympathizes with Caroline and shows her a picture of a pottery project she recently finished. Caroline expresses interest in seeing the picture and compliments Melanie's work. Melanie explains that the colors and patterns were inspired by her love for them and how painting helps her express her feelings. Caroline praises Melanie's creativity and passion. Melanie expresses her deep connection to art and how it brings her happiness and fulfillment. Caroline agrees that surrounding oneself with things that bring joy is important. They both agree that finding happiness is key in life. They express appreciation for each other's friendship and support. They reminisce about a fun time at a Pride fest and discuss plans for a family outing or a special trip just for the two of them. They agree to plan something special and look forward to making more memories together.",
+      "session_13_summary": "Caroline shared with Melanie that she applied to adoption agencies and received help from an adoption assistance group. Melanie congratulated Caroline and asked about her pets. Caroline mentioned her guinea pig named Oscar. Melanie shared that she had another cat named Bailey and showed Caroline a picture of her cat Oliver. Caroline shared a picture of Oscar eating parsley. Melanie mentioned that Oliver hid his bone in her slipper. Caroline reminisced about horseback riding with her dad and shared that she loves horses. Melanie showed Caroline a horse painting she did. Caroline shared a self-portrait she recently made, mentioning how painting helps her explore her identity. Melanie agreed and asked what else helps her. Caroline mentioned having supportive people and promoting LGBTQ rights. Melanie commended Caroline for her care and wished her the best on her adoption journey. They said goodbye and Melanie offered her support.",
+      "session_14_summary": "Caroline tells Melanie that she went hiking last week and got into a bad situation with some people. She tried to apologize to them. Melanie is supportive and says that it takes a lot of courage and maturity to apologize. Melanie shows Caroline a pottery plate she made and Caroline compliments her on it. Melanie says that pottery is relaxing and creative. Caroline says that she has been busy painting and shows Melanie a painting of a sunset that she recently finished. Melanie compliments the painting and Caroline explains that she was inspired by a visit to the beach. Melanie says that she can feel the serenity of the beach in the painting. They discuss how art can connect people and Melanie mentions a volunteering experience at a homeless shelter. Caroline praises Melanie for her volunteering efforts. Melanie asks Caroline about her decision to transition and join the transgender community. Caroline explains that finding a supportive community has meant a lot to her and shows Melanie a mural that she created, explaining its symbolism. Melanie praises Caroline's courage as a trans person. Melanie asks Caroline if she has made any more art and Caroline shows her a stained glass window that she made for a local church. They discuss the inspiration behind the window and Melanie compliments Caroline on her artistry. Caroline shows Melanie a picture of a rainbow sidewalk that she found in her neighborhood",
+      "session_15_summary": "Caroline and Melanie had a conversation at 3:19 pm on 28 August, 2023. Melanie had taken her kids to a park and enjoyed seeing them have fun outdoors. Caroline had been volunteering at an LGBTQ+ youth center and found it gratifying and fulfilling to support and guide the young people there. Melanie asked Caroline about her experience at the youth center and Caroline shared that connecting with the young folks and sharing her story had been meaningful and made her feel like she could make a difference. Caroline expressed her dedication to continuing volunteering at the youth center and mentioned that they were planning a talent show for the kids. Melanie expressed her excitement and support for Caroline's dedication to helping others. They also briefly discussed a band Melanie saw and Caroline spoke about her love for music and playing the guitar. They shared their favorite songs and agreed on the power of music to inspire and uplift.",
+      "session_16_summary": "Caroline and Melanie were chatting at 12:09 am on 13 September, 2023. Caroline told Melanie about her biking trip with friends and sent her a stunning picture. Melanie complimented the picture and shared her own experience of camping with her kids. They both agreed that being in nature was refreshing for the soul. Melanie asked Caroline about her upcoming plans. Caroline expressed how excited she was about her work volunteering for the LGBTQ+ community and how it inspired her to create art. Melanie admired Caroline's art and shared her own love for painting and pottery. They talked about the therapeutic aspect of art and how it helped them express their feelings. Caroline showed Melanie a painting she made about her journey as a trans woman. Melanie was impressed and proud of Caroline's progress. Caroline spoke about the changes in her relationships and how she was happier being around accepting and loving people. Melanie shared a picture from a caf\u00e9 they visited and assured Caroline that everything was fine despite the serious sign. They ended their conversation by celebrating the joyful moments in life.",
+      "session_17_summary": "Caroline reached out to her friend Melanie to share her excitement about her decision to adopt and become a mother. Melanie mentioned that she knew someone who had successfully adopted. Caroline gave Melanie some advice on how to get started with the adoption process, emphasizing the importance of research and emotional preparation. Melanie mentioned that she had recently experienced a setback due to an injury, but had found solace in reading and painting. Caroline showed interest in Melanie's paintings, and shared her own recent venture into abstract art. They discussed the emotions behind their artwork and the therapeutic nature of self-expression. Caroline also mentioned attending a poetry reading that celebrated transgender identities, which inspired her to create her own art. Melanie praised Caroline's artwork and they affirmed the importance of staying true to oneself and embracing personal growth and exploration.",
+      "session_18_summary": "Melanie and Caroline are discussing a recent road trip on October 20, 2023. Melanie mentions that her son got into an accident, but fortunately, he is okay. She reflects on the importance of cherishing family and how they enjoyed their time at the Grand Canyon. Caroline acknowledges the resilience of children and the support that loved ones provide during tough times. Melanie expresses her gratitude for her family, who are her motivation and support. They also discuss the benefits of spending time in nature and how it helps them reset and recharge. Melanie shares that camping with her family brings peace and serenity and allows them to bond. Caroline compliments Melanie on the quality time she spends with her family and remarks on the priceless nature of these experiences.",
+      "session_19_summary": "Caroline tells Melanie that she passed the adoption agency interviews last Friday and is excited about the progress she's making towards her goal of having a family. Melanie congratulates her and shows her some figurines that remind her of family love. Caroline explains that she wants to build her own family and provide a home for children in need, as a way of giving back and showing love and acceptance. Melanie agrees that everyone deserves love and acceptance and admires Caroline's passion for helping these kids. Caroline shares that finding self-acceptance was a long process for her, but now she's ready to offer love and support to those who need it. Melanie praises Caroline for her strength and inspiration. Caroline credits her friends, family, and role models for helping her find acceptance and wants to pass that same support to others. Melanie tells Caroline that she is happy for her and finds her journey inspiring. Caroline expresses gratitude for the support she's received and considers it a gift to be able to share her journey and help others. Melanie agrees that it's important to be there for each other. Caroline emphasizes the importance of being oneself and living honestly, as it brings freedom and contentment. Both friends express their agreement and appreciation for the support they've received in being true to themselves."
+    },
+    "sample_id": "conv-26"
+  }
+]
