@@ -500,10 +500,21 @@ impl axum::response::IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Internal(msg) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-            ),
+            AppError::Internal(msg) => {
+                // SEC: Never leak internal error details to the client.
+                // Log the full message server-side with a trace ID so
+                // operators can correlate, then return a generic message.
+                let trace_id = uuid::Uuid::new_v4().to_string();
+                tracing::error!(
+                    trace_id = %trace_id,
+                    "Internal server error: {}",
+                    msg,
+                );
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal server error (traceId: {})", trace_id),
+                )
+            }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
@@ -620,9 +631,29 @@ mod tests {
 
     #[test]
     fn app_error_internal_status() {
-        let err = AppError::Internal("test".into());
+        let err = AppError::Internal("secret db connection string".into());
         let resp = axum::response::IntoResponse::into_response(err);
         assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn app_error_internal_redacts_message() {
+        let err = AppError::Internal("secret db connection string".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // Must NOT contain the internal message
+        assert!(
+            !body_str.contains("secret db connection string"),
+            "internal error details leaked to client: {}",
+            body_str,
+        );
+        // Must contain a traceId for correlation
+        assert!(
+            body_str.contains("traceId"),
+            "response should contain traceId: {}",
+            body_str,
+        );
     }
 
     #[test]
