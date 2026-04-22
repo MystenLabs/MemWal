@@ -364,32 +364,76 @@ app.post("/seal/encrypt", async (req, res) => {
     }
 });
 
+/**
+ * ENG-1697: Resolve a SEAL SessionKey from the request headers.
+ *
+ * Preferred path: `x-seal-session` contains a base64-encoded
+ * `ExportedSessionKey` (built by the SDK on the client). We import it and
+ * skip touching any private-key material.
+ *
+ * Legacy path: `x-delegate-key` contains the raw delegate private key
+ * (hex or suiprivkey bech32). We reconstruct the keypair and build the
+ * SessionKey here — same behavior as before the migration. This path
+ * will be removed at EOL once all SDK clients emit `x-seal-session`.
+ *
+ * Returns `null` when neither header is present so the caller can emit a
+ * 400 with a clear error message.
+ */
+async function resolveSessionKey(
+    req: express.Request,
+    packageId: string,
+): Promise<SessionKey | null> {
+    const sessionHeader = req.headers["x-seal-session"] as string | undefined;
+    if (sessionHeader) {
+        const exportedJson = Buffer.from(sessionHeader, "base64").toString("utf8");
+        const exported = JSON.parse(exportedJson);
+        return SessionKey.import(exported, suiClient as any);
+    }
+
+    const privateKey = req.headers["x-delegate-key"] as string | undefined;
+    if (!privateKey) return null;
+
+    let keypair: Ed25519Keypair;
+    if (privateKey.startsWith("suiprivkey")) {
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        keypair = Ed25519Keypair.fromSecretKey(secretKey);
+    } else {
+        // LOW-12: Validate hex format before parsing to prevent injection
+        if (!/^[0-9a-fA-F]+$/.test(privateKey) || privateKey.length !== 64) {
+            throw new Error("privateKey must be 64-char hex string or suiprivkey bech32");
+        }
+        const keyBytes = Uint8Array.from(
+            privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)),
+        );
+        keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+    }
+    return await SessionKey.create({
+        address: keypair.getPublicKey().toSuiAddress(),
+        packageId,
+        ttlMin: 5,
+        signer: keypair,
+        suiClient: suiClient as any,
+    });
+}
+
 // ============================================================
 // POST /seal/decrypt
 // ============================================================
 app.post("/seal/decrypt", async (req, res) => {
     try {
         const { data, packageId, accountId } = req.body;
-        const privateKey = req.headers["x-delegate-key"] as string | undefined;
-        if (!data || !privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: data, packageId, accountId, or x-delegate-key header" });
+        if (!data || !packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
         }
 
-        // Decode delegate keypair — supports both bech32 (suiprivkey1...) and raw hex
-        let keypair: Ed25519Keypair;
-        if (privateKey.startsWith("suiprivkey")) {
-            const { secretKey } = decodeSuiPrivateKey(privateKey);
-            keypair = Ed25519Keypair.fromSecretKey(secretKey);
-        } else {
-            // LOW-12: Validate hex format before parsing to prevent injection
-            if (!/^[0-9a-fA-F]+$/.test(privateKey) || privateKey.length !== 64) {
-                return res.status(400).json({ error: "privateKey must be 64-char hex string or suiprivkey bech32" });
-            }
-            // Raw hex private key (32 bytes = 64 hex chars)
-            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
-            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // x-delegate-key supported during the deprecation window).
+        const sessionKey = await resolveSessionKey(req, packageId);
+        if (!sessionKey) {
+            return res.status(400).json({
+                error: "Missing credential: provide x-seal-session (preferred) or x-delegate-key header",
+            });
         }
-        const signerAddress = keypair.getPublicKey().toSuiAddress();
 
         // Parse encrypted object to get key ID
         const encryptedData = new Uint8Array(Buffer.from(data, "base64"));
@@ -400,15 +444,6 @@ app.post("/seal/decrypt", async (req, res) => {
         const idBytes = Array.from(
             Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
         );
-
-        // Create session key
-        const sessionKey = await SessionKey.create({
-            address: signerAddress,
-            packageId,
-            ttlMin: 5,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
 
         // Build seal_approve PTB — pass MemWalAccount (owned object) instead of AccountRegistry
         const tx = new Transaction();
@@ -455,7 +490,6 @@ app.post("/seal/decrypt", async (req, res) => {
 app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res) => {
     try {
         const { items, packageId, accountId } = req.body;
-        const privateKey = req.headers["x-delegate-key"] as string | undefined;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
@@ -465,20 +499,18 @@ app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res)
         if (items.length > 25) {
             return res.status(400).json({ error: "items array exceeds maximum of 25 elements" });
         }
-        if (!privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: packageId, accountId, or x-delegate-key header" });
+        if (!packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: packageId, accountId" });
         }
 
-        // Decode delegate keypair
-        let keypair: Ed25519Keypair;
-        if (privateKey.startsWith("suiprivkey")) {
-            const { secretKey } = decodeSuiPrivateKey(privateKey);
-            keypair = Ed25519Keypair.fromSecretKey(secretKey);
-        } else {
-            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
-            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // x-delegate-key supported during the deprecation window).
+        const sessionKey = await resolveSessionKey(req, packageId);
+        if (!sessionKey) {
+            return res.status(400).json({
+                error: "Missing credential: provide x-seal-session (preferred) or x-delegate-key header",
+            });
         }
-        const signerAddress = keypair.getPublicKey().toSuiAddress();
 
         // Parse all encrypted objects and collect unique SEAL IDs
         const parsedItems: { index: number; encryptedData: Uint8Array; fullId: string }[] = [];
@@ -500,15 +532,6 @@ app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res)
 
         // Collect all unique IDs
         const allIds = [...new Set(parsedItems.map(p => p.fullId))];
-
-        // Create ONE SessionKey
-        const sessionKey = await SessionKey.create({
-            address: signerAddress,
-            packageId,
-            ttlMin: 5,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
 
         // Build ONE PTB with seal_approve for ALL IDs
         const tx = new Transaction();
