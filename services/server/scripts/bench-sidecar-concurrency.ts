@@ -2,15 +2,15 @@
 /**
  * bench-sidecar-concurrency.ts — ENG-1405
  *
- * Concurrent stress-tester cho sidecar HTTP server.
- * Bắn N requests đồng thời vào từng endpoint để tìm giới hạn safe concurrency:
+ * Concurrent stress-tester for the sidecar HTTP server.
+ * Fires N concurrent requests at each endpoint to find safe concurrency limits:
  *
  *   Mode: seal-encrypt   → POST /seal/encrypt      (no Sui RPC, pure crypto)
  *   Mode: seal-decrypt   → POST /seal/decrypt       (SessionKey + Sui RPC + fetchKeys per req)
- *   Mode: decrypt-batch  → POST /seal/decrypt-batch (1 SessionKey cho nhiều items)
+ *   Mode: decrypt-batch  → POST /seal/decrypt-batch (1 SessionKey for multiple items)
  *
- * Chạy qua nhiều concurrency levels (ví dụ: 1,5,10,20,50,100) để thấy
- * latency tăng/cliff và failure rate khi Sui RPC bị throttle.
+ * Runs through multiple concurrency levels (e.g. 1,5,10,20,50,100) to observe
+ * latency increase/cliff and failure rate when Sui RPC gets throttled.
  *
  * Usage:
  *   npx tsx bench-sidecar-concurrency.ts \
@@ -21,17 +21,17 @@
  *     --requests-per-level 20 \
  *     --output          bench-sidecar.json
  *
- *   # Test decrypt (cần thêm real ciphertext):
+ *   # Test decrypt (requires real ciphertext):
  *   npx tsx bench-sidecar-concurrency.ts \
  *     --mode            seal-decrypt \
  *     --ciphertext-b64  <base64-of-real-SEAL-blob> \
- *     --delegate-key    <suiprivkey1... hoặc 64-hex> \
+ *     --delegate-key    <suiprivkey1... or 64-hex> \
  *     --package-id      0x... \
  *     --account-id      0x... \
  *     --concurrency-levels 1,5,10,20,50 \
  *     --requests-per-level 10
  *
- *   # Test decrypt-batch (1 SessionKey cho nhiều blobs):
+ *   # Test decrypt-batch (1 SessionKey for multiple blobs):
  *   npx tsx bench-sidecar-concurrency.ts \
  *     --mode            decrypt-batch \
  *     --ciphertext-b64  <base64> \
