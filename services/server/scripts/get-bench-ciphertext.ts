@@ -1,8 +1,8 @@
 #!/usr/bin/env npx tsx
 /**
  * get-bench-ciphertext.ts
- * Lấy 1 blob_id từ DB, download ciphertext từ Walrus aggregator,
- * in ra base64 để dùng với bench-sidecar-concurrency.ts
+ * Fetch a blob_id, download its ciphertext from the Walrus aggregator,
+ * and print base64 output for use with bench-sidecar-concurrency.ts
  */
 
 const WALRUS_AGGREGATOR = process.env.WALRUS_AGGREGATOR_URL ?? "https://aggregator.walrus-mainnet.walrus.space";
