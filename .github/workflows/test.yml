@@ -150,6 +150,22 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      - name: Setup Node (for TS sidecar auto-spawned by server)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install sidecar deps
+        working-directory: services/server/scripts
+        # Server boot spawns `npx tsx sidecar-server.ts` which imports express
+        # et al — those must be installed up-front or the spawn fails fast.
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -330,10 +346,25 @@ jobs:
         if: steps.sui-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$HOME/.local/bin"
+          TMPDIR="$(mktemp -d)"
+          cd "$TMPDIR"
           curl -fsSL \
             "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" \
-            | tar -xz -C "$HOME/.local/bin" sui
+            -o sui.tgz
+          # Archive ships every Sui binary at its root (./sui, ./sui-node, ...).
+          # Extracting the whole thing is simpler than pattern-matching and is
+          # robust across release layout changes.
+          tar -xzf sui.tgz
+          SUI_BIN="$(find . -maxdepth 2 -type f -name sui -perm -u+x | head -n1)"
+          if [ -z "$SUI_BIN" ]; then
+            echo "::error::sui binary not found in archive"
+            tar -tzf sui.tgz | head -100
+            exit 1
+          fi
+          cp "$SUI_BIN" "$HOME/.local/bin/sui"
           chmod +x "$HOME/.local/bin/sui"
+          cd /
+          rm -rf "$TMPDIR"
 
       - name: Add Sui to PATH
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
