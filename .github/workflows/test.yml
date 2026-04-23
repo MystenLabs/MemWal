@@ -132,6 +132,12 @@ jobs:
       SUI_NETWORK: testnet
       MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
+      # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start
+      # without it, and the server panics when the sidecar doesn't come up.
+      # Not a real secret; SEAL encrypt / Walrus upload paths aren't exercised
+      # by the CI-scoped tests, so the sidecar running in degraded mode is
+      # fine for /health + auth-contract checks.
+      SIDECAR_AUTH_TOKEN: ci-test-sidecar-token-not-for-production
 
     steps:
       - name: Checkout
