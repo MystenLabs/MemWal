@@ -7,13 +7,15 @@ mod sui;
 mod types;
 mod walrus;
 
-use axum::{middleware, routing::{get, post}, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
+use std::net::SocketAddr;
+use axum::http::{header, HeaderValue, Method};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use db::VectorDb;
-use types::{AppState, Config, KeyPool};
+use types::{AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_SIZE};
 
 #[tokio::main]
 async fn main() {
@@ -41,6 +43,10 @@ async fn main() {
         config.rate_limit.max_requests_per_delegate_key,
         config.rate_limit.max_storage_bytes / 1_048_576
     );
+    tracing::info!("  sponsor rate limit: {}/min, {}/hr per IP+sender",
+        config.sponsor_rate_limit.per_minute,
+        config.sponsor_rate_limit.per_hour,
+    );
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
@@ -58,7 +64,11 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    let http_client = reqwest::Client::new();
+    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
     let mut ready = false;
     for attempt in 1..=30 {
@@ -111,6 +121,20 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // ENG-1405: Walrus blob ciphertext cache — skips Walrus fetch on warm recall.
+    // `blob_id` is content-addressed (immutable), so cached bytes are always valid.
+    let blob_cache_size = std::env::var("BLOB_CACHE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_SIZE);
+    let blob_cache = std::sync::Mutex::new(
+        lru::LruCache::<String, Vec<u8>>::new(
+            std::num::NonZeroUsize::new(blob_cache_size)
+                .expect("BLOB_CACHE_SIZE must be > 0"),
+        ),
+    );
+    tracing::info!("  blob cache: {} slots (BLOB_CACHE_SIZE={})", blob_cache_size, blob_cache_size);
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -119,10 +143,28 @@ async fn main() {
         walrus_client,
         key_pool,
         redis,
+        fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        blob_cache,
+    });
+
+    // Spawn background task for cache eviction
+    let evict_state = state.clone();
+    tokio::spawn(async move {
+        // Run every hour
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            if let Err(e) = evict_state.db.evict_expired_delegate_keys().await {
+                tracing::error!("Background eviction failed: {}", e);
+            }
+        }
     });
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
+    // HIGH-13: 256 KiB covers the largest realistic JSON body (64 KiB plaintext
+    // + base64 overhead + JSON framing) while blocking abusive uploads before
+    // auth + rate-limit middleware even sees the request.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route("/api/recall", post(routes::recall))
@@ -141,19 +183,73 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,
+        ))
+        .layer(DefaultBodyLimit::max(256 * 1024));
+
+    // Sponsor routes — body limits + IP rate limit middleware
+    let sponsor_routes = Router::new()
+        .route(
+            "/sponsor",
+            post(routes::sponsor_proxy).layer(DefaultBodyLimit::max(10 * 1024)),
+        )
+        .route(
+            "/sponsor/execute",
+            post(routes::sponsor_execute_proxy).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::sponsor_rate_limit_middleware,
         ));
 
     // Public routes
+    // HIGH-13: /health accepts no body — cap at 16 KiB to reject oversized
+    // unauthenticated requests before they reach any handler.
     let public_routes = Router::new()
-        .route("/health", get(routes::health))
-        .route("/sponsor", post(routes::sponsor_proxy))
-        .route("/sponsor/execute", post(routes::sponsor_execute_proxy));
+        .route("/health", get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)))
+        .merge(sponsor_routes);
+
+    // CORS — restrict to configured origins.
+    // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
+    // which blocks browser cross-origin requests. Set ALLOWED_ORIGINS to allow
+    // specific origins (e.g. "http://localhost:3000,https://memwal.ai").
+    let cors = {
+        let origins: Vec<HeaderValue> = config
+            .allowed_origins
+            .split(',')
+            .filter_map(|s| {
+                let s = s.trim();
+                if s.is_empty() { return None; }
+                s.parse::<HeaderValue>().ok()
+            })
+            .collect();
+
+        if origins.is_empty() {
+            tracing::warn!("ALLOWED_ORIGINS not set — CORS is deny-all (browsers blocked). Set ALLOWED_ORIGINS for frontend access.");
+            CorsLayer::new() // deny-all: no Allow-Origin header emitted
+        } else {
+            tracing::info!("  CORS origins: {}", config.allowed_origins);
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::AUTHORIZATION,
+                    // SDK auth headers (required for Ed25519 signed requests)
+                    "x-public-key".parse::<header::HeaderName>().unwrap(),
+                    "x-signature".parse::<header::HeaderName>().unwrap(),
+                    "x-timestamp".parse::<header::HeaderName>().unwrap(),
+                    "x-nonce".parse::<header::HeaderName>().unwrap(),
+                    "x-account-id".parse::<header::HeaderName>().unwrap(),
+                    "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+                ])
+        }
+    };
 
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     // Start server
@@ -172,7 +268,7 @@ async fn main() {
         tracing::info!("shutting down...");
     };
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown)
         .await
         .expect("Server failed");

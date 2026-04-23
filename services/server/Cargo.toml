@@ -49,3 +49,7 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
+percent-encoding = "2"
+
+# In-memory LRU cache (Walrus blob ciphertext cache for warm recall path)
+lru = "0.12"

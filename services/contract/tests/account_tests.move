@@ -610,4 +610,116 @@ module memwal::account_tests {
 
         scenario.end();
     }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENotOwner)]
+    fun test_non_owner_cannot_remove_key() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OTHER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            account::remove_delegate_key(&mut account, pk, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENotOwner)]
+    fun test_non_owner_cannot_reactivate() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::deactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.next_tx(OTHER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            account::reactivate_account(&mut account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ETooManyDelegateKeys)]
+    fun test_add_key_max_limit_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let clock = clock::create_for_testing(scenario.ctx());
+            let mut i = 0;
+            while (i <= 20) {
+                let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                pk.push_back((i as u8));
+                pk.push_back((i as u8));
+                account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
+                i = i + 1;
+            };
+
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::ENoAccess)]
+    fun test_seal_approve_wrong_id_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let account = scenario.take_shared<MemWalAccount>();
+            let wrong_bytes = sui::bcs::to_bytes(&OTHER); // using OTHER's id
+            account::seal_approve(wrong_bytes, &account, scenario.ctx());
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
+    #[test]
+    fun test_is_delegate_address_not_found() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            account::add_delegate_key(
+                &mut account,
+                pk,
+                DELEGATE_ADDR,
+                string::utf8(b"Server Key"),
+                &clock,
+                scenario.ctx(),
+            );
+
+            // Check an address that is not DELEGATE_ADDR
+            assert!(!account.is_delegate_address(@0x1111));
+            
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
 }

@@ -98,6 +98,7 @@ module memwal::account {
     public struct DelegateKeyRemoved has copy, drop {
         account_id: ID,
         public_key: vector<u8>,
+        sui_address: address,
     }
 
     public struct AccountDeactivated has copy, drop {
@@ -236,11 +237,13 @@ module memwal::account {
 
         // Find and remove the key
         let mut found = false;
+        let mut sui_address = @0x0;
         let mut i = 0;
         let len = account.delegate_keys.length();
 
         while (i < len) {
             if (account.delegate_keys[i].public_key == public_key) {
+                sui_address = account.delegate_keys[i].sui_address;
                 account.delegate_keys.remove(i);
                 found = true;
                 break
@@ -253,6 +256,7 @@ module memwal::account {
         event::emit(DelegateKeyRemoved {
             account_id: object::id(account),
             public_key,
+            sui_address,
         });
     }
 
