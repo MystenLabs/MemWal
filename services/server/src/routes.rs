@@ -161,39 +161,23 @@ pub async fn remember(
         namespace
     );
 
-    // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
+    // Step 1: Embed text + SEAL encrypt
+    // ENG-1700: encrypt is now local (~1ms), no need for concurrency with embed
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
-    let encrypt_fut = seal::seal_encrypt(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        text.as_bytes(),
-        owner,
-        &state.config.package_id,
-    );
-    let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-    let vector = vector_result?;
-    let encrypted = encrypted_result?;
+    let encrypted = seal::native_seal_encrypt(&state.seal_state, text.as_bytes(), owner)?;
+    let vector = embed_fut.await?;
 
     // LOW-11: Quota is stored using encrypted blob size (blob_size_bytes), so check
     // quota against ciphertext length — not plaintext — to avoid under-counting
     // the SEAL framing overhead that is actually persisted.
     rate_limit::check_storage_quota(&state, owner, encrypted.len() as i64).await?;
 
-    // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let key_index = state.key_pool.next_index()
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
+    // Step 2: Upload encrypted blob → Walrus (native SDK)
     let upload_result = walrus::upload_blob(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.walrus_client,
         &encrypted,
         50,
         owner,
-        key_index,
-        namespace,
-        &state.config.package_id,
-        Some(&auth.public_key),
     )
     .await?;
     let blob_id = upload_result.blob_id;
@@ -278,14 +262,14 @@ pub async fn recall(
         .map(|hit| {
             let walrus_client = &state.walrus_client;
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
+            let seal_state = &state.seal_state;
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
             let owner_for_cleanup = owner.clone();
+            let sui_rpc_url = state.config.sui_rpc_url.clone();
             async move {
                 // Download encrypted blob from Walrus (native Rust)
                 let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
@@ -301,15 +285,15 @@ pub async fn recall(
                         return None;
                     }
                 };
-                // Decrypt using SEAL (via sidecar HTTP)
-                match seal::seal_decrypt(
+                // Decrypt using SEAL (native Rust — ENG-1700)
+                match seal::native_seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
+                    seal_state,
                     &encrypted_data,
                     &credential,
                     &package_id,
                     &account_id,
+                    &sui_rpc_url,
                 )
                 .await
                 {
@@ -411,20 +395,11 @@ pub async fn remember_manual(
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
     // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
-    let key_index = state.key_pool.next_index()
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
-
     let upload = walrus::upload_blob(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.walrus_client,
         &encrypted_bytes,
         50,
         owner,
-        key_index,
-        namespace,
-        &state.config.package_id,
-        Some(&auth.public_key),
     )
     .await?;
 
@@ -565,37 +540,21 @@ pub async fn analyze(
         let state = Arc::clone(&state);
         let owner = owner.clone();
         let fact_text = fact_text.clone();
-        let auth_pubkey = auth_pubkey_base.clone();
-        // Pick the next key in round-robin order at task construction time.
+        let _auth_pubkey = auth_pubkey_base.clone();
         // Convert to owned String *before* async move so we don't borrow-then-move `state`.
-        let key_index: Result<usize, AppError> = state.key_pool.next_index()
-            .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()));
         let namespace = namespace.clone();
         async move {
-            let key_index = key_index?;
-            // Embed + SEAL encrypt concurrently (independent operations)
+            // Embed + SEAL encrypt (encrypt is now local ~1ms)
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
-            let encrypt_fut = seal::seal_encrypt(
-                &state.http_client, &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
-                fact_text.as_bytes(), &owner, &state.config.package_id,
-            );
-            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-            let vector = vector_result?;
-            let encrypted = encrypted_result?;
+            let encrypted = seal::native_seal_encrypt(&state.seal_state, fact_text.as_bytes(), &owner)?;
+            let vector = embed_fut.await?;
 
-            // Upload to Walrus (via sidecar HTTP)
+            // Upload to Walrus (native SDK)
             let upload_result = walrus::upload_blob(
-                &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
+                &state.walrus_client,
                 &encrypted,
                 50,
                 &owner,
-                key_index,
-                &namespace,
-                &state.config.package_id,
-                Some(&auth_pubkey),
             ).await?;
 
             // Store in Vector DB with namespace
@@ -1134,14 +1093,14 @@ pub async fn ask(
         .map(|hit| {
             let walrus_client = &state.walrus_client;
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
+            let seal_state = &state.seal_state;
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
             let owner_for_cleanup = owner.clone();
+            let sui_rpc_url = state.config.sui_rpc_url.clone();
             async move {
                 let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                     Ok(data) => data,
@@ -1156,14 +1115,14 @@ pub async fn ask(
                         return None;
                     }
                 };
-                match seal::seal_decrypt(
+                match seal::native_seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
+                    seal_state,
                     &encrypted_data,
                     &credential,
                     &package_id,
                     &account_id,
+                    &sui_rpc_url,
                 )
                 .await
                 {
@@ -1369,8 +1328,8 @@ pub async fn restore(
     );
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.config.sui_rpc_url,
+        &state.config.walrus_package_id,
         owner,
         Some(namespace),
         Some(&state.config.package_id),
@@ -1495,8 +1454,7 @@ pub async fn restore(
     let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
+            let seal_state = &state.seal_state;
             let credential = credential.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids
@@ -1504,15 +1462,16 @@ pub async fn restore(
                 .cloned()
                 .unwrap_or_else(|| state.config.package_id.clone());
             let account_id = auth.account_id.clone();
+            let sui_rpc_url = state.config.sui_rpc_url.clone();
             async move {
-                match seal::seal_decrypt(
+                match seal::native_seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
+                    seal_state,
                     &encrypted_data,
                     &credential,
                     &package_id,
                     &account_id,
+                    &sui_rpc_url,
                 )
                 .await
                 {
@@ -1659,7 +1618,7 @@ fn validate_digest(s: &str) -> bool {
     })
 }
 
-/// POST /sponsor — proxy to sidecar POST /sponsor
+/// POST /sponsor — direct Enoki API call (replaces sidecar proxy)
 pub async fn sponsor_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -1679,7 +1638,6 @@ pub async fn sponsor_proxy(
     }
 
     // Per-sender rate limit — second axis that a distributed IP attack cannot bypass.
-    // Runs after validation so we only count well-formed requests against the sender.
     {
         let config = &state.config.sponsor_rate_limit;
         match rate_limit::check_sender_rate_limit(
@@ -1706,7 +1664,6 @@ pub async fn sponsor_proxy(
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
             Err(_) => {
-                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
                 tracing::error!("sponsor sender rate limit unavailable for sponsor_proxy, denying request");
                 return Ok(json_error_response(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1716,41 +1673,45 @@ pub async fn sponsor_proxy(
         }
     }
 
-    // Re-serialise only validated fields before forwarding.
-    let forwarded = serde_json::json!({
-        "sender": req.sender,
+    let enoki_api_key = state.config.enoki_api_key.as_deref()
+        .ok_or_else(|| AppError::Internal("ENOKI_API_KEY not configured".into()))?;
+
+    let enoki_body = serde_json::json!({
+        "network": state.config.sui_network,
         "transactionBlockKindBytes": req.transaction_block_kind_bytes,
+        "sender": req.sender,
     });
 
-    let url = format!("{}/sponsor", state.config.sidecar_url);
-    let mut req = state
+    let url = format!("{}/transaction-blocks/sponsor", state.config.enoki_api_url);
+    let resp = state
         .http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        .header("Authorization", format!("Bearer {}", enoki_api_key))
+        .json(&enoki_body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Enoki sponsor request failed: {}", e)))?;
 
     let upstream_status = resp.status();
     let resp_body = resp
         .bytes()
         .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy read failed: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Enoki sponsor read failed: {}", e)))?;
 
     if upstream_status.is_success() {
+        // Enoki wraps response in { data: { bytes, digest } } — extract .data
+        let envelope: serde_json::Value = serde_json::from_slice(&resp_body)
+            .map_err(|e| AppError::Internal(format!("Enoki sponsor parse failed: {}", e)))?;
+        let data = envelope.get("data").cloned().unwrap_or(envelope);
         Ok(Response::builder()
-            .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
+            .status(axum::http::StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
+            .body(Body::from(serde_json::to_vec(&data).unwrap()))
             .unwrap())
     } else {
         tracing::error!(
-            "sponsor upstream error {}: {}",
+            "enoki sponsor error {}: {}",
             upstream_status,
             String::from_utf8_lossy(&resp_body)
         );
@@ -1759,7 +1720,7 @@ pub async fn sponsor_proxy(
     }
 }
 
-/// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
+/// POST /sponsor/execute — direct Enoki API call (replaces sidecar proxy)
 pub async fn sponsor_execute_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -1777,8 +1738,7 @@ pub async fn sponsor_execute_proxy(
         return Err(AppError::BadRequest("signature has unexpected length".into()));
     }
 
-    // Per-sender rate limit — same axis as /sponsor.
-    // `sender` is optional on this endpoint; when absent the per-IP limit (middleware) is the only gate.
+    // Per-sender rate limit
     if let Some(ref sender) = req.sender {
         if !validate_sui_address(sender) {
             return Err(AppError::BadRequest("Invalid sender address".into()));
@@ -1795,7 +1755,6 @@ pub async fn sponsor_execute_proxy(
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
             Err(_) => {
-                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
                 tracing::error!("sponsor/execute sender rate limit unavailable, denying request");
                 return Ok(json_error_response(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1805,40 +1764,49 @@ pub async fn sponsor_execute_proxy(
         }
     }
 
-    let forwarded = serde_json::json!({
+    let enoki_api_key = state.config.enoki_api_key.as_deref()
+        .ok_or_else(|| AppError::Internal("ENOKI_API_KEY not configured".into()))?;
+
+    let enoki_body = serde_json::json!({
         "digest": req.digest,
         "signature": req.signature,
     });
 
-    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state
+    // URL-encode the digest for the path parameter
+    let encoded_digest = urlencoding::encode(&req.digest);
+    let url = format!(
+        "{}/transaction-blocks/sponsor/{}",
+        state.config.enoki_api_url, encoded_digest
+    );
+    let resp = state
         .http_client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
+        .header("Authorization", format!("Bearer {}", enoki_api_key))
+        .json(&enoki_body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Enoki sponsor/execute failed: {}", e)))?;
 
     let upstream_status = resp.status();
     let resp_body = resp
         .bytes()
         .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Enoki sponsor/execute read failed: {}", e)))?;
 
     if upstream_status.is_success() {
+        // Enoki wraps response in { data: { digest } } — extract .data
+        let envelope: serde_json::Value = serde_json::from_slice(&resp_body)
+            .map_err(|e| AppError::Internal(format!("Enoki execute parse failed: {}", e)))?;
+        let data = envelope.get("data").cloned().unwrap_or(envelope);
         Ok(Response::builder()
-            .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
+            .status(axum::http::StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
+            .body(Body::from(serde_json::to_vec(&data).unwrap()))
             .unwrap())
     } else {
         tracing::error!(
-            "sponsor/execute upstream error {}: {}",
+            "enoki sponsor/execute error {}: {}",
             upstream_status,
             String::from_utf8_lossy(&resp_body)
         );

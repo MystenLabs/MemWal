@@ -48,48 +48,11 @@ async fn main() {
         config.sponsor_rate_limit.per_hour,
     );
 
-    // Start TS sidecar HTTP server (SEAL + Walrus operations)
-    let sidecar_url = config.sidecar_url.clone();
-    tracing::info!("  sidecar: starting at {}", sidecar_url);
-    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
-    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    let mut sidecar_child = tokio::process::Command::new("npx")
-        .args(["tsx", "sidecar-server.ts"])
-        .current_dir(&scripts_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("Failed to start TS sidecar. Is Node.js installed?");
-
-    // Wait for sidecar to be ready (health check with retry)
     // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
-    let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
-                }
-            }
-        }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
-        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
-    }
 
     // Initialize database (PostgreSQL + pgvector)
     let db = VectorDb::new(&config.database_url)
@@ -121,6 +84,28 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // ENG-1700: Initialize SEAL state (fetch key server public keys)
+    let seal_state = if config.seal_key_servers.is_empty() {
+        tracing::warn!("SEAL_KEY_SERVERS not set — native SEAL encrypt/decrypt disabled");
+        // Create a minimal SealState that will fail gracefully on use
+        seal::SealState {
+            key_servers: vec![],
+            threshold: config.seal_threshold,
+            package_id: config.package_id.clone(),
+        }
+    } else {
+        seal::SealState::init(
+            &http_client,
+            &config.seal_key_servers,
+            config.seal_threshold,
+            &config.package_id,
+            &config.sui_network,
+        )
+        .await
+        .expect("Failed to initialize SEAL state — check SEAL_KEY_SERVERS and key server availability")
+    };
+    tracing::info!("  SEAL: {} key servers, threshold={}", seal_state.key_servers.len(), seal_state.threshold);
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -130,6 +115,7 @@ async fn main() {
         key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        seal_state,
     });
 
     // Spawn background task for cache eviction
@@ -253,7 +239,7 @@ async fn main() {
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
-    // Graceful shutdown: kill sidecar when server stops
+    // Graceful shutdown
     let shutdown = async {
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutting down...");
@@ -263,8 +249,4 @@ async fn main() {
         .with_graceful_shutdown(shutdown)
         .await
         .expect("Server failed");
-
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
 }

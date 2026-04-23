@@ -19,8 +19,13 @@ ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
-# (no Rust crypto deps needed)
+# SEAL encryption (native Rust — ENG-1700)
+seal-sdk = { git = "https://github.com/MystenLabs/seal.git", package = "seal-sdk" }
+seal-crypto = { git = "https://github.com/MystenLabs/seal.git", package = "crypto" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c" }
+bcs = "0.1.6"
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -50,3 +55,5 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 percent-encoding = "2"
+num-bigint = "0.4"
+urlencoding = "2"

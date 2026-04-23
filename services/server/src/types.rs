@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
+use crate::seal::SealState;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -15,11 +16,14 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub walrus_client: walrus_rs::WalrusClient,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads
+    #[allow(dead_code)]
     pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    /// ENG-1700: Native SEAL state (key servers + cached public keys)
+    pub seal_state: SealState,
 }
 
 // ============================================================
@@ -53,6 +57,7 @@ impl KeyPool {
     }
 
     /// Returns the pool index for the next key in round-robin order.
+    #[allow(dead_code)]
     pub fn next_index(&self) -> Option<usize> {
         if self.keys.is_empty() {
             return None;
@@ -91,16 +96,22 @@ pub struct Config {
     pub sui_private_keys: Vec<String>,
     pub package_id: String,
     pub registry_id: String,
-    /// URL of the SEAL/Walrus TS sidecar HTTP server
-    pub sidecar_url: String,
-    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
-    pub sidecar_secret: Option<String>,
+    /// Enoki API key for transaction sponsorship
+    pub enoki_api_key: Option<String>,
+    /// Enoki API base URL (default: https://api.enoki.mystenlabs.com/v1)
+    pub enoki_api_url: String,
+    /// Walrus package ID for on-chain blob queries (e.g. 0x7e12d...::blob::Blob)
+    pub walrus_package_id: String,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
+    /// ENG-1700: SEAL key server object IDs (comma-separated)
+    pub seal_key_servers: Vec<String>,
+    /// ENG-1700: SEAL threshold (number of key servers required for decrypt)
+    pub seal_threshold: u8,
 }
 
 impl Config {
@@ -149,13 +160,31 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
-            sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            enoki_api_key: std::env::var("ENOKI_API_KEY").ok(),
+            enoki_api_url: std::env::var("ENOKI_API_URL")
+                .unwrap_or_else(|_| "https://api.enoki.mystenlabs.com/v1".to_string()),
+            walrus_package_id: std::env::var("WALRUS_PACKAGE_ID")
+                .unwrap_or_else(|_| {
+                    match network.as_str() {
+                        "testnet" => "0xd847046409e3db00c83dd55a5ba2970660d0757e6389e2259a65cbb53da8b78a".to_string(),
+                        _ => "0xfdc88f7d97ee89e3cc48e1e1b9eaadce6c2edd36bc5b31f1f3e6f06e93bb47b4".to_string(),
+                    }
+                }),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
+            seal_key_servers: std::env::var("SEAL_KEY_SERVERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            seal_threshold: std::env::var("SEAL_THRESHOLD")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .expect("SEAL_THRESHOLD must be a number"),
         }
     }
 }
@@ -523,16 +552,6 @@ impl axum::response::IntoResponse for AppError {
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
     }
-}
-
-// ============================================================
-// Sidecar Types (shared by seal.rs + walrus.rs)
-// ============================================================
-
-/// Error response from the TS sidecar HTTP server
-#[derive(Debug, Deserialize)]
-pub struct SidecarError {
-    pub error: String,
 }
 
 // ============================================================
