@@ -41,7 +41,7 @@ import type {
     RecallManualResult,
     RestoreResult,
 } from "./types.js";
-import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
+import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -67,9 +67,12 @@ export class MemWal {
     private accountId: string;
 
     private constructor(config: MemWalConfig) {
-        this.privateKey = hexToBytes(config.key);
+        this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         this.accountId = config.accountId;
-        this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
+        // LOW-22: default to HTTPS for production usage; normalizeServerUrl
+        // warns (does not throw) if a user passes plain http:// for a
+        // non-localhost host.
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://api.memwal.com");
         this.namespace = config.namespace ?? "default";
     }
 
@@ -77,10 +80,23 @@ export class MemWal {
      * Create a new MemWal client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
-     * @param config.serverUrl - Server URL (default: http://localhost:8000)
+     * @param config.serverUrl - Server URL (default: https://api.memwal.com)
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
+    }
+
+    /**
+     * Securely wipe the private and public keys from memory.
+     * Prevents key extraction from V8 heap dumps.
+     */
+    destroy(): void {
+        if (this.privateKey) {
+            this.privateKey.fill(0);
+        }
+        if (this.publicKey) {
+            this.publicKey.fill(0);
+        }
     }
 
     // ============================================================
@@ -245,13 +261,27 @@ export class MemWal {
 
     /**
      * Check server health.
+     *
+     * INFO-7: The health endpoint is currently public/unsigned server-side,
+     * but we send the same signed-request envelope as every other call so
+     * that (a) the channel is authenticated whenever the server opts in, and
+     * (b) a MitM cannot trivially forge a "healthy" response for a client
+     * that has no way to tell. If the server ignores the signature headers
+     * on `/health`, this is still a harmless no-op.
      */
     async health(): Promise<HealthResult> {
-        const res = await fetch(`${this.serverUrl}/health`);
-        if (!res.ok) {
-            throw new Error(`Health check failed: ${res.status}`);
+        try {
+            return await this.signedRequest<HealthResult>("GET", "/health", {});
+        } catch (err) {
+            // Fall back to a plain GET for servers that reject bodies on GET /health.
+            const res = await fetch(`${this.serverUrl}/health`);
+            if (!res.ok) {
+                throw err instanceof Error
+                    ? err
+                    : new Error(`Health check failed: ${res.status}`);
+            }
+            return res.json() as Promise<HealthResult>;
         }
-        return res.json();
     }
 
     /**
@@ -277,11 +307,18 @@ export class MemWal {
     /**
      * Make a signed request to the server.
      *
-     * Signature format: "{timestamp}.{method}.{path}.{body_sha256}"
-     * Headers: x-public-key, x-signature, x-timestamp
+     * Signature format (LOW-23 updated):
+     *   "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
      *
-     * The server uses x-public-key to look up the owner via onchain
-     * MemWalAccount.delegate_keys — no need to send owner in the body.
+     * Headers: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id
+     *
+     * The nonce is a UUID v4 generated per-request and tracked server-side
+     * in Redis (TTL=600s) to prevent replay attacks.
+     *
+     * LOW-23: x-account-id is now included in the signed canonical message so
+     * an intermediary cannot swap the account hint without invalidating the
+     * signature. Server-side verification in services/server/src/auth.rs must
+     * use the matching message format.
      */
     private async signedRequest<T>(
         method: string,
@@ -294,8 +331,11 @@ export class MemWal {
         const bodyStr = JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
 
-        // Build message to sign
-        const message = `${timestamp}.${method}.${path}.${bodySha256}`;
+        // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
+        const nonce = crypto.randomUUID();
+
+        // LOW-23: Build message to sign — now includes nonce AND account id
+        const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
         // Sign with Ed25519
@@ -311,6 +351,7 @@ export class MemWal {
                 "x-public-key": bytesToHex(publicKey),
                 "x-signature": bytesToHex(signature),
                 "x-timestamp": timestamp,
+                "x-nonce": nonce,           // MED-1: replay protection
                 "x-delegate-key": bytesToHex(this.privateKey),
                 "x-account-id": this.accountId,
             },
@@ -318,8 +359,19 @@ export class MemWal {
         });
 
         if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`MemWal API error (${res.status}): ${errText}`);
+            // LOW-26: sanitize server error bodies before surfacing to callers.
+            const raw = await res.text();
+            const { message, serverCode } = sanitizeServerError(res.status, raw);
+            const err = new Error(message) as Error & {
+                status?: number;
+                serverCode?: string;
+                cause?: string;
+            };
+            err.status = res.status;
+            if (serverCode) err.serverCode = serverCode;
+            // Preserve raw body on `cause` for in-process debugging only.
+            err.cause = raw;
+            throw err;
         }
 
         return res.json() as Promise<T>;
