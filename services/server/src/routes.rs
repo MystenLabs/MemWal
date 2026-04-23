@@ -5,6 +5,8 @@ use axum::response::Response;
 use axum::{extract::State, Extension, Json};
 use base64::Engine as _;
 use futures::stream::{self, StreamExt};
+use redis::AsyncCommands;
+use sha2::Digest;
 use std::sync::Arc;
 
 use apalis::prelude::Storage as _;
@@ -309,7 +311,7 @@ async fn generate_embedding(
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
                 .json(&EmbeddingApiRequest {
-                    model: "openai/text-embedding-3-small".to_string(),
+                    model: EMBEDDING_MODEL.to_string(),
                     input: text.to_string(),
                 })
                 .send()
@@ -355,6 +357,50 @@ async fn generate_embedding(
             Ok(mock_vector)
         }
     }
+}
+
+fn recall_embedding_cache_key(config: &Config, query: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(config.openai_api_base.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(EMBEDDING_MODEL.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(query.as_bytes());
+    format!("memwal:embedding:v1:{:x}", hasher.finalize())
+}
+
+async fn generate_recall_embedding_cached(
+    state: &AppState,
+    query: &str,
+) -> Result<Vec<f32>, AppError> {
+    let ttl_secs = state.embedding_cache_ttl.as_secs();
+    if ttl_secs == 0 {
+        return generate_embedding(&state.http_client, &state.config, query).await;
+    }
+
+    let cache_key = recall_embedding_cache_key(&state.config, query);
+    let mut redis = state.redis.clone();
+    match redis.get::<_, Option<String>>(&cache_key).await {
+        Ok(Some(payload)) => match serde_json::from_str::<Vec<f32>>(&payload) {
+            Ok(vector) => return Ok(vector),
+            Err(e) => tracing::warn!("embedding cache decode failed: {}", e),
+        },
+        Ok(None) => {}
+        Err(e) => tracing::warn!("embedding cache get failed: {}", e),
+    }
+
+    let vector = generate_embedding(&state.http_client, &state.config, query).await?;
+    match serde_json::to_string(&vector) {
+        Ok(payload) => {
+            let result: redis::RedisResult<()> = redis.set_ex(&cache_key, payload, ttl_secs).await;
+            if let Err(e) = result {
+                tracing::warn!("embedding cache set failed: {}", e);
+            }
+        }
+        Err(e) => tracing::warn!("embedding cache encode failed: {}", e),
+    }
+
+    Ok(vector)
 }
 
 // ============================================================
@@ -557,6 +603,8 @@ pub async fn remember_bulk(
 
 type BulkStatusRow = (String, String, String, Option<String>, Option<String>);
 
+const EMBEDDING_MODEL: &str = "openai/text-embedding-3-small";
+
 fn build_bulk_status_results(
     job_ids: Vec<String>,
     rows: Vec<BulkStatusRow>,
@@ -665,85 +713,83 @@ pub async fn recall(
         )
             })?;
 
-    // Step 1: Embed query → vector
-    let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
+    let t0 = std::time::Instant::now();
+    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let embed_ms = t0.elapsed().as_millis();
 
-    // Step 2: Search Vector DB
     // MED-3 fix: Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
+    let t1 = std::time::Instant::now();
     let hits = state
         .db
         .search_similar(&query_vector, owner, namespace, limit)
         .await?;
+    let vsearch_ms = t1.elapsed().as_millis();
 
-    // Step 3: Download + SEAL decrypt all results concurrently
+    if hits.is_empty() {
+        tracing::info!(
+            "recall complete: 0 results (no vector hits) for owner={}",
+            owner
+        );
+        return Ok(Json(RecallResponse {
+            results: vec![],
+            total: 0,
+            dropped_count: 0,
+        }));
+    }
+
+    const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
+
+    struct FetchedBlob {
+        blob_id: String,
+        distance: f64,
+        ciphertext: Vec<u8>,
+        was_cached: bool,
+    }
+
+    let t2 = std::time::Instant::now();
     let db = &state.db;
-    let tasks: Vec<_> = hits
+    let download_tasks: Vec<_> = hits
         .iter()
         .map(|hit| {
             let walrus_client = &state.walrus_client;
-            let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
-            let credential = credential.clone();
-            let package_id = state.config.package_id.clone();
-            let account_id = auth.account_id.clone();
             let owner_for_cleanup = owner.clone();
+            let mut redis = state.redis.clone();
+
             async move {
-                // Download encrypted blob from Walrus (native Rust)
-                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                    Ok(data) => data,
+                let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
+                match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
+                    Ok(Some(ciphertext)) => {
+                        return Some(FetchedBlob {
+                            blob_id,
+                            distance,
+                            ciphertext,
+                            was_cached: true,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                    }
+                }
+
+                match walrus::download_blob(walrus_client, &blob_id).await {
+                    Ok(ciphertext) => Some(FetchedBlob {
+                        blob_id,
+                        distance,
+                        ciphertext,
+                        was_cached: false,
+                    }),
                     Err(AppError::BlobNotFound(msg)) => {
-                        // Blob expired on Walrus — clean up from DB reactively
                         tracing::warn!("Blob expired, cleaning up: {}", msg);
                         cleanup_expired_blob(db, &blob_id, &owner_for_cleanup).await;
-                        return None;
+                        None
                     }
                     Err(e) => {
                         tracing::warn!("Failed to download blob {}: {}", blob_id, e);
-                        return None;
-                    }
-                };
-                // Decrypt using SEAL (via sidecar HTTP)
-                match seal::seal_decrypt(
-                    http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
-                    &encrypted_data,
-                    &credential,
-                    &package_id,
-                    &account_id,
-                )
-                .await
-                {
-                    Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult {
-                            blob_id,
-                            text,
-                            distance,
-                        }),
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        let is_permanent = err_str.contains("Not enough shares")
-                            || err_str.contains("decrypt failed");
-                        if is_permanent {
-                            tracing::warn!(
-                                "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
-                                blob_id,
-                                e
-                            );
-                            cleanup_expired_blob(db, &blob_id, &owner_for_cleanup).await;
-                        } else {
-                            tracing::warn!("Failed to SEAL decrypt blob {}: {}", blob_id, e);
-                        }
                         None
                     }
                 }
@@ -751,25 +797,149 @@ pub async fn recall(
         })
         .collect();
 
-    let task_results = futures::future::join_all(tasks).await;
-    let attempted = task_results.len();
-    let results: Vec<RecallResult> = task_results.into_iter().flatten().collect();
+    let fetched_results = futures::future::join_all(download_tasks).await;
+    let walrus_ms = t2.elapsed().as_millis();
+
+    let mut fetched_blobs = Vec::new();
+    let mut walrus_fails = 0usize;
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+    for result in fetched_results {
+        match result {
+            Some(fetched) => {
+                if fetched.was_cached {
+                    cache_hits += 1;
+                } else {
+                    cache_misses += 1;
+                }
+                fetched_blobs.push(fetched);
+            }
+            None => walrus_fails += 1,
+        }
+    }
+    tracing::info!(
+        "recall[walrus_fetch]: {}ms -> {} ok ({} cached, {} cold), {} failed",
+        walrus_ms,
+        fetched_blobs.len(),
+        cache_hits,
+        cache_misses,
+        walrus_fails
+    );
+
+    let blob_cache_ttl_secs = state.blob_cache_ttl.as_secs();
+    if blob_cache_ttl_secs > 0 {
+        let mut redis = state.redis.clone();
+        for fetched in &fetched_blobs {
+            if fetched.was_cached {
+                continue;
+            }
+            let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, fetched.blob_id);
+            let result: redis::RedisResult<()> = redis
+                .set_ex(&cache_key, fetched.ciphertext.clone(), blob_cache_ttl_secs)
+                .await;
+            if let Err(e) = result {
+                tracing::warn!("blob cache set failed for {}: {}", fetched.blob_id, e);
+            }
+        }
+    }
+
+    const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
+
+    let batch_input: Vec<(String, Vec<u8>)> = fetched_blobs
+        .iter()
+        .map(|fetched| (fetched.blob_id.clone(), fetched.ciphertext.clone()))
+        .collect();
+    let t3 = std::time::Instant::now();
+    let mut decrypted = Vec::with_capacity(batch_input.len());
+    for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
+        match seal::seal_decrypt_batch(
+            &state.http_client,
+            &state.config.sidecar_url,
+            state.config.sidecar_secret.as_deref(),
+            chunk,
+            &credential,
+            &state.config.package_id,
+            &auth.account_id,
+        )
+        .await
+        {
+            Ok(outcomes) => decrypted.extend(outcomes),
+            Err(e) => {
+                tracing::warn!(
+                    "recall: seal_decrypt_batch failed for {} blobs: {}",
+                    chunk.len(),
+                    e
+                );
+                decrypted.extend((0..chunk.len()).map(|_| crate::seal::DecryptOutcome::Missing));
+            }
+        }
+    }
+    let seal_ms = t3.elapsed().as_millis();
+
+    let mut results = Vec::new();
+    let mut seal_fails = 0usize;
+    for (fetched, outcome) in fetched_blobs.iter().zip(decrypted) {
+        match outcome {
+            crate::seal::DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
+                Ok(text) => results.push(RecallResult {
+                    blob_id: fetched.blob_id.clone(),
+                    text,
+                    distance: fetched.distance,
+                }),
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid UTF-8 in decrypted data for blob {}: {}",
+                        fetched.blob_id,
+                        e
+                    );
+                    seal_fails += 1;
+                }
+            },
+            crate::seal::DecryptOutcome::Failed { error, permanent } => {
+                if permanent {
+                    tracing::warn!(
+                        "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
+                        fetched.blob_id,
+                        error
+                    );
+                    cleanup_expired_blob(db, &fetched.blob_id, owner).await;
+                } else {
+                    tracing::warn!(
+                        "SEAL decrypt transient failure for blob {}: {}",
+                        fetched.blob_id,
+                        error
+                    );
+                }
+                seal_fails += 1;
+            }
+            crate::seal::DecryptOutcome::Missing => seal_fails += 1,
+        }
+    }
 
     let total = results.len();
     // LOW-7: Surface the count of silently-dropped entries (download / decrypt /
     // UTF-8 failures) so clients can distinguish "no matches" from "matches we
     // couldn't return". Per-item errors are already logged with the blob_id
     // inside each task — we only add the aggregate count here.
-    let dropped_count = attempted.saturating_sub(total);
+    let dropped_count = walrus_fails + seal_fails;
     if dropped_count > 0 {
         tracing::warn!(
             "recall: {} of {} matches dropped due to download/decrypt errors (owner={})",
             dropped_count,
-            attempted,
+            hits.len(),
             owner
         );
     }
-    tracing::info!("recall complete: {} results for owner={}", total, owner);
+    tracing::info!(
+        "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms total={}ms",
+        total,
+        owner,
+        embed_ms,
+        vsearch_ms,
+        walrus_ms,
+        seal_ms,
+        t0.elapsed().as_millis()
+    );
 
     Ok(Json(RecallResponse {
         results,
