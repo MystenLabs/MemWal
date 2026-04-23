@@ -10,8 +10,8 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string). This is the delegate key from app.memwal.com */
-    key: string;
+    /** Ed25519 private key (hex string or Uint8Array). This is the delegate key from app.memwal.com */
+    key: string | Uint8Array;
     /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
     /** Server URL (default: http://localhost:8000) */
@@ -43,6 +43,48 @@ export interface RecallMemory {
 export interface RecallResult {
     results: RecallMemory[];
     total: number;
+}
+
+/** One item in a bulk remember request */
+export interface RememberBulkItem {
+    /** The text to remember */
+    text: string;
+    /** Optional per-item namespace override (falls back to client default) */
+    namespace?: string;
+}
+
+/** Options for remember bulk polling behaviour */
+export interface RememberBulkOptions {
+    /** How often to poll each job_id (default: 1500ms) */
+    pollIntervalMs?: number;
+    /** Max total wait time before throwing (default: 120_000ms) */
+    timeoutMs?: number;
+}
+
+/** Per-item result returned from rememberBulk() */
+export interface RememberBulkItemResult {
+    /** job_id returned by the server */
+    id: string;
+    /** Walrus blob_id once the job completes ("" if failed) */
+    blob_id: string;
+    /** Final status reported by the server: "done" | "failed" | "timeout" */
+    status: "done" | "failed" | "timeout";
+    /** Namespace the memory was stored under */
+    namespace: string;
+    /** Error message if status !== "done" */
+    error?: string;
+}
+
+/** Result from rememberBulk() */
+export interface RememberBulkResult {
+    /** One result per input item, in the same order */
+    results: RememberBulkItemResult[];
+    /** Total items submitted */
+    total: number;
+    /** Count of items that reached status=done */
+    succeeded: number;
+    /** Count of items that failed or timed out */
+    failed: number;
 }
 
 /** Result from embed() */
@@ -123,8 +165,8 @@ export interface RestoreResult {
 
 /** Config for MemWalManual (full client-side: SEAL + Walrus + embedding) */
 export interface MemWalManualConfig {
-    /** Ed25519 delegate private key (hex) for server auth */
-    key: string;
+    /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
+    key: string | Uint8Array;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
     /**
@@ -162,6 +204,12 @@ export interface MemWalManualConfig {
      * If omitted, uses built-in defaults for the selected suiNetwork.
      */
     sealKeyServers?: string[];
+    /**
+     * SEAL threshold — number of key server shares required for encrypt/decrypt.
+     * Must be ≤ number of entries in sealKeyServers.
+     * Default: 2 (matches sidecar SEAL_THRESHOLD default).
+     */
+    sealThreshold?: number;
     /** Walrus storage epochs (default: 50) */
     walrusEpochs?: number;
     /** Walrus aggregator URL for direct blob downloads (default: mainnet aggregator) */
