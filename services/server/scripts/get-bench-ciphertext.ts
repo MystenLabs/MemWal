@@ -4,18 +4,8 @@
  * Lấy 1 blob_id từ DB, download ciphertext từ Walrus aggregator,
  * in ra base64 để dùng với bench-sidecar-concurrency.ts
  */
-import { createConnection } from "net";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://memwal:memwal_secret@localhost:5432/memwal";
 const WALRUS_AGGREGATOR = process.env.WALRUS_AGGREGATOR_URL ?? "https://aggregator.walrus-mainnet.walrus.space";
-
-// Parse DATABASE_URL manually
-const url = new URL(DATABASE_URL);
-const host = url.hostname;
-const port = parseInt(url.port || "5432", 10);
-const user = url.username;
-const password = url.password;
-const database = url.pathname.slice(1);
 
 // Simple pg query via spawning psql-like or using a tiny fetch to sidecar
 // Actually let's just use the walrus endpoint on sidecar to get blob IDs
