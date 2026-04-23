@@ -125,6 +125,7 @@ fn endpoint_weight(path: &str) -> i64 {
     match path {
         "/api/analyze" => 5,           // LLM extract + N × (1 pt per fact)
         "/api/remember" => 5,          // embed + SEAL encrypt + Walrus upload
+        "/api/remember/bulk" => 10,    // N × embed/encrypt/upload in one request
         "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,           // download + decrypt + re-embed
         "/api/ask" => 2,               // recall + LLM
@@ -650,6 +651,7 @@ pub async fn check_sender_rate_limit(
 /// Cost of the /api/analyze endpoint already reserved by the middleware
 /// for the first (LLM extraction) step. The weight value must match
 /// `endpoint_weight("/api/analyze")` = 5.
+#[allow(dead_code)]
 const ANALYZE_BASE_WEIGHT: i64 = 5;
 
 /// Additional weight to charge after fact-count is known.
@@ -665,6 +667,7 @@ pub fn analyze_additional_weight(fact_count: usize) -> i64 {
 }
 
 /// Total effective weight of an `/api/analyze` call given `fact_count`.
+#[allow(dead_code)]
 pub fn analyze_total_weight(fact_count: usize) -> i64 {
     ANALYZE_BASE_WEIGHT + analyze_additional_weight(fact_count)
 }

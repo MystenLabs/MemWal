@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod jobs;
 mod rate_limit;
 mod routes;
 mod seal;
@@ -14,7 +15,11 @@ use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use apalis::prelude::*;
+use apalis_sql::postgres::PostgresStorage;
+
 use db::VectorDb;
+use jobs::{BulkRememberJob, MetaTransferJob, RememberJob, WalletJobStorage, execute_bulk_remember, execute_wallet_job};
 use types::{AppState, Config, KeyPool};
 
 #[tokio::main]
@@ -96,6 +101,34 @@ async fn main() {
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
+    // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
+    let apalis_pool = sqlx::PgPool::connect(&config.database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL for Apalis");
+    // setup() is defined only on PostgresStorage<()> — creates schema tables.
+    PostgresStorage::<()>::setup(&apalis_pool)
+        .await
+        .expect("Apalis postgres migration failed");
+    let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
+    let remember_job_storage: PostgresStorage<RememberJob> = PostgresStorage::new(apalis_pool.clone());
+    // ENG-1408: BulkRememberJob storage
+    let bulk_job_storage: PostgresStorage<BulkRememberJob> = PostgresStorage::new(apalis_pool.clone());
+
+    // Create N per-wallet queues (one per pool key) for WalletJob.
+    // Each queue name is "wallet-{i}" and has a single dedicated worker.
+    let pool_size = config.sui_private_keys.len();
+    let mut wallet_storages: Vec<WalletJobStorage> = Vec::with_capacity(pool_size.max(1));
+    for i in 0..pool_size.max(1) {
+        let config_name = format!("wallet-{}", i);
+        let storage: WalletJobStorage = PostgresStorage::new_with_config(
+            apalis_pool.clone(),
+            apalis_sql::Config::new(&config_name),
+        );
+        wallet_storages.push(storage);
+    }
+    tracing::info!("  Apalis: job queue ready (table=apalis_jobs)");
+
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
     let walrus_client = walrus_rs::WalrusClient::new(
         &config.walrus_aggregator_url,
@@ -130,7 +163,94 @@ async fn main() {
         key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        job_storage: job_storage.clone(),
+        remember_job_storage: remember_job_storage.clone(),
+        wallet_storages: wallet_storages.clone(),
+        bulk_job_storage: bulk_job_storage.clone(),
     });
+
+    // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
+    {
+        let worker_state = state.clone();
+        let storage = job_storage.clone();
+        tokio::spawn(async move {
+            let worker = WorkerBuilder::new("meta-transfer")
+                .data(worker_state)
+                .backend(storage)
+                .build_fn(jobs::execute_meta_transfer);
+
+            #[allow(deprecated)]
+            Monitor::new()
+                .register_with_count(2, worker)
+                .run()
+                .await
+                .unwrap_or_else(|e| tracing::error!("Apalis monitor exited: {}", e));
+        });
+        tracing::info!("  Apalis: worker 'meta-transfer' spawned (concurrency=2)");
+    }
+
+    // Worker 2: RememberJob (legacy full pipeline)
+    {
+        let worker_state = state.clone();
+        let storage = remember_job_storage.clone();
+        tokio::spawn(async move {
+            let worker = WorkerBuilder::new("remember")
+                .data(worker_state)
+                .backend(storage)
+                .build_fn(jobs::execute_remember);
+
+            #[allow(deprecated)]
+            Monitor::new()
+                .register_with_count(3, worker) // up to 3 concurrent remember pipelines
+                .run()
+                .await
+                .unwrap_or_else(|e| tracing::error!("Apalis remember monitor exited: {}", e));
+        });
+        tracing::info!("  Apalis: worker 'remember' spawned (concurrency=3)");
+    }
+
+    // Worker 3: BulkRememberJob (ENG-1408)
+    {
+        let worker_state = state.clone();
+        let storage = bulk_job_storage.clone();
+        tokio::spawn(async move {
+            let worker = WorkerBuilder::new("bulk-remember")
+                .data(worker_state)
+                .backend(storage)
+                .build_fn(execute_bulk_remember);
+
+            #[allow(deprecated)]
+            Monitor::new()
+                .register_with_count(2, worker) // 2 concurrent batch jobs
+                .run()
+                .await
+                .unwrap_or_else(|e| tracing::error!("Apalis bulk-remember monitor exited: {}", e));
+        });
+        tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
+    }
+
+    // Workers 3..N: Per-wallet WalletJob workers (one per pool key).
+    // Each worker is pinned to wallet_index i and processes jobs from queue "wallet-{i}".
+    // This guarantees upload and set-metadata+transfer always use the same signing key.
+    for (i, storage) in wallet_storages.into_iter().enumerate() {
+        let worker_state = state.clone();
+        let queue_name = format!("wallet-{}", i);
+        let queue_label = queue_name.clone();
+        tokio::spawn(async move {
+            let worker = WorkerBuilder::new(&queue_name)
+                .data(worker_state)
+                .backend(storage)
+                .build_fn(execute_wallet_job);
+
+            #[allow(deprecated)]
+            Monitor::new()
+                .register_with_count(1, worker) // serial per wallet — no coin lock conflicts
+                .run()
+                .await
+                .unwrap_or_else(|e| tracing::error!("Apalis wallet worker {} exited: {}", queue_label, e));
+        });
+        tracing::info!("  Apalis: wallet worker '{}' spawned (serial)", format!("wallet-{}", i));
+    }
 
     // Spawn background task for cache eviction
     let evict_state = state.clone();
@@ -152,10 +272,14 @@ async fn main() {
     // auth + rate-limit middleware even sees the request.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
+        .route("/api/remember/{job_id}", axum::routing::get(routes::remember_status))
+        .route("/api/remember/bulk/status", post(routes::remember_bulk_status))
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
-
+        // ENG-1408: Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
+        .route("/api/remember/bulk", post(routes::remember_bulk)
+            .layer(DefaultBodyLimit::max(2 * 1024 * 1024)))
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))

@@ -42,10 +42,28 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
 
+        let migration_005 = include_str!("../migrations/005_remember_jobs.sql");
+        sqlx::raw_sql(migration_005)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
+
+        // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
+        let migration_006 = include_str!("../migrations/006_bulk_remember.sql");
+        sqlx::raw_sql(migration_006)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
+    }
+
+    /// Expose a reference to the underlying `PgPool` so job handlers
+    /// can run ad-hoc queries (e.g. `remember_jobs` status updates).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota)

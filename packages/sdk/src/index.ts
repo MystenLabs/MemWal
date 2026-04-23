@@ -28,4 +28,8 @@ export type {
     AnalyzedFact,
     HealthResult,
     RestoreResult,
+    RememberBulkItem,
+    RememberBulkOptions,
+    RememberBulkResult,
+    RememberBulkItemResult,
 } from "./types.js";

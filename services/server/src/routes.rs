@@ -1,15 +1,45 @@
 use axum::body::Body;
+use axum::extract::Path;
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::{extract::State, Extension, Json};
 use base64::Engine as _;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
+use apalis::prelude::Storage as _;
+
 use crate::db::VectorDb;
+use crate::jobs::{BulkRememberItem, WalletJob, WalletOperation};
 use crate::rate_limit;
 use crate::seal;
 use crate::types::*;
 use crate::walrus;
+
+/// Enqueue a WalletJob to the correct per-wallet Apalis queue.
+///
+/// `wallet_index` must match the index used (or to be used) for the Walrus
+/// upload so that upload and set-metadata+transfer always sign with the
+/// same key. Returns the wallet_index for caller tracking.
+pub async fn enqueue_wallet_job(
+    state: &AppState,
+    wallet_index: usize,
+    operation: WalletOperation,
+) -> Result<usize, AppError> {
+    let storages = &state.wallet_storages;
+    if wallet_index >= storages.len() {
+        return Err(AppError::Internal(format!(
+            "wallet_index {} out of range (pool size={})",
+            wallet_index, storages.len()
+        )));
+    }
+    let mut storage = storages[wallet_index].clone();
+    storage
+        .push(WalletJob { wallet_index, operation })
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue WalletJob: {}", e)))?;
+    Ok(wallet_index)
+}
 
 const MAX_ANALYZE_FACTS: usize = 20;
 const ANALYZE_CONCURRENCY: usize = 5;
@@ -37,7 +67,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 // ============================================================
-// Embedding — OpenRouter/OpenAI API (with mock fallback)
+// Embedding — OpenRouter/OpenAI API (with mock fallback) [pub for jobs.rs]
 // ============================================================
 
 /// OpenAI-compatible embedding request
@@ -127,22 +157,20 @@ async fn generate_embedding(
 // Routes
 // ============================================================
 
-/// POST /api/remember
+/// POST /api/remember  (ENG-1406 v3 — fully async)
 ///
-/// Full TEE flow:
-/// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
-/// 2. Embed text + Encrypt text concurrently (independent operations)
-/// 3. Upload encrypted blob → Walrus → blobId
-/// 4. Store {vector, blobId} in Vector DB
+/// Validates the request, enqueues a RememberJob into Apalis Postgres,
+/// inserts a `pending` row into `remember_jobs`, then returns **HTTP 202**
+/// with `{ job_id }`. The caller polls `GET /api/remember/:job_id` to
+/// get status and, once done, the `blob_id`.
 pub async fn remember(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RememberRequest>,
-) -> Result<Json<RememberResponse>, AppError> {
+) -> Result<(StatusCode, Json<RememberAcceptedResponse>), AppError> {
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
-    // LOW-6: Reject oversize plaintext before spending embed + encrypt compute.
     if body.text.len() > MAX_REMEMBER_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
             "Text exceeds maximum length of {} bytes",
@@ -150,24 +178,20 @@ pub async fn remember(
         )));
     }
 
-    // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
-    let text = &body.text;
     let namespace = &body.namespace;
-    tracing::info!(
-        "remember: text=\"{}...\" owner={} ns={}",
-        truncate_str(text, 50),
-        owner,
-        namespace
-    );
 
-    // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
-    let embed_fut = generate_embedding(&state.http_client, &state.config, text);
-    let encrypt_fut = seal::seal_encrypt(
+    // Step 1: embed + SEAL encrypt concurrently in the route handler.
+    // (~300ms total, parallel). This ensures:
+    //   - No plaintext is stored in the Apalis job payload
+    //   - Exact encrypted size is known for quota check
+    //   - Worker only needs to upload (the slow ~2-3s part)
+    let embed_fut = generate_embedding(&state.http_client, &state.config, &body.text);
+    let encrypt_fut = crate::seal::seal_encrypt(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
-        text.as_bytes(),
+        body.text.as_bytes(),
         owner,
         &state.config.package_id,
     );
@@ -175,51 +199,295 @@ pub async fn remember(
     let vector = vector_result?;
     let encrypted = encrypted_result?;
 
-    // LOW-11: Quota is stored using encrypted blob size (blob_size_bytes), so check
-    // quota against ciphertext length — not plaintext — to avoid under-counting
-    // the SEAL framing overhead that is actually persisted.
+    // Step 2: Quota check with exact ciphertext size (restored from sync path).
+    // LOW-11: Use encrypted size, not plaintext, to match what's stored in DB.
     rate_limit::check_storage_quota(&state, owner, encrypted.len() as i64).await?;
 
-    // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let key_index = state.key_pool.next_index()
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
-    let upload_result = walrus::upload_blob(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        &encrypted,
-        50,
-        owner,
-        key_index,
-        namespace,
-        &state.config.package_id,
-        Some(&auth.public_key),
-    )
-    .await?;
-    let blob_id = upload_result.blob_id;
+    let job_id = uuid::Uuid::new_v4().to_string();
 
-    // Step 3: Store {vector, blobId, namespace} in Vector DB
-    let blob_size = encrypted.len() as i64;
-    let id = uuid::Uuid::new_v4().to_string();
-    state
-        .db
-        .insert_vector(&id, owner, namespace, &blob_id, &vector, blob_size)
-        .await?;
+    // Encode encrypted bytes for job payload (base64, no plaintext stored)
+    let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+
+    // Step 3: Insert status row BEFORE enqueuing so GET can immediately find it.
+    sqlx::query(
+        "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(&job_id)
+    .bind(owner)
+    .bind(namespace)
+    .execute(state.db.pool())
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
+
+    // Step 4: Pin a wallet slot at enqueue time and enqueue WalletJob::UploadAndTransfer.
+    // Using WalletJob (vs the legacy RememberJob) guarantees that the upload AND the
+    // subsequent set-metadata + transfer both sign with the SAME wallet — eliminating
+    // the wrong-signer race that occurred when set-metadata picked a different key
+    // from the round-robin pool than the one that owned the freshly-certified blob.
+    let wallet_index = state
+        .key_pool
+        .next_index()
+        .ok_or_else(|| AppError::Internal(
+            "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()
+        ))?;
+
+    enqueue_wallet_job(
+        &state,
+        wallet_index,
+        WalletOperation::UploadAndTransfer {
+            encrypted_b64,
+            vector,
+            owner: owner.clone(),
+            namespace: namespace.clone(),
+            package_id: state.config.package_id.clone(),
+            agent_public_key: Some(auth.public_key.clone()),
+            remember_job_id: Some(job_id.clone()),
+            epochs: 50,
+        },
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to enqueue remember job: {}", e)))?;
 
     tracing::info!(
-        "remember complete: blob_id={}, owner={}, ns={}, dims={}",
-        blob_id,
+        "remember accepted: job_id={} owner={} ns={} encrypted_bytes={} wallet={}",
+        job_id,
         owner,
         namespace,
-        vector.len()
+        encrypted.len(),
+        wallet_index,
     );
 
-    Ok(Json(RememberResponse {
-        id,
+    Ok((StatusCode::ACCEPTED, Json(RememberAcceptedResponse {
+        job_id,
+        status: "pending".to_string(),
+    })))
+}
+
+/// GET /api/remember/:job_id  — poll job status
+///
+/// Returns `{ job_id, status, blob_id?, error? }` where status is one of
+/// `pending | running | done | failed`.
+pub async fn remember_status(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(job_id): Path<String>,
+) -> Result<Json<RememberJobStatusResponse>, AppError> {
+    // Query by job_id — no compile-time check since table is created at runtime
+    #[allow(clippy::type_complexity)]
+    let row: Option<(String, String, String, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, owner, namespace, status, blob_id, error_msg FROM remember_jobs WHERE id = $1",
+        )
+        .bind(&job_id)
+        .fetch_optional(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {}", e)))?;
+
+    // Security: collapse "not found" and "exists but not yours" into the same
+    // BlobNotFound response to prevent enumeration of other users' job IDs.
+    let (id, owner_db, namespace, status, blob_id, error_msg) = match row {
+        Some(r) if r.1 == auth.owner => r,
+        _ => return Err(AppError::BlobNotFound(format!("Job {} not found", job_id))),
+    };
+    let _ = owner_db; // already validated equal to auth.owner
+
+    Ok(Json(RememberJobStatusResponse {
+        job_id: id,
+        status,
+        owner: auth.owner.clone(),
+        namespace,
         blob_id,
-        owner: owner.clone(),
-        namespace: namespace.clone(),
+        error: error_msg,
     }))
+}
+
+/// POST /api/remember/bulk  (ENG-1408)
+///
+/// Batch async remember — accepts up to MAX_BULK_ITEMS memories in one call.
+/// Returns 202 with job_ids[]; poll each via GET /api/remember/:job_id.
+pub async fn remember_bulk(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberBulkRequest>,
+) -> Result<(StatusCode, Json<RememberBulkAcceptedResponse>), AppError> {
+    // ── Validate ──────────────────────────────────────────────────────────
+    if body.items.is_empty() {
+        return Err(AppError::BadRequest("items cannot be empty".into()));
+    }
+    if body.items.len() > MAX_BULK_ITEMS {
+        return Err(AppError::BadRequest(format!(
+            "items exceeds maximum of {} per bulk request",
+            MAX_BULK_ITEMS
+        )));
+    }
+    for (i, item) in body.items.iter().enumerate() {
+        if item.text.is_empty() {
+            return Err(AppError::BadRequest(format!("items[{}].text cannot be empty", i)));
+        }
+        if item.text.len() > MAX_REMEMBER_TEXT_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "items[{}].text exceeds {} bytes",
+                i, MAX_REMEMBER_TEXT_BYTES
+            )));
+        }
+    }
+
+    let owner = &auth.owner;
+    tracing::info!(
+        "remember_bulk: {} items owner={}",
+        body.items.len(),
+        &owner[..10.min(owner.len())],
+    );
+
+    // ── Concurrent embed + SEAL-encrypt (bounded concurrency) ─────────────
+    let prep_tasks: Vec<_> = body.items.iter().map(|item| {
+        let state = Arc::clone(&state);
+        let owner = owner.clone();
+        let text = item.text.clone();
+        let namespace = item.namespace.clone();
+        async move {
+            let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
+            let encrypt_fut = crate::seal::seal_encrypt(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                text.as_bytes(),
+                &owner,
+                &state.config.package_id,
+            );
+            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+            Ok::<_, AppError>((namespace, vector_result?, encrypted_result?))
+        }
+    }).collect();
+
+    let prep_results = collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
+
+    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut total_encrypted_bytes: i64 = 0;
+    for r in prep_results {
+        let (namespace, vector, encrypted) = r?;
+        total_encrypted_bytes += encrypted.len() as i64;
+        prepared.push((namespace, vector, encrypted));
+    }
+
+    // ── Quota check ───────────────────────────────────────────────────────
+    rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
+
+    // ── Insert N remember_jobs rows + build BulkRememberItems ─────────────
+    let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
+    let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
+
+    for (namespace, vector, encrypted) in prepared {
+        let job_id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+        )
+        .bind(&job_id)
+        .bind(owner)
+        .bind(&namespace)
+        .execute(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to create bulk job row: {}", e)))?;
+
+        let wallet_index = state
+            .key_pool
+            .next_index()
+            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+
+        let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+        bulk_items.push(BulkRememberItem {
+            job_id: job_id.clone(),
+            encrypted_b64,
+            vector,
+            namespace,
+            wallet_index,
+        });
+        job_ids.push(job_id);
+    }
+
+    let total = job_ids.len();
+
+    // ── Enqueue 1 BulkRememberJob ─────────────────────────────────────────
+    let mut storage = state.bulk_job_storage.clone();
+    storage
+        .push(crate::jobs::BulkRememberJob {
+            owner: owner.clone(),
+            package_id: state.config.package_id.clone(),
+            agent_public_key: Some(auth.public_key.clone()),
+            items: bulk_items,
+            epochs: 50,
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue bulk remember job: {}", e)))?;
+
+    tracing::info!(
+        "remember_bulk accepted: {} items owner={} total_encrypted_bytes={}",
+        total, owner, total_encrypted_bytes,
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RememberBulkAcceptedResponse {
+            job_ids,
+            total,
+            status: "pending".to_string(),
+        }),
+    ))
+}
+
+/// POST /api/remember/bulk/status  — poll multiple job statuses at once
+///
+/// Returns `{ results: [{ job_id, status, blob_id?, error? }] }` preserving the
+/// same order as `job_ids[]` in the request. All jobs must belong to the
+/// authenticated owner.
+pub async fn remember_bulk_status(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberBulkStatusRequest>,
+) -> Result<Json<RememberBulkStatusResponse>, AppError> {
+    if body.job_ids.is_empty() {
+        return Err(AppError::BadRequest("job_ids cannot be empty".into()));
+    }
+    if body.job_ids.len() > MAX_BULK_ITEMS {
+        return Err(AppError::BadRequest(format!(
+            "job_ids exceeds maximum of {} per bulk status request",
+            MAX_BULK_ITEMS
+        )));
+    }
+
+    let rows: Vec<(String, String, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, owner, status, blob_id, error_msg FROM remember_jobs WHERE id = ANY($1) AND owner = $2",
+        )
+        .bind(&body.job_ids)
+        .bind(&auth.owner)
+        .fetch_all(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("DB error: {}", e)))?;
+
+    // Only rows owned by auth.owner are returned. Any requested job_id missing
+    // from the result set is reported as BlobNotFound — same response whether
+    // it doesn't exist or belongs to another user (no enumeration possible).
+    let mut by_id = std::collections::HashMap::with_capacity(rows.len());
+    for (id, _owner_db, status, blob_id, error_msg) in rows {
+        by_id.insert(id.clone(), RememberBulkStatusItem {
+            job_id: id,
+            status,
+            blob_id,
+            error: error_msg,
+        });
+    }
+
+    let mut results = Vec::with_capacity(body.job_ids.len());
+    for job_id in body.job_ids {
+        let item = by_id
+            .remove(&job_id)
+            .ok_or_else(|| AppError::BlobNotFound(format!("Job {} not found", job_id)))?;
+        results.push(item);
+    }
+
+    Ok(Json(RememberBulkStatusResponse { results }))
 }
 
 /// POST /api/recall
@@ -228,7 +496,7 @@ pub async fn remember(
 /// 1. Verify auth (middleware) → get owner from delegate key onchain lookup
 /// 2. Embed query → vector
 /// 3. Search Vector DB → top-K {blobId}
-/// 4. Download + Decrypt all blobs concurrently (via sidecar HTTP)
+/// 4. Download all blobs concurrently + SEAL decrypt each
 /// 5. Return plaintext results
 pub async fn recall(
     State(state): State<Arc<AppState>>,
@@ -437,6 +705,23 @@ pub async fn remember_manual(
         .insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size)
         .await?;
 
+    // Enqueue metadata+transfer background job (WalletJob, pinned to same key)
+    if !upload.object_id.as_deref().unwrap_or("").is_empty() {
+        if let Err(e) = enqueue_wallet_job(
+            &state,
+            key_index,
+            WalletOperation::SetMetadataAndTransfer {
+                blob_object_id: upload.object_id.clone().unwrap_or_default(),
+                owner: owner.clone(),
+                namespace: namespace.clone(),
+                package_id: Some(state.config.package_id.clone()),
+                agent_id: Some(auth.public_key.clone()),
+            },
+        ).await {
+            tracing::warn!("[remember_manual] failed to enqueue wallet job: {}", e);
+        }
+    }
+
     tracing::info!(
         "remember_manual complete: id={}, blob_id={}, ns={}",
         id,
@@ -505,7 +790,7 @@ pub async fn analyze(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<AnalyzeRequest>,
-) -> Result<Json<AnalyzeResponse>, AppError> {
+) -> Result<(StatusCode, Json<AnalyzeAcceptedResponse>), AppError> {
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
@@ -519,28 +804,23 @@ pub async fn analyze(
         namespace
     );
 
-    // Step 1: Extract facts using LLM
+    // Step 1: Extract facts using LLM (sync — fast, ~1-2s)
     let extracted = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
     let reserved_additional_weight = rate_limit::analyze_additional_weight(facts.len());
-    let total_weight = rate_limit::analyze_total_weight(facts.len());
     tracing::info!(
-        "  → Extracted {} facts (accepted={} cap={} concurrency={} total_weight={} additional_weight={})",
-        raw_fact_count,
-        facts.len(),
-        MAX_ANALYZE_FACTS,
-        ANALYZE_CONCURRENCY,
-        total_weight,
-        reserved_additional_weight
+        "  → Extracted {} facts (accepted={} cap={})",
+        raw_fact_count, facts.len(), MAX_ANALYZE_FACTS,
     );
 
     if facts.is_empty() {
-        return Ok(Json(AnalyzeResponse {
-            facts: vec![],
-            total: 0,
+        return Ok((StatusCode::ACCEPTED, Json(AnalyzeAcceptedResponse {
+            job_ids: vec![],
+            fact_count: 0,
+            status: "pending".to_string(),
             owner: owner.clone(),
-        }));
+        })));
     }
 
     rate_limit::charge_explicit_weight(
@@ -551,84 +831,95 @@ pub async fn analyze(
     )
     .await?;
 
-    // Check storage quota before processing all facts
-    let total_text_bytes: i64 = facts.iter().map(|f| f.len() as i64).sum();
-    rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
-
-    // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
-    // Each fact gets its own key from the pool so sidecar can upload them in parallel
-    // (different signer addresses bypass the per-signer serialization lock).
+    // Step 2: embed + SEAL encrypt all facts concurrently (no wallet needed yet).
+    // This is the fast part (~300-500ms), done in the request handler so:
+    //   - No plaintext stored in job payload
+    //   - Exact ciphertext size known for quota check
     let auth_pubkey_base = auth.public_key.clone();
-    let tasks: Vec<_> = facts.iter().map(|fact_text| {
+    let prep_tasks: Vec<_> = facts.iter().map(|fact_text| {
         let state = Arc::clone(&state);
         let owner = owner.clone();
         let fact_text = fact_text.clone();
-        let auth_pubkey = auth_pubkey_base.clone();
-        // Pick the next key in round-robin order at task construction time.
-        // Convert to owned String *before* async move so we don't borrow-then-move `state`.
-        let key_index: Result<usize, AppError> = state.key_pool.next_index()
-            .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()));
-        let namespace = namespace.clone();
         async move {
-            let key_index = key_index?;
-            // Embed + SEAL encrypt concurrently (independent operations)
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
-            let encrypt_fut = seal::seal_encrypt(
+            let encrypt_fut = crate::seal::seal_encrypt(
                 &state.http_client, &state.config.sidecar_url,
                 state.config.sidecar_secret.as_deref(),
                 fact_text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-            let vector = vector_result?;
-            let encrypted = encrypted_result?;
-
-            // Upload to Walrus (via sidecar HTTP)
-            let upload_result = walrus::upload_blob(
-                &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
-                &encrypted,
-                50,
-                &owner,
-                key_index,
-                &namespace,
-                &state.config.package_id,
-                Some(&auth_pubkey),
-            ).await?;
-
-            // Store in Vector DB with namespace
-            let blob_size = encrypted.len() as i64;
-            let id = uuid::Uuid::new_v4().to_string();
-            state.db.insert_vector(&id, &owner, &namespace, &upload_result.blob_id, &vector, blob_size).await?;
-
-            Ok::<AnalyzedFact, AppError>(AnalyzedFact {
-                text: fact_text,
-                id,
-                blob_id: upload_result.blob_id,
-            })
+            Ok::<_, AppError>((fact_text, vector_result?, encrypted_result?))
         }
     }).collect();
 
-    let results = collect_bounded_results(tasks, ANALYZE_CONCURRENCY).await;
+    let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
-    // Collect successes, fail on first error (same semantics as sequential version)
-    let mut stored_facts = Vec::with_capacity(results.len());
-    for result in results {
-        stored_facts.push(result?);
+    // Quota check on total ciphertext size
+    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut total_encrypted_bytes: i64 = 0;
+    for r in prep_results {
+        let (fact_text, vector, encrypted) = r?;
+        total_encrypted_bytes += encrypted.len() as i64;
+        prepared.push((fact_text, vector, encrypted));
+    }
+    rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
+
+    // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
+    // Round-robin across wallet pool so facts upload in parallel.
+    let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
+    for (fact_text, vector, encrypted) in prepared {
+        let job_id = uuid::Uuid::new_v4().to_string();
+
+        // Insert status row
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+        )
+        .bind(&job_id)
+        .bind(owner)
+        .bind(namespace)
+        .execute(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to create analyze job row: {}", e)))?;
+
+        // Pick next wallet slot (round-robin) and enqueue UploadAndTransfer
+        let wallet_index = state.key_pool.next_index()
+            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+        let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+
+        enqueue_wallet_job(
+            &state,
+            wallet_index,
+            WalletOperation::UploadAndTransfer {
+                encrypted_b64,
+                vector,
+                owner: owner.clone(),
+                namespace: namespace.clone(),
+                package_id: state.config.package_id.clone(),
+                agent_public_key: Some(auth_pubkey_base.clone()),
+                remember_job_id: Some(job_id.clone()),
+                epochs: 50,
+            },
+        ).await.map_err(|e| AppError::Internal(format!("Failed to enqueue analyze job: {}", e)))?;
+
+        tracing::info!(
+            "analyze: fact enqueued job_id={} wallet={} fact=\"{}...\"",
+            job_id, wallet_index, truncate_str(&fact_text, 40)
+        );
+        job_ids.push(job_id);
     }
 
-    let total = stored_facts.len();
+    let fact_count = job_ids.len();
     tracing::info!(
-        "analyze complete: {} facts stored for owner={}",
-        total,
-        owner
+        "analyze accepted: {} facts enqueued owner={} ns={}",
+        fact_count, owner, namespace
     );
 
-    Ok(Json(AnalyzeResponse {
-        facts: stored_facts,
-        total,
+    Ok((StatusCode::ACCEPTED, Json(AnalyzeAcceptedResponse {
+        job_ids,
+        fact_count,
+        status: "pending".to_string(),
         owner: owner.clone(),
-    }))
+    })))
 }
 
 // ============================================================
