@@ -15,7 +15,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use db::VectorDb;
-use types::{AppState, Config, KeyPool};
+use types::{AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_SIZE};
 
 #[tokio::main]
 async fn main() {
@@ -121,6 +121,20 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // ENG-1405: Walrus blob ciphertext cache — skips Walrus fetch on warm recall.
+    // `blob_id` is content-addressed (immutable), so cached bytes are always valid.
+    let blob_cache_size = std::env::var("BLOB_CACHE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_SIZE);
+    let blob_cache = std::sync::Mutex::new(
+        lru::LruCache::<String, Vec<u8>>::new(
+            std::num::NonZeroUsize::new(blob_cache_size)
+                .expect("BLOB_CACHE_SIZE must be > 0"),
+        ),
+    );
+    tracing::info!("  blob cache: {} slots (BLOB_CACHE_SIZE={})", blob_cache_size, blob_cache_size);
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -130,6 +144,7 @@ async fn main() {
         key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        blob_cache,
     });
 
     // Spawn background task for cache eviction

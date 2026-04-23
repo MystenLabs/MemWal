@@ -1,8 +1,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
+use lru::LruCache;
 
 use crate::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
+
+/// Default number of Walrus ciphertext blobs held in the per-process LRU cache.
+/// Each entry is at most ~87 KiB (64 KiB plaintext × SEAL overhead × base64 ≈ 0.87×).
+/// 256 entries ≈ ~22 MiB max RSS. Override with `BLOB_CACHE_SIZE` env var.
+pub const DEFAULT_BLOB_CACHE_SIZE: usize = 256;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -20,6 +27,10 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    /// ENG-1405: LRU cache of Walrus blob ciphertext bytes keyed by blob_id.
+    /// Blobs are content-addressed and immutable, so this is safe indefinitely.
+    /// Warm recall hits skip the Walrus aggregator round-trip (~500ms–2s saved).
+    pub blob_cache: Mutex<LruCache<String, Vec<u8>>>,
 }
 
 // ============================================================
