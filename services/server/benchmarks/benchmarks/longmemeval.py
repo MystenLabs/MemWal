@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from core.types import Conversation, Session, Turn, Query, Evidence
@@ -39,6 +40,18 @@ from core.types import Conversation, Session, Turn, Query, Evidence
 from .base import BenchmarkAdapter
 
 logger = logging.getLogger(__name__)
+
+# LongMemEval dates are formatted like "2023/04/10 (Mon) 17:50".
+_DATE_FMT = "%Y/%m/%d (%a) %H:%M"
+
+
+def _parse_haystack_date(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, _DATE_FMT)
+    except ValueError:
+        return None
 
 # Map LongMemEval question types to our internal category names
 CATEGORY_MAP: dict[str, str] = {
@@ -120,9 +133,23 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
             session_ids = item.get("haystack_session_ids", [])
             session_dates = item.get("haystack_dates", [])
 
+            # Sort sessions chronologically by haystack_dates before ingestion.
+            # ~7% of oracle instances ship sessions out of date order (annotator
+            # artefact, never >1 day off). Real users don't hand a memory system
+            # turns out of sequence — sorting here keeps ingest-order realistic
+            # and matches what Mem0's own runner does. Sessions whose date
+            # fails to parse fall back to their original position, sorted last.
+            sess_indices = list(range(len(sessions_raw)))
+            sess_indices.sort(
+                key=lambda i: (
+                    _parse_haystack_date(session_dates[i]) if i < len(session_dates) else None
+                ) or datetime.max
+            )
+
             # Build sessions — each haystack_sessions entry is a list of turns.
             sessions: list[Session] = []
-            for sess_idx, turns_raw in enumerate(sessions_raw):
+            for sess_idx in sess_indices:
+                turns_raw = sessions_raw[sess_idx]
                 # Prefer the real session_id from the dataset when available; fall back
                 # to a positional id. Real ids let us match answer_session_ids later.
                 session_id = (
