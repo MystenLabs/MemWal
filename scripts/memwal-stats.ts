@@ -12,17 +12,28 @@
 // Configuration
 // ============================================================
 
-const MAINNET_RPC_URL = "https://fullnode.mainnet.sui.io:443";
-const MEMWAL_PACKAGE_ID = "0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6";
-const MEMWAL_REGISTRY_ID = "0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd";
+const IS_TESTNET = process.argv.includes("--testnet");
 
-// Walrus Blob type (mainnet)
-const WALRUS_BLOB_TYPE = "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::blob::Blob";
+const CONFIG = IS_TESTNET
+  ? {
+      network: "testnet",
+      rpcUrl: "https://fullnode.testnet.sui.io:443",
+      packageId: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6",
+      registryId: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+      walrusBlobType: "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66::blob::Blob",
+    }
+  : {
+      network: "mainnet",
+      rpcUrl: "https://fullnode.mainnet.sui.io:443",
+      packageId: "0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6",
+      registryId: "0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd",
+      walrusBlobType: "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77::blob::Blob",
+    };
 
 // Event types
-const ACCOUNT_CREATED_EVENT = `${MEMWAL_PACKAGE_ID}::account::AccountCreated`;
-const DELEGATE_KEY_ADDED_EVENT = `${MEMWAL_PACKAGE_ID}::account::DelegateKeyAdded`;
-const DELEGATE_KEY_REMOVED_EVENT = `${MEMWAL_PACKAGE_ID}::account::DelegateKeyRemoved`;
+const ACCOUNT_CREATED_EVENT = `${CONFIG.packageId}::account::AccountCreated`;
+const DELEGATE_KEY_ADDED_EVENT = `${CONFIG.packageId}::account::DelegateKeyAdded`;
+const DELEGATE_KEY_REMOVED_EVENT = `${CONFIG.packageId}::account::DelegateKeyRemoved`;
 
 // ============================================================
 // Types
@@ -64,7 +75,7 @@ async function main() {
   console.log("  ╔══════════════════════════════════════════════════════════╗");
   console.log("  ║                                                          ║");
   console.log("  ║   🧠 MemWal On-Chain Statistics                          ║");
-  console.log("  ║   Mainnet · Real-time Data                               ║");
+  console.log(`  ║   ${CONFIG.network.toUpperCase().padEnd(7)} · Real-time Data                               ║`);
   console.log("  ║                                                          ║");
   console.log("  ╚══════════════════════════════════════════════════════════╝\n");
 
@@ -113,7 +124,9 @@ async function main() {
     const agentCount = keys ? keys.size : 0;
 
     // Query blobs for this owner
+    process.stdout.write(`     [${i + 1}/${accounts.length}] Querying blobs for ${account.owner.slice(0, 10)}...`);
     const blobs = await queryBlobsForOwner(account.owner);
+    process.stdout.write(` found ${blobs.length}, checking metadata...\r`);
 
     let memoryCount = 0;
     let storageBytes = 0;
@@ -127,7 +140,7 @@ async function main() {
       // Fetch and verify metadata
       const metadata = await fetchBlobMetadata(objectId);
 
-      if (metadata.memwal_package_id === MEMWAL_PACKAGE_ID) {
+      if (metadata.memwal_package_id === CONFIG.packageId) {
         memoryCount++;
         storageBytes += parseInt(fields?.storage?.fields?.storage_size || "0", 10);
         contentBytes += parseInt(fields?.size || "0", 10);
@@ -238,8 +251,8 @@ async function main() {
   const outputPath = "./scripts/memwal-stats-output.json";
   const output = {
     timestamp: new Date().toISOString(),
-    network: "mainnet",
-    packageId: MEMWAL_PACKAGE_ID,
+    network: CONFIG.network,
+    packageId: CONFIG.packageId,
     summary: {
       totalAccounts: accounts.length,
       activeAccounts,
@@ -282,7 +295,7 @@ async function queryAllEvents<T>(eventType: string): Promise<T[]> {
       params: [{ MoveEventType: eventType }, cursor, 50, false],
     };
 
-    const response = await fetch(MAINNET_RPC_URL, {
+    const response = await fetch(CONFIG.rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -314,7 +327,7 @@ async function queryBlobsForOwner(owner: string): Promise<any[]> {
     const params: any[] = [
       owner,
       {
-        filter: { StructType: WALRUS_BLOB_TYPE },
+        filter: { StructType: CONFIG.walrusBlobType },
         options: { showContent: true },
       },
     ];
@@ -372,7 +385,7 @@ function arrayToHex(arr: number[]): string {
 async function fetchWithRetry(body: any, retries = 3): Promise<any> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(MAINNET_RPC_URL, {
+      const response = await fetch(CONFIG.rpcUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
