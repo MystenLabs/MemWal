@@ -33,7 +33,9 @@ export default defineConfig({
     video: isCI ? "retain-on-failure" : "off",
     screenshot: "only-on-failure",
     actionTimeout: 10_000,
-    navigationTimeout: 15_000,
+    // 30s to tolerate cold Next.js/Turbopack compile on 2-vCPU CI runners;
+    // globalSetup also warms `/` to make first-nav fast on the happy path.
+    navigationTimeout: 30_000,
   },
 
   timeout: 60_000,
