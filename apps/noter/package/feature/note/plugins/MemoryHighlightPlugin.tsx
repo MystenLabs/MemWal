@@ -154,7 +154,42 @@ export function MemoryHighlightPlugin({
             if (index === -1) {
               index = findUnusedOccurrence(trimmedMemoryText);
               if (index !== -1) {
-                matchedText = trimmedMemoryText; // We matched the trimmed version!
+                matchedText = trimmedMemoryText;
+              }
+            }
+
+            // If that fails, try fuzzy match: case-insensitive search,
+            // then find the best overlapping substring between LLM text and editor text
+            if (index === -1) {
+              const lowerFull = fullText.toLowerCase();
+              const lowerMemory = trimmedMemoryText.toLowerCase();
+
+              // Strategy 1: case-insensitive exact match
+              const ciIndex = lowerFull.indexOf(lowerMemory);
+              if (ciIndex !== -1 && !usedPositions.has(ciIndex)) {
+                index = ciIndex;
+                matchedText = fullText.slice(ciIndex, ciIndex + trimmedMemoryText.length);
+              }
+
+              // Strategy 2: find longest common substring (min 10 chars)
+              if (index === -1) {
+                let best = { start: -1, len: 0 };
+                for (let i = 0; i < lowerFull.length; i++) {
+                  for (let j = 0; j < lowerMemory.length; j++) {
+                    if (lowerFull[i] !== lowerMemory[j]) continue;
+                    let k = 0;
+                    while (i + k < lowerFull.length && j + k < lowerMemory.length && lowerFull[i + k] === lowerMemory[j + k]) {
+                      k++;
+                    }
+                    if (k > best.len) {
+                      best = { start: i, len: k };
+                    }
+                  }
+                }
+                if (best.len >= 10 && !usedPositions.has(best.start)) {
+                  index = best.start;
+                  matchedText = fullText.slice(best.start, best.start + best.len);
+                }
               }
             }
 

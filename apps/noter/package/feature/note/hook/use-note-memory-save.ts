@@ -48,7 +48,7 @@ export function useNoteMemorySave() {
       });
 
       // Call server-side API to remember (v2 SDK)
-      const response = await fetch("/api/memory/remember", {
+      const response = await fetch("/api/memory/remember-one", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: memoryText }),
