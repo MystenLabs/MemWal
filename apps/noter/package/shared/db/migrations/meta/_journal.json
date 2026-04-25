@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "7",
+      "when": 1743900000000,
+      "tag": "0002_add_enoki_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
       "when": 1774594396885,
-      "tag": "0002_conscious_deathbird",
+      "tag": "0003_conscious_deathbird",
       "breakpoints": true
     }
   ]

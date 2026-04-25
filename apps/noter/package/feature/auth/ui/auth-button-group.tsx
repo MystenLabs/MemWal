@@ -1,104 +1,127 @@
 /**
  * AUTH BUTTON GROUP
- * Combined login button with dropdown for alternative auth methods
+ * Sign in with Google (Enoki) + collapsible delegate key login
  */
 
 "use client";
 
 import { Button } from "@/shared/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/shared/components/ui/dropdown-menu";
-import { ChevronDown, Loader2, Wallet } from "lucide-react";
+import { Input } from "@/shared/components/ui/input";
+import { ChevronDown, KeyRound, Loader2, ArrowRight, Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
-import { WALLET_INSTALL_URLS, type WalletType } from "../constant";
 import { useAuth } from "../hook/use-auth";
-import {
-  connectWallet,
-  isWalletInstalled,
-  signMessage,
-} from "../lib/wallet-client";
-import { trpc } from "@/shared/lib/trpc/client";
-import { LoginButton } from "./login-button";
+import { EnokiLoginCard } from "@/app/components/enoki-login-card";
 
 export function AuthButtonGroup() {
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [isWalletConnecting, setIsWalletConnecting] = useState(false);
-  const [walletError, setWalletError] = useState<string | null>(null);
-  const { connectWalletAuth, isLoginPending } = useAuth();
-  const getChallenge = trpc.auth.getChallenge.useMutation();
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { connectDelegateKey, isLoginPending } = useAuth();
 
-  const slushInstalled = isWalletInstalled("slush");
+  const handleDelegateKeySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedKey = privateKey.trim();
+    const trimmedAccountId = accountId.trim();
 
-  const handleWalletSelect = async (walletType: WalletType) => {
-    // If wallet not installed, open install URL
-    if (!slushInstalled) {
-      window.open(WALLET_INSTALL_URLS[walletType], "_blank");
-      setDropdownOpen(false);
+    if (!trimmedKey || !trimmedAccountId) {
+      setError("Both fields are required.");
       return;
     }
 
-    setWalletError(null);
-    setIsWalletConnecting(true);
-    setDropdownOpen(false);
-
+    setError(null);
     try {
-      // 1. Connect to wallet
-      const account = await connectWallet(walletType);
-
-      // 2. Get server-issued challenge nonce
-      const { challengeId, nonce } = await getChallenge.mutateAsync();
-
-      // 3. Sign the challenge nonce
-      const { signature } = await signMessage(walletType, nonce, account);
-
-      // 4. Authenticate with backend
-      await connectWalletAuth({
-        walletType,
-        address: account.address,
-        signature,
-        challengeId,
+      await connectDelegateKey({
+        privateKey: trimmedKey,
+        accountId: trimmedAccountId,
       });
+      window.location.href = "/note";
     } catch (err) {
-      console.error(`[AuthButtonGroup] Failed to connect ${walletType}:`, err);
-      setWalletError(err instanceof Error ? err.message : "Connection failed");
-    } finally {
-      setIsWalletConnecting(false);
+      setError(err instanceof Error ? err.message : "Authentication failed");
     }
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex h-9">
-        {/* Primary Button - Connect with Slush Wallet */}
-        <Button
-          onClick={() => handleWalletSelect("slush")}
-          disabled={isLoginPending || isWalletConnecting}
-          className="flex-1"
-        >
-          {isWalletConnecting ? (
-            <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Connecting...
-            </>
-          ) : (
-            <>
-              <Wallet className="mr-2 h-4 w-4" />
-              {slushInstalled ? "Continue with Slush Wallet" : "Install Slush Wallet"}
-            </>
-          )}
-        </Button>
+    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+      {/* Google Sign-in (Enoki) */}
+      <EnokiLoginCard />
+
+      {/* Divider */}
+      <div className="flex items-center gap-3">
+        <div className="h-px flex-1 bg-border" />
+        <span className="text-muted-foreground text-xs">or</span>
+        <div className="h-px flex-1 bg-border" />
       </div>
 
-      {/* Error Message */}
-      {walletError && (
-        <p className="text-xs text-destructive">{walletError}</p>
-      )}
+      {/* Advanced: Delegate key login */}
+      <div className="border bg-card">
+        <button
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-muted-foreground text-sm transition-colors hover:text-foreground"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          type="button"
+        >
+          <span className="flex items-center gap-2">
+            <KeyRound className="h-3.5 w-3.5" />
+            Sign in with delegate key
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 transition-transform duration-200 ${showAdvanced ? "rotate-180" : ""}`}
+          />
+        </button>
+
+        {showAdvanced && (
+          <form
+            className="border-t px-4 pb-4 pt-3 flex flex-col gap-3"
+            onSubmit={handleDelegateKeySubmit}
+          >
+            <Input
+              className="font-mono text-sm"
+              onChange={(e) => setAccountId(e.target.value)}
+              placeholder="Account ID (0x...)"
+              required
+              value={accountId}
+            />
+            <div className="relative">
+              <Input
+                className="pr-10 font-mono text-sm"
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder="Private key (64 hex)"
+                required
+                type={showKey ? "text" : "password"}
+                value={privateKey}
+              />
+              <button
+                className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => setShowKey(!showKey)}
+                tabIndex={-1}
+                type="button"
+              >
+                {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+            <Button
+              className="w-full"
+              disabled={isLoginPending || !privateKey.trim() || !accountId.trim()}
+              type="submit"
+            >
+              {isLoginPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Authenticating...
+                </>
+              ) : (
+                <>
+                  Sign In
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </>
+              )}
+            </Button>
+          </form>
+        )}
+      </div>
+
+      {error && <p className="text-xs text-destructive text-center">{error}</p>}
     </div>
   );
 }

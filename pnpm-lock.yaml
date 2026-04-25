@@ -502,8 +502,14 @@ importers:
       '@mysten-incubation/memwal':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@mysten/dapp-kit':
+        specifier: ^1.0.3
+        version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.2.3))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.2.3))
+      '@mysten/enoki':
+        specifier: ^1.0.4
+        version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.3)
       '@mysten/sui':
-        specifier: ^2.5.0
+        specifier: ^2.6.0
         version: 2.8.0(typescript@5.9.3)
       '@mysten/wallet-standard':
         specifier: ^0.15.0
@@ -511,6 +517,12 @@ importers:
       '@mysten/zklogin':
         specifier: ^0.8.1
         version: 0.8.1(typescript@5.9.3)
+      '@noble/ed25519':
+        specifier: ^2.2.3
+        version: 2.3.0
+      '@noble/hashes':
+        specifier: ^1.7.2
+        version: 1.8.0
       '@tanstack/react-query':
         specifier: ^5.90.21
         version: 5.90.21(react@19.2.3)
@@ -539,11 +551,11 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
       drizzle-orm:
-        specifier: ^0.45.1
-        version: 0.45.1(@opentelemetry/api@1.9.0)(postgres@3.4.8)
+        specifier: ^0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.0)(postgres@3.4.8)
       drizzle-zod:
         specifier: ^0.8.3
-        version: 0.8.3(drizzle-orm@0.45.1(@opentelemetry/api@1.9.0)(postgres@3.4.8))(zod@4.3.6)
+        version: 0.8.3(drizzle-orm@0.45.2(@opentelemetry/api@1.9.0)(postgres@3.4.8))(zod@4.3.6)
       embla-carousel-react:
         specifier: ^8.6.0
         version: 8.6.0(react@19.2.3)
@@ -704,6 +716,15 @@ importers:
       '@mysten-incubation/memwal':
         specifier: 0.0.1
         version: 0.0.1(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
+      '@mysten/dapp-kit':
+        specifier: ^1.0.3
+        version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.0.1))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.0.1))
+      '@mysten/enoki':
+        specifier: ^1.0.4
+        version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.0.1)
+      '@mysten/sui':
+        specifier: ^2.6.0
+        version: 2.8.0(typescript@5.9.3)
       '@noble/ed25519':
         specifier: ^2.2.3
         version: 2.3.0
@@ -758,6 +779,9 @@ importers:
       '@radix-ui/react-visually-hidden':
         specifier: ^1.1.0
         version: 1.2.4(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)
+      '@tanstack/react-query':
+        specifier: ^5.90.21
+        version: 5.90.21(react@19.0.1)
       '@vercel/blob':
         specifier: ^0.24.1
         version: 0.24.1
@@ -6568,8 +6592,8 @@ packages:
       sqlite3:
         optional: true
 
-  drizzle-orm@0.45.1:
-    resolution: {integrity: sha512-Te0FOdKIistGNPMq2jscdqngBRfBpC8uMFVwqjf6gtTVJHIQ/dosgV/CLBU2N4ZJBsXL5savCba9b0YJskKdcA==}
+  drizzle-orm@0.45.2:
+    resolution: {integrity: sha512-kY0BSaTNYWnoDMVoyY8uxmyHjpJW1geOmBMdSSicKo9CIIWkSxMIj2rkeSR51b8KAPB7m+qysjuHme5nKP+E5Q==}
     peerDependencies:
       '@aws-sdk/client-rds-data': '>=3'
       '@cloudflare/workers-types': '>=4'
@@ -13014,7 +13038,7 @@ snapshots:
 
   '@manypkg/find-root@1.1.0':
     dependencies:
-      '@babel/runtime': 7.28.6
+      '@babel/runtime': 7.29.2
       '@types/node': 12.20.55
       find-up: 4.1.0
       fs-extra: 8.1.0
@@ -13553,6 +13577,31 @@ snapshots:
       '@mysten/utils': 0.3.1
       '@scure/base': 2.0.0
 
+  '@mysten/dapp-kit@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.0.1))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.0.1))':
+    dependencies:
+      '@mysten/slush-wallet': 1.0.3(@mysten/sui@2.8.0(typescript@5.9.3))(typescript@5.9.3)
+      '@mysten/sui': 2.8.0(typescript@5.9.3)
+      '@mysten/utils': 0.3.1
+      '@mysten/wallet-standard': 0.20.1(@mysten/sui@2.8.0(typescript@5.9.3))
+      '@radix-ui/react-dialog': 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)
+      '@radix-ui/react-dropdown-menu': 2.1.16(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)
+      '@radix-ui/react-slot': 1.2.4(@types/react@19.2.14)(react@19.0.1)
+      '@tanstack/react-query': 5.90.21(react@19.0.1)
+      '@vanilla-extract/css': 1.18.0
+      '@vanilla-extract/dynamic': 2.1.5
+      '@vanilla-extract/recipes': 0.5.7(@vanilla-extract/css@1.18.0)
+      clsx: 2.1.1
+      react: 19.0.1
+      zustand: 5.0.11(@types/react@19.2.14)(immer@9.0.21)(react@19.0.1)(use-sync-external-store@1.6.0(react@19.0.1))
+    transitivePeerDependencies:
+      - '@types/react'
+      - '@types/react-dom'
+      - babel-plugin-macros
+      - immer
+      - react-dom
+      - typescript
+      - use-sync-external-store
+
   '@mysten/dapp-kit@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.2.3))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.2.3))':
     dependencies:
       '@mysten/slush-wallet': 1.0.3(@mysten/sui@2.8.0(typescript@5.9.3))(typescript@5.9.3)
@@ -13577,6 +13626,22 @@ snapshots:
       - react-dom
       - typescript
       - use-sync-external-store
+
+  '@mysten/enoki@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.0.1)':
+    dependencies:
+      '@mysten/signers': 1.0.1(@mysten/sui@2.8.0(typescript@5.9.3))
+      '@mysten/sui': 2.8.0(typescript@5.9.3)
+      '@mysten/utils': 0.3.1
+      '@mysten/wallet-standard': 0.20.1(@mysten/sui@2.8.0(typescript@5.9.3))
+      '@nanostores/react': 1.0.0(nanostores@1.1.1)(react@19.0.1)
+      '@wallet-standard/ui': 1.0.1
+      idb-keyval: 6.2.2
+      nanostores: 1.1.1
+    optionalDependencies:
+      '@types/react': 19.2.14
+      react: 19.0.1
+    transitivePeerDependencies:
+      - supports-color
 
   '@mysten/enoki@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.3)':
     dependencies:
@@ -13733,6 +13798,11 @@ snapshots:
       - '@gql.tada/svelte-support'
       - '@gql.tada/vue-support'
       - typescript
+
+  '@nanostores/react@1.0.0(nanostores@1.1.1)(react@19.0.1)':
+    dependencies:
+      nanostores: 1.1.1
+      react: 19.0.1
 
   '@nanostores/react@1.0.0(nanostores@1.1.1)(react@19.2.3)':
     dependencies:
@@ -16894,6 +16964,11 @@ snapshots:
 
   '@tanstack/query-core@5.90.20': {}
 
+  '@tanstack/react-query@5.90.21(react@19.0.1)':
+    dependencies:
+      '@tanstack/query-core': 5.90.20
+      react: 19.0.1
+
   '@tanstack/react-query@5.90.21(react@19.2.3)':
     dependencies:
       '@tanstack/query-core': 5.90.20
@@ -18619,14 +18694,14 @@ snapshots:
       postgres: 3.4.8
       react: 19.0.1
 
-  drizzle-orm@0.45.1(@opentelemetry/api@1.9.0)(postgres@3.4.8):
+  drizzle-orm@0.45.2(@opentelemetry/api@1.9.0)(postgres@3.4.8):
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
       postgres: 3.4.8
 
-  drizzle-zod@0.8.3(drizzle-orm@0.45.1(@opentelemetry/api@1.9.0)(postgres@3.4.8))(zod@4.3.6):
+  drizzle-zod@0.8.3(drizzle-orm@0.45.2(@opentelemetry/api@1.9.0)(postgres@3.4.8))(zod@4.3.6):
     dependencies:
-      drizzle-orm: 0.45.1(@opentelemetry/api@1.9.0)(postgres@3.4.8)
+      drizzle-orm: 0.45.2(@opentelemetry/api@1.9.0)(postgres@3.4.8)
       zod: 4.3.6
 
   dunder-proto@1.0.1:
@@ -19031,7 +19106,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.6.1)
       eslint-import-resolver-node: 0.3.9
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react-hooks: 7.0.1(eslint@9.39.4(jiti@2.6.1))
@@ -19064,7 +19139,7 @@ snapshots:
       tinyglobby: 0.2.15
       unrs-resolver: 1.11.1
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
     transitivePeerDependencies:
       - supports-color
 
@@ -19078,7 +19153,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)):
+  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9
@@ -24693,6 +24768,13 @@ snapshots:
       '@types/react': 19.2.14
       immer: 9.0.21
       react: 19.2.3
+
+  zustand@5.0.11(@types/react@19.2.14)(immer@9.0.21)(react@19.0.1)(use-sync-external-store@1.6.0(react@19.0.1)):
+    optionalDependencies:
+      '@types/react': 19.2.14
+      immer: 9.0.21
+      react: 19.0.1
+      use-sync-external-store: 1.6.0(react@19.0.1)
 
   zustand@5.0.11(@types/react@19.2.14)(immer@9.0.21)(react@19.2.3)(use-sync-external-store@1.6.0(react@19.2.3)):
     optionalDependencies:

@@ -2,34 +2,44 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
 import superjson from "superjson";
 import { db } from "@/shared/lib/db";
-import { zkLoginSessions, walletSessions } from "@/shared/db/schema";
+import { zkLoginSessions, walletSessions, users } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 export type Context = {
   db: typeof db;
   userId: string | null;
+  /** Per-user MemWal delegate key (null if user has no stored key). */
+  memwalKey: string | null;
+  /** Per-user MemWal account ID (null if user has no stored account). */
+  memwalAccountId: string | null;
 };
 
-/**
- * Extract session ID from request headers
- * Client should send sessionId in x-session-id header
- */
 function getSessionIdFromRequest(req: Request): string | null {
-  const sessionId = req.headers.get("x-session-id");
-  return sessionId;
+  return req.headers.get("x-session-id");
 }
 
-/**
- * Create tRPC context with authenticated user
- * Extracts sessionId from headers and validates against database
- * Supports both zkLogin and wallet sessions
- */
+/** Load user's MemWal delegate key from the users table. Falls back to env vars. */
+async function loadUserMemwalKey(userId: string) {
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    return {
+      memwalKey: user?.delegatePrivateKey ?? process.env.MEMWAL_KEY ?? null,
+      memwalAccountId: user?.delegateAccountId ?? process.env.MEMWAL_ACCOUNT_ID ?? null,
+    };
+  } catch {
+    return {
+      memwalKey: process.env.MEMWAL_KEY ?? null,
+      memwalAccountId: process.env.MEMWAL_ACCOUNT_ID ?? null,
+    };
+  }
+}
+
 export const createContext = async (
   opts: FetchCreateContextFnOptions
 ): Promise<Context> => {
+  const noAuth: Context = { db, userId: null, memwalKey: null, memwalAccountId: null };
   const sessionId = getSessionIdFromRequest(opts.req);
-  if (!sessionId) {    return { db, userId: null };
-  }
+  if (!sessionId) return noAuth;
 
   // Try zkLogin session first
   const [zkSession] = await db
@@ -38,28 +48,24 @@ export const createContext = async (
     .where(eq(zkLoginSessions.id, sessionId))
     .limit(1);
 
-  if (zkSession && zkSession.userId) {
-    // Check if session expired
-    if (zkSession.expiresAt < new Date()) {      return { db, userId: null };
-    }
-
-    return { db, userId: zkSession.userId };
+  if (zkSession?.userId && zkSession.expiresAt > new Date()) {
+    const keys = await loadUserMemwalKey(zkSession.userId);
+    return { db, userId: zkSession.userId, ...keys };
   }
 
-  // Try wallet session
+  // Try wallet/enoki session
   const [walletSession] = await db
     .select()
     .from(walletSessions)
     .where(eq(walletSessions.id, sessionId))
     .limit(1);
 
-  if (walletSession && walletSession.userId) {
-    // Check if session expired
-    if (walletSession.expiresAt < new Date()) {      return { db, userId: null };
-    }
+  if (walletSession?.userId && walletSession.expiresAt > new Date()) {
+    const keys = await loadUserMemwalKey(walletSession.userId);
+    return { db, userId: walletSession.userId, ...keys };
+  }
 
-    return { db, userId: walletSession.userId };
-  }  return { db, userId: null };
+  return noAuth;
 };
 
 const t = initTRPC.context<Context>().create({
@@ -70,8 +76,8 @@ export const router = t.router;
 export const procedure = t.procedure;
 
 /**
- * Protected procedure that requires authentication
- * Throws UNAUTHORIZED if no valid session
+ * Protected procedure that requires authentication.
+ * Throws UNAUTHORIZED if no valid session.
  */
 export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   if (!ctx.userId) {
@@ -84,7 +90,7 @@ export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   return next({
     ctx: {
       ...ctx,
-      userId: ctx.userId, // Now TypeScript knows userId is non-null
+      userId: ctx.userId,
     },
   });
 });
