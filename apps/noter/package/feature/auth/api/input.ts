@@ -79,7 +79,7 @@ export const connectWalletInput = z.object({
   walletType: walletSessionInsertSchema.shape.walletType.pipe(z.enum(["slush"])), // Subset validation
   address: walletSessionInsertSchema.shape.walletAddress, // Maps to walletAddress in DB
   signature: walletSessionInsertSchema.shape.signature,
-  message: walletSessionInsertSchema.shape.signedMessage, // Maps to signedMessage in DB
+  challengeId: uuidv7Schema, // Server-issued challenge ID (replaces client message)
 });
 
 export type ConnectWalletInput = z.infer<typeof connectWalletInput>;
