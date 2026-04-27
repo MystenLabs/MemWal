@@ -7,7 +7,7 @@ mod sui;
 mod types;
 mod walrus;
 
-use axum::{middleware, routing::{get, post}, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -141,7 +141,8 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(1536 * 1024)); // 1.5 MiB — supports 1 MiB text + JSON envelope
 
     // Public routes
     let public_routes = Router::new()
