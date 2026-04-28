@@ -190,13 +190,33 @@ pub struct RecallResult {
     pub distance: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
 }
 
 
+
+/// POST /api/remember/batch
+/// Batch version of /api/remember — processes multiple texts in a single transaction
+#[derive(Debug, Deserialize)]
+pub struct RememberBatchRequest {
+    pub items: Vec<RememberBatchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RememberBatchItem {
+    pub text: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RememberBatchResponse {
+    pub results: Vec<RememberResponse>,
+    pub total: usize,
+}
 
 /// POST /api/analyze
 /// Extract facts from conversation text using LLM, then remember each fact

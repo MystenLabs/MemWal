@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:sdk": "pnpm --filter @mysten-incubation/memwal build",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "build:sdk": "turbo run build --filter=@mysten-incubation/memwal",
     "dev:sdk": "pnpm --filter @mysten-incubation/memwal dev",
     "dev:noter": "pnpm --filter noter dev",
     "dev:chatbot": "pnpm --filter chatbot dev",
@@ -23,6 +26,7 @@
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
     "tsx": "^4.21.0",
+    "turbo": "^2.9.6",
     "typescript": "^5"
   },
   "packageManager": "pnpm@9.12.3",
