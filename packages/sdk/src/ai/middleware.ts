@@ -154,10 +154,11 @@ export function withMemWal(
 }
 
 // ============================================================
-// Helpers
+// Helpers (exported for testing)
 // ============================================================
 
-function findLastUserMessage(
+/** @internal */
+export function findLastUserMessage(
     prompt: unknown
 ): string | null {
     if (!Array.isArray(prompt)) return null;
@@ -177,32 +178,34 @@ function findLastUserMessage(
     return null;
 }
 
-function formatMemories(memories: RecallMemory[]): string {
+/** @internal */
+export function formatMemories(memories: RecallMemory[]): string {
     const lines = memories.map(
         (m) => `- ${m.text} (relevance: ${(1 - m.distance).toFixed(2)})`
     );
     return `[Memory Context] The following are known facts about this user from their personal memory store. Use these facts to answer the user's question:\n${lines.join("\n")}`;
 }
 
-function injectMemoryContext(
+/** @internal */
+export function injectMemoryContext(
     prompt: unknown,
     memoryContext: string
 ): unknown {
     if (!Array.isArray(prompt)) return prompt;
 
-    // Insert memory as a separate system message right before the last user message
-    // This ensures the LLM sees it prominently, not buried in a long system prompt
-    const lastUserIndex = prompt.reduce(
-        (idx: number, m: any, i: number) => (m.role === "user" ? i : idx),
-        -1
-    );
+    // Append memory context to existing system message to avoid multiple system
+    // messages (Anthropic only allows one). If no system message exists, prepend one.
+    const systemIndex = prompt.findIndex((m: any) => m.role === "system");
 
-    if (lastUserIndex > 0) {
+    if (systemIndex >= 0) {
         const result = [...prompt];
-        result.splice(lastUserIndex, 0, {
-            role: "system" as const,
-            content: memoryContext,
-        });
+        const existing = result[systemIndex] as any;
+        result[systemIndex] = {
+            ...existing,
+            content: typeof existing.content === "string"
+                ? `${existing.content}\n\n${memoryContext}`
+                : memoryContext,
+        };
         return result;
     }
 

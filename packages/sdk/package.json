@@ -26,7 +26,8 @@
     "scripts": {
         "build": "tsc",
         "dev": "tsc --watch",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "tsc"
     },
     "dependencies": {
         "@noble/ed25519": "^2.3.0",
