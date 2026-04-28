@@ -150,6 +150,9 @@ async fn main() {
         .route("/sponsor", post(routes::sponsor_proxy))
         .route("/sponsor/execute", post(routes::sponsor_execute_proxy));
 
+    // Clone state before moving into router (needed for shutdown cleanup)
+    let state_for_shutdown = state.clone();
+
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
@@ -168,7 +171,6 @@ async fn main() {
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
     // Graceful shutdown: handle Ctrl+C and SIGTERM
-    let state_for_shutdown = state.clone();
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();
 
