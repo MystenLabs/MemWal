@@ -235,7 +235,18 @@ still on React 18 which lacks `useActionState`. This caused a build failure:
 Module '"react"' has no exported member 'useActionState'.
 ```
 
-#### 15. Build Script — Turbo Filter for SDK
+#### 15. CI — Remove `npm install -g npm@latest` from Release Workflows
+
+**Files:** `.github/workflows/release-sdk.yml`, `.github/workflows/release-oc-memwal.yml`
+
+Removed the `npm install -g npm@latest` step from both release workflows. This step was
+corrupting npm's own installation mid-upgrade — npm deletes its dependency `promise-retry`
+before the rebuild phase finishes, causing `MODULE_NOT_FOUND` errors.
+
+Node 22's bundled npm (10.x) already supports `--provenance` and OIDC trusted publishing
+natively, so the self-upgrade was unnecessary.
+
+#### 16. Build Script — Turbo Filter for SDK
 
 **File:** `package.json`
 

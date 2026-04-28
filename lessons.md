@@ -94,3 +94,15 @@ Issues encountered during the optimization branch and how they were resolved.
 **Fix:** Changed to `pnpm exec turbo run build --filter=...`. `pnpm exec` resolves binaries from the local `node_modules/.bin/` directory.
 
 **Lesson:** In CI, never assume devDependency binaries are in PATH. Always use `pnpm exec`, `npx`, or `yarn exec` to invoke locally-installed CLI tools. This applies to turbo, tsc, eslint, vitest, and any other bin-only package.
+
+---
+
+## 9. CI: `npm install -g npm@latest` self-corrupts in GitHub Actions
+
+**Error:** `npm error Cannot find module 'promise-retry'` when running `npm install -g npm@latest` in the release workflow.
+
+**Cause:** npm's global self-upgrade deletes its own dependencies (like `promise-retry`) from the old installation before the new installation's rebuild phase completes. This is a race condition in npm's self-update mechanism on GitHub Actions runners.
+
+**Fix:** Removed the `npm install -g npm@latest` step entirely. The step was added for OIDC Trusted Publishing (`--provenance` flag), but Node 22's bundled npm 10.x already supports this natively.
+
+**Lesson:** Never run `npm install -g npm@latest` in CI. Node's bundled npm version is sufficient for modern features like `--provenance`. If a specific npm version is truly needed, use `setup-node` with a pinned version or use `corepack`.
