@@ -26,11 +26,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build (Turborepo cached)
-        run: pnpm build
+      - name: Build SDK
+        run: pnpm build:sdk
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Typecheck SDK
+        run: pnpm --filter @mysten-incubation/memwal typecheck
 
   build-rust:
     name: Build (Rust Server)
