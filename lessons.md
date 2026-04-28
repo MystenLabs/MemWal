@@ -106,3 +106,15 @@ Issues encountered during the optimization branch and how they were resolved.
 **Fix:** Removed the `npm install -g npm@latest` step entirely. The step was added for OIDC Trusted Publishing (`--provenance` flag), but Node 22's bundled npm 10.x already supports this natively.
 
 **Lesson:** Never run `npm install -g npm@latest` in CI. Node's bundled npm version is sufficient for modern features like `--provenance`. If a specific npm version is truly needed, use `setup-node` with a pinned version or use `corepack`.
+
+---
+
+## 10. CI: pnpm 9.x incompatible with Node 22 in GitHub Actions
+
+**Error:** `pnpm/action-setup@v4` fails with Node 22 when using `pnpm@9.12.3`.
+
+**Cause:** pnpm 9.x has compatibility issues with Node 22 in CI environments. The `pnpm/action-setup` action reads the version from `packageManager` in `package.json`, and pnpm 9.x may not fully support Node 22's module resolution changes.
+
+**Fix:** Upgraded `"packageManager": "pnpm@9.12.3"` to `"pnpm@10.0.0"` in the root `package.json`.
+
+**Lesson:** When upgrading Node.js to a new major version (e.g., 20 → 22), also upgrade pnpm to the corresponding compatible major version. pnpm 10.x is the recommended version for Node 22 LTS. Always check the pnpm compatibility matrix before pinning versions.

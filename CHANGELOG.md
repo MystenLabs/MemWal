@@ -246,7 +246,16 @@ before the rebuild phase finishes, causing `MODULE_NOT_FOUND` errors.
 Node 22's bundled npm (10.x) already supports `--provenance` and OIDC trusted publishing
 natively, so the self-upgrade was unnecessary.
 
-#### 16. Build Script — Turbo Filter for SDK
+#### 16. CI — Upgrade pnpm 9.12.3 → 10.0.0
+
+**File:** `package.json`
+
+Upgraded `packageManager` from `pnpm@9.12.3` to `pnpm@10.0.0` for Node 22 compatibility.
+pnpm 9.x has compatibility issues with Node 22 in GitHub Actions CI runners, causing
+`pnpm/action-setup@v4` to fail during dependency resolution. pnpm 10.x is the recommended
+version for Node 22 LTS environments.
+
+#### 17. Build Script — Turbo Filter for SDK
 
 **File:** `package.json`
 
