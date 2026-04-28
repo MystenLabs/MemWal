@@ -27,10 +27,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build SDK
-        run: pnpm build:sdk
+        run: turbo run build --filter=@mysten-incubation/memwal
 
       - name: Typecheck SDK
-        run: pnpm --filter @mysten-incubation/memwal typecheck
+        run: turbo run typecheck --filter=@mysten-incubation/memwal
 
   build-rust:
     name: Build (Rust Server)

@@ -7,7 +7,7 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "build:sdk": "pnpm --filter @mysten-incubation/memwal build",
+    "build:sdk": "turbo run build --filter=@mysten-incubation/memwal",
     "dev:sdk": "pnpm --filter @mysten-incubation/memwal dev",
     "dev:noter": "pnpm --filter noter dev",
     "dev:chatbot": "pnpm --filter chatbot dev",
