@@ -109,6 +109,71 @@ async fn generate_embedding(
     }
 }
 
+/// Sidecar batch embedding response
+#[derive(serde::Deserialize)]
+struct EmbedBatchResult {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+#[derive(serde::Deserialize)]
+struct EmbedBatchResponse {
+    results: Vec<EmbedBatchResult>,
+    #[allow(dead_code)]
+    errors: Vec<serde_json::Value>,
+}
+
+/// Generate embeddings for multiple texts in a single batch call via sidecar.
+/// Falls back to sequential single-text embedding if sidecar batch endpoint is unavailable.
+async fn generate_embeddings_batch(
+    client: &reqwest::Client,
+    config: &Config,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, AppError> {
+    // Try sidecar /embed-batch first
+    let url = format!("{}/embed-batch", config.sidecar_url);
+    match client
+        .post(&url)
+        .json(&serde_json::json!({ "texts": texts }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let batch_resp: EmbedBatchResponse = resp.json().await.map_err(|e| {
+                AppError::Internal(format!("Failed to parse embed-batch response: {}", e))
+            })?;
+
+            // Reconstruct ordered vector list
+            let mut embeddings = vec![Vec::new(); texts.len()];
+            for result in batch_resp.results {
+                if result.index < embeddings.len() {
+                    embeddings[result.index] = result.embedding;
+                }
+            }
+
+            // Check all slots filled
+            if embeddings.iter().any(|v| v.is_empty()) {
+                tracing::warn!("embed-batch: some embeddings missing, falling back to sequential");
+            } else {
+                return Ok(embeddings);
+            }
+        }
+        Ok(resp) => {
+            tracing::warn!("embed-batch returned {}, falling back to sequential", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("embed-batch unavailable ({}), falling back to sequential", e);
+        }
+    }
+
+    // Fallback: sequential single-text embedding
+    let mut embeddings = Vec::with_capacity(texts.len());
+    for text in texts {
+        embeddings.push(generate_embedding(client, config, text).await?);
+    }
+    Ok(embeddings)
+}
+
 // ============================================================
 // Routes
 // ============================================================
@@ -178,6 +243,97 @@ pub async fn remember(
     }))
 }
 
+/// POST /api/remember/batch
+///
+/// Batch version of /api/remember — processes multiple texts in a single transaction.
+/// Each item goes through: embed + encrypt → Walrus upload → store.
+/// All DB inserts are wrapped in one transaction for atomicity.
+pub async fn remember_batch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberBatchRequest>,
+) -> Result<Json<RememberBatchResponse>, AppError> {
+    if body.items.is_empty() {
+        return Err(AppError::BadRequest("Items array cannot be empty".into()));
+    }
+    if body.items.len() > 100 {
+        return Err(AppError::BadRequest("Batch size cannot exceed 100 items".into()));
+    }
+    for (i, item) in body.items.iter().enumerate() {
+        if item.text.is_empty() {
+            return Err(AppError::BadRequest(format!("Item {} has empty text", i)));
+        }
+    }
+
+    let owner = &auth.owner;
+    tracing::info!("remember_batch: {} items, owner={}", body.items.len(), owner);
+
+    // Check total storage quota
+    let total_bytes: i64 = body.items.iter().map(|i| i.text.as_bytes().len() as i64).sum();
+    rate_limit::check_storage_quota(&state, owner, total_bytes).await?;
+
+    // Process all items concurrently (embed + encrypt → upload)
+    let auth_pubkey = auth.public_key.clone();
+    let tasks: Vec<_> = body.items.iter().map(|item| {
+        let state = Arc::clone(&state);
+        let owner = owner.clone();
+        let text = item.text.clone();
+        let namespace = item.namespace.clone();
+        let auth_pubkey = auth_pubkey.clone();
+        let sui_key: Result<String, AppError> = state.key_pool.next()
+            .map(|s| s.to_string())
+            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()));
+        async move {
+            let sui_key = sui_key?;
+
+            // Embed + encrypt concurrently
+            let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
+            let encrypt_fut = seal::seal_encrypt(
+                &state.http_client, &state.config.sidecar_url,
+                text.as_bytes(), &owner, &state.config.package_id,
+            );
+            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+            let vector = vector_result?;
+            let encrypted = encrypted_result?;
+
+            // Upload to Walrus
+            let upload_result = walrus::upload_blob(
+                &state.http_client, &state.config.sidecar_url,
+                &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
+                Some(&auth_pubkey),
+            ).await?;
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let blob_size = encrypted.len() as i64;
+            let blob_id = upload_result.blob_id;
+
+            Ok::<(String, String, String, String, Vec<f32>, i64, RememberResponse), AppError>((
+                id.clone(), owner.clone(), namespace.clone(), blob_id.clone(), vector, blob_size,
+                RememberResponse { id, blob_id, owner: owner.clone(), namespace },
+            ))
+        }
+    }).collect();
+
+    let results = futures::future::join_all(tasks).await;
+
+    // Collect results and prepare batch DB insert
+    let mut db_entries = Vec::with_capacity(results.len());
+    let mut responses = Vec::with_capacity(results.len());
+    for result in results {
+        let (id, owner, namespace, blob_id, vector, blob_size, response) = result?;
+        db_entries.push((id, owner, namespace, blob_id, vector, blob_size));
+        responses.push(response);
+    }
+
+    // Single transaction for all DB inserts
+    state.db.insert_vectors_batch(&db_entries).await?;
+
+    let total = responses.len();
+    tracing::info!("remember_batch complete: {} items stored for owner={}", total, owner);
+
+    Ok(Json(RememberBatchResponse { results: responses, total }))
+}
+
 /// POST /api/recall
 ///
 /// Full TEE flow:
@@ -210,8 +366,10 @@ pub async fn recall(
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
 
-    // Step 2: Search Vector DB
-    let hits = state.db.search_similar(&query_vector, owner, namespace, body.limit).await?;
+    // Step 2: Search Vector DB (with Redis cache)
+    let hits = state.db.search_cached(
+        &mut state.redis.clone(), &query_vector, owner, namespace, body.limit,
+    ).await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
     let db = &state.db;
@@ -372,8 +530,10 @@ pub async fn recall_manual(
         body.vector.len(), body.limit, owner, namespace
     );
 
-    // Search Vector DB — return blob IDs + distances only
-    let hits = state.db.search_similar(&body.vector, owner, namespace, body.limit).await?;
+    // Search Vector DB — return blob IDs + distances only (with Redis cache)
+    let hits = state.db.search_cached(
+        &mut state.redis.clone(), &body.vector, owner, namespace, body.limit,
+    ).await?;
     let total = hits.len();
 
     tracing::info!("recall_manual complete: {} results for owner={} ns={}", total, owner, namespace);

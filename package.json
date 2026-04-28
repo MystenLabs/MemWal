@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
     "build:sdk": "pnpm --filter @mysten-incubation/memwal build",
     "dev:sdk": "pnpm --filter @mysten-incubation/memwal dev",
     "dev:noter": "pnpm --filter noter dev",
@@ -23,6 +26,7 @@
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
     "tsx": "^4.21.0",
+    "turbo": "^2.9.6",
     "typescript": "^5"
   },
   "packageManager": "pnpm@9.12.3",

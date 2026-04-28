@@ -30,6 +30,8 @@
 import type {
     MemWalConfig,
     RememberResult,
+    RememberBatchItem,
+    RememberBatchResult,
     RecallResult,
     RecallMemory,
     EmbedResult,
@@ -42,6 +44,7 @@ import type {
     RestoreResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex } from "./utils.js";
+import { createHttpClient, type HttpClient } from "./client.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -65,12 +68,14 @@ export class MemWal {
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    private httpClient: HttpClient;
 
-    private constructor(config: MemWalConfig) {
+    private constructor(config: MemWalConfig & { httpClient?: HttpClient }) {
         this.privateKey = hexToBytes(config.key);
         this.accountId = config.accountId;
         this.serverUrl = (config.serverUrl ?? "http://localhost:8000").replace(/\/$/, "");
         this.namespace = config.namespace ?? "default";
+        this.httpClient = config.httpClient ?? createHttpClient();
     }
 
     /**
@@ -79,7 +84,7 @@ export class MemWal {
      * @param config.key - Ed25519 private key (hex string) — the delegate key
      * @param config.serverUrl - Server URL (default: http://localhost:8000)
      */
-    static create(config: MemWalConfig): MemWal {
+    static create(config: MemWalConfig & { httpClient?: HttpClient }): MemWal {
         return new MemWal(config);
     }
 
@@ -107,6 +112,31 @@ export class MemWal {
     }
 
     /**
+     * Remember multiple items in a single batch request.
+     * Server processes all items in one transaction for atomicity.
+     *
+     * @param items - Array of items to remember (text + optional namespace)
+     * @returns RememberBatchResult with results for each item
+     *
+     * @example
+     * ```typescript
+     * const result = await memwal.rememberBatch([
+     *     { text: "I'm allergic to peanuts" },
+     *     { text: "I live in Hanoi" },
+     * ])
+     * console.log(result.total) // 2
+     * ```
+     */
+    async rememberBatch(items: RememberBatchItem[]): Promise<RememberBatchResult> {
+        return this.signedRequest<RememberBatchResult>("POST", "/api/remember/batch", {
+            items: items.map((item) => ({
+                text: item.text,
+                namespace: item.namespace ?? this.namespace,
+            })),
+        });
+    }
+
+    /**
      * Recall memories similar to a query — server handles:
      * verify → embed query → search → Walrus download → decrypt → return plaintext
      *
@@ -123,7 +153,7 @@ export class MemWal {
      * ```
      */
     async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
-        return this.signedRequest<RecallResult>("POST", "/api/recall", {
+        return this.signedRequestWithRetry<RecallResult>("POST", "/api/recall", {
             query,
             limit,
             namespace: namespace ?? this.namespace,
@@ -186,7 +216,7 @@ export class MemWal {
      * ```
      */
     async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
-        return this.signedRequest<RecallManualResult>("POST", "/api/recall/manual", {
+        return this.signedRequestWithRetry<RecallManualResult>("POST", "/api/recall/manual", {
             vector: opts.vector,
             limit: opts.limit ?? 10,
             namespace: opts.namespace ?? this.namespace,
@@ -200,7 +230,7 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
-        return this.signedRequest<EmbedResult>("POST", "/api/embed", { text });
+        return this.signedRequestWithRetry<EmbedResult>("POST", "/api/embed", { text });
     }
 
     /**
@@ -247,7 +277,7 @@ export class MemWal {
      * Check server health.
      */
     async health(): Promise<HealthResult> {
-        const res = await fetch(`${this.serverUrl}/health`);
+        const res = await this.httpClient.fetch(`${this.serverUrl}/health`);
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
@@ -304,18 +334,16 @@ export class MemWal {
 
         // Make HTTP request
         const url = `${this.serverUrl}${path}`;
-        const res = await fetch(url, {
-            method,
-            headers: {
-                "Content-Type": "application/json",
-                "x-public-key": bytesToHex(publicKey),
-                "x-signature": bytesToHex(signature),
-                "x-timestamp": timestamp,
-                "x-delegate-key": bytesToHex(this.privateKey),
-                "x-account-id": this.accountId,
-            },
-            body: bodyStr,
-        });
+        const headers = {
+            "Content-Type": "application/json",
+            "x-public-key": bytesToHex(publicKey),
+            "x-signature": bytesToHex(signature),
+            "x-timestamp": timestamp,
+            "x-delegate-key": bytesToHex(this.privateKey),
+            "x-account-id": this.accountId,
+        };
+
+        const res = await this.httpClient.fetch(url, { method, headers, body: bodyStr });
 
         if (!res.ok) {
             const errText = await res.text();
@@ -323,5 +351,43 @@ export class MemWal {
         }
 
         return res.json() as Promise<T>;
+    }
+
+    /**
+     * Make a signed request with automatic retry on transient failures.
+     * Retries up to 3 times on HTTP 429 (rate limit) or network errors.
+     * Uses exponential backoff: 1s, 2s, 4s.
+     */
+    private async signedRequestWithRetry<T>(
+        method: string,
+        path: string,
+        body: object,
+    ): Promise<T> {
+        const MAX_RETRIES = 3;
+        const RETRY_DELAYS = [1000, 2000, 4000];
+
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return await this.signedRequest<T>(method, path, body);
+            } catch (err: unknown) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                const isRetryable =
+                    errMsg.includes("(429)") ||
+                    errMsg.includes("ECONNREFUSED") ||
+                    errMsg.includes("ECONNRESET") ||
+                    errMsg.includes("fetch failed") ||
+                    errMsg.includes("network");
+
+                if (!isRetryable || attempt === MAX_RETRIES) {
+                    throw err;
+                }
+
+                const delay = RETRY_DELAYS[attempt];
+                await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+        }
+
+        // Unreachable, but TypeScript needs it
+        throw new Error("Retry logic exhausted");
     }
 }

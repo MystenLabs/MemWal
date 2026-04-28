@@ -120,6 +120,46 @@ pub async fn upload_blob(
     })
 }
 
+/// A single item for batch upload
+pub struct UploadItem {
+    pub data: Vec<u8>,
+    pub owner_address: String,
+    pub sui_private_key: String,
+    pub namespace: String,
+    pub package_id: String,
+    pub agent_id: Option<String>,
+}
+
+/// Upload multiple encrypted blobs to Walrus in parallel using the key pool.
+/// Each item uses a different signing key from the pool to avoid serialization.
+/// Returns a Vec of Results — one per item in the same order.
+pub async fn upload_batch(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    items: Vec<UploadItem>,
+    epochs: u64,
+) -> Vec<Result<UploadResult, AppError>> {
+    let tasks: Vec<_> = items.into_iter().map(|item| {
+        let client = client.clone();
+        let sidecar_url = sidecar_url.to_string();
+        async move {
+            upload_blob(
+                &client,
+                &sidecar_url,
+                &item.data,
+                epochs,
+                &item.owner_address,
+                &item.sui_private_key,
+                &item.namespace,
+                &item.package_id,
+                item.agent_id.as_deref(),
+            ).await
+        }
+    }).collect();
+
+    futures::future::join_all(tasks).await
+}
+
 /// Query user's Walrus Blob objects from the Sui chain via sidecar.
 ///
 /// This enables restore-from-zero: even if the local DB is empty,

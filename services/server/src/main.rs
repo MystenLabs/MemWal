@@ -125,6 +125,7 @@ async fn main() {
     // Protected routes (require Ed25519 signature + onchain verification)
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
+        .route("/api/remember/batch", post(routes::remember_batch))
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
@@ -166,10 +167,26 @@ async fn main() {
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
-    // Graceful shutdown: kill sidecar when server stops
+    // Graceful shutdown: handle Ctrl+C and SIGTERM
+    let state_for_shutdown = state.clone();
     let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("shutting down...");
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("received Ctrl+C, shutting down..."); },
+            _ = terminate => { tracing::info!("received SIGTERM, shutting down..."); },
+        }
     };
 
     axum::serve(listener, app)
@@ -177,7 +194,9 @@ async fn main() {
         .await
         .expect("Server failed");
 
-    // Cleanup sidecar after shutdown
+    // Cleanup after shutdown
+    tracing::info!("closing database pool...");
+    state_for_shutdown.db.close().await;
     sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
+    tracing::info!("shutdown complete");
 }
