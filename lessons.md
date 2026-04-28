@@ -82,3 +82,15 @@ Issues encountered during the optimization branch and how they were resolved.
 **Fix:** Upgraded `@types/react` from `^18` to `^19` and `@types/react-dom` from `^18` to `^19` to match the installed runtime.
 
 **Lesson:** When upgrading React, always upgrade `@types/react` and `@types/react-dom` to the same major version. Type definition mismatches cause phantom errors that look like missing exports but are really just outdated type packages.
+
+---
+
+## 8. CI: turbo command not found
+
+**Error:** `/home/runner/work/_temp/xxx.sh: line 1: turbo: command not found` (exit code 127)
+
+**Cause:** CI workflow ran `turbo run build --filter=...` directly. Turbo is installed as a devDependency in `node_modules/.bin/`, not globally available in the CI runner's PATH.
+
+**Fix:** Changed to `pnpm exec turbo run build --filter=...`. `pnpm exec` resolves binaries from the local `node_modules/.bin/` directory.
+
+**Lesson:** In CI, never assume devDependency binaries are in PATH. Always use `pnpm exec`, `npx`, or `yarn exec` to invoke locally-installed CLI tools. This applies to turbo, tsc, eslint, vitest, and any other bin-only package.

@@ -213,8 +213,8 @@ New CI pipeline triggered on push/PR to `dev` and `main`:
 **TypeScript job:**
 - pnpm store caching (via `actions/setup-node` cache)
 - `pnpm install --frozen-lockfile`
-- `pnpm build` (Turborepo cached)
-- `pnpm typecheck`
+- `pnpm exec turbo run build --filter=@mysten-incubation/memwal` (scoped SDK build)
+- `pnpm exec turbo run typecheck --filter=@mysten-incubation/memwal`
 
 **Rust job:**
 - Cargo target caching (via `Swatinem/rust-cache`)
@@ -223,6 +223,28 @@ New CI pipeline triggered on push/PR to `dev` and `main`:
 
 Actions runtime set to Node.js 24 (`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`)
 to avoid deprecation warnings. Project uses Node.js 22 LTS.
+
+#### 14. Chatbot — @types/react Upgrade
+
+**File:** `apps/chatbot/package.json`
+
+Upgraded `@types/react` from `^18` to `^19.2.14` and `@types/react-dom` from `^18` to `^19.2.3`.
+The chatbot app uses React 19.0.1 (runtime) with Next.js 16, but the type definitions were
+still on React 18 which lacks `useActionState`. This caused a build failure:
+```
+Module '"react"' has no exported member 'useActionState'.
+```
+
+#### 15. Build Script — Turbo Filter for SDK
+
+**File:** `package.json`
+
+Changed `build:sdk` from `pnpm --filter @mysten-incubation/memwal build` to
+`turbo run build --filter=@mysten-incubation/memwal`. The pnpm `--filter` flag does not
+prevent turbo from resolving the full workspace dependency graph via `^build`.
+Turbo's own `--filter=` properly scopes execution to the target package only.
+
+Verified: `Tasks: 1 successful, 1 total` (previously 6 total).
 
 ---
 
