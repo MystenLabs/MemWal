@@ -32,6 +32,18 @@ export interface RememberResult {
     namespace: string;
 }
 
+/** Input item for rememberBatch() */
+export interface RememberBatchItem {
+    text: string;
+    namespace?: string;
+}
+
+/** Result from rememberBatch() */
+export interface RememberBatchResult {
+    results: RememberResult[];
+    total: number;
+}
+
 /** A single recalled memory */
 export interface RecallMemory {
     blob_id: string;

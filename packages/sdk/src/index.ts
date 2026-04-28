@@ -14,6 +14,10 @@
 // Core client (server-mode: server handles SEAL + Walrus + embedding)
 export { MemWal } from "./memwal.js";
 
+// HTTP client (connection reuse)
+export { createHttpClient } from "./client.js";
+export type { HttpClient } from "./client.js";
+
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 
@@ -21,6 +25,8 @@ export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 export type {
     MemWalConfig,
     RememberResult,
+    RememberBatchItem,
+    RememberBatchResult,
     RecallResult,
     RecallMemory,
     EmbedResult,

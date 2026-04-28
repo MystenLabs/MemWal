@@ -886,6 +886,65 @@ app.post("/sponsor/execute", async (req, res) => {
 });
 
 // ============================================================
+// POST /embed-batch — Batch text embedding via OpenAI-compatible API
+// Accepts array of texts, calls embedding API in parallel, returns array of vectors
+// ============================================================
+app.post("/embed-batch", async (req, res) => {
+    try {
+        const { texts } = req.body;
+        if (!texts || !Array.isArray(texts) || texts.length === 0) {
+            return res.status(400).json({ error: "Missing required field: texts (array of strings)" });
+        }
+
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+            return res.status(503).json({ error: "OPENAI_API_KEY is not configured" });
+        }
+
+        const apiBase = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
+        const url = `${apiBase}/embeddings`;
+
+        // Call embedding API in parallel for each text
+        const results = await Promise.all(
+            texts.map(async (text: string, index: number) => {
+                try {
+                    const resp = await fetch(url, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${apiKey}`,
+                        },
+                        body: JSON.stringify({
+                            model: "openai/text-embedding-3-small",
+                            input: text,
+                        }),
+                    });
+
+                    if (!resp.ok) {
+                        const body = await resp.text();
+                        return { index, error: `API error (${resp.status}): ${body}` };
+                    }
+
+                    const data = (await resp.json()) as { data: { embedding: number[] }[] };
+                    return { index, embedding: data.data[0].embedding };
+                } catch (err: any) {
+                    return { index, error: err.message || String(err) };
+                }
+            })
+        );
+
+        const embeddings = results.filter((r) => "embedding" in r);
+        const errors = results.filter((r) => "error" in r);
+
+        console.log(`[embed-batch] ${embeddings.length}/${texts.length} embedded ok, ${errors.length} errors`);
+        res.json({ results: embeddings, errors });
+    } catch (err: any) {
+        console.error(`[embed-batch] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
 // Start server
 // ============================================================
 
