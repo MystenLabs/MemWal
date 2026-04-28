@@ -63,6 +63,7 @@ struct WalrusUploadResponse {
 /// The server wallet pays for gas + storage. After certify, the blob object
 /// is transferred to `owner_address`. Namespace + owner are stored as
 /// on-chain metadata attributes for discoverability.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
@@ -121,6 +122,7 @@ pub async fn upload_blob(
 }
 
 /// A single item for batch upload
+#[allow(dead_code)]
 pub struct UploadItem {
     pub data: Vec<u8>,
     pub owner_address: String,
@@ -133,6 +135,7 @@ pub struct UploadItem {
 /// Upload multiple encrypted blobs to Walrus in parallel using the key pool.
 /// Each item uses a different signing key from the pool to avoid serialization.
 /// Returns a Vec of Results — one per item in the same order.
+#[allow(dead_code)]
 pub async fn upload_batch(
     client: &reqwest::Client,
     sidecar_url: &str,

@@ -85,6 +85,8 @@ impl VectorDb {
     }
 
     /// Insert multiple vector entries in a single transaction
+    /// Tuple: (id, owner, namespace, blob_id, vector, blob_size_bytes)
+    #[allow(clippy::type_complexity)]
     pub async fn insert_vectors_batch(
         &self,
         entries: &[(String, String, String, String, Vec<f32>, i64)],

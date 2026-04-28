@@ -111,20 +111,22 @@ async fn generate_embedding(
 
 /// Sidecar batch embedding response
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct EmbedBatchResult {
     index: usize,
     embedding: Vec<f32>,
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct EmbedBatchResponse {
     results: Vec<EmbedBatchResult>,
-    #[allow(dead_code)]
     errors: Vec<serde_json::Value>,
 }
 
 /// Generate embeddings for multiple texts in a single batch call via sidecar.
 /// Falls back to sequential single-text embedding if sidecar batch endpoint is unavailable.
+#[allow(dead_code)]
 async fn generate_embeddings_batch(
     client: &reqwest::Client,
     config: &Config,
@@ -201,7 +203,7 @@ pub async fn remember(
     tracing::info!("remember: text=\"{}...\" owner={} ns={}", truncate_str(text, 50), owner, namespace);
 
     // Check storage quota before processing
-    let text_bytes = text.as_bytes().len() as i64;
+    let text_bytes = text.len() as i64;
     rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
@@ -269,7 +271,7 @@ pub async fn remember_batch(
     tracing::info!("remember_batch: {} items, owner={}", body.items.len(), owner);
 
     // Check total storage quota
-    let total_bytes: i64 = body.items.iter().map(|i| i.text.as_bytes().len() as i64).sum();
+    let total_bytes: i64 = body.items.iter().map(|i| i.text.len() as i64).sum();
     rate_limit::check_storage_quota(&state, owner, total_bytes).await?;
 
     // Process all items concurrently (embed + encrypt → upload)
@@ -576,7 +578,7 @@ pub async fn analyze(
     }
 
     // Check storage quota before processing all facts
-    let total_text_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+    let total_text_bytes: i64 = facts.iter().map(|f| f.len() as i64).sum();
     rate_limit::check_storage_quota(&state, owner, total_text_bytes).await?;
 
     // Step 2: Process all facts concurrently (embed + encrypt → upload → store)
@@ -1077,7 +1079,7 @@ pub async fn restore(
     // Step 4: SEAL decrypt with bounded concurrency (3 at a time)
     // Use per-blob package_id from on-chain metadata, fall back to current server config
     use futures::stream::{self, StreamExt};
-    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
+    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
