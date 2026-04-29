@@ -1,6 +1,6 @@
 {
     "name": "@mysten-incubation/memwal",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "MemWal — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "main": "./dist/index.js",
@@ -49,12 +49,6 @@
             "optional": true
         },
         "zod": {
-            "optional": true
-        },
-        "@mysten/sui": {
-            "optional": true
-        },
-        "@mysten/seal": {
             "optional": true
         },
         "@mysten/walrus": {

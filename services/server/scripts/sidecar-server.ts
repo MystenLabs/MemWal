@@ -11,7 +11,8 @@
  *   GET  /health         → { status: "ok" }
  */
 
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
+import { timingSafeEqual, randomUUID } from "crypto";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
@@ -36,6 +37,22 @@ const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
 
 if (SEAL_KEY_SERVERS.length === 0) {
     console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
+}
+
+const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
+
+// Server Sui Private Keys for Walrus uploads
+const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+if (SERVER_SUI_PRIVATE_KEYS.length === 0 && process.env.SERVER_SUI_PRIVATE_KEY) {
+    SERVER_SUI_PRIVATE_KEYS.push(process.env.SERVER_SUI_PRIVATE_KEY.trim());
+}
+
+if (SERVER_SUI_PRIVATE_KEYS.length === 0) {
+    console.error("[sidecar] WARNING: SERVER_SUI_PRIVATE_KEYS env var is empty — Walrus uploads will fail");
 }
 
 // Walrus package ID (for on-chain Move calls: metadata, blob type queries)
@@ -64,7 +81,7 @@ const sealClient = new SealClient({
         objectId: id,
         weight: 1,
     })),
-    verifyKeyServers: false,
+    verifyKeyServers: true,
 });
 
 const walrusClient = new WalrusClient({
@@ -216,8 +233,10 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
             new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
         );
 
+        // LOW-15: Defense-in-depth — encode digest before path interpolation.
+        const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
         const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${sponsored.digest}`,
+            `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
             {
                 digest: sponsored.digest,
                 signature: signature.signature,
@@ -271,22 +290,51 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // ============================================================
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+// HIGH-13: Use a conservative global default — routes that need more bytes
+// (e.g. /walrus/upload, /seal/decrypt-batch) apply their own per-route
+// json() middleware that overrides this default.
+// Global floor: 256 KiB is enough for every metadata-only JSON body
+// (seal/encrypt, seal/decrypt, walrus/query-blobs, sponsor, sponsor/execute).
+app.use(express.json({ limit: "256kb" }));
 
-// CORS — allow frontend (any origin) to call sponsor endpoints
-app.use((_req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+// CORS — sidecar is called only by the co-located Rust server, never by browsers.
+// Remove all CORS headers so no cross-origin access is granted.
+app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.removeHeader("Access-Control-Allow-Origin");
+    res.removeHeader("Access-Control-Allow-Methods");
+    res.removeHeader("Access-Control-Allow-Headers");
     if (_req.method === "OPTIONS") {
         return res.sendStatus(204);
     }
     next();
 });
 
-// Health check
-app.get("/health", (_req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+// Health check — placed before auth middleware so it is always reachable.
+app.get("/health", (_req: Request, res: Response) => {
+    res.json({ status: "ok" });
+});
+
+// Shared-secret authentication — protects all routes registered after this point.
+// Set SIDECAR_AUTH_TOKEN in the environment; callers must send it as Authorization: Bearer <token>.
+// Sidecar refuses to start if SIDECAR_AUTH_TOKEN is not set.
+const SIDECAR_AUTH_TOKEN = process.env.SIDECAR_AUTH_TOKEN;
+if (!SIDECAR_AUTH_TOKEN) {
+    console.error("[sidecar] FATAL: SIDECAR_AUTH_TOKEN not set. Refusing to start without auth.");
+    process.exit(1);
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    const secretBuf = Buffer.from(SIDECAR_AUTH_TOKEN!);
+    const providedBuf = Buffer.from(typeof token === "string" ? token : "");
+    // timingSafeEqual prevents timing side-channel attacks on the token comparison.
+    // Buffers must be same length — if lengths differ it's already a mismatch.
+    const valid = providedBuf.length === secretBuf.length &&
+        timingSafeEqual(providedBuf, secretBuf);
+    if (!valid) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
 });
 
 // ============================================================
@@ -301,7 +349,7 @@ app.post("/seal/encrypt", async (req, res) => {
 
         const plaintext = Buffer.from(data, "base64");
         const result = await sealClient.encrypt({
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
             packageId,
             id: owner,
             data: new Uint8Array(plaintext),
@@ -310,32 +358,82 @@ app.post("/seal/encrypt", async (req, res) => {
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/encrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/encrypt] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
+
+/**
+ * ENG-1697: Resolve a SEAL SessionKey from the request headers.
+ *
+ * Preferred path: `x-seal-session` contains a base64-encoded
+ * `ExportedSessionKey` (built by the SDK on the client). We import it and
+ * skip touching any private-key material.
+ *
+ * Legacy path: `x-delegate-key` contains the raw delegate private key
+ * (hex or suiprivkey bech32). We reconstruct the keypair and build the
+ * SessionKey here — same behavior as before the migration. This path
+ * will be removed at EOL once all SDK clients emit `x-seal-session`.
+ *
+ * Returns `null` when neither header is present so the caller can emit a
+ * 400 with a clear error message.
+ */
+async function resolveSessionKey(
+    req: express.Request,
+    packageId: string,
+): Promise<SessionKey | null> {
+    const sessionHeader = req.headers["x-seal-session"] as string | undefined;
+    if (sessionHeader) {
+        const exportedJson = Buffer.from(sessionHeader, "base64").toString("utf8");
+        const exported = JSON.parse(exportedJson);
+        return SessionKey.import(exported, suiClient as any);
+    }
+
+    const privateKey = req.headers["x-delegate-key"] as string | undefined;
+    if (!privateKey) return null;
+
+    let keypair: Ed25519Keypair;
+    if (privateKey.startsWith("suiprivkey")) {
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        keypair = Ed25519Keypair.fromSecretKey(secretKey);
+    } else {
+        // LOW-12: Validate hex format before parsing to prevent injection
+        if (!/^[0-9a-fA-F]+$/.test(privateKey) || privateKey.length !== 64) {
+            throw new Error("privateKey must be 64-char hex string or suiprivkey bech32");
+        }
+        const keyBytes = Uint8Array.from(
+            privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)),
+        );
+        keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+    }
+    return await SessionKey.create({
+        address: keypair.getPublicKey().toSuiAddress(),
+        packageId,
+        ttlMin: 5,
+        signer: keypair,
+        suiClient: suiClient as any,
+    });
+}
 
 // ============================================================
 // POST /seal/decrypt
 // ============================================================
 app.post("/seal/decrypt", async (req, res) => {
     try {
-        const { data, privateKey, packageId, accountId } = req.body;
-        if (!data || !privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey, packageId, accountId" });
+        const { data, packageId, accountId } = req.body;
+        if (!data || !packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
         }
 
-        // Decode delegate keypair — supports both bech32 (suiprivkey1...) and raw hex
-        let keypair: Ed25519Keypair;
-        if (privateKey.startsWith("suiprivkey")) {
-            const { secretKey } = decodeSuiPrivateKey(privateKey);
-            keypair = Ed25519Keypair.fromSecretKey(secretKey);
-        } else {
-            // Raw hex private key (32 bytes = 64 hex chars)
-            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
-            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // x-delegate-key supported during the deprecation window).
+        const sessionKey = await resolveSessionKey(req, packageId);
+        if (!sessionKey) {
+            return res.status(400).json({
+                error: "Missing credential: provide x-seal-session (preferred) or x-delegate-key header",
+            });
         }
-        const signerAddress = keypair.getPublicKey().toSuiAddress();
 
         // Parse encrypted object to get key ID
         const encryptedData = new Uint8Array(Buffer.from(data, "base64"));
@@ -346,15 +444,6 @@ app.post("/seal/decrypt", async (req, res) => {
         const idBytes = Array.from(
             Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
         );
-
-        // Create session key
-        const sessionKey = await SessionKey.create({
-            address: signerAddress,
-            packageId,
-            ttlMin: 30,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
 
         // Build seal_approve PTB — pass MemWalAccount (owned object) instead of AccountRegistry
         const tx = new Transaction();
@@ -372,7 +461,7 @@ app.post("/seal/decrypt", async (req, res) => {
             ids: [fullId],
             txBytes,
             sessionKey,
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
         });
 
         // Decrypt locally
@@ -385,8 +474,9 @@ app.post("/seal/decrypt", async (req, res) => {
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        console.error(`[seal/decrypt] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/decrypt] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
@@ -395,26 +485,32 @@ app.post("/seal/decrypt", async (req, res) => {
 // Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
 // Avoids "Not enough shares" errors when decrypting many blobs at once.
 // ============================================================
-app.post("/seal/decrypt-batch", async (req, res) => {
+// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB)
+// Apply a per-route json() that overrides the 256 KiB global for this endpoint only.
+app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res) => {
     try {
-        const { items, privateKey, packageId, accountId } = req.body;
+        const { items, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
-        if (!privateKey || !packageId || !accountId) {
-            return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
+        // HIGH-13 / MED-13: Cap items. 25 × max-item body = ~8 MB (matches the
+        // per-route body limit above). Tightened from 50 to 25 so worst-case
+        // in-memory allocation stays bounded even at the new limit.
+        if (items.length > 25) {
+            return res.status(400).json({ error: "items array exceeds maximum of 25 elements" });
+        }
+        if (!packageId || !accountId) {
+            return res.status(400).json({ error: "Missing required fields: packageId, accountId" });
         }
 
-        // Decode delegate keypair
-        let keypair: Ed25519Keypair;
-        if (privateKey.startsWith("suiprivkey")) {
-            const { secretKey } = decodeSuiPrivateKey(privateKey);
-            keypair = Ed25519Keypair.fromSecretKey(secretKey);
-        } else {
-            const keyBytes = Uint8Array.from(privateKey.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
-            keypair = Ed25519Keypair.fromSecretKey(keyBytes);
+        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // x-delegate-key supported during the deprecation window).
+        const sessionKey = await resolveSessionKey(req, packageId);
+        if (!sessionKey) {
+            return res.status(400).json({
+                error: "Missing credential: provide x-seal-session (preferred) or x-delegate-key header",
+            });
         }
-        const signerAddress = keypair.getPublicKey().toSuiAddress();
 
         // Parse all encrypted objects and collect unique SEAL IDs
         const parsedItems: { index: number; encryptedData: Uint8Array; fullId: string }[] = [];
@@ -437,15 +533,6 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         // Collect all unique IDs
         const allIds = [...new Set(parsedItems.map(p => p.fullId))];
 
-        // Create ONE SessionKey
-        const sessionKey = await SessionKey.create({
-            address: signerAddress,
-            packageId,
-            ttlMin: 30,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
-
         // Build ONE PTB with seal_approve for ALL IDs
         const tx = new Transaction();
         for (const id of allIds) {
@@ -467,7 +554,7 @@ app.post("/seal/decrypt-batch", async (req, res) => {
             ids: allIds,
             txBytes,
             sessionKey,
-            threshold: 1,
+            threshold: SEAL_THRESHOLD,
         });
 
         // Decrypt each blob using the shared sessionKey
@@ -492,27 +579,50 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        console.error(`[seal/decrypt-batch] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[seal/decrypt-batch] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
 // ============================================================
 // POST /walrus/upload
 // ============================================================
-app.post("/walrus/upload", async (req, res) => {
+// HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
+// be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
+// The 10 MB ceiling matches the sidecar's original global Walrus limit and is
+// well above any realistic single-memory upload size.
+app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => {
     try {
         const {
             data,
-            privateKey,
+            keyIndex,
             owner,
             namespace,
             packageId,
             agentId,
-            epochs = DEFAULT_WALRUS_EPOCHS,
+            epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
-        if (!data || !privateKey) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey" });
+        // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
+        const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
+
+        if (!data || keyIndex === undefined) {
+            return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
+        }
+
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[keyIndex];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
+        }
+
+        // LOW-16: Validate packageId resembles a Sui address to prevent injection
+        if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId format" });
+        }
+
+        // MED-11: Validate owner address format
+        if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid owner address format" });
         }
 
         // Decode signer
@@ -630,20 +740,36 @@ app.post("/walrus/upload", async (req, res) => {
 
                 const metaDigest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
                 await suiClient.waitForTransaction({ digest: metaDigest });
-                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to ${owner} (ns=${namespace})`);
+                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
             } catch (metaErr: any) {
-                // Non-fatal: blob is uploaded but metadata/transfer failed
-                console.error(`[walrus/upload] metadata+transfer failed: ${metaErr.message}`);
+                // LOW-14: Previously the metadata-set + transfer failure was swallowed
+                // and /walrus/upload returned 200 with the blob_id, leaving the blob
+                // owned by the server wallet and the client unable to observe the
+                // failure. We still can't delete the blob from Walrus (no delete
+                // primitive after certify), so at minimum we log loudly AND return
+                // 500 so the caller can react (retry / mark stored-but-not-owned).
+                console.error(
+                    `[walrus/upload] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
+                    `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
+                );
+                return res.status(500).json({
+                    error: "Blob uploaded but metadata/transfer to owner failed",
+                    blobId: blob.blobId,
+                    objectId: blobObjectId,
+                    transferStatus: "failed",
+                });
             }
         }
 
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
+            transferStatus: "ok",
         });
     } catch (err: any) {
-        console.error(`[walrus/upload] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = randomUUID();
+        console.error(`[walrus/upload] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
     }
 });
 
@@ -842,14 +968,17 @@ app.post("/sponsor", async (req, res) => {
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        console.log(`[sponsor] creating sponsored tx for sender=${sender}`);
+        // LOW-18: Redact full sender address (PII / deanonymisation) — log only
+        // a short prefix for correlation. Never log the full digest here either.
+        const senderPrefix = typeof sender === "string" ? sender.slice(0, 10) : "unknown";
+        console.log(`[sponsor] creating sponsored tx for sender=${senderPrefix}...`);
         const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
             network: enokiNetwork,
             transactionBlockKindBytes,
             sender,
         });
 
-        console.log(`[sponsor] sponsored tx created, digest=${sponsored.digest}`);
+        console.log(`[sponsor] sponsored tx created (digest_len=${sponsored.digest.length})`);
         res.json(sponsored); // { bytes, digest }
     } catch (err: any) {
         console.error(`[sponsor] error: ${err.message || err}`);
@@ -871,13 +1000,22 @@ app.post("/sponsor/execute", async (req, res) => {
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        console.log(`[sponsor/execute] executing sponsored tx digest=${digest}`);
+        // LOW-15: Percent-encode digest before path interpolation. The digest is
+        // attacker-controlled when the sidecar is reached directly (no auth,
+        // S1 in audit) or via the Rust proxy which validates base58 but the
+        // sidecar must not rely on that. encodeURIComponent neutralises any
+        // path traversal (`..`), query injection (`?`), or fragment (`#`)
+        // payloads in the digest segment.
+        const encodedDigest = encodeURIComponent(digest);
         const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${digest}`,
+            `/transaction-blocks/sponsor/${encodedDigest}`,
             { digest, signature }
         );
 
-        console.log(`[sponsor/execute] tx executed, final digest=${executed.digest}`);
+        // LOW-18: Redact digest from console logs — it's a high-cardinality
+        // value that ties log lines to individual user transactions. Log only
+        // a length indicator for diagnostics.
+        console.log(`[sponsor/execute] executed sponsored tx (digest_len=${digest.length})`);
         res.json(executed); // { digest }
     } catch (err: any) {
         console.error(`[sponsor/execute] error: ${err.message || err}`);
@@ -890,9 +1028,11 @@ app.post("/sponsor/execute", async (req, res) => {
 // ============================================================
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
-app.listen(PORT, () => {
+const HOST = process.env.SIDECAR_HOST || "127.0.0.1";
+app.listen(PORT, HOST, () => {
     console.log(JSON.stringify({
         event: "sidecar_ready",
+        host: HOST,
         port: PORT,
         pid: process.pid,
     }));
