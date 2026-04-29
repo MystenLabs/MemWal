@@ -92,11 +92,8 @@ export class MemWal {
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
     private sessionCache: SessionCacheEntry | null = null;
     private serverConfig: ServerConfig | null = null;
-    /** null = not probed yet; false = peer deps missing or probe failed. */
-    private sealSessionAvailable: boolean | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
-    private sessionBuildPromise: Promise<string | null> | null = null;
-    private sealFallbackWarned = false;
+    private sessionBuildPromise: Promise<string> | null = null;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -104,7 +101,7 @@ export class MemWal {
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
         // non-localhost host.
-        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://api.memwal.com");
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
         this.namespace = config.namespace ?? "default";
     }
 
@@ -112,7 +109,7 @@ export class MemWal {
      * Create a new MemWal client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
-     * @param config.serverUrl - Server URL (default: https://api.memwal.com)
+     * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
@@ -175,11 +172,17 @@ export class MemWal {
      * ```
      */
     async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
-        return this.signedRequest<RecallResult>("POST", "/api/recall", {
-            query,
-            limit,
-            namespace: namespace ?? this.namespace,
-        });
+        const ac = new AbortController();
+        const tid = setTimeout(() => ac.abort(), 15000);
+        try {
+            return await this.signedRequest<RecallResult>("POST", "/api/recall", {
+                query,
+                limit,
+                namespace: namespace ?? this.namespace,
+            }, { signal: ac.signal });
+        } finally {
+            clearTimeout(tid);
+        }
     }
 
     // ============================================================
@@ -377,10 +380,7 @@ export class MemWal {
     // accountId })`) stays unchanged — past users upgrading to v0.4 do not
     // have to touch their config.
     //
-    // If the peer deps (`@mysten/seal`, `@mysten/sui`) are not installed,
-    // or `/config` is unreachable, we fall back to the legacy header and
-    // warn once. The server accepts both headers during the deprecation
-    // window so existing apps continue to work.
+    // Requires `@mysten/seal` and `@mysten/sui` peer dependencies.
     // ============================================================
 
     private async fetchServerConfig(): Promise<ServerConfig> {
@@ -401,117 +401,97 @@ export class MemWal {
         return this.serverConfig;
     }
 
-    private async buildSealSessionInner(): Promise<string | null> {
+    private async buildSealSessionInner(): Promise<string> {
+        const cfg = await this.fetchServerConfig();
+        // @mysten/sui renamed/moved `SuiClient` between minor versions:
+        //   - pre-2.6:  `SuiClient` in `@mysten/sui/client`
+        //   - 2.6+:     `SuiJsonRpcClient` in `@mysten/sui/jsonRpc`
+        // Probe both paths so the SDK works across the supported range.
+        const sealMod = (await import("@mysten/seal")) as any;
+        const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
+        const SessionKey = sealMod.SessionKey;
+        const Ed25519Keypair = ed25519Mod.Ed25519Keypair;
+
+        let SuiClient: any = undefined;
         try {
-            const cfg = await this.fetchServerConfig();
-            // Dynamic imports: these are optional peer deps, so users on
-            // older setups without them still work via the legacy fallback.
-            // @mysten/sui renamed/moved `SuiClient` between minor versions:
-            //   - pre-2.6:  `SuiClient` in `@mysten/sui/client`
-            //   - 2.6+:     `SuiJsonRpcClient` in `@mysten/sui/jsonRpc`
-            // Probe both paths so the SDK works across the supported range.
-            const sealMod = (await import("@mysten/seal")) as any;
-            const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
-            const SessionKey = sealMod.SessionKey;
-            const Ed25519Keypair = ed25519Mod.Ed25519Keypair;
-
-            let SuiClient: any = undefined;
-            try {
-                const mod = (await import("@mysten/sui/client")) as any;
-                SuiClient = mod.SuiClient;
-            } catch {
-                /* not present on this version */
-            }
-            if (typeof SuiClient !== "function") {
-                try {
-                    const mod = (await import("@mysten/sui/jsonRpc")) as any;
-                    SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
-                } catch {
-                    /* not present on this version either */
-                }
-            }
-            if (typeof SuiClient !== "function" || typeof Ed25519Keypair !== "function") {
-                throw new Error(
-                    "SuiClient/SuiJsonRpcClient or Ed25519Keypair not found in @mysten/sui. " +
-                    "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
-                );
-            }
-
-            const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
-            const suiClient = new SuiClient({ url: cfg.suiRpcUrl });
-
-            const session = await SessionKey.create({
-                address: keypair.getPublicKey().toSuiAddress(),
-                packageId: cfg.packageId,
-                ttlMin: SEAL_SESSION_TTL_MIN,
-                signer: keypair,
-                suiClient: suiClient as any,
-            });
-
-            // Eagerly sign the personal message so the exported envelope is
-            // fully self-contained. `SessionKey.create()` defers this signing
-            // until first use, which would break the migration: the sidecar
-            // imports without a signer and must be able to get a certificate
-            // from the exported state alone. Calling
-            // setPersonalMessageSignature() here populates the
-            // `personalMessageSignature` field in the subsequent export().
-            const personalMessage = session.getPersonalMessage();
-            const signResult = await keypair.signPersonalMessage(personalMessage);
-            await session.setPersonalMessageSignature(signResult.signature);
-
-            const exported = session.export();
-            // SEAL intentionally installs a throwing `toJSON` on the
-            // exported object to catch accidental serialization. The
-            // migration to `x-seal-session` IS the intended on-wire
-            // format, so we project the primitive fields into a fresh
-            // object before stringifying. The sidecar's
-            // `SessionKey.import()` expects this exact shape.
-            const jsonStr = JSON.stringify({
-                address: exported.address,
-                packageId: exported.packageId,
-                mvrName: exported.mvrName,
-                creationTimeMs: exported.creationTimeMs,
-                ttlMin: exported.ttlMin,
-                personalMessageSignature: exported.personalMessageSignature,
-                sessionKey: exported.sessionKey,
-            });
-            const bytes =
-                typeof btoa === "function"
-                    ? btoa(jsonStr)
-                    : Buffer.from(jsonStr, "utf8").toString("base64");
-
-            this.sessionCache = {
-                bytes,
-                expiresAt:
-                    Date.now() +
-                    SEAL_SESSION_TTL_MIN * 60_000 -
-                    SEAL_SESSION_SAFETY_MARGIN_MS,
-            };
-            this.sealSessionAvailable = true;
-            return bytes;
-        } catch (err) {
-            this.sealSessionAvailable = false;
-            if (!this.sealFallbackWarned) {
-                this.sealFallbackWarned = true;
-                // eslint-disable-next-line no-console
-                console.warn(
-                    "[memwal] Could not build SEAL SessionKey — falling back to " +
-                    "legacy x-delegate-key header. Install @mysten/seal + " +
-                    "@mysten/sui peer deps to enable the secure path. " +
-                    `Reason: ${err instanceof Error ? err.message : String(err)}`,
-                );
-            }
-            return null;
+            const mod = (await import("@mysten/sui/client")) as any;
+            SuiClient = mod.SuiClient;
+        } catch {
+            /* not present on this version */
         }
+        if (typeof SuiClient !== "function") {
+            try {
+                const mod = (await import("@mysten/sui/jsonRpc")) as any;
+                SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+            } catch {
+                /* not present on this version either */
+            }
+        }
+        if (typeof SuiClient !== "function" || typeof Ed25519Keypair !== "function") {
+            throw new Error(
+                "SuiClient/SuiJsonRpcClient or Ed25519Keypair not found in @mysten/sui. " +
+                "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
+            );
+        }
+
+        const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
+        const suiClient = new SuiClient({ url: cfg.suiRpcUrl });
+
+        const session = await SessionKey.create({
+            address: keypair.getPublicKey().toSuiAddress(),
+            packageId: cfg.packageId,
+            ttlMin: SEAL_SESSION_TTL_MIN,
+            signer: keypair,
+            suiClient: suiClient as any,
+        });
+
+        // Eagerly sign the personal message so the exported envelope is
+        // fully self-contained. `SessionKey.create()` defers this signing
+        // until first use, which would break the migration: the sidecar
+        // imports without a signer and must be able to get a certificate
+        // from the exported state alone. Calling
+        // setPersonalMessageSignature() here populates the
+        // `personalMessageSignature` field in the subsequent export().
+        const personalMessage = session.getPersonalMessage();
+        const signResult = await keypair.signPersonalMessage(personalMessage);
+        await session.setPersonalMessageSignature(signResult.signature);
+
+        const exported = session.export();
+        // SEAL intentionally installs a throwing `toJSON` on the
+        // exported object to catch accidental serialization. The
+        // migration to `x-seal-session` IS the intended on-wire
+        // format, so we project the primitive fields into a fresh
+        // object before stringifying. The sidecar's
+        // `SessionKey.import()` expects this exact shape.
+        const jsonStr = JSON.stringify({
+            address: exported.address,
+            packageId: exported.packageId,
+            mvrName: exported.mvrName,
+            creationTimeMs: exported.creationTimeMs,
+            ttlMin: exported.ttlMin,
+            personalMessageSignature: exported.personalMessageSignature,
+            sessionKey: exported.sessionKey,
+        });
+        const bytes =
+            typeof btoa === "function"
+                ? btoa(jsonStr)
+                : Buffer.from(jsonStr, "utf8").toString("base64");
+
+        this.sessionCache = {
+            bytes,
+            expiresAt:
+                Date.now() +
+                SEAL_SESSION_TTL_MIN * 60_000 -
+                SEAL_SESSION_SAFETY_MARGIN_MS,
+        };
+        return bytes;
     }
 
-    private async buildSealSession(): Promise<string | null> {
+    private async buildSealSession(): Promise<string> {
         // Fast path: cached session still fresh.
         if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
             return this.sessionCache.bytes;
         }
-        // We already tried and failed once — don't keep probing.
-        if (this.sealSessionAvailable === false) return null;
         // Single-flight: concurrent requests share one build.
         if (this.sessionBuildPromise) return this.sessionBuildPromise;
 
@@ -542,20 +522,16 @@ export class MemWal {
      * promise the key stays client-side; the server does not need it on those
      * routes because Manual-mode handlers never invoke SEAL decrypt.
      *
-     * ENG-1697: On Relayer-mode routes the SDK prefers a SEAL SessionKey
-     * built client-side (emitted via `x-seal-session`) over the legacy raw
-     * delegate private key (`x-delegate-key`). The SessionKey is ephemeral
+     * ENG-1697: On Relayer-mode routes the SDK builds a SEAL SessionKey
+     * client-side (emitted via `x-seal-session`). The SessionKey is ephemeral
      * (5-min TTL, scoped to the server's `packageId`) so a wire capture has
-     * a bounded blast radius. If the SEAL peer deps are not installed or
-     * `/config` is unreachable the SDK warns once and falls back to the
-     * legacy header — the server accepts both during the deprecation
-     * window.
+     * a bounded blast radius. Requires `@mysten/seal` and `@mysten/sui`.
      */
     private async signedRequest<T>(
         method: string,
         path: string,
         body: object,
-        options: { includeDelegateKey?: boolean } = {},
+        options: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
     ): Promise<T> {
         const ed = await getEd();
 
@@ -589,20 +565,13 @@ export class MemWal {
         // decrypt. Manual-mode methods (rememberManual, recallManual) opt
         // out and transmit no decrypt credential at all.
         if (options.includeDelegateKey !== false) {
-            const sessionBytes = await this.buildSealSession();
-            if (sessionBytes) {
-                headers["x-seal-session"] = sessionBytes;
-            } else {
-                // Legacy fallback during the deprecation window. The
-                // server dual-accepts both headers until EOL; at that
-                // point users without SEAL peer deps must install them.
-                headers["x-delegate-key"] = bytesToHex(this.privateKey);
-            }
+            headers["x-seal-session"] = await this.buildSealSession();
         }
         const res = await fetch(url, {
             method,
             headers,
             body: bodyStr,
+            signal: options.signal,
         });
 
         if (!res.ok) {

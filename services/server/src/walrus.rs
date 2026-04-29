@@ -191,7 +191,7 @@ pub async fn download_blob(
     // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
     let download_fut = walrus_client.read_blob_by_id(blob_id);
     let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(15),
         download_fut,
     ).await {
         Ok(Ok(data)) => data,

@@ -51,12 +51,6 @@
         "zod": {
             "optional": true
         },
-        "@mysten/sui": {
-            "optional": true
-        },
-        "@mysten/seal": {
-            "optional": true
-        },
         "@mysten/walrus": {
             "optional": true
         }

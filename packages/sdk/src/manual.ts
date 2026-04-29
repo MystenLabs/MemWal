@@ -82,7 +82,7 @@ export class MemWalManual {
         this.delegatePrivateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
-        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://api.memwal.com");
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
         this.walletSigner = config.walletSigner ?? null;
         this.config = config;
         this.namespace = config.namespace ?? "default";
