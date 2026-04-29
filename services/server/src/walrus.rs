@@ -39,7 +39,6 @@ struct QueryBlobsResponse {
 #[serde(rename_all = "camelCase")]
 struct WalrusUploadRequest {
     data: String,
-    private_key: String,
     owner: String,
     namespace: String,
     package_id: String,
@@ -67,10 +66,10 @@ struct WalrusUploadResponse {
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: &str,
     data: &[u8],
     epochs: u64,
     owner_address: &str,
-    sui_private_key: &str,
     namespace: &str,
     package_id: &str,
     agent_id: Option<&str>,
@@ -80,9 +79,9 @@ pub async fn upload_blob(
 
     let resp = client
         .post(&url)
+        .header("x-sidecar-secret", sidecar_secret)
         .json(&WalrusUploadRequest {
             data: data_b64,
-            private_key: sui_private_key.to_string(),
             owner: owner_address.to_string(),
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),
@@ -126,33 +125,34 @@ pub async fn upload_blob(
 pub struct UploadItem {
     pub data: Vec<u8>,
     pub owner_address: String,
-    pub sui_private_key: String,
     pub namespace: String,
     pub package_id: String,
     pub agent_id: Option<String>,
 }
 
-/// Upload multiple encrypted blobs to Walrus in parallel using the key pool.
-/// Each item uses a different signing key from the pool to avoid serialization.
+/// Upload multiple encrypted blobs to Walrus in parallel.
+/// Signing keys are managed by the sidecar's internal key pool.
 /// Returns a Vec of Results — one per item in the same order.
 #[allow(dead_code)]
 pub async fn upload_batch(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: &str,
     items: Vec<UploadItem>,
     epochs: u64,
 ) -> Vec<Result<UploadResult, AppError>> {
     let tasks: Vec<_> = items.into_iter().map(|item| {
         let client = client.clone();
         let sidecar_url = sidecar_url.to_string();
+        let sidecar_secret = sidecar_secret.to_string();
         async move {
             upload_blob(
                 &client,
                 &sidecar_url,
+                &sidecar_secret,
                 &item.data,
                 epochs,
                 &item.owner_address,
-                &item.sui_private_key,
                 &item.namespace,
                 &item.package_id,
                 item.agent_id.as_deref(),

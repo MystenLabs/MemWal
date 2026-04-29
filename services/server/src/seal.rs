@@ -40,6 +40,7 @@ struct SealDecryptResponse {
 pub async fn seal_encrypt(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: &str,
     data: &[u8],
     owner_address: &str,
     package_id: &str,
@@ -49,6 +50,7 @@ pub async fn seal_encrypt(
 
     let resp = client
         .post(&url)
+        .header("x-sidecar-secret", sidecar_secret)
         .json(&SealEncryptRequest {
             data: data_b64,
             owner: owner_address.to_string(),
@@ -95,6 +97,7 @@ pub async fn seal_encrypt(
 pub async fn seal_decrypt(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: &str,
     encrypted_data: &[u8],
     private_key: &str,
     package_id: &str,
@@ -105,6 +108,7 @@ pub async fn seal_decrypt(
 
     let resp = client
         .post(&url)
+        .header("x-sidecar-secret", sidecar_secret)
         .json(&SealDecryptRequest {
             data: data_b64,
             private_key: private_key.to_string(),

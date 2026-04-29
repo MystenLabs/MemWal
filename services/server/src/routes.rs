@@ -90,21 +90,9 @@ async fn generate_embedding(
             Ok(vector)
         }
         None => {
-            // Mock embedding (deterministic hash-based)
-            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY set)");
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(text.as_bytes());
-            let mock_vector: Vec<f32> = hash
-                .iter()
-                .cycle()
-                .take(1536)
-                .enumerate()
-                .map(|(i, &b)| {
-                    let val = (b as f32 / 255.0) * 2.0 - 1.0;
-                    val * (1.0 + (i as f32 * 0.001).sin())
-                })
-                .collect();
-            Ok(mock_vector)
+            Err(AppError::Internal(
+                "OPENAI_API_KEY is required for embeddings but is not set".into(),
+            ))
         }
     }
 }
@@ -209,20 +197,17 @@ pub async fn remember(
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
-        &state.http_client, &state.config.sidecar_url,
+        &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
         text.as_bytes(), owner, &state.config.package_id,
     );
     let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
     let vector = vector_result?;
     let encrypted = encrypted_result?;
 
-    // Step 2: Upload encrypted blob → Walrus (via sidecar)
-    let sui_key = state.key_pool.next()
-        .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
+    // Step 2: Upload encrypted blob → Walrus (via sidecar; sidecar manages signing keys)
     let upload_result = walrus::upload_blob(
-        &state.http_client, &state.config.sidecar_url,
-        &encrypted, 50, owner, &sui_key, namespace, &state.config.package_id,
+        &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
+        &encrypted, 50, owner, namespace, &state.config.package_id,
         Some(&auth.public_key),
     ).await?;
     let blob_id = upload_result.blob_id;
@@ -282,26 +267,21 @@ pub async fn remember_batch(
         let text = item.text.clone();
         let namespace = item.namespace.clone();
         let auth_pubkey = auth_pubkey.clone();
-        let sui_key: Result<String, AppError> = state.key_pool.next()
-            .map(|s| s.to_string())
-            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()));
         async move {
-            let sui_key = sui_key?;
-
             // Embed + encrypt concurrently
             let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
             let encrypt_fut = seal::seal_encrypt(
-                &state.http_client, &state.config.sidecar_url,
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
                 text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
             let vector = vector_result?;
             let encrypted = encrypted_result?;
 
-            // Upload to Walrus
+            // Upload to Walrus (sidecar manages signing keys)
             let upload_result = walrus::upload_blob(
-                &state.http_client, &state.config.sidecar_url,
-                &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
+                &encrypted, 50, &owner, &namespace, &state.config.package_id,
                 Some(&auth_pubkey),
             ).await?;
 
@@ -358,19 +338,19 @@ pub async fn recall(
     let namespace = &body.namespace;
     tracing::info!("recall: query=\"{}...\" owner={} ns={}", truncate_str(&body.query, 50), owner, namespace);
 
-    // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth.delegate_key.as_deref()
-        .or(state.config.sui_private_key.as_deref())
+    // Server uses its own key for SEAL decryption (private key never sent by client)
+    let private_key = state.config.sui_private_key.as_deref()
         .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
         })?;
 
     // Step 1: Embed query → vector
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
 
     // Step 2: Search Vector DB (with Redis cache)
+    let limit = body.limit.min(100);
     let hits = state.db.search_cached(
-        &mut state.redis.clone(), &query_vector, owner, namespace, body.limit,
+        &mut state.redis.clone(), &query_vector, owner, namespace, limit,
     ).await?;
 
     // Step 3: Download + SEAL decrypt all results concurrently
@@ -379,6 +359,7 @@ pub async fn recall(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
+        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -400,7 +381,7 @@ pub async fn recall(
                 }
             };
             // Decrypt using SEAL (via sidecar HTTP)
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -474,18 +455,14 @@ pub async fn remember_manual(
     // Check storage quota before upload
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
-    // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
-    let sui_key = state.key_pool.next()
-        .map(|s| s.to_string())
-        .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
-
+    // Upload encrypted bytes to Walrus via sidecar (sidecar manages signing keys)
     let upload = walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
+        &state.config.sidecar_secret,
         &encrypted_bytes,
         50,
         owner,
-        &sui_key,
         namespace,
         &state.config.package_id,
         Some(&auth.public_key),
@@ -527,14 +504,15 @@ pub async fn recall_manual(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
+    let limit = body.limit.min(100);
     tracing::info!(
         "recall_manual: vector_dims={} limit={} owner={} ns={}",
-        body.vector.len(), body.limit, owner, namespace
+        body.vector.len(), limit, owner, namespace
     );
 
     // Search Vector DB — return blob IDs + distances only (with Redis cache)
     let hits = state.db.search_cached(
-        &mut state.redis.clone(), &body.vector, owner, namespace, body.limit,
+        &mut state.redis.clone(), &body.vector, owner, namespace, limit,
     ).await?;
     let total = hits.len();
 
@@ -590,28 +568,22 @@ pub async fn analyze(
         let owner = owner.clone();
         let fact_text = fact_text.clone();
         let auth_pubkey = auth_pubkey_base.clone();
-        // Pick the next key in round-robin order at task construction time.
-        // Convert to owned String *before* async move so we don't borrow-then-move `state`.
-        let sui_key: Result<String, AppError> = state.key_pool.next()
-            .map(|s| s.to_string())
-            .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()));
         let namespace = namespace.clone();
         async move {
-            let sui_key = sui_key?;
             // Embed + SEAL encrypt concurrently (independent operations)
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
             let encrypt_fut = seal::seal_encrypt(
-                &state.http_client, &state.config.sidecar_url,
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
                 fact_text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
             let vector = vector_result?;
             let encrypted = encrypted_result?;
 
-            // Upload to Walrus (via sidecar HTTP)
+            // Upload to Walrus (sidecar manages signing keys)
             let upload_result = walrus::upload_blob(
-                &state.http_client, &state.config.sidecar_url,
-                &encrypted, 50, &owner, &sui_key, &namespace, &state.config.package_id,
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
+                &encrypted, 50, &owner, &namespace, &state.config.package_id,
                 Some(&auth_pubkey),
             ).await?;
 
@@ -792,18 +764,17 @@ pub async fn ask(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit.unwrap_or(5);
+    let limit = body.limit.unwrap_or(5).min(100);
     tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
     // Step 1: Recall relevant memories
     let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
     let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
 
-    // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth.delegate_key.as_deref()
-        .or(state.config.sui_private_key.as_deref())
+    // Server uses its own key for SEAL decryption (private key never sent by client)
+    let private_key = state.config.sui_private_key.as_deref()
         .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
         })?;
 
     // Download + SEAL decrypt all memories concurrently
@@ -812,6 +783,7 @@ pub async fn ask(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
+        let sidecar_secret = state.config.sidecar_secret.clone();
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
@@ -831,7 +803,7 @@ pub async fn ask(
                     return None;
                 }
             };
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
+            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -962,14 +934,13 @@ pub async fn restore(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit;
+    let limit = body.limit.min(100);
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
-    // Use delegate key for SEAL decryption
-    let private_key = auth.delegate_key.as_deref()
-        .or(state.config.sui_private_key.as_deref())
+    // Server uses its own key for SEAL decryption (private key never sent by client)
+    let private_key = state.config.sui_private_key.as_deref()
         .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for restore".into())
+            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for restore".into())
         })?
         .to_string();
 
@@ -1083,6 +1054,7 @@ pub async fn restore(
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_secret = state.config.sidecar_secret.clone();
             let private_key = private_key.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids.get(&blob_id)
@@ -1091,7 +1063,7 @@ pub async fn restore(
             let account_id = auth.account_id.clone();
             async move {
                 match seal::seal_decrypt(
-                    http_client, &sidecar_url, &encrypted_data,
+                    http_client, &sidecar_url, &sidecar_secret, &encrypted_data,
                     &private_key, &package_id, &account_id,
                 ).await {
                     Ok(plaintext) => {

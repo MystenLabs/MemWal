@@ -4,6 +4,147 @@ All notable changes to the MemWal project will be documented in this file.
 
 ---
 
+## [security/v1] — 2026-04-29
+
+Security hardening across the Rust server and TypeScript sidecar.
+Fixes 3 CRITICAL + 6 HIGH + 5 MEDIUM findings from internal code review.
+No breaking changes to public API endpoints or SDK interface.
+
+---
+
+### Rust Server (`services/server`)
+
+#### 1. Walrus upload key no longer sent over HTTP (CRITICAL → FIXED)
+
+**Files:** `src/walrus.rs`, `src/routes.rs`, `src/types.rs`, `src/main.rs`
+
+The Sui private key used for Walrus blob uploads was previously sent in every
+`POST /walrus/upload` request body to the sidecar. The sidecar now loads its own
+key pool from `SERVER_SUI_PRIVATE_KEYS` / `SERVER_SUI_PRIVATE_KEY` at startup and
+manages round-robin selection internally.
+
+- Removed `private_key` field from `WalrusUploadRequest`
+- Removed `sui_private_key` parameter from `upload_blob()`
+- Removed `KeyPool` from `AppState` / `Config` — key management is now sidecar-only
+- All four upload call sites in `routes.rs` updated accordingly
+
+#### 2. Sidecar secret header added to all sidecar calls (HIGH → FIXED)
+
+**Files:** `src/seal.rs`, `src/walrus.rs`, `src/routes.rs`
+
+`seal_decrypt` was calling the sidecar without the `x-sidecar-secret` header,
+leaving SEAL decryption unprotected even when `SIDECAR_SECRET` was configured.
+All sidecar calls (`seal_encrypt`, `seal_decrypt`, `upload_blob`) now send
+`x-sidecar-secret` with every request.
+
+#### 3. Atomic rate limiting via Redis Lua script (HIGH → FIXED)
+
+**File:** `src/rate_limit.rs`
+
+All three rate limit layers now use a single atomic Redis round-trip via a Lua script
+(`RATE_LIMIT_LUA`). The previous check-then-record pattern had a TOCTOU race condition
+under concurrent load.
+
+#### 4. remember_batch added to rate limit weight table (HIGH → FIXED)
+
+**File:** `src/rate_limit.rs`
+
+`POST /api/remember/batch` (up to 100 items) was weighted the same as a single
+`/api/remember` call. Now carries weight 50, accurately reflecting its resource cost.
+
+#### 5. User-supplied limit param capped at 100 (HIGH → FIXED)
+
+**File:** `src/routes.rs`
+
+`recall`, `recall_manual`, `ask`, and `restore` handlers now apply `.min(100)` to
+any user-supplied `limit` parameter before passing it to the database or downstream calls.
+
+#### 6. reqwest::Client timeouts configured (HIGH → FIXED)
+
+**File:** `src/main.rs`
+
+The shared HTTP client now has explicit timeouts:
+- Request timeout: 30 seconds
+- Connection timeout: 10 seconds
+
+Prevents external HTTP calls (embedding API, Sui RPC, sidecar) from hanging indefinitely.
+
+#### 7. OPENAI_API_KEY missing now returns an error (MEDIUM → FIXED)
+
+**File:** `src/routes.rs`
+
+The silent mock-embedding fallback (deterministic SHA-256 hash vector) has been removed.
+When `OPENAI_API_KEY` is absent, `generate_embedding` returns `AppError::Internal`.
+Prevents semantically useless vectors from silently entering the vector database in production.
+
+#### 8. CORS restricted to explicit origins (MEDIUM → FIXED)
+
+**File:** `src/main.rs`
+
+`CorsLayer::permissive()` replaced by env-driven CORS configuration. Set
+`CORS_ORIGINS=https://your-app.com` to restrict to specific origins. If unset,
+falls back to permissive with a startup warning.
+
+#### 9. Registry scan capped at 20 pages (MEDIUM → FIXED)
+
+**File:** `src/sui.rs`
+
+`find_account_by_delegate_key` now breaks after 20 pages (1,000 accounts maximum)
+with a warning log, preventing unbounded on-chain scans from stalling auth middleware
+on large registries.
+
+#### 10. Full SHA-256 hash used for search cache keys (MEDIUM → FIXED)
+
+**File:** `src/db.rs`
+
+Cache keys previously used only the first 16 hex characters (64 bits) of the vector hash,
+creating a 1-in-2^64 collision risk where different queries could return each other's
+cached results. Now uses the full 64-character SHA-256 hex string.
+
+---
+
+### TypeScript Sidecar (`services/server/scripts/sidecar-server.ts`)
+
+#### 11. Sidecar binds to 127.0.0.1 only (HIGH → FIXED)
+
+The sidecar now listens on `127.0.0.1` instead of `0.0.0.0`, making it unreachable
+from any external network interface.
+
+#### 12. Shared secret authentication on all sidecar endpoints (HIGH → FIXED)
+
+All non-health endpoints require the `x-sidecar-secret` header to match `SIDECAR_SECRET`.
+A startup warning is printed if the secret is not configured.
+
+#### 13. Request body size limited to 5MB (HIGH → FIXED)
+
+`express.json({ limit: "5mb" })` prevents oversized payloads from reaching handler logic.
+
+#### 14. Sidecar manages its own Sui key pool (CRITICAL → FIXED)
+
+See item 1. The sidecar loads `SERVER_SUI_PRIVATE_KEYS` / `SERVER_SUI_PRIVATE_KEY` at
+startup and selects keys internally via round-robin counter. Walrus upload requests no
+longer carry a private key in the request body.
+
+#### 15. SEAL key server verification enabled (CRITICAL → FIXED)
+
+**File:** `scripts/sidecar-server.ts`
+
+`SealClient` is initialized with `verifyKeyServers: true`, restoring the chain-of-trust
+check that was previously disabled (`verifyKeyServers: false`).
+
+#### 16. Input validation on all sidecar endpoints (MEDIUM → FIXED)
+
+Added:
+- `isValidSuiAddress()` — enforces `0x` prefix + 32-byte hex format
+- `isValidSuiObjectId()` — enforces `0x` prefix + variable-length hex
+- `/seal/encrypt`: validates `owner` and `packageId` format
+- `/seal/decrypt`: validates `packageId` and `accountId` format
+- `/seal/decrypt-batch`: caps `items` at 100; validates `packageId` and `accountId`
+- `/walrus/upload`: validates `owner`, `packageId`, and `epochs` range (1–200)
+- `/embed-batch`: caps `texts` at 100
+
+---
+
 ## [optimization/v1] — 2026-04-28
 
 Performance, scalability, and developer experience improvements across the entire stack.

@@ -6,8 +6,8 @@
  *
  * Endpoints:
  *   POST /seal/encrypt   → { data, owner, packageId } → { encryptedData }
- *   POST /seal/decrypt   → { data, privateKey, packageId, registryId } → { decryptedData }
- *   POST /walrus/upload  → { data, privateKey, owner, epochs } → { blobId, objectId }
+ *   POST /seal/decrypt   → { data, privateKey, packageId, accountId } → { decryptedData }
+ *   POST /walrus/upload  → { data, owner, namespace, packageId, epochs } → { blobId, objectId }
  *   GET  /health         → { status: "ok" }
  */
 
@@ -38,6 +38,29 @@ if (SEAL_KEY_SERVERS.length === 0) {
     console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
 }
 
+// Upload key pool — loaded once at startup from env (same vars the Rust server uses)
+const UPLOAD_KEY_POOL: string[] = (() => {
+    const multi = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    if (multi.length > 0) return multi;
+    const single = process.env.SERVER_SUI_PRIVATE_KEY || "";
+    return single.length > 0 ? [single] : [];
+})();
+
+if (UPLOAD_KEY_POOL.length === 0) {
+    console.error("[sidecar] WARNING: No Sui upload keys configured (SERVER_SUI_PRIVATE_KEYS / SERVER_SUI_PRIVATE_KEY) — Walrus uploads will fail");
+}
+
+let uploadKeyCounter = 0;
+function nextUploadKey(): string | null {
+    if (UPLOAD_KEY_POOL.length === 0) return null;
+    const key = UPLOAD_KEY_POOL[uploadKeyCounter % UPLOAD_KEY_POOL.length];
+    uploadKeyCounter++;
+    return key;
+}
+
 // Walrus package ID (for on-chain Move calls: metadata, blob type queries)
 const WALRUS_PACKAGE_ID = process.env.WALRUS_PACKAGE_ID || (
     SUI_NETWORK === "testnet"
@@ -64,7 +87,7 @@ const sealClient = new SealClient({
         objectId: id,
         weight: 1,
     })),
-    verifyKeyServers: false,
+    verifyKeyServers: true,
 });
 
 const walrusClient = new WalrusClient({
@@ -267,11 +290,38 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 }
 
 // ============================================================
+// Input validation helpers
+// ============================================================
+
+/** Sui addresses are 0x-prefixed 32-byte hex strings (66 chars total) */
+function isValidSuiAddress(addr: string): boolean {
+    return /^0x[0-9a-fA-F]{64}$/.test(addr);
+}
+
+/** Sui package/object IDs follow the same format as addresses */
+function isValidSuiObjectId(id: string): boolean {
+    return /^0x[0-9a-fA-F]{1,64}$/.test(id);
+}
+
+// ============================================================
 // Express app
 // ============================================================
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "5mb" }));
+
+// Shared secret — sidecar only accepts requests from the Rust server
+const SIDECAR_SECRET = process.env.SIDECAR_SECRET || "";
+if (!SIDECAR_SECRET) {
+    console.warn("[sidecar] WARNING: SIDECAR_SECRET not set — sidecar is unprotected");
+}
+app.use((req, res, next) => {
+    if (req.path === "/health") return next();
+    if (SIDECAR_SECRET && req.headers["x-sidecar-secret"] !== SIDECAR_SECRET) {
+        return res.status(403).json({ error: "Forbidden: invalid sidecar secret" });
+    }
+    next();
+});
 
 // CORS — allow frontend (any origin) to call sponsor endpoints
 app.use((_req, res, next) => {
@@ -298,6 +348,12 @@ app.post("/seal/encrypt", async (req, res) => {
         if (!data || !owner || !packageId) {
             return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
         }
+        if (!isValidSuiAddress(owner)) {
+            return res.status(400).json({ error: "Invalid owner: must be a 0x-prefixed 32-byte Sui address" });
+        }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
 
         const plaintext = Buffer.from(data, "base64");
         const result = await sealClient.encrypt({
@@ -323,6 +379,12 @@ app.post("/seal/decrypt", async (req, res) => {
         const { data, privateKey, packageId, accountId } = req.body;
         if (!data || !privateKey || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: data, privateKey, packageId, accountId" });
+        }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
+        if (!isValidSuiObjectId(accountId)) {
+            return res.status(400).json({ error: "Invalid accountId: must be a 0x-prefixed hex Sui object ID" });
         }
 
         // Decode delegate keypair — supports both bech32 (suiprivkey1...) and raw hex
@@ -401,8 +463,17 @@ app.post("/seal/decrypt-batch", async (req, res) => {
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
+        if (items.length > 100) {
+            return res.status(400).json({ error: "Too many items: decrypt-batch accepts at most 100 items" });
+        }
         if (!privateKey || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: privateKey, packageId, accountId" });
+        }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
+        if (!isValidSuiObjectId(accountId)) {
+            return res.status(400).json({ error: "Invalid accountId: must be a 0x-prefixed hex Sui object ID" });
         }
 
         // Decode delegate keypair
@@ -504,15 +575,29 @@ app.post("/walrus/upload", async (req, res) => {
     try {
         const {
             data,
-            privateKey,
             owner,
             namespace,
             packageId,
             agentId,
             epochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
-        if (!data || !privateKey) {
-            return res.status(400).json({ error: "Missing required fields: data, privateKey" });
+        if (!data) {
+            return res.status(400).json({ error: "Missing required field: data" });
+        }
+        if (owner && !isValidSuiAddress(owner)) {
+            return res.status(400).json({ error: "Invalid owner: must be a 0x-prefixed 32-byte Sui address" });
+        }
+        if (packageId && !isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
+        const epochsNum = Number(epochs);
+        if (!Number.isInteger(epochsNum) || epochsNum < 1 || epochsNum > 200) {
+            return res.status(400).json({ error: "Invalid epochs: must be an integer between 1 and 200" });
+        }
+
+        const privateKey = nextUploadKey();
+        if (!privateKey) {
+            return res.status(503).json({ error: "No Sui upload keys configured on sidecar (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)" });
         }
 
         // Decode signer
@@ -895,6 +980,9 @@ app.post("/embed-batch", async (req, res) => {
         if (!texts || !Array.isArray(texts) || texts.length === 0) {
             return res.status(400).json({ error: "Missing required field: texts (array of strings)" });
         }
+        if (texts.length > 100) {
+            return res.status(400).json({ error: "Too many texts: embed-batch accepts at most 100 items" });
+        }
 
         const apiKey = process.env.OPENAI_API_KEY;
         if (!apiKey) {
@@ -949,9 +1037,11 @@ app.post("/embed-batch", async (req, res) => {
 // ============================================================
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
-app.listen(PORT, () => {
+const HOST = "127.0.0.1";
+app.listen(PORT, HOST, () => {
     console.log(JSON.stringify({
         event: "sidecar_ready",
+        host: HOST,
         port: PORT,
         pid: process.pid,
     }));

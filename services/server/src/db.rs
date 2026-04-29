@@ -169,7 +169,7 @@ impl VectorDb {
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let hash = hex::encode(sha2::Sha256::digest(&vec_bytes));
-        let cache_key = format!("search:{}:{}:{}", owner, namespace, &hash[..16]);
+        let cache_key = format!("search:{}:{}:{}", owner, namespace, hash);
 
         // Try cache first
         match redis.get::<_, Option<String>>(&cache_key).await {

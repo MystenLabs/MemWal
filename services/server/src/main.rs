@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use db::VectorDb;
-use types::{AppState, Config, KeyPool};
+use types::{AppState, Config};
 
 #[tokio::main]
 async fn main() {
@@ -58,7 +58,11 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
     let mut ready = false;
     for attempt in 1..=30 {
@@ -94,17 +98,6 @@ async fn main() {
     .expect("Failed to initialize Walrus client (invalid URL?)");
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
-    // Log upload key pool status
-    let pool_size = config.sui_private_keys.len();
-    if pool_size > 0 {
-        tracing::info!("  Walrus upload: {} key(s) in pool (parallel uploads up to {}x)", pool_size, pool_size);
-    } else {
-        tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
-    }
-
-    // Build key pool for parallel Walrus uploads
-    let key_pool = KeyPool::new(config.sui_private_keys.clone());
-
     // Initialize Redis for rate limiting
     let redis = rate_limit::create_redis_client(&config.rate_limit.redis_url)
         .await
@@ -117,7 +110,6 @@ async fn main() {
         config: config.clone(),
         http_client,
         walrus_client,
-        key_pool,
         redis,
     });
 
@@ -153,11 +145,36 @@ async fn main() {
     // Clone state before moving into router (needed for shutdown cleanup)
     let state_for_shutdown = state.clone();
 
+    let cors = {
+        let origins = std::env::var("CORS_ORIGINS").unwrap_or_default();
+        if origins.is_empty() || origins.trim() == "*" {
+            if origins.is_empty() {
+                tracing::warn!("CORS_ORIGINS not set — defaulting to permissive. Set CORS_ORIGINS=https://your-app.com to restrict.");
+            }
+            CorsLayer::permissive()
+        } else {
+            let parsed: Vec<axum::http::HeaderValue> = origins
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            if parsed.is_empty() {
+                tracing::warn!("CORS_ORIGINS set but no valid origins parsed — defaulting to permissive");
+                CorsLayer::permissive()
+            } else {
+                tracing::info!("CORS: restricting to {} origin(s)", parsed.len());
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods(tower_http::cors::Any)
+                    .allow_headers(tower_http::cors::Any)
+            }
+        }
+    };
+
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     // Start server

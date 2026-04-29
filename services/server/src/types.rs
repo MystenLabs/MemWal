@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::db::VectorDb;
@@ -14,45 +13,8 @@ pub struct AppState {
     pub config: Config,
     pub http_client: reqwest::Client,
     pub walrus_client: walrus_rs::WalrusClient,
-    /// Round-robin pool of Sui private keys for parallel Walrus uploads
-    pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
-}
-
-// ============================================================
-// Key Pool (round-robin selection for parallel uploads)
-// ============================================================
-
-/// A thread-safe round-robin pool of Sui private keys.
-/// Each call to `next()` returns the next key in the pool,
-/// allowing concurrent uploads to use different signer addresses.
-pub struct KeyPool {
-    keys: Vec<String>,
-    counter: AtomicUsize,
-}
-
-impl KeyPool {
-    pub fn new(keys: Vec<String>) -> Self {
-        Self {
-            keys,
-            counter: AtomicUsize::new(0),
-        }
-    }
-
-    /// Returns the next key in round-robin order, or `None` if the pool is empty.
-    pub fn next(&self) -> Option<&str> {
-        if self.keys.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
-        Some(&self.keys[idx])
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
 }
 
 // ============================================================
@@ -69,15 +31,14 @@ pub struct Config {
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
     pub walrus_aggregator_url: String,
-    /// Primary key (used for SEAL decrypt / recall). Unchanged.
+    /// Server's Sui private key for SEAL decrypt operations.
     pub sui_private_key: Option<String>,
-    /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
-    /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
-    pub sui_private_keys: Vec<String>,
     pub package_id: String,
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
+    /// Shared secret for authenticating sidecar requests
+    pub sidecar_secret: String,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
 }
@@ -110,25 +71,14 @@ impl Config {
             walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
                 .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
-            sui_private_keys: {
-                // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).
-                // Falls back to SERVER_SUI_PRIVATE_KEY as a single-element list.
-                let multi = std::env::var("SERVER_SUI_PRIVATE_KEYS").ok().map(|s| {
-                    s.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect::<Vec<_>>()
-                });
-                let single = std::env::var("SERVER_SUI_PRIVATE_KEY").ok().map(|k| vec![k]);
-                multi.or(single).unwrap_or_default()
-            },
             package_id: std::env::var("MEMWAL_PACKAGE_ID")
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_secret: std::env::var("SIDECAR_SECRET")
+                .unwrap_or_default(),
             rate_limit: RateLimitConfig::from_env(),
         }
     }
@@ -342,8 +292,6 @@ pub struct AuthInfo {
     pub owner: String,
     /// MemWalAccount object ID (set after onchain verification)
     pub account_id: String,
-    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
-    pub delegate_key: Option<String>,
 }
 
 // ============================================================
@@ -383,10 +331,13 @@ impl axum::response::IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Internal(msg) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-            ),
+            AppError::Internal(msg) => {
+                tracing::error!("internal error: {}", msg);
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
