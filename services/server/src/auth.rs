@@ -57,11 +57,8 @@ pub async fn verify_signature(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Optional delegate private key (hex) for SEAL decrypt
-    let delegate_key_hex = headers
-        .get("x-delegate-key")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    // Private key no longer accepted from client — server uses its own
+    // SERVER_SUI_PRIVATE_KEY for SEAL decryption.
 
     // Validate timestamp (5 minute window)
     let timestamp: i64 = timestamp_str
@@ -127,7 +124,6 @@ pub async fn verify_signature(
         public_key: public_key_hex,
         owner,
         account_id,
-        delegate_key: delegate_key_hex,
     });
 
     // Rebuild request with the body re-injected
