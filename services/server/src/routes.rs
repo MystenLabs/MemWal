@@ -14,6 +14,7 @@ use crate::walrus;
 const MAX_ANALYZE_FACTS: usize = 20;
 const ANALYZE_CONCURRENCY: usize = 5;
 const ANALYZE_MAX_OUTPUT_TOKENS: u32 = 256;
+const MAX_SPONSORED_SIGNATURE_BYTES: usize = 2048;
 
 // LOW-6: Upper bound on plaintext size accepted by /api/remember (and /api/analyze).
 // 64 KiB is well above any realistic single memory / conversation turn and far
@@ -1659,6 +1660,12 @@ fn validate_digest(s: &str) -> bool {
     })
 }
 
+/// Sui transaction signatures are serialized as base64 bytes. Native schemes are
+/// 65/97 bytes, while zkLogin signatures are variable-size serialized payloads.
+fn validate_sponsored_signature_len(len: usize) -> bool {
+    (65..=MAX_SPONSORED_SIGNATURE_BYTES).contains(&len)
+}
+
 /// POST /sponsor — proxy to sidecar POST /sponsor
 pub async fn sponsor_proxy(
     State(state): State<Arc<AppState>>,
@@ -1773,8 +1780,10 @@ pub async fn sponsor_execute_proxy(
 
     let sig_bytes = decode_base64(&req.signature)
         .ok_or_else(|| AppError::BadRequest("signature must be valid base64".into()))?;
-    if sig_bytes.len() != 65 && sig_bytes.len() != 97 {
-        return Err(AppError::BadRequest("signature has unexpected length".into()));
+    if !validate_sponsored_signature_len(sig_bytes.len()) {
+        return Err(AppError::BadRequest(
+            "signature has unexpected length".into(),
+        ));
     }
 
     // Per-sender rate limit — same axis as /sponsor.
@@ -1957,6 +1966,26 @@ mod more_tests {
     #[test]
     fn test_digest_empty() {
         assert!(!validate_digest(""));
+    }
+
+    // ---- validate_sponsored_signature_len ----
+
+    #[test]
+    fn test_sponsored_signature_len_accepts_native_and_zklogin_sizes() {
+        assert!(validate_sponsored_signature_len(65));
+        assert!(validate_sponsored_signature_len(97));
+        assert!(validate_sponsored_signature_len(512));
+        assert!(validate_sponsored_signature_len(
+            MAX_SPONSORED_SIGNATURE_BYTES
+        ));
+    }
+
+    #[test]
+    fn test_sponsored_signature_len_rejects_out_of_bounds() {
+        assert!(!validate_sponsored_signature_len(64));
+        assert!(!validate_sponsored_signature_len(
+            MAX_SPONSORED_SIGNATURE_BYTES + 1
+        ));
     }
 
     // ---- decode_base64 ----

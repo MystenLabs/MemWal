@@ -219,7 +219,7 @@ def test_execute_digest_wrong_length_returns_400():
 
 
 def test_execute_signature_wrong_length_returns_400():
-    """POST /sponsor/execute with signature decoding to 64 bytes (not 65 or 97) → 400."""
+    """POST /sponsor/execute with signature decoding below minimum size → 400."""
     sig_64 = base64.b64encode(b"\x00" * 64).decode()
     code, _ = http("POST", "/sponsor/execute", body={"digest": "1" * 43, "signature": sig_64},
                    headers={"X-Forwarded-For": unique_ip()})
