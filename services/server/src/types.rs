@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 
-use crate::db::VectorDb;
+use crate::storage::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
 
 // ============================================================

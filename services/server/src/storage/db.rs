@@ -18,19 +18,19 @@ impl VectorDb {
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
         // Run migrations
-        let migration_001 = include_str!("../migrations/001_init.sql");
+        let migration_001 = include_str!("../../migrations/001_init.sql");
         sqlx::raw_sql(migration_001)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
 
-        let migration_002 = include_str!("../migrations/002_add_namespace.sql");
+        let migration_002 = include_str!("../../migrations/002_add_namespace.sql");
         sqlx::raw_sql(migration_002)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
 
-        let migration_003 = include_str!("../migrations/003_rate_limiter.sql");
+        let migration_003 = include_str!("../../migrations/003_rate_limiter.sql");
         sqlx::raw_sql(migration_003)
             .execute(&pool)
             .await

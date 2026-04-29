@@ -1,18 +1,15 @@
 mod auth;
-mod db;
 mod rate_limit;
 mod routes;
-mod seal;
-mod sui;
+mod storage;
 mod types;
-mod walrus;
 
 use axum::{middleware, routing::{get, post}, Router};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use db::VectorDb;
+use storage::db::VectorDb;
 use types::{AppState, Config, KeyPool};
 
 #[tokio::main]

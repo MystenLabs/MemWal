@@ -4,11 +4,11 @@ use axum::response::Response;
 use base64::Engine as _;
 use std::sync::Arc;
 
-use crate::seal;
-use crate::walrus;
+use crate::storage::seal;
+use crate::storage::walrus;
+use crate::storage::db::VectorDb;
 use crate::rate_limit;
 use crate::types::*;
-use crate::db::VectorDb;
 
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
