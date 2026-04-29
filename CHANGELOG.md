@@ -10,11 +10,25 @@ Security hardening across the Rust server and TypeScript sidecar.
 Fixes 3 CRITICAL + 6 HIGH + 5 MEDIUM findings from internal code review.
 No breaking changes to public API endpoints or SDK interface.
 
+> **Hotfix c512036:** `cargo check` compile error fixed — `auth.rs` had a
+> leftover `delegate_key` field reference after `types::AuthInfo` was cleaned up.
+
 ---
 
 ### Rust Server (`services/server`)
 
-#### 1. Walrus upload key no longer sent over HTTP (CRITICAL → FIXED)
+#### 1. Client private key no longer accepted over HTTP (CRITICAL → FIXED)
+
+**File:** `src/auth.rs`
+
+The `x-delegate-key` header — which sent the client's raw Sui private key on every
+authenticated request — has been removed from the auth middleware. The server now uses
+its own `SERVER_SUI_PRIVATE_KEY` for all SEAL decryption operations.
+
+Removed from `AuthInfo`: the `delegate_key` field. Removed from `verify_signature`:
+the header extraction and all downstream usage.
+
+#### 2. Walrus upload key no longer sent over HTTP (CRITICAL → FIXED)
 
 **Files:** `src/walrus.rs`, `src/routes.rs`, `src/types.rs`, `src/main.rs`
 
