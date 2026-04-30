@@ -114,7 +114,7 @@ async function main() {
             objectId: id,
             weight: 1,
         })),
-        verifyKeyServers: false,
+        verifyKeyServers: true,
     });
 
     // Step 1: Parse the encrypted object to get the real key ID
@@ -128,10 +128,11 @@ async function main() {
     );
 
     // Step 2: Create session key (auto-signs with signer)
+    // LOW-13: Reduced from 30 to 5 minutes to match sidecar policy.
     const sessionKey = await SessionKey.create({
         address: adminAddress,
         packageId,
-        ttlMin: 30,
+        ttlMin: 5,
         signer: keypair,
         suiClient: suiClient as any,
     });

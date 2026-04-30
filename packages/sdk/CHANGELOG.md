@@ -1,5 +1,14 @@
 # @mysten-incubation/memwal
 
+## 0.0.2
+
+### Security
+
+- Added per-request `x-nonce` signing to block replay within the timestamp window.
+- Added `x-account-id` to the canonical signed message so account hints cannot be rebound in transit.
+- Replaced relayer-mode `x-delegate-key` transport with ephemeral `x-seal-session`; manual-mode requests no longer send delegate private key material.
+- SDK versions that do not send `x-nonce` are no longer supported by the server and receive `426 Upgrade Required`.
+
 ## 0.0.1
 
 ### Initial Release

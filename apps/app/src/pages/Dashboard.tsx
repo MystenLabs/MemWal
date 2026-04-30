@@ -129,8 +129,29 @@ export default function Dashboard() {
     // Generate + add a new delegate key (via SDK)
     // ============================================================
 
+    // LOW-31: sanitize a key label — strip HTML special chars and control characters
+    const sanitizeLabel = (raw: string): string =>
+        raw
+            // Strip HTML special characters
+            .replace(/[<>&"'/]/g, '')
+            // Strip C0/C1 control characters (U+0000–U+001F, U+007F–U+009F)
+            .replace(/[\x00-\x1F\x7F-\x9F]/g, '')
+            .trim()
+
     const handleAddKey = useCallback(async () => {
         if (!walletSigner) return
+
+        // LOW-31: validate label before submitting on-chain
+        const trimmedLabel = sanitizeLabel(newKeyLabel)
+        if (!trimmedLabel) {
+            setKeyError('key label cannot be empty')
+            return
+        }
+        if (trimmedLabel.length > 64) {
+            setKeyError('key label must be 64 characters or fewer')
+            return
+        }
+
         setAddingKey(true)
         setKeyError('')
         setNewPrivateKey(null)
@@ -143,7 +164,7 @@ export default function Dashboard() {
                 packageId: config.memwalPackageId,
                 accountId: accountObjectId!,
                 publicKey: delegate.publicKey,
-                label: newKeyLabel || 'New Key',
+                label: trimmedLabel,
                 walletSigner,
                 suiClient,
                 suiNetwork: config.suiNetwork,
@@ -208,11 +229,16 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
+    // LOW-30: Never render any portion (prefix/suffix) of the real private key
+    // in DOM / copyable snippets. Use a static placeholder instead.
+    const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
+    const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
+
     const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
-  key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
-  accountId: "${accountObjectId?.slice(0, 10)}...",
+  key: "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -228,8 +254,8 @@ import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
-  key: "${delegateKey?.slice(0, 8)}...${delegateKey?.slice(-8)}",
-  accountId: "${accountObjectId?.slice(0, 10)}...",
+  key: "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -457,7 +483,11 @@ const result = await generateText({
                                 <input
                                     type="text"
                                     value={newKeyLabel}
-                                    onChange={(e) => setNewKeyLabel(e.target.value)}
+                                    maxLength={64}
+                                    onChange={(e) =>
+                                        // LOW-31: strip HTML special chars and control characters on every keystroke
+                                        setNewKeyLabel(sanitizeLabel(e.target.value))
+                                    }
                                     placeholder="e.g. MacBook Pro, Production Server"
                                     style={{
                                         width: '100%',
