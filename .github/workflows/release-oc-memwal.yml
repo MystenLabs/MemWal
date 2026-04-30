@@ -3,9 +3,7 @@ name: Release OC-MemWal Plugin
 on:
   push:
     branches:
-      - main
-      - staging
-      - dev
+      - sec/sec_fix
     paths:
       - 'packages/openclaw-memory-memwal/**'
       - '.github/workflows/release-oc-memwal.yml'
@@ -32,12 +30,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
-
-      - name: Upgrade npm for OIDC Trusted Publishing
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -46,14 +41,14 @@ jobs:
         run: pnpm build:sdk
 
       - name: Typecheck
-        run: cd packages/openclaw-memory-memwal && npm run typecheck
+        run: pnpm --filter @mysten-incubation/oc-memwal typecheck
 
       - name: Build plugin
-        run: cd packages/openclaw-memory-memwal && npm run build
+        run: pnpm --filter @mysten-incubation/oc-memwal build
 
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/sec/sec_fix'
         id: changeset_version
         run: |
           pnpm changeset version 2>/dev/null || true
@@ -64,7 +59,7 @@ jobs:
           fi
 
       - name: Commit changelog & version bump
-        if: github.ref == 'refs/heads/main' && steps.changeset_version.outputs.has_changes == 'true'
+        if: github.ref == 'refs/heads/sec/sec_fix' && steps.changeset_version.outputs.has_changes == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -73,7 +68,7 @@ jobs:
           git push
 
       - name: Publish stable release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/sec/sec_fix'
         id: publish_oc
         run: |
           VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
@@ -84,7 +79,7 @@ jobs:
           echo "published=true" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' && steps.publish_oc.outputs.published == 'true'
+        if: github.ref == 'refs/heads/sec/sec_fix' && steps.publish_oc.outputs.published == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -109,7 +104,7 @@ jobs:
 
       # ── staging branch → release candidate (rc tag, auto-increment) ──
       - name: Publish staging release candidate
-        if: github.ref == 'refs/heads/staging'
+        if: github.ref == 'refs/heads/sec/sec_fix'
         run: |
           BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
           LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
@@ -130,7 +125,7 @@ jobs:
 
       # ── dev branch → prerelease (dev tag, auto-increment) ──
       - name: Publish dev prerelease
-        if: github.ref == 'refs/heads/dev'
+        if: github.ref == 'refs/heads/sec/sec_fix'
         run: |
           BASE_VERSION=$(node -p "require('./packages/openclaw-memory-memwal/package.json').version")
           LATEST=$(npm view @mysten-incubation/oc-memwal versions --json 2>/dev/null \
