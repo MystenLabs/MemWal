@@ -36,6 +36,10 @@ async fn constant_time_reject() -> StatusCode {
     StatusCode::UNAUTHORIZED
 }
 
+fn unsupported_legacy_sdk() -> StatusCode {
+    StatusCode::UPGRADE_REQUIRED
+}
+
 pub async fn verify_signature(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -105,7 +109,13 @@ pub async fn verify_signature(
         .get("x-nonce")
         .and_then(|v| v.to_str().ok())
         .map(String::from)
-        .ok_or_else(|| StatusCode::UNAUTHORIZED)?;  // will be normalized below
+        .ok_or_else(|| {
+            tracing::warn!(
+                target: "memwal::deprecation",
+                "request missing x-nonce; rejecting unsupported legacy SDK"
+            );
+            unsupported_legacy_sdk()
+        })?;
 
     // Validate nonce is UUID format (prevents injection attacks)
     if uuid::Uuid::parse_str(&nonce).is_err() {
@@ -461,6 +471,11 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    #[test]
+    fn unsupported_legacy_sdk_returns_upgrade_required() {
+        assert_eq!(unsupported_legacy_sdk(), StatusCode::UPGRADE_REQUIRED);
+    }
+
     // ── LOW-23: account_id included in signed canonical message ─────────
 
     #[test]
@@ -613,4 +628,3 @@ mod tests {
         assert!(!debug_str.contains("<redacted>"));
     }
 }
-
