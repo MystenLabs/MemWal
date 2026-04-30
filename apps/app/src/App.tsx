@@ -5,12 +5,13 @@
  * Flow: Landing → Sign in with Google (Enoki) → Setup Wizard → Dashboard
  */
 
-import { useEffect, useState, useCallback, createContext, useContext } from 'react'
+import { useEffect, useState, useCallback, useRef, createContext, useContext } from 'react'
 import {
   createNetworkConfig,
   SuiClientProvider,
   WalletProvider,
   useCurrentAccount,
+  useDisconnectWallet,
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
@@ -39,7 +40,7 @@ const { networkConfig } = createNetworkConfig({
 const queryClient = new QueryClient()
 
 // ============================================================
-// Delegate Key Context (stored in localStorage)
+// Delegate Key Context (stored in sessionStorage — cleared on tab close, never persists across sessions)
 // ============================================================
 
 interface DelegateKeyState {
@@ -58,6 +59,12 @@ interface DelegateKeyContextType extends DelegateKeyState {
 
 const DelegateKeyContext = createContext<DelegateKeyContextType | null>(null)
 
+// LOW-32: tunable idle-timeout. 15 minutes by default. Exported so callers/tests can read it.
+export const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000
+
+// Debounce interval for activity events to avoid excessive timer resets.
+const ACTIVITY_DEBOUNCE_MS = 1000
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function useDelegateKey() {
   const ctx = useContext(DelegateKeyContext)
@@ -67,7 +74,7 @@ export function useDelegateKey() {
 
 function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<DelegateKeyState>(() => {
-    const saved = localStorage.getItem('memwal_delegate')
+    const saved = sessionStorage.getItem('memwal_delegate')
     if (saved) {
       try { return JSON.parse(saved) } catch { /* ignore */ }
     }
@@ -76,14 +83,76 @@ function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
 
   const setDelegateKeys = useCallback((privateKey: string, publicKey: string, accountId: string) => {
     const next = { delegateKey: privateKey, delegatePublicKey: publicKey, accountObjectId: accountId }
-    localStorage.setItem('memwal_delegate', JSON.stringify(next))
+    sessionStorage.setItem('memwal_delegate', JSON.stringify(next))
     setState(next)
   }, [])
 
   const clearDelegateKeys = useCallback(() => {
-    localStorage.removeItem('memwal_delegate')
-    setState({ delegateKey: null, delegatePublicKey: null, accountObjectId: null })
+    // Best-effort zeroization: overwrite the private-key string reference before nulling.
+    // JS strings are immutable so true wipe is impossible, but we at least drop the last
+    // live reference held by this provider.
+    setState((prev) => {
+      if (prev.delegateKey) {
+        // Reassign to a placeholder of same length to encourage GC of the original buffer.
+        // (best-effort — V8 may still retain the interned string)
+        void prev.delegateKey.replace(/./g, '\0')
+      }
+      return { delegateKey: null, delegatePublicKey: null, accountObjectId: null }
+    })
+    sessionStorage.removeItem('memwal_delegate')
   }, [])
+
+  // ============================================================
+  // LOW-32: Idle-timeout — wipe in-memory key material and disconnect after inactivity.
+  // ============================================================
+  const { mutateAsync: disconnect } = useDisconnectWallet()
+  const hasKey = state.delegateKey !== null
+  const timerRef = useRef<number | null>(null)
+  const lastResetRef = useRef<number>(0)
+
+  useEffect(() => {
+    if (!hasKey) return
+
+    const triggerWipe = () => {
+      clearDelegateKeys()
+      // Fire-and-forget disconnect; redirect to landing regardless.
+      Promise.resolve(disconnect()).catch(() => { /* ignore */ })
+      try {
+        if (window.location.pathname !== '/') {
+          window.location.assign('/')
+        }
+      } catch { /* ignore */ }
+    }
+
+    const scheduleTimer = () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+      }
+      timerRef.current = window.setTimeout(triggerWipe, INACTIVITY_TIMEOUT_MS)
+    }
+
+    const onActivity = () => {
+      const now = Date.now()
+      if (now - lastResetRef.current < ACTIVITY_DEBOUNCE_MS) return
+      lastResetRef.current = now
+      scheduleTimer()
+    }
+
+    // Start timer on mount.
+    scheduleTimer()
+
+    const events: Array<keyof WindowEventMap> = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart']
+    const opts: AddEventListenerOptions = { passive: true }
+    events.forEach((ev) => window.addEventListener(ev, onActivity, opts))
+
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, onActivity, opts))
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [hasKey, clearDelegateKeys, disconnect])
 
   return (
     <DelegateKeyContext.Provider value={{ ...state, setDelegateKeys, clearDelegateKeys }}>

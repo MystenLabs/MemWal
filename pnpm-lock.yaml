@@ -717,8 +717,8 @@ importers:
         specifier: ^13.7.0
         version: 13.12.0(react@19.0.1)
       '@mysten-incubation/memwal':
-        specifier: 0.0.1
-        version: 0.0.1(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@mysten/dapp-kit':
         specifier: ^1.0.3
         version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))(@tanstack/react-query@5.90.21(react@19.0.1))(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(immer@9.0.21)(react-dom@19.0.1(react@19.0.1))(react@19.0.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@19.0.1))
@@ -978,6 +978,9 @@ importers:
       drizzle-kit:
         specifier: ^0.25.0
         version: 0.25.0
+      esbuild:
+        specifier: ~0.27.4
+        version: 0.27.4
       postcss:
         specifier: ^8
         version: 8.5.8
@@ -1003,8 +1006,8 @@ importers:
   packages/openclaw-memory-memwal:
     dependencies:
       '@mysten-incubation/memwal':
-        specifier: ^0.0.1
-        version: 0.0.1(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
+        specifier: ^0.0.2
+        version: 0.0.2(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)
       '@sinclair/typebox':
         specifier: 0.34.48
         version: 0.34.48
@@ -3091,8 +3094,8 @@ packages:
     resolution: {integrity: sha512-cXu86tF4VQVfwz8W1SPbhoRyHJkti6mjH/XJIxp40jhO4j2k1m4KYrEykxqWPkFF3vrK4rgQppBh//AwyGSXPA==}
     engines: {node: '>=18'}
 
-  '@mysten-incubation/memwal@0.0.1':
-    resolution: {integrity: sha512-kRAFFJBdk3D9XvGHZdPOrnz2x4C7dwCRf0xTaeLFAVTgVwfpk3GmOnJZ1O+pAQyrAhweAzBXNXBWutShnPWgJg==}
+  '@mysten-incubation/memwal@0.0.2':
+    resolution: {integrity: sha512-tQ/U/054bOylXUEk3JsiAP0DlskoxqAerbMBXFAN/wWTNvvJK7L+FcvL1f4NlICawsW8dfxt5Of7jLCTIHxbdg==}
     peerDependencies:
       '@mysten/seal': '>=1.1.0'
       '@mysten/sui': '>=2.5.0'
@@ -3100,10 +3103,6 @@ packages:
       ai: '>=4.0.0'
       zod: ^3.23.0
     peerDependenciesMeta:
-      '@mysten/seal':
-        optional: true
-      '@mysten/sui':
-        optional: true
       '@mysten/walrus':
         optional: true
       ai:
@@ -13580,13 +13579,13 @@ snapshots:
       outvariant: 1.4.3
       strict-event-emitter: 0.5.1
 
-  '@mysten-incubation/memwal@0.0.1(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
+  '@mysten-incubation/memwal@0.0.2(@mysten/seal@1.1.1(@mysten/sui@2.8.0(typescript@5.9.3)))(@mysten/sui@2.8.0(typescript@5.9.3))(@mysten/walrus@1.0.4(@mysten/sui@2.8.0(typescript@5.9.3)))(ai@6.0.37(zod@3.25.76))(zod@3.25.76)':
     dependencies:
+      '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
+      '@mysten/sui': 2.8.0(typescript@5.9.3)
       '@noble/ed25519': 2.3.0
       '@noble/hashes': 2.0.1
     optionalDependencies:
-      '@mysten/seal': 1.1.1(@mysten/sui@2.8.0(typescript@5.9.3))
-      '@mysten/sui': 2.8.0(typescript@5.9.3)
       '@mysten/walrus': 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))
       ai: 6.0.37(zod@3.25.76)
       zod: 3.25.76
@@ -18320,7 +18319,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.6.1)
       eslint-import-resolver-node: 0.3.9
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.6.1))
       eslint-plugin-react-hooks: 7.0.1(eslint@9.39.4(jiti@2.6.1))
@@ -18353,7 +18352,7 @@ snapshots:
       tinyglobby: 0.2.15
       unrs-resolver: 1.11.1
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1))
+      eslint-plugin-import: 2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1))
     transitivePeerDependencies:
       - supports-color
 
@@ -18367,7 +18366,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.6.1)):
+  eslint-plugin-import@2.32.0(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)))(eslint@9.39.4(jiti@2.6.1)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9

@@ -10,8 +10,8 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string). This is the delegate key from app.memwal.com */
-    key: string;
+    /** Ed25519 private key (hex string or Uint8Array). This is the delegate key from app.memwal.com */
+    key: string | Uint8Array;
     /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
     /** Server URL (default: http://localhost:8000) */
@@ -135,8 +135,8 @@ export interface RestoreResult {
 
 /** Config for MemWalManual (full client-side: SEAL + Walrus + embedding) */
 export interface MemWalManualConfig {
-    /** Ed25519 delegate private key (hex) for server auth */
-    key: string;
+    /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
+    key: string | Uint8Array;
     /** Server URL (default: http://localhost:8000) */
     serverUrl?: string;
     /**
@@ -174,6 +174,12 @@ export interface MemWalManualConfig {
      * If omitted, uses built-in defaults for the selected suiNetwork.
      */
     sealKeyServers?: string[];
+    /**
+     * SEAL threshold — number of key server shares required for encrypt/decrypt.
+     * Must be ≤ number of entries in sealKeyServers.
+     * Default: 2 (matches sidecar SEAL_THRESHOLD default).
+     */
+    sealThreshold?: number;
     /** Walrus storage epochs (default: 50) */
     walrusEpochs?: number;
     /** Walrus aggregator URL for direct blob downloads (default: mainnet aggregator) */
