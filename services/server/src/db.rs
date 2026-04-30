@@ -1,4 +1,5 @@
 use pgvector::Vector;
+use redis::AsyncCommands;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -12,7 +13,7 @@ impl VectorDb {
     /// Initialize database connection pool and run migrations
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(20)
             .connect(database_url)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
@@ -36,7 +37,8 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
-        let migration_004 = include_str!("../migrations/004_delegate_key_cache_expires.sql");
+        let migration_004 = include_str!("../migrations/004_add_ivfflat_index.sql");
+        let migration_005 = include_str!("../migrations/004_delegate_key_cache_expires.sql");
         sqlx::raw_sql(migration_004)
             .execute(&pool)
             .await
@@ -46,6 +48,12 @@ impl VectorDb {
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
+    }
+
+    /// Gracefully close the database connection pool.
+    pub async fn close(&self) {
+        self.pool.close().await;
+        tracing::info!("database connection pool closed");
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota)
@@ -75,6 +83,40 @@ impl VectorDb {
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
         tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B", id, blob_id, owner, namespace, blob_size_bytes);
+        Ok(())
+    }
+
+    /// Insert multiple vector entries in a single transaction
+    /// Tuple: (id, owner, namespace, blob_id, vector, blob_size_bytes)
+    #[allow(clippy::type_complexity)]
+    pub async fn insert_vectors_batch(
+        &self,
+        entries: &[(String, String, String, String, Vec<f32>, i64)],
+    ) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await
+            .map_err(|e| AppError::Internal(format!("Failed to begin transaction: {}", e)))?;
+
+        for (id, owner, namespace, blob_id, vector, blob_size_bytes) in entries {
+            let embedding = Vector::from(vector.clone());
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(namespace)
+            .bind(blob_id)
+            .bind(embedding)
+            .bind(blob_size_bytes)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to insert vector in batch: {}", e)))?;
+        }
+
+        tx.commit().await
+            .map_err(|e| AppError::Internal(format!("Failed to commit batch transaction: {}", e)))?;
+
+        tracing::debug!("batch inserted {} vectors", entries.len());
         Ok(())
     }
 
@@ -110,6 +152,51 @@ impl VectorDb {
             .collect();
 
         Ok(results)
+    }
+
+    /// Search with Redis caching (60s TTL).
+    /// Cache key: search:{owner}:{namespace}:{hash(vector)}
+    /// Falls back to DB query if Redis is unavailable.
+    pub async fn search_cached(
+        &self,
+        redis: &mut redis::aio::MultiplexedConnection,
+        query_vector: &[f32],
+        owner: &str,
+        namespace: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, AppError> {
+        // Build cache key from vector hash
+        use sha2::Digest;
+        let vec_bytes: Vec<u8> = query_vector.iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let hash = hex::encode(sha2::Sha256::digest(&vec_bytes));
+        let cache_key = format!("search:{}:{}:{}", owner, namespace, hash);
+
+        // Try cache first
+        match redis.get::<_, Option<String>>(&cache_key).await {
+            Ok(Some(cached)) => {
+                if let Ok(hits) = serde_json::from_str::<Vec<SearchHit>>(&cached) {
+                    tracing::debug!("search cache HIT: key={}", cache_key);
+                    return Ok(hits);
+                }
+            }
+            Ok(None) => { /* cache miss */ }
+            Err(e) => {
+                tracing::warn!("Redis get failed ({}), falling back to DB", e);
+            }
+        }
+
+        // Cache miss — query DB
+        let hits = self.search_similar(query_vector, owner, namespace, limit).await?;
+
+        // Store in cache (60s TTL), ignore errors
+        if let Ok(serialized) = serde_json::to_string(&hits) {
+            let _: Result<(), _> = redis.set_ex(&cache_key, &serialized, 60).await;
+        }
+
+        tracing::debug!("search cache MISS: key={}", cache_key);
+        Ok(hits)
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)

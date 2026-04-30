@@ -82,6 +82,7 @@ pub async fn seal_encrypt(
 
     let mut req = client
         .post(&url)
+        .header("x-sidecar-secret", sidecar_secret)
         .json(&SealEncryptRequest {
             data: data_b64,
             owner: owner_address.to_string(),
@@ -144,6 +145,7 @@ pub async fn seal_decrypt(
 
     let mut req = client
         .post(&url)
+        .header("x-sidecar-secret", sidecar_secret)
         .json(&SealDecryptRequest {
             data: data_b64,
             package_id: package_id.to_string(),

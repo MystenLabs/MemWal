@@ -6,8 +6,8 @@
  *
  * Endpoints:
  *   POST /seal/encrypt   → { data, owner, packageId } → { encryptedData }
- *   POST /seal/decrypt   → { data, privateKey, packageId, registryId } → { decryptedData }
- *   POST /walrus/upload  → { data, privateKey, owner, epochs } → { blobId, objectId }
+ *   POST /seal/decrypt   → { data, privateKey, packageId, accountId } → { decryptedData }
+ *   POST /walrus/upload  → { data, owner, namespace, packageId, epochs } → { blobId, objectId }
  *   GET  /health         → { status: "ok" }
  */
 
@@ -39,20 +39,27 @@ if (SEAL_KEY_SERVERS.length === 0) {
     console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
 }
 
-const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
+// Upload key pool — loaded once at startup from env (same vars the Rust server uses)
+const UPLOAD_KEY_POOL: string[] = (() => {
+    const multi = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    if (multi.length > 0) return multi;
+    const single = process.env.SERVER_SUI_PRIVATE_KEY || "";
+    return single.length > 0 ? [single] : [];
+})();
 
-// Server Sui Private Keys for Walrus uploads
-const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-
-if (SERVER_SUI_PRIVATE_KEYS.length === 0 && process.env.SERVER_SUI_PRIVATE_KEY) {
-    SERVER_SUI_PRIVATE_KEYS.push(process.env.SERVER_SUI_PRIVATE_KEY.trim());
+if (UPLOAD_KEY_POOL.length === 0) {
+    console.error("[sidecar] WARNING: No Sui upload keys configured (SERVER_SUI_PRIVATE_KEYS / SERVER_SUI_PRIVATE_KEY) — Walrus uploads will fail");
 }
 
-if (SERVER_SUI_PRIVATE_KEYS.length === 0) {
-    console.error("[sidecar] WARNING: SERVER_SUI_PRIVATE_KEYS env var is empty — Walrus uploads will fail");
+let uploadKeyCounter = 0;
+function nextUploadKey(): string | null {
+    if (UPLOAD_KEY_POOL.length === 0) return null;
+    const key = UPLOAD_KEY_POOL[uploadKeyCounter % UPLOAD_KEY_POOL.length];
+    uploadKeyCounter++;
+    return key;
 }
 
 // Walrus package ID (for on-chain Move calls: metadata, blob type queries)
@@ -286,23 +293,44 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 }
 
 // ============================================================
+// Input validation helpers
+// ============================================================
+
+/** Sui addresses are 0x-prefixed 32-byte hex strings (66 chars total) */
+function isValidSuiAddress(addr: string): boolean {
+    return /^0x[0-9a-fA-F]{64}$/.test(addr);
+}
+
+/** Sui package/object IDs follow the same format as addresses */
+function isValidSuiObjectId(id: string): boolean {
+    return /^0x[0-9a-fA-F]{1,64}$/.test(id);
+}
+
+// ============================================================
 // Express app
 // ============================================================
 
 const app = express();
-// HIGH-13: Use a conservative global default — routes that need more bytes
-// (e.g. /walrus/upload, /seal/decrypt-batch) apply their own per-route
-// json() middleware that overrides this default.
-// Global floor: 256 KiB is enough for every metadata-only JSON body
-// (seal/encrypt, seal/decrypt, walrus/query-blobs, sponsor, sponsor/execute).
-app.use(express.json({ limit: "256kb" }));
+app.use(express.json({ limit: "5mb" }));
 
-// CORS — sidecar is called only by the co-located Rust server, never by browsers.
-// Remove all CORS headers so no cross-origin access is granted.
-app.use((_req: Request, res: Response, next: NextFunction) => {
-    res.removeHeader("Access-Control-Allow-Origin");
-    res.removeHeader("Access-Control-Allow-Methods");
-    res.removeHeader("Access-Control-Allow-Headers");
+// Shared secret — sidecar only accepts requests from the Rust server
+const SIDECAR_SECRET = process.env.SIDECAR_SECRET || "";
+if (!SIDECAR_SECRET) {
+    console.warn("[sidecar] WARNING: SIDECAR_SECRET not set — sidecar is unprotected");
+}
+app.use((req, res, next) => {
+    if (req.path === "/health") return next();
+    if (SIDECAR_SECRET && req.headers["x-sidecar-secret"] !== SIDECAR_SECRET) {
+        return res.status(403).json({ error: "Forbidden: invalid sidecar secret" });
+    }
+    next();
+});
+
+// CORS — allow frontend (any origin) to call sponsor endpoints
+app.use((_req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     if (_req.method === "OPTIONS") {
         return res.sendStatus(204);
     }
@@ -345,6 +373,12 @@ app.post("/seal/encrypt", async (req, res) => {
         const { data, owner, packageId } = req.body;
         if (!data || !owner || !packageId) {
             return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
+        }
+        if (!isValidSuiAddress(owner)) {
+            return res.status(400).json({ error: "Invalid owner: must be a 0x-prefixed 32-byte Sui address" });
+        }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
         }
 
         const plaintext = Buffer.from(data, "base64");
@@ -425,6 +459,12 @@ app.post("/seal/decrypt", async (req, res) => {
         if (!data || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
         }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
+        if (!isValidSuiObjectId(accountId)) {
+            return res.status(400).json({ error: "Invalid accountId: must be a 0x-prefixed hex Sui object ID" });
+        }
 
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
@@ -501,6 +541,12 @@ app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res)
         }
         if (!packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: packageId, accountId" });
+        }
+        if (!isValidSuiObjectId(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId: must be a 0x-prefixed hex Sui object ID" });
+        }
+        if (!isValidSuiObjectId(accountId)) {
+            return res.status(400).json({ error: "Invalid accountId: must be a 0x-prefixed hex Sui object ID" });
         }
 
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
@@ -1019,6 +1065,68 @@ app.post("/sponsor/execute", async (req, res) => {
         res.json(executed); // { digest }
     } catch (err: any) {
         console.error(`[sponsor/execute] error: ${err.message || err}`);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// ============================================================
+// POST /embed-batch — Batch text embedding via OpenAI-compatible API
+// Accepts array of texts, calls embedding API in parallel, returns array of vectors
+// ============================================================
+app.post("/embed-batch", async (req, res) => {
+    try {
+        const { texts } = req.body;
+        if (!texts || !Array.isArray(texts) || texts.length === 0) {
+            return res.status(400).json({ error: "Missing required field: texts (array of strings)" });
+        }
+        if (texts.length > 100) {
+            return res.status(400).json({ error: "Too many texts: embed-batch accepts at most 100 items" });
+        }
+
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) {
+            return res.status(503).json({ error: "OPENAI_API_KEY is not configured" });
+        }
+
+        const apiBase = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
+        const url = `${apiBase}/embeddings`;
+
+        // Call embedding API in parallel for each text
+        const results = await Promise.all(
+            texts.map(async (text: string, index: number) => {
+                try {
+                    const resp = await fetch(url, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${apiKey}`,
+                        },
+                        body: JSON.stringify({
+                            model: "openai/text-embedding-3-small",
+                            input: text,
+                        }),
+                    });
+
+                    if (!resp.ok) {
+                        const body = await resp.text();
+                        return { index, error: `API error (${resp.status}): ${body}` };
+                    }
+
+                    const data = (await resp.json()) as { data: { embedding: number[] }[] };
+                    return { index, embedding: data.data[0].embedding };
+                } catch (err: any) {
+                    return { index, error: err.message || String(err) };
+                }
+            })
+        );
+
+        const embeddings = results.filter((r) => "embedding" in r);
+        const errors = results.filter((r) => "error" in r);
+
+        console.log(`[embed-batch] ${embeddings.length}/${texts.length} embedded ok, ${errors.length} errors`);
+        res.json({ results: embeddings, errors });
+    } catch (err: any) {
+        console.error(`[embed-batch] error: ${err.message || err}`);
         res.status(500).json({ error: err.message || String(err) });
     }
 });

@@ -105,23 +105,78 @@ async fn generate_embedding(
             Ok(vector)
         }
         None => {
-            // Mock embedding (deterministic hash-based)
-            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY set)");
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(text.as_bytes());
-            let mock_vector: Vec<f32> = hash
-                .iter()
-                .cycle()
-                .take(1536)
-                .enumerate()
-                .map(|(i, &b)| {
-                    let val = (b as f32 / 255.0) * 2.0 - 1.0;
-                    val * (1.0 + (i as f32 * 0.001).sin())
-                })
-                .collect();
-            Ok(mock_vector)
+            Err(AppError::Internal(
+                "OPENAI_API_KEY is required for embeddings but is not set".into(),
+            ))
         }
     }
+}
+
+/// Sidecar batch embedding response
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct EmbedBatchResult {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct EmbedBatchResponse {
+    results: Vec<EmbedBatchResult>,
+    errors: Vec<serde_json::Value>,
+}
+
+/// Generate embeddings for multiple texts in a single batch call via sidecar.
+/// Falls back to sequential single-text embedding if sidecar batch endpoint is unavailable.
+#[allow(dead_code)]
+async fn generate_embeddings_batch(
+    client: &reqwest::Client,
+    config: &Config,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>, AppError> {
+    // Try sidecar /embed-batch first
+    let url = format!("{}/embed-batch", config.sidecar_url);
+    match client
+        .post(&url)
+        .json(&serde_json::json!({ "texts": texts }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let batch_resp: EmbedBatchResponse = resp.json().await.map_err(|e| {
+                AppError::Internal(format!("Failed to parse embed-batch response: {}", e))
+            })?;
+
+            // Reconstruct ordered vector list
+            let mut embeddings = vec![Vec::new(); texts.len()];
+            for result in batch_resp.results {
+                if result.index < embeddings.len() {
+                    embeddings[result.index] = result.embedding;
+                }
+            }
+
+            // Check all slots filled
+            if embeddings.iter().any(|v| v.is_empty()) {
+                tracing::warn!("embed-batch: some embeddings missing, falling back to sequential");
+            } else {
+                return Ok(embeddings);
+            }
+        }
+        Ok(resp) => {
+            tracing::warn!("embed-batch returned {}, falling back to sequential", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("embed-batch unavailable ({}), falling back to sequential", e);
+        }
+    }
+
+    // Fallback: sequential single-text embedding
+    let mut embeddings = Vec::with_capacity(texts.len());
+    for text in texts {
+        embeddings.push(generate_embedding(client, config, text).await?);
+    }
+    Ok(embeddings)
 }
 
 // ============================================================
@@ -221,6 +276,92 @@ pub async fn remember(
         owner: owner.clone(),
         namespace: namespace.clone(),
     }))
+}
+
+/// POST /api/remember/batch
+///
+/// Batch version of /api/remember — processes multiple texts in a single transaction.
+/// Each item goes through: embed + encrypt → Walrus upload → store.
+/// All DB inserts are wrapped in one transaction for atomicity.
+pub async fn remember_batch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<RememberBatchRequest>,
+) -> Result<Json<RememberBatchResponse>, AppError> {
+    if body.items.is_empty() {
+        return Err(AppError::BadRequest("Items array cannot be empty".into()));
+    }
+    if body.items.len() > 100 {
+        return Err(AppError::BadRequest("Batch size cannot exceed 100 items".into()));
+    }
+    for (i, item) in body.items.iter().enumerate() {
+        if item.text.is_empty() {
+            return Err(AppError::BadRequest(format!("Item {} has empty text", i)));
+        }
+    }
+
+    let owner = &auth.owner;
+    tracing::info!("remember_batch: {} items, owner={}", body.items.len(), owner);
+
+    // Check total storage quota
+    let total_bytes: i64 = body.items.iter().map(|i| i.text.len() as i64).sum();
+    rate_limit::check_storage_quota(&state, owner, total_bytes).await?;
+
+    // Process all items concurrently (embed + encrypt → upload)
+    let auth_pubkey = auth.public_key.clone();
+    let tasks: Vec<_> = body.items.iter().map(|item| {
+        let state = Arc::clone(&state);
+        let owner = owner.clone();
+        let text = item.text.clone();
+        let namespace = item.namespace.clone();
+        let auth_pubkey = auth_pubkey.clone();
+        async move {
+            // Embed + encrypt concurrently
+            let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
+            let encrypt_fut = seal::seal_encrypt(
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
+                text.as_bytes(), &owner, &state.config.package_id,
+            );
+            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+            let vector = vector_result?;
+            let encrypted = encrypted_result?;
+
+            // Upload to Walrus (sidecar manages signing keys)
+            let upload_result = walrus::upload_blob(
+                &state.http_client, &state.config.sidecar_url, &state.config.sidecar_secret,
+                &encrypted, 50, &owner, &namespace, &state.config.package_id,
+                Some(&auth_pubkey),
+            ).await?;
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let blob_size = encrypted.len() as i64;
+            let blob_id = upload_result.blob_id;
+
+            Ok::<(String, String, String, String, Vec<f32>, i64, RememberResponse), AppError>((
+                id.clone(), owner.clone(), namespace.clone(), blob_id.clone(), vector, blob_size,
+                RememberResponse { id, blob_id, owner: owner.clone(), namespace },
+            ))
+        }
+    }).collect();
+
+    let results = futures::future::join_all(tasks).await;
+
+    // Collect results and prepare batch DB insert
+    let mut db_entries = Vec::with_capacity(results.len());
+    let mut responses = Vec::with_capacity(results.len());
+    for result in results {
+        let (id, owner, namespace, blob_id, vector, blob_size, response) = result?;
+        db_entries.push((id, owner, namespace, blob_id, vector, blob_size));
+        responses.push(response);
+    }
+
+    // Single transaction for all DB inserts
+    state.db.insert_vectors_batch(&db_entries).await?;
+
+    let total = responses.len();
+    tracing::info!("remember_batch complete: {} items stored for owner={}", total, owner);
+
+    Ok(Json(RememberBatchResponse { results: responses, total }))
 }
 
 /// POST /api/recall
@@ -471,6 +612,7 @@ pub async fn recall_manual(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
+    let limit = body.limit.min(100);
     tracing::info!(
         "recall_manual: vector_dims={} limit={} owner={} ns={}",
         body.vector.len(),
@@ -585,7 +727,7 @@ pub async fn analyze(
             let vector = vector_result?;
             let encrypted = encrypted_result?;
 
-            // Upload to Walrus (via sidecar HTTP)
+            // Upload to Walrus (sidecar manages signing keys)
             let upload_result = walrus::upload_blob(
                 &state.http_client,
                 &state.config.sidecar_url,
@@ -1100,80 +1242,49 @@ pub async fn ask(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit.unwrap_or(5);
-    tracing::info!(
-        "ask: question=\"{}...\" owner={} ns={}",
-        truncate_str(&body.question, 50),
-        owner,
-        namespace
-    );
+    let limit = body.limit.unwrap_or(5).min(100);
+    tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
     // Step 1: Recall relevant memories
-    let query_vector =
-        generate_embedding(&state.http_client, &state.config, &body.question).await?;
-    let hits = state
-        .db
-        .search_similar(&query_vector, owner, namespace, limit)
-        .await?;
+    let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
+    let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
 
-    // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
-    // delegate key, then to the server's own key.
-    let credential = seal::SealCredential::from_auth_or_fallback(
-        &auth,
-        state.config.sui_private_key.as_deref(),
-    )
-    .ok_or_else(|| {
-        AppError::Internal(
-            "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)".into(),
-        )
-    })?;
+    // Server uses its own key for SEAL decryption (private key never sent by client)
+    let private_key = state.config.sui_private_key.as_deref()
+        .ok_or_else(|| {
+            AppError::Internal("SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
+        })?;
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
-    let tasks: Vec<_> = hits
-        .iter()
-        .map(|hit| {
-            let walrus_client = &state.walrus_client;
-            let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
-            let blob_id = hit.blob_id.clone();
-            let distance = hit.distance;
-            let credential = credential.clone();
-            let package_id = state.config.package_id.clone();
-            let account_id = auth.account_id.clone();
-            let owner_for_cleanup = owner.clone();
-            async move {
-                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                    Ok(data) => data,
-                    Err(AppError::BlobNotFound(msg)) => {
-                        // Blob expired on Walrus — clean up from DB reactively
-                        tracing::warn!("Blob expired, cleaning up: {}", msg);
-                        cleanup_expired_blob(db, &blob_id, &owner_for_cleanup).await;
-                        return None;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Download failed for {}: {}", blob_id, e);
-                        return None;
-                    }
-                };
-                match seal::seal_decrypt(
-                    http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
-                    &encrypted_data,
-                    &credential,
-                    &package_id,
-                    &account_id,
-                )
-                .await
-                {
-                    Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult {
-                            blob_id,
-                            text,
-                            distance,
-                        }),
+    let tasks: Vec<_> = hits.iter().map(|hit| {
+        let walrus_client = &state.walrus_client;
+        let http_client = &state.http_client;
+        let sidecar_url = state.config.sidecar_url.clone();
+        let sidecar_secret = state.config.sidecar_secret.clone();
+        let blob_id = hit.blob_id.clone();
+        let distance = hit.distance;
+        let private_key = private_key.to_string();
+        let package_id = state.config.package_id.clone();
+        let account_id = auth.account_id.clone();
+        async move {
+            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
+                Ok(data) => data,
+                Err(AppError::BlobNotFound(msg)) => {
+                    // Blob expired on Walrus — clean up from DB reactively
+                    tracing::warn!("Blob expired, cleaning up: {}", msg);
+                    cleanup_expired_blob(db, &blob_id).await;
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!("Download failed for {}: {}", blob_id, e);
+                    return None;
+                }
+            };
+            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
+                Ok(plaintext) => {
+                    match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8: {}", e);
                             None
@@ -1347,7 +1458,7 @@ pub async fn restore(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit;
+    let limit = body.limit.min(100);
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
@@ -1493,7 +1604,7 @@ pub async fn restore(
     // Step 4: SEAL decrypt with bounded concurrency (3 at a time)
     // Use per-blob package_id from on-chain metadata, fall back to current server config
     use futures::stream::{self, StreamExt};
-    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
+    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();

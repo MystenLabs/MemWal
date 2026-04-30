@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::db::VectorDb;
@@ -14,8 +13,6 @@ pub struct AppState {
     pub config: Config,
     pub http_client: reqwest::Client,
     pub walrus_client: walrus_rs::WalrusClient,
-    /// Round-robin pool of Sui private keys for parallel Walrus uploads
-    pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -84,11 +81,8 @@ pub struct Config {
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
     pub walrus_aggregator_url: String,
-    /// Primary key (used for SEAL decrypt / recall). Unchanged.
+    /// Server's Sui private key for SEAL decrypt operations.
     pub sui_private_key: Option<String>,
-    /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
-    /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
-    pub sui_private_keys: Vec<String>,
     pub package_id: String,
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
@@ -132,19 +126,6 @@ impl Config {
             walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
                 .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
-            sui_private_keys: {
-                // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).
-                // Falls back to SERVER_SUI_PRIVATE_KEY as a single-element list.
-                let multi = std::env::var("SERVER_SUI_PRIVATE_KEYS").ok().map(|s| {
-                    s.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect::<Vec<_>>()
-                });
-                let single = std::env::var("SERVER_SUI_PRIVATE_KEY").ok().map(|k| vec![k]);
-                multi.or(single).unwrap_or_default()
-            },
             package_id: std::env::var("MEMWAL_PACKAGE_ID")
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
@@ -262,13 +243,33 @@ pub struct RecallResult {
     pub distance: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
 }
 
 
+
+/// POST /api/remember/batch
+/// Batch version of /api/remember — processes multiple texts in a single transaction
+#[derive(Debug, Deserialize)]
+pub struct RememberBatchRequest {
+    pub items: Vec<RememberBatchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RememberBatchItem {
+    pub text: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RememberBatchResponse {
+    pub results: Vec<RememberResponse>,
+    pub total: usize,
+}
 
 /// POST /api/analyze
 /// Extract facts from conversation text using LLM, then remember each fact

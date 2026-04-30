@@ -168,8 +168,18 @@ pub async fn find_account_by_delegate_key(
 
     // Step 2: Scan dynamic fields on the Table's inner ID
     let mut cursor: Option<String> = None;
+    let mut pages_scanned: usize = 0;
+    const MAX_REGISTRY_PAGES: usize = 20; // max 20 × 50 = 1000 accounts
 
     loop {
+        if pages_scanned >= MAX_REGISTRY_PAGES {
+            tracing::warn!(
+                "registry scan reached {} page limit ({} accounts), aborting",
+                MAX_REGISTRY_PAGES, MAX_REGISTRY_PAGES * 50
+            );
+            break;
+        }
+        pages_scanned += 1;
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

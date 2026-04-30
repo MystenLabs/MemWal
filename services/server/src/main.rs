@@ -15,7 +15,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use db::VectorDb;
-use types::{AppState, Config, KeyPool};
+use types::{AppState, Config};
 
 #[tokio::main]
 async fn main() {
@@ -64,9 +64,9 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
@@ -104,17 +104,6 @@ async fn main() {
     .expect("Failed to initialize Walrus client (invalid URL?)");
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
-    // Log upload key pool status
-    let pool_size = config.sui_private_keys.len();
-    if pool_size > 0 {
-        tracing::info!("  Walrus upload: {} key(s) in pool (parallel uploads up to {}x)", pool_size, pool_size);
-    } else {
-        tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
-    }
-
-    // Build key pool for parallel Walrus uploads
-    let key_pool = KeyPool::new(config.sui_private_keys.clone());
-
     // Initialize Redis for rate limiting
     let redis = rate_limit::create_redis_client(&config.rate_limit.redis_url)
         .await
@@ -127,7 +116,6 @@ async fn main() {
         config: config.clone(),
         http_client,
         walrus_client,
-        key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
     });
@@ -152,6 +140,7 @@ async fn main() {
     // auth + rate-limit middleware even sees the request.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
+        .route("/api/remember/batch", post(routes::remember_batch))
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
@@ -236,6 +225,34 @@ async fn main() {
         }
     };
 
+    // Clone state before moving into router (needed for shutdown cleanup)
+    let state_for_shutdown = state.clone();
+
+    let cors = {
+        let origins = std::env::var("CORS_ORIGINS").unwrap_or_default();
+        if origins.is_empty() || origins.trim() == "*" {
+            if origins.is_empty() {
+                tracing::warn!("CORS_ORIGINS not set — defaulting to permissive. Set CORS_ORIGINS=https://your-app.com to restrict.");
+            }
+            CorsLayer::permissive()
+        } else {
+            let parsed: Vec<axum::http::HeaderValue> = origins
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            if parsed.is_empty() {
+                tracing::warn!("CORS_ORIGINS set but no valid origins parsed — defaulting to permissive");
+                CorsLayer::permissive()
+            } else {
+                tracing::info!("CORS: restricting to {} origin(s)", parsed.len());
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods(tower_http::cors::Any)
+                    .allow_headers(tower_http::cors::Any)
+            }
+        }
+    };
+
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
@@ -253,10 +270,25 @@ async fn main() {
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
-    // Graceful shutdown: kill sidecar when server stops
+    // Graceful shutdown: handle Ctrl+C and SIGTERM
     let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("shutting down...");
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("received Ctrl+C, shutting down..."); },
+            _ = terminate => { tracing::info!("received SIGTERM, shutting down..."); },
+        }
     };
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
@@ -264,7 +296,9 @@ async fn main() {
         .await
         .expect("Server failed");
 
-    // Cleanup sidecar after shutdown
+    // Cleanup after shutdown
+    tracing::info!("closing database pool...");
+    state_for_shutdown.db.close().await;
     sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
+    tracing::info!("shutdown complete");
 }

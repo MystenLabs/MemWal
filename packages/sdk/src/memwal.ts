@@ -30,6 +30,8 @@
 import type {
     MemWalConfig,
     RememberResult,
+    RememberBatchItem,
+    RememberBatchResult,
     RecallResult,
     RecallMemory,
     EmbedResult,
@@ -42,6 +44,7 @@ import type {
     RestoreResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import { createHttpClient, type HttpClient } from "./client.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -87,6 +90,7 @@ export class MemWal {
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    private httpClient: HttpClient;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -103,6 +107,7 @@ export class MemWal {
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
         this.namespace = config.namespace ?? "default";
+        this.httpClient = config.httpClient ?? createHttpClient();
     }
 
     /**
@@ -111,7 +116,7 @@ export class MemWal {
      * @param config.key - Ed25519 private key (hex string) — the delegate key
      * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
      */
-    static create(config: MemWalConfig): MemWal {
+    static create(config: MemWalConfig & { httpClient?: HttpClient }): MemWal {
         return new MemWal(config);
     }
 
@@ -152,6 +157,31 @@ export class MemWal {
         return this.signedRequest<RememberResult>("POST", "/api/remember", {
             text,
             namespace: namespace ?? this.namespace,
+        });
+    }
+
+    /**
+     * Remember multiple items in a single batch request.
+     * Server processes all items in one transaction for atomicity.
+     *
+     * @param items - Array of items to remember (text + optional namespace)
+     * @returns RememberBatchResult with results for each item
+     *
+     * @example
+     * ```typescript
+     * const result = await memwal.rememberBatch([
+     *     { text: "I'm allergic to peanuts" },
+     *     { text: "I live in Hanoi" },
+     * ])
+     * console.log(result.total) // 2
+     * ```
+     */
+    async rememberBatch(items: RememberBatchItem[]): Promise<RememberBatchResult> {
+        return this.signedRequest<RememberBatchResult>("POST", "/api/remember/batch", {
+            items: items.map((item) => ({
+                text: item.text,
+                namespace: item.namespace ?? this.namespace,
+            })),
         });
     }
 
@@ -273,7 +303,7 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
-        return this.signedRequest<EmbedResult>("POST", "/api/embed", { text });
+        return this.signedRequestWithRetry<EmbedResult>("POST", "/api/embed", { text });
     }
 
     /**
@@ -591,5 +621,43 @@ export class MemWal {
         }
 
         return res.json() as Promise<T>;
+    }
+
+    /**
+     * Make a signed request with automatic retry on transient failures.
+     * Retries up to 3 times on HTTP 429 (rate limit) or network errors.
+     * Uses exponential backoff: 1s, 2s, 4s.
+     */
+    private async signedRequestWithRetry<T>(
+        method: string,
+        path: string,
+        body: object,
+    ): Promise<T> {
+        const MAX_RETRIES = 3;
+        const RETRY_DELAYS = [1000, 2000, 4000];
+
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return await this.signedRequest<T>(method, path, body);
+            } catch (err: unknown) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                const isRetryable =
+                    errMsg.includes("(429)") ||
+                    errMsg.includes("ECONNREFUSED") ||
+                    errMsg.includes("ECONNRESET") ||
+                    errMsg.includes("fetch failed") ||
+                    errMsg.includes("network");
+
+                if (!isRetryable || attempt === MAX_RETRIES) {
+                    throw err;
+                }
+
+                const delay = RETRY_DELAYS[attempt];
+                await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+        }
+
+        // Unreachable, but TypeScript needs it
+        throw new Error("Retry logic exhausted");
     }
 }
