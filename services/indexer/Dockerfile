@@ -26,8 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Add non-root user
+RUN useradd -ms /bin/bash appuser
+USER appuser
 WORKDIR /app
 
-COPY --from=builder /app/target/release/memwal-indexer ./memwal-indexer
+COPY --from=builder --chown=appuser:appuser /app/target/release/memwal-indexer ./memwal-indexer
 
 CMD ["./memwal-indexer"]

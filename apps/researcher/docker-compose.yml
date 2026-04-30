@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: researcher
       POSTGRES_PASSWORD: researcher_secret
     ports:
-      - "5436:5432"
+      - "127.0.0.1:5436:5432"
     volumes:
       - researcher_pgdata:/var/lib/postgresql/data
     healthcheck:

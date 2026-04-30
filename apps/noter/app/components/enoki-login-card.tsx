@@ -146,7 +146,7 @@ export function EnokiLoginCard() {
         // Phase 2: First-time user — generate key + register on-chain
         setStep("generating-key");
         const ed = await import("@noble/ed25519");
-        const { blake2b } = await import("@noble/hashes/blake2b");
+        const { blake2b } = await import("@noble/hashes/blake2.js");
 
         const privateKeyRaw = new Uint8Array(32);
         crypto.getRandomValues(privateKeyRaw);

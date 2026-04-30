@@ -1176,6 +1176,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
+ "percent-encoding",
  "pgvector",
  "redis",
  "reqwest",

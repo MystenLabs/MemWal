@@ -32,7 +32,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
@@ -43,10 +43,10 @@ jobs:
         run: pnpm build:sdk
 
       - name: Typecheck
-        run: cd packages/openclaw-memory-memwal && npm run typecheck
+        run: pnpm --filter @mysten-incubation/oc-memwal typecheck
 
       - name: Build plugin
-        run: cd packages/openclaw-memory-memwal && npm run build
+        run: pnpm --filter @mysten-incubation/oc-memwal build
 
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)

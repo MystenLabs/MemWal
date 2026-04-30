@@ -93,7 +93,7 @@ async function main() {
             objectId: id,
             weight: 1,
         })),
-        verifyKeyServers: false,
+        verifyKeyServers: true,
     });
 
     // Encrypt with threshold 1 (need 1 of N key servers to decrypt)

@@ -376,7 +376,7 @@ export const authRouter = router({
       try {
         // Derive Sui address from private key
         const ed = await import("@noble/ed25519");
-        const { sha512 } = await import("@noble/hashes/sha512");
+        const { sha512 } = await import("@noble/hashes/sha2.js");
         if (!(ed.etc as any).sha512Sync) {
           (ed.etc as any).sha512Sync = (...m: Uint8Array[]) => {
             const h = sha512.create();
@@ -390,7 +390,7 @@ export const authRouter = router({
         );
         const pubKeyBytes = ed.getPublicKey(privKeyBytes);
 
-        const { blake2b } = await import("@noble/hashes/blake2b");
+        const { blake2b } = await import("@noble/hashes/blake2.js");
         const addrInput = new Uint8Array(33);
         addrInput[0] = 0x00;
         addrInput.set(pubKeyBytes, 1);

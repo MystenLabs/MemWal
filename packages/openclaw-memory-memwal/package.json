@@ -1,6 +1,6 @@
 {
   "name": "@mysten-incubation/oc-memwal",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
   "license": "Apache-2.0",
@@ -32,7 +32,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@mysten-incubation/memwal": "^0.0.1",
+    "@mysten-incubation/memwal": "^0.0.2",
     "@sinclair/typebox": "0.34.48",
     "zod": "^3.23.0"
   },
