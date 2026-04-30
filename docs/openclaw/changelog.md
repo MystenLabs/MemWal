@@ -7,6 +7,12 @@ Track what's new, changed, and fixed in `@mysten-incubation/oc-memwal`.
 
 For the latest version, see the [npm package page](https://www.npmjs.com/package/@mysten-incubation/oc-memwal).
 
+## 0.0.2
+
+### Internal
+
+- Update `@mysten-incubation/memwal` dependency to `^0.0.2`
+
 ## 0.0.1
 
 ### Initial Release
