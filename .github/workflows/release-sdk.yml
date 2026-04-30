@@ -6,7 +6,6 @@ on:
       - main
       - staging
       - dev
-      - sec/security_fix
     paths:
       - 'packages/sdk/**'
       - '.github/workflows/release-sdk.yml'
@@ -126,9 +125,9 @@ jobs:
           node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
           npm publish --tag rc --provenance --access public
 
-      # ── dev / sec/security_fix branch → prerelease (dev tag, auto-increment) ──
+      # ── dev branch → prerelease (dev tag, auto-increment) ──
       - name: Publish dev prerelease
-        if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/sec/security_fix'
+        if: github.ref == 'refs/heads/dev'
         run: |
           BASE_VERSION=$(node -p "require('./packages/sdk/package.json').version")
           LATEST=$(npm view @mysten-incubation/memwal versions --json 2>/dev/null \
