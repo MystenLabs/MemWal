@@ -4,6 +4,34 @@ All notable changes to the MemWal project will be documented in this file.
 
 ---
 
+## [hotfix] — 2026-04-30
+
+CI failures introduced by merge commit `9de4771` — two independent bugs across TypeScript SDK and Rust server.
+
+### TypeScript SDK (`packages/sdk`)
+
+#### Constructor type mismatch on `httpClient` (BUILD FAILURE → FIXED)
+
+**File:** `packages/sdk/src/memwal.ts`
+
+The private constructor accepted `MemWalConfig` but accessed `config.httpClient`, a property not present on that type. The `static create()` method already used the correct `MemWalConfig & { httpClient?: HttpClient }` intersection — the constructor signature simply didn't match.
+
+**Fix:** Changed constructor parameter from `MemWalConfig` to `MemWalConfig & { httpClient?: HttpClient }`.
+
+### Rust Server (`services/server`)
+
+#### Mismatched closing delimiter in `routes.rs` (BUILD FAILURE → FIXED)
+
+**File:** `services/server/src/routes.rs`
+
+The `Err(e)` arm of the outer `match seal_decrypt(...)` was placed inside the `Ok(plaintext) => { ... }` block due to a stray trailing comma after the inner `match String::from_utf8(plaintext)` expression. The compiler reported `mismatched closing delimiter: )` at line 1260.
+
+**Fix:** Restructured match arms so `Err(e)` is a proper sibling of `Ok(plaintext)` at the outer match level.
+
+> **Note:** Both `Version & Publish` workflow failures were downstream cascades — they depend on the build jobs and failed because of the above two errors.
+
+---
+
 ## [security/v1] — 2026-04-29
 
 Security hardening across the Rust server and TypeScript sidecar.

@@ -118,3 +118,27 @@ Issues encountered during the optimization branch and how they were resolved.
 **Fix:** Upgraded `"packageManager": "pnpm@9.12.3"` to `"pnpm@10.0.0"` in the root `package.json`.
 
 **Lesson:** When upgrading Node.js to a new major version (e.g., 20 → 22), also upgrade pnpm to the corresponding compatible major version. pnpm 10.x is the recommended version for Node 22 LTS. Always check the pnpm compatibility matrix before pinning versions.
+
+---
+
+## 11. TypeScript: constructor type narrower than method signature
+
+**Error:** `error TS2339: Property 'httpClient' does not exist on type 'MemWalConfig'`
+
+**Cause:** `static create()` accepted `MemWalConfig & { httpClient?: HttpClient }` (the correct intersection type), but the `private constructor` it called was typed as plain `MemWalConfig`. TypeScript enforces the constructor's declared parameter type, so accessing `config.httpClient` inside the body was a compile error even though callers always passed the wider type.
+
+**Fix:** Updated the constructor signature to `MemWalConfig & { httpClient?: HttpClient }` to match `create()`.
+
+**Lesson:** When a factory method widens the config type with an intersection (`T & { extra?: X }`), the constructor it delegates to must carry the same (or wider) type. Mismatches between factory and constructor signatures are invisible at call sites but caught by tsc in the constructor body.
+
+---
+
+## 12. Rust: match arm placed inside sibling arm's block
+
+**Error:** `error: mismatched closing delimiter: )` at `routes.rs:1260`
+
+**Cause:** A trailing comma after an inner `match` expression inside `Ok(plaintext) => { ... }` caused the parser to treat the following `Err(e) =>` as a second statement inside the `Ok` block, not as a sibling arm of the outer match. The delimiter mismatch surface was far from the actual authoring error.
+
+**Fix:** Removed the trailing comma and closed the `Ok` block before the `Err(e)` arm.
+
+**Lesson:** In Rust, a trailing comma after a block-valued expression (`match`, `if`, `{ ... }`) inside a match arm makes the expression a statement, so the parser expects another statement next — not another match arm. The compiler error points at the closing delimiter, not the comma. When you see a delimiter mismatch deep in a `match`, look for a stray comma after a nested `match` or block expression.
