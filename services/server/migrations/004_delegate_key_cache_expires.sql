@@ -1,0 +1,2 @@
+ALTER TABLE delegate_key_cache 
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours';

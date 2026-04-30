@@ -63,6 +63,8 @@ jobs:
           VITE_MEMWAL_PACKAGE_ID: ${{ vars.VITE_MEMWAL_PACKAGE_ID }}
           VITE_MEMWAL_REGISTRY_ID: ${{ vars.VITE_MEMWAL_REGISTRY_ID }}
           VITE_SEAL_KEY_SERVERS: ${{ vars.VITE_SEAL_KEY_SERVERS }}
+          VITE_ENOKI_API_KEY: ${{ vars.VITE_ENOKI_API_KEY }}
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
           VITE_DOCS_URL: ${{ vars.VITE_DOCS_URL }}
           VITE_DEMO_URLS: ${{ vars.VITE_DEMO_URLS }}
 
