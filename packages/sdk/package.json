@@ -72,10 +72,11 @@
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/MystenLabs/MemWal.git",
+        "url": "git+https://github.com/MystenLabs/MemWal.git",
         "directory": "packages/sdk"
     },
     "publishConfig": {
         "access": "public",
         "registry": "https://registry.npmjs.org/"
-    }}
+    }
+}
