@@ -1287,6 +1287,13 @@ pub async fn ask(
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8: {}", e);
+                          // ... (phần code phía trên của bạn)
+            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
+                Ok(plaintext) => {
+                    match String::from_utf8(plaintext) {
+                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
+                        Err(e) => {
+                            tracing::warn!("Invalid UTF-8: {}", e);
                             None
                         }
                     }
@@ -1296,10 +1303,14 @@ pub async fn ask(
                     None
                 }
             }
-        })
-        .collect();
+        } // Đóng khối async move
+    }).collect(); // Đóng closure |hit| và đóng hàm map()
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
         .await
         .into_iter()
         .flatten()
