@@ -1,6 +1,7 @@
 mod auth;
 mod rate_limit;
 mod routes;
+mod services;
 mod storage;
 mod types;
 
@@ -9,6 +10,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use services::{LlmExtractor, OpenAiEmbedder};
 use storage::db::VectorDb;
 use types::{AppState, Config, KeyPool};
 
@@ -108,6 +110,19 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // Build service-layer capabilities. They share the same http_client and a
+    // cheap Arc<Config> snapshot. Mock-embedding fallback is gated inside the
+    // OpenAiEmbedder impl by config.openai_api_key — see services/embedder.rs.
+    let config_arc = Arc::new(config.clone());
+    let embedder: Arc<dyn services::Embedder> = Arc::new(OpenAiEmbedder::new(
+        http_client.clone(),
+        Arc::clone(&config_arc),
+    ));
+    let extractor: Arc<dyn services::Extractor> = Arc::new(LlmExtractor::new(
+        http_client.clone(),
+        Arc::clone(&config_arc),
+    ));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -116,6 +131,8 @@ async fn main() {
         walrus_client,
         key_pool,
         redis,
+        embedder,
+        extractor,
     });
 
     // Build routes

@@ -1,8 +1,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
+use crate::services::{Embedder, Extractor};
+use crate::storage::db::VectorDb;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -18,6 +20,10 @@ pub struct AppState {
     pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
+    /// Embedder service — text → vector
+    pub embedder: Arc<dyn Embedder>,
+    /// Extractor service — text → memorable facts (LLM-driven)
+    pub extractor: Arc<dyn Extractor>,
 }
 
 // ============================================================

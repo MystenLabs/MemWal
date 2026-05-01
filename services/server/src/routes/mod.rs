@@ -1,10 +1,9 @@
 //! HTTP route handlers, split by endpoint family.
 //!
-//! Each submodule owns a related group of handlers. Shared helpers
-//! (embedding generation, LLM chat, blob cleanup, string truncation,
-//! and OpenAI request/response types) live here in `mod.rs` for now —
-//! they will move into `pipeline/ingest/` modules in Phase 2 of the
-//! refactor.
+//! Each submodule owns a related group of handlers. Shared route-level
+//! helpers (`truncate_str`, `cleanup_expired_blob`) live here in `mod.rs`.
+//! Capability-level code (embedding, extraction, OpenAI chat types) has
+//! moved into `crate::services` per the Phase 2 refactor.
 
 mod admin;
 mod analyze;
@@ -21,7 +20,6 @@ pub use remember::{remember, remember_manual};
 pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
 
 use crate::storage::db::VectorDb;
-use crate::types::{AppError, Config};
 
 // ============================================================
 // String truncation helper (used in several `tracing::info!` lines)
@@ -39,126 +37,6 @@ pub(super) fn truncate_str(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
-}
-
-// ============================================================
-// Embedding — OpenRouter/OpenAI API (with mock fallback)
-// ============================================================
-
-/// OpenAI-compatible embedding request
-#[derive(serde::Serialize)]
-struct EmbeddingApiRequest {
-    model: String,
-    input: String,
-}
-
-/// OpenAI-compatible embedding response
-#[derive(serde::Deserialize)]
-struct EmbeddingApiResponse {
-    data: Vec<EmbeddingData>,
-}
-
-#[derive(serde::Deserialize)]
-struct EmbeddingData {
-    embedding: Vec<f32>,
-}
-
-/// Generate an embedding vector from text.
-/// Uses OpenRouter/OpenAI API when OPENAI_API_KEY is set, mock otherwise.
-pub(super) async fn generate_embedding(
-    client: &reqwest::Client,
-    config: &Config,
-    text: &str,
-) -> Result<Vec<f32>, AppError> {
-    match &config.openai_api_key {
-        Some(api_key) => {
-            // Real embedding via OpenRouter/OpenAI-compatible API
-            let url = format!("{}/embeddings", config.openai_api_base);
-
-            let resp = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .json(&EmbeddingApiRequest {
-                    model: "openai/text-embedding-3-small".to_string(),
-                    input: text.to_string(),
-                })
-                .send()
-                .await
-                .map_err(|e| AppError::Internal(format!("Embedding API request failed: {}", e)))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(AppError::Internal(format!(
-                    "Embedding API error ({}): {}", status, body
-                )));
-            }
-
-            let api_resp: EmbeddingApiResponse = resp.json().await.map_err(|e| {
-                AppError::Internal(format!("Failed to parse embedding response: {}", e))
-            })?;
-
-            let vector = api_resp.data
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::Internal("Embedding API returned no data".into()))?
-                .embedding;
-            Ok(vector)
-        }
-        None => {
-            // Mock embedding (deterministic hash-based)
-            tracing::warn!("  → Using MOCK embedding (no OPENAI_API_KEY set)");
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(text.as_bytes());
-            let mock_vector: Vec<f32> = hash
-                .iter()
-                .cycle()
-                .take(1536)
-                .enumerate()
-                .map(|(i, &b)| {
-                    let val = (b as f32 / 255.0) * 2.0 - 1.0;
-                    val * (1.0 + (i as f32 * 0.001).sin())
-                })
-                .collect();
-            Ok(mock_vector)
-        }
-    }
-}
-
-// ============================================================
-// Chat completion — OpenRouter/OpenAI shared types
-// Used by `extract_facts_llm` (in analyze.rs) and `ask` (in admin.rs).
-// ============================================================
-
-/// Chat completion request for OpenRouter/OpenAI
-#[derive(serde::Serialize)]
-pub(super) struct ChatCompletionRequest {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
-    pub temperature: f32,
-}
-
-#[derive(serde::Serialize)]
-pub(super) struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-/// Chat completion response
-#[derive(serde::Deserialize)]
-pub(super) struct ChatCompletionResponse {
-    pub choices: Vec<ChatChoice>,
-}
-
-#[derive(serde::Deserialize)]
-pub(super) struct ChatChoice {
-    pub message: ChatMessageResp,
-}
-
-#[derive(serde::Deserialize)]
-pub(super) struct ChatMessageResp {
-    pub content: String,
 }
 
 // ============================================================

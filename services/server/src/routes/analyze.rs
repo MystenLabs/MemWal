@@ -1,8 +1,10 @@
 //! POST /api/analyze handler — LLM-driven fact extraction + ingestion.
 //!
-//! Also owns the `extract_facts_llm` helper and its `FACT_EXTRACTION_PROMPT`.
-//! In Phase 2 these will move into `pipeline/ingest/extractor.rs`, with the
-//! prompt becoming a versioned text asset under `pipeline/ingest/prompts/`.
+//! Extraction now lives in `crate::services::extractor`. The handler
+//! orchestrates: extractor → embedder + SEAL encrypt (parallel) → Walrus
+//! upload → DB insert (per fact). The extraction prompt itself is still an
+//! inline `const` inside `services/extractor.rs`; it moves to a versioned
+//! text asset under `services/prompts/extract.txt` in Phase 3.
 
 use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
@@ -11,10 +13,7 @@ use crate::rate_limit;
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{
-    generate_embedding, truncate_str,
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
-};
+use super::truncate_str;
 
 /// POST /api/analyze
 ///
@@ -36,7 +35,7 @@ pub async fn analyze(
     tracing::info!("analyze: text=\"{}...\" owner={} ns={}", truncate_str(&body.text, 50), owner, namespace);
 
     // Step 1: Extract facts using LLM
-    let facts = extract_facts_llm(&state.http_client, &state.config, &body.text).await?;
+    let facts = state.extractor.extract(&body.text).await?;
     tracing::info!("  → Extracted {} facts", facts.len());
 
     if facts.is_empty() {
@@ -69,7 +68,7 @@ pub async fn analyze(
         async move {
             let sui_key = sui_key?;
             // Embed + SEAL encrypt concurrently (independent operations)
-            let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
+            let embed_fut = state.embedder.embed(&fact_text);
             let encrypt_fut = seal::seal_encrypt(
                 &state.http_client, &state.config.sidecar_url,
                 fact_text.as_bytes(), &owner, &state.config.package_id,
@@ -114,94 +113,4 @@ pub async fn analyze(
         total,
         owner: owner.clone(),
     }))
-}
-
-// ============================================================
-// LLM Fact Extraction
-// ============================================================
-
-const FACT_EXTRACTION_PROMPT: &str = r#"You are a fact extraction system. Given a text or conversation, extract distinct factual statements about the user that are worth remembering for future interactions.
-
-Rules:
-- Extract personal preferences, habits, constraints, biographical info, and important facts
-- Each fact should be a single, self-contained statement
-- Skip greetings, small talk, and questions
-- If the text contains no memorable facts, respond with NONE
-- Return one fact per line, no numbering or bullets
-- Be concise but specific
-
-Examples:
-Input: "I'm allergic to peanuts and I live in Hanoi. What's the weather like?"
-Output:
-User is allergic to peanuts
-User lives in Hanoi
-
-Input: "Hey, how are you?"
-Output:
-NONE"#;
-
-/// Extract memorable facts from text using LLM
-async fn extract_facts_llm(
-    client: &reqwest::Client,
-    config: &Config,
-    text: &str,
-) -> Result<Vec<String>, AppError> {
-    let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
-        AppError::Internal("OPENAI_API_KEY required for fact extraction".into())
-    })?;
-
-    let url = format!("{}/chat/completions", config.openai_api_base);
-
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&ChatCompletionRequest {
-            model: "openai/gpt-4o-mini".to_string(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: FACT_EXTRACTION_PROMPT.to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: text.to_string(),
-                },
-            ],
-            temperature: 0.1,
-        })
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM API request failed: {}", e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "LLM API error ({}): {}", status, body
-        )));
-    }
-
-    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse LLM response: {}", e))
-    })?;
-
-    let content = api_resp
-        .choices
-        .first()
-        .map(|c| c.message.content.trim().to_string())
-        .unwrap_or_default();
-
-    // Parse response: one fact per line, skip "NONE"
-    if content == "NONE" || content.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let facts: Vec<String> = content
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && l != "NONE")
-        .collect();
-
-    Ok(facts)
 }

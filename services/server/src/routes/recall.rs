@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{cleanup_expired_blob, generate_embedding, truncate_str};
+use super::{cleanup_expired_blob, truncate_str};
 
 /// POST /api/recall
 ///
@@ -38,7 +38,7 @@ pub async fn recall(
         })?;
 
     // Step 1: Embed query → vector
-    let query_vector = generate_embedding(&state.http_client, &state.config, &body.query).await?;
+    let query_vector = state.embedder.embed(&body.query).await?;
 
     // Step 2: Search Vector DB
     let hits = state.db.search_similar(&query_vector, owner, namespace, body.limit).await?;

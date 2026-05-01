@@ -8,7 +8,7 @@ use crate::rate_limit;
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{generate_embedding, truncate_str};
+use super::truncate_str;
 
 /// POST /api/remember
 ///
@@ -37,7 +37,7 @@ pub async fn remember(
     rate_limit::check_storage_quota(&state, owner, text_bytes).await?;
 
     // Step 1: Embed text + SEAL encrypt concurrently (they're independent)
-    let embed_fut = generate_embedding(&state.http_client, &state.config, text);
+    let embed_fut = state.embedder.embed(text);
     let encrypt_fut = seal::seal_encrypt(
         &state.http_client, &state.config.sidecar_url,
         text.as_bytes(), owner, &state.config.package_id,

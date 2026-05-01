@@ -6,13 +6,13 @@
 use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
 
+use crate::services::llm_chat::{
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
+};
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{
-    cleanup_expired_blob, generate_embedding, truncate_str,
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
-};
+use super::{cleanup_expired_blob, truncate_str};
 
 /// GET /health
 pub async fn health() -> Json<HealthResponse> {
@@ -44,7 +44,7 @@ pub async fn ask(
     tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
     // Step 1: Recall relevant memories
-    let query_vector = generate_embedding(&state.http_client, &state.config, &body.question).await?;
+    let query_vector = state.embedder.embed(&body.question).await?;
     let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
 
     // Use delegate key from SDK for SEAL decryption (falls back to server key)
@@ -339,12 +339,11 @@ pub async fn restore(
 
     // Step 5: Re-embed all decrypted texts concurrently
     let embed_tasks: Vec<_> = decrypted_texts.iter().map(|(blob_id, text)| {
-        let http_client = &state.http_client;
-        let config = state.config.clone();
+        let embedder = Arc::clone(&state.embedder);
         let blob_id = blob_id.clone();
         let text = text.clone();
         async move {
-            match generate_embedding(http_client, &config, &text).await {
+            match embedder.embed(&text).await {
                 Ok(vector) => Some((blob_id, vector)),
                 Err(e) => {
                     tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
