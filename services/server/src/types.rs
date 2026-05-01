@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 use crate::db::VectorDb;
-use crate::rate_limit::RateLimitConfig;
+// ... giữ các import cũ ...
 
-// Thêm struct này để quản lý xoay vòng Key
+// 1. Thêm struct này để quản lý xoay vòng Key
 pub struct KeyPool {
     pub keys: Vec<String>,
     pub counter: AtomicUsize,
@@ -11,10 +11,12 @@ pub struct KeyPool {
 
 impl KeyPool {
     pub fn next_index(&self) -> usize {
+        if self.keys.is_empty() { return 0; }
         self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len()
     }
 }
 
+// 2. Cập nhật AppState
 pub struct AppState {
     pub db: VectorDb,
     pub config: Config,
@@ -22,7 +24,7 @@ pub struct AppState {
     pub walrus_client: walrus_rs::WalrusClient,
     pub redis: redis::aio::MultiplexedConnection,
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    pub key_pool: KeyPool, // <--- THÊM DÒNG NÀY VÀO ĐÂY
+    pub key_pool: KeyPool, // <--- BẮT BUỘC PHẢI CÓ DÒNG NÀY
 }
 
 // ============================================================
