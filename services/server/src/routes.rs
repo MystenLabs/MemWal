@@ -1257,25 +1257,25 @@ pub async fn ask(
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
-    // 1260
     let tasks: Vec<_> = hits.iter().map(|hit| {
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.clone();
+        let sidecar_secret = state.config.sidecar_secret.as_deref(); // Sửa kiểu dữ liệu ở đây
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
         let private_key = private_key.to_string();
         let package_id = state.config.package_id.clone();
         let account_id = auth.account_id.clone();
-        let db = db.clone();
+        let db = state.db.clone();
+        let owner = auth.account_id.clone(); // Lấy owner để dùng cho cleanup
 
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
                 Err(AppError::BlobNotFound(msg)) => {
                     tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(&db, &blob_id).await;
+                    cleanup_expired_blob(&db, &blob_id, &owner).await; // Thêm tham số thứ 3
                     return None;
                 }
                 Err(e) => {
@@ -1284,7 +1284,16 @@ pub async fn ask(
                 }
             };
 
-            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
+            // Ép kiểu private_key sang SealCredential nếu cần, hoặc kiểm tra lại hàm decrypt
+            match seal::seal_decrypt(
+                http_client, 
+                &sidecar_url, 
+                sidecar_secret, 
+                &encrypted_data, 
+                &private_key, // Nếu lỗi E0308 vẫn báo ở đây, bạn cần convert private_key sang đúng Struct
+                &package_id, 
+                &account_id
+            ).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
@@ -1299,8 +1308,8 @@ pub async fn ask(
                     None
                 }
             }
-        } // Đóng async move
-    }).collect(); // Đóng map và gọi collect
+        }
+    }).collect(); // KHÔNG có dấu chấm phẩy ở đây nếu dòng sau là .await
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
