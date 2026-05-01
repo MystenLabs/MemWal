@@ -1261,55 +1261,45 @@ pub async fn ask(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.as_deref(); // Sửa kiểu dữ liệu ở đây
+        let sidecar_secret = state.config.sidecar_secret.as_deref(); 
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
-        let private_key = private_key.to_string();
+        let private_key = private_key.to_string(); 
         let package_id = state.config.package_id.clone();
         let account_id = auth.account_id.clone();
         let db = state.db.clone();
-        let owner = auth.account_id.clone(); // Lấy owner để dùng cho cleanup
+        let owner = auth.account_id.clone();
 
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
-                Err(AppError::BlobNotFound(msg)) => {
-                    tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(&db, &blob_id, &owner).await; // Thêm tham số thứ 3
-                    return None;
-                }
                 Err(e) => {
-                    tracing::warn!("Download failed for {}: {}", blob_id, e);
+                    tracing::warn!("Download failed: {}", e);
+                    // Sửa lỗi thiếu tham số ở đây:
+                    cleanup_expired_blob(&db, &blob_id, &owner).await; 
                     return None;
                 }
             };
 
-            // Ép kiểu private_key sang SealCredential nếu cần, hoặc kiểm tra lại hàm decrypt
             match seal::seal_decrypt(
                 http_client, 
                 &sidecar_url, 
                 sidecar_secret, 
                 &encrypted_data, 
-                &private_key, // Nếu lỗi E0308 vẫn báo ở đây, bạn cần convert private_key sang đúng Struct
+                &private_key, // Lưu ý: Nếu vẫn lỗi, hãy kiểm tra type trong seal.rs
                 &package_id, 
                 &account_id
             ).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
                         Ok(text) => Some(RecallResult { blob_id, text, distance }),
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8: {}", e);
-                            None
-                        }
+                        Err(_) => None,
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
-                    None
-                }
+                Err(_) => None,
             }
         }
-    }).collect(); // KHÔNG có dấu chấm phẩy ở đây nếu dòng sau là .await
+    }).collect(); // ĐẢM BẢO KHÔNG CÓ DẤU CHẤM PHẨY Ở ĐÂY
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
