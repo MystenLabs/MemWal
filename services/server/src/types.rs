@@ -3,20 +3,26 @@ use serde::{Deserialize, Serialize};
 use crate::db::VectorDb;
 use crate::rate_limit::RateLimitConfig;
 
-// ============================================================
-// App State (shared across routes + middleware)
-// ============================================================
+// Thêm struct này để quản lý xoay vòng Key
+pub struct KeyPool {
+    pub keys: Vec<String>,
+    pub counter: AtomicUsize,
+}
 
-/// Shared application state passed to all routes and middleware
+impl KeyPool {
+    pub fn next_index(&self) -> usize {
+        self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len()
+    }
+}
+
 pub struct AppState {
     pub db: VectorDb,
     pub config: Config,
     pub http_client: reqwest::Client,
     pub walrus_client: walrus_rs::WalrusClient,
-    /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
-    /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    pub key_pool: KeyPool, // <--- THÊM DÒNG NÀY VÀO ĐÂY
 }
 
 // ============================================================
