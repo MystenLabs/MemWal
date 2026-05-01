@@ -1261,10 +1261,10 @@ pub async fn ask(
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
         let sidecar_url = state.config.sidecar_url.clone();
-        let sidecar_secret = state.config.sidecar_secret.as_deref(); 
+        let sidecar_secret = state.config.sidecar_secret.as_deref(); // Sửa lỗi Option<&str>
         let blob_id = hit.blob_id.clone();
         let distance = hit.distance;
-        let private_key = private_key.to_string(); 
+        let private_key_str = private_key.to_string(); 
         let package_id = state.config.package_id.clone();
         let account_id = auth.account_id.clone();
         let db = state.db.clone();
@@ -1273,20 +1273,22 @@ pub async fn ask(
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
-                Err(e) => {
-                    tracing::warn!("Download failed: {}", e);
-                    // Sửa lỗi thiếu tham số ở đây:
+                Err(_) => {
+                    // Fix: Truyền đủ 3 tham số (db, blob_id, owner)
                     cleanup_expired_blob(&db, &blob_id, &owner).await; 
                     return None;
                 }
             };
+
+            // Fix: Bọc key vào struct SealCredential nếu hàm yêu cầu
+            let credential = seal::SealCredential(private_key_str);
 
             match seal::seal_decrypt(
                 http_client, 
                 &sidecar_url, 
                 sidecar_secret, 
                 &encrypted_data, 
-                &private_key, // Lưu ý: Nếu vẫn lỗi, hãy kiểm tra type trong seal.rs
+                &credential, 
                 &package_id, 
                 &account_id
             ).await {
@@ -1299,13 +1301,10 @@ pub async fn ask(
                 Err(_) => None,
             }
         }
-    }).collect(); // ĐẢM BẢO KHÔNG CÓ DẤU CHẤM PHẨY Ở ĐÂY
+    }).collect(); // Đảm bảo có dấu chấm phẩy ở đây vì chúng ta gán vào biến `tasks`
 
+    // Fix lỗi "expected expression, found ." bằng cách gọi trực tiếp tasks ở đây
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .flatten()
-        .collect();
         .await
         .into_iter()
         .flatten()
