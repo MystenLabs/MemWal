@@ -1267,27 +1267,22 @@ pub async fn ask(
         let private_key = private_key.to_string();
         let package_id = state.config.package_id.clone();
         let account_id = auth.account_id.clone();
+        let db = db.clone(); 
+
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
                 Ok(data) => data,
                 Err(AppError::BlobNotFound(msg)) => {
-                    // Blob expired on Walrus — clean up from DB reactively
                     tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
+                    cleanup_expired_blob(&db, &blob_id).await;
                     return None;
                 }
                 Err(e) => {
                     tracing::warn!("Download failed for {}: {}", blob_id, e);
                     return None;
                 }
-            };
-            match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
-                Ok(plaintext) => {
-                    match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8: {}", e);
-                          // ... (phần code phía trên của bạn)
+            }; // Kết thúc match download_blob
+
             match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
                     match String::from_utf8(plaintext) {
@@ -1297,14 +1292,14 @@ pub async fn ask(
                             None
                         }
                     }
-                }
+                } // Kết thúc Ok(plaintext)
                 Err(e) => {
                     tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
                     None
                 }
-            }
-        } // Đóng khối async move
-    }).collect(); // Đóng closure |hit| và đóng hàm map()
+            } // Kết thúc match seal_decrypt
+        } // Kết thúc async move
+    }).collect(); // Kết thúc map
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
