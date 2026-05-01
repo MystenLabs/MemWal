@@ -99,7 +99,7 @@ export class MemWal {
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
 
-    private constructor(config: MemWalConfig) {
+    private constructor(config: MemWalConfig & { httpClient?: HttpClient }) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl

@@ -1289,11 +1289,11 @@ pub async fn ask(
                             tracing::warn!("Invalid UTF-8: {}", e);
                             None
                         }
-                    },
-                    Err(e) => {
-                        tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
-                        None
                     }
+                }
+                Err(e) => {
+                    tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                    None
                 }
             }
         })
