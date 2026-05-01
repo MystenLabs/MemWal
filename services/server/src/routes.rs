@@ -1257,6 +1257,7 @@ pub async fn ask(
 
     // Download + SEAL decrypt all memories concurrently
     let db = &state.db;
+    // 1260
     let tasks: Vec<_> = hits.iter().map(|hit| {
         let walrus_client = &state.walrus_client;
         let http_client = &state.http_client;
@@ -1267,7 +1268,7 @@ pub async fn ask(
         let private_key = private_key.to_string();
         let package_id = state.config.package_id.clone();
         let account_id = auth.account_id.clone();
-        let db = db.clone(); 
+        let db = db.clone();
 
         async move {
             let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
@@ -1281,7 +1282,7 @@ pub async fn ask(
                     tracing::warn!("Download failed for {}: {}", blob_id, e);
                     return None;
                 }
-            }; // Kết thúc match download_blob
+            };
 
             match seal::seal_decrypt(http_client, &sidecar_url, &sidecar_secret, &encrypted_data, &private_key, &package_id, &account_id).await {
                 Ok(plaintext) => {
@@ -1292,14 +1293,14 @@ pub async fn ask(
                             None
                         }
                     }
-                } // Kết thúc Ok(plaintext)
+                }
                 Err(e) => {
                     tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
                     None
                 }
-            } // Kết thúc match seal_decrypt
-        } // Kết thúc async move
-    }).collect(); // Kết thúc map
+            }
+        } // Đóng async move
+    }).collect(); // Đóng map và gọi collect
 
     let memories: Vec<RecallResult> = futures::future::join_all(tasks)
         .await
