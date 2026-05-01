@@ -5,6 +5,7 @@ use sqlx::PgPool;
 
 use crate::types::{AppError, SearchHit};
 
+#[derive(Clone)] 
 pub struct VectorDb {
     pool: PgPool,
 }
