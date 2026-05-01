@@ -80,17 +80,23 @@ pub async fn seal_encrypt(
     let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
+// 1. Khởi tạo request với body trước
     let mut req = client
         .post(&url)
-        .header("x-sidecar-secret", sidecar_secret)
         .json(&SealEncryptRequest {
             data: data_b64,
             owner: owner_address.to_string(),
             package_id: package_id.to_string(),
         });
+
+    // 2. Nếu có secret, mới thêm các header liên quan
     if let Some(secret) = sidecar_secret {
+        // Chỗ này secret bây giờ là &str, không còn là Option nữa nên sẽ KHÔNG lỗi
+        req = req.header("x-sidecar-secret", secret);
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+
+    // 3. Gửi request
     let resp = req
         .send()
         .await
