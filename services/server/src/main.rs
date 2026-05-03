@@ -1,4 +1,5 @@
 mod auth;
+mod engine;
 mod rate_limit;
 mod routes;
 mod services;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use services::{LlmExtractor, OpenAiEmbedder};
 use storage::db::VectorDb;
 use types::{AppState, Config, KeyPool};
@@ -80,17 +82,22 @@ async fn main() {
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
     }
 
-    // Initialize database (PostgreSQL + pgvector)
-    let db = VectorDb::new(&config.database_url)
-        .await
-        .expect("Failed to connect to PostgreSQL");
+    // Initialize database (PostgreSQL + pgvector). Wrapped in Arc so the
+    // engine can share ownership with AppState.
+    let db = Arc::new(
+        VectorDb::new(&config.database_url)
+            .await
+            .expect("Failed to connect to PostgreSQL"),
+    );
 
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
-    let walrus_client = walrus_rs::WalrusClient::new(
-        &config.walrus_aggregator_url,
-        &config.walrus_publisher_url,
-    )
-    .expect("Failed to initialize Walrus client (invalid URL?)");
+    let walrus_client = Arc::new(
+        walrus_rs::WalrusClient::new(
+            &config.walrus_aggregator_url,
+            &config.walrus_publisher_url,
+        )
+        .expect("Failed to initialize Walrus client (invalid URL?)"),
+    );
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
     // Log upload key pool status
@@ -102,7 +109,7 @@ async fn main() {
     }
 
     // Build key pool for parallel Walrus uploads
-    let key_pool = KeyPool::new(config.sui_private_keys.clone());
+    let key_pool = Arc::new(KeyPool::new(config.sui_private_keys.clone()));
 
     // Initialize Redis for rate limiting
     let redis = rate_limit::create_redis_client(&config.rate_limit.redis_url)
@@ -110,10 +117,13 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
-    // Build service-layer capabilities. They share the same http_client and a
-    // cheap Arc<Config> snapshot. Mock-embedding fallback is gated inside the
-    // OpenAiEmbedder impl by config.openai_api_key — see services/embedder.rs.
+    // Cheap Arc<Config> snapshot — shared by services and engine. Avoids
+    // cloning Config across multiple components.
     let config_arc = Arc::new(config.clone());
+
+    // Build service-layer capabilities (Embedder, Extractor). The
+    // mock-embedding fallback is gated inside the OpenAiEmbedder impl by
+    // config.openai_api_key — see services/embedder.rs.
     let embedder: Arc<dyn services::Embedder> = Arc::new(OpenAiEmbedder::new(
         http_client.clone(),
         Arc::clone(&config_arc),
@@ -123,16 +133,38 @@ async fn main() {
         Arc::clone(&config_arc),
     ));
 
+    // Build the persistence engine. BENCHMARK_MODE=true selects the
+    // plaintext engine (Postgres only); otherwise the production
+    // SEAL+Walrus engine. Selection happens once at startup; handlers
+    // never look at config.benchmark_mode after this point.
+    let engine: Arc<dyn MemoryEngine> = if config.benchmark_mode {
+        tracing::warn!("========================================================");
+        tracing::warn!("BENCHMARK_MODE=true — SEAL + Walrus DISABLED");
+        tracing::warn!("  Memories stored as PLAINTEXT in Postgres.");
+        tracing::warn!("  DO NOT RUN THIS CONFIGURATION IN PRODUCTION.");
+        tracing::warn!("========================================================");
+        Arc::new(PlaintextEngine::new(Arc::clone(&db)))
+    } else {
+        Arc::new(WalrusSealEngine::new(
+            Arc::clone(&db),
+            http_client.clone(),
+            Arc::clone(&walrus_client),
+            Arc::clone(&key_pool),
+            Arc::clone(&config_arc),
+        ))
+    };
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
-        config: config.clone(),
+        config: config_arc,
         http_client,
         walrus_client,
         key_pool,
         redis,
         embedder,
         extractor,
+        engine,
     });
 
     // Build routes

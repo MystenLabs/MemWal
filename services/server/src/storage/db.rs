@@ -36,6 +36,16 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
+        // Migration 004 is reserved for the dev branch's delegate-key-cache TTL
+        // work, which the refactor branch doesn't yet have. We skip the number
+        // intentionally so post-reconciliation the two streams converge cleanly.
+
+        let migration_005 = include_str!("../../migrations/005_benchmark_plaintext.sql");
+        sqlx::raw_sql(migration_005)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -69,6 +79,66 @@ impl VectorDb {
 
         tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B", id, blob_id, owner, namespace, blob_size_bytes);
         Ok(())
+    }
+
+    /// Insert a vector entry alongside its plaintext (benchmark mode only).
+    ///
+    /// The `blob_id` here is a synthetic UUID that uniquely identifies the row
+    /// — no Walrus blob exists. The `plaintext` column lets the benchmark
+    /// engine retrieve the original text without going through SEAL/Walrus.
+    /// Production deployments must NEVER set this column; it bypasses
+    /// confidentiality.
+    pub async fn insert_vector_plaintext(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        vector: &[f32],
+        plaintext: &str,
+        blob_size_bytes: i64,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(vector.to_vec());
+
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, plaintext, blob_size_bytes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(embedding)
+        .bind(plaintext)
+        .bind(blob_size_bytes)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)))?;
+
+        tracing::debug!("inserted plaintext vector: id={}, blob_id={}, ns={}, size={}B", id, blob_id, namespace, blob_size_bytes);
+        Ok(())
+    }
+
+    /// Fetch the plaintext for a given blob_id (benchmark mode only).
+    ///
+    /// Returns `Ok(None)` if the row exists but has no plaintext (production
+    /// row), or `Err(BlobNotFound)` if the row doesn't exist at all.
+    pub async fn fetch_plaintext_by_blob_id(
+        &self,
+        blob_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT plaintext FROM vector_entries WHERE blob_id = $1 LIMIT 1",
+        )
+        .bind(blob_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
+
+        match row {
+            Some((plaintext,)) => Ok(plaintext),
+            None => Err(AppError::BlobNotFound(format!("blob_id {} not found", blob_id))),
+        }
     }
 
     /// Search for similar vectors using pgvector cosine distance (<=>)

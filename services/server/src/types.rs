@@ -10,20 +10,28 @@ use crate::storage::db::VectorDb;
 // App State (shared across routes + middleware)
 // ============================================================
 
-/// Shared application state passed to all routes and middleware
+/// Shared application state passed to all routes and middleware.
+///
+/// Heavy/shared resources (DB pool, walrus client, key pool) live in
+/// `Arc<>` so the engine can hold its own clone without forcing
+/// `AppState` itself to be cloned. Cheap-to-clone resources
+/// (`reqwest::Client`) stay by value.
 pub struct AppState {
-    pub db: VectorDb,
-    pub config: Config,
+    pub db: Arc<VectorDb>,
+    pub config: Arc<Config>,
     pub http_client: reqwest::Client,
-    pub walrus_client: walrus_rs::WalrusClient,
+    pub walrus_client: Arc<walrus_rs::WalrusClient>,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads
-    pub key_pool: KeyPool,
+    pub key_pool: Arc<KeyPool>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// Embedder service — text → vector
     pub embedder: Arc<dyn Embedder>,
     /// Extractor service — text → memorable facts (LLM-driven)
     pub extractor: Arc<dyn Extractor>,
+    /// Persistence engine — production (`WalrusSealEngine`) or
+    /// benchmark (`PlaintextEngine`), selected at startup.
+    pub engine: Arc<dyn crate::engine::MemoryEngine>,
 }
 
 // ============================================================
@@ -86,6 +94,10 @@ pub struct Config {
     pub sidecar_url: String,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
+    /// When true, switch to the benchmark `MemoryEngine` (plaintext in
+    /// Postgres) instead of the production `WalrusSealEngine`. Set via
+    /// `BENCHMARK_MODE=true`. Off by default. **Never enable in production.**
+    pub benchmark_mode: bool,
 }
 
 impl Config {
@@ -136,6 +148,9 @@ impl Config {
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             rate_limit: RateLimitConfig::from_env(),
+            benchmark_mode: std::env::var("BENCHMARK_MODE")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
     }
 }

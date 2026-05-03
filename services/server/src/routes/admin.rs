@@ -6,6 +6,7 @@
 use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
 
+use crate::engine::HydratedMemory;
 use crate::services::llm_chat::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
 };
@@ -43,64 +44,47 @@ pub async fn ask(
     let limit = body.limit.unwrap_or(5);
     tracing::info!("ask: question=\"{}...\" owner={} ns={}", truncate_str(&body.question, 50), owner, namespace);
 
-    // Step 1: Recall relevant memories
+    // Step 1: Recall relevant memories — same pattern as /api/recall.
     let query_vector = state.embedder.embed(&body.question).await?;
-    let hits = state.db.search_similar(&query_vector, owner, namespace, limit).await?;
+    let hits = state
+        .db
+        .search_similar(&query_vector, owner, namespace, limit)
+        .await?;
 
-    // Use delegate key from SDK for SEAL decryption (falls back to server key)
-    let private_key = auth.delegate_key.as_deref()
-        .or(state.config.sui_private_key.as_deref())
-        .ok_or_else(|| {
-            AppError::Internal("Delegate key or SERVER_SUI_PRIVATE_KEY required for SEAL decryption".into())
-        })?;
-
-    // Download + SEAL decrypt all memories concurrently
-    let db = &state.db;
-    let tasks: Vec<_> = hits.iter().map(|hit| {
-        let walrus_client = &state.walrus_client;
-        let http_client = &state.http_client;
-        let sidecar_url = state.config.sidecar_url.clone();
-        let blob_id = hit.blob_id.clone();
-        let distance = hit.distance;
-        let private_key = private_key.to_string();
-        let package_id = state.config.package_id.clone();
-        let account_id = auth.account_id.clone();
-        async move {
-            let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                Ok(data) => data,
-                Err(AppError::BlobNotFound(msg)) => {
-                    // Blob expired on Walrus — clean up from DB reactively
-                    tracing::warn!("Blob expired, cleaning up: {}", msg);
-                    cleanup_expired_blob(db, &blob_id).await;
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!("Download failed for {}: {}", blob_id, e);
-                    return None;
-                }
-            };
-            match seal::seal_decrypt(http_client, &sidecar_url, &encrypted_data, &private_key, &package_id, &account_id).await {
-                Ok(plaintext) => {
-                    match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult { blob_id, text, distance }),
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8: {}", e);
-                            None
-                        }
+    // Hydrate hits via the engine (production: download + SEAL decrypt;
+    // benchmark: read plaintext directly).
+    let tasks: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            let engine = Arc::clone(&state.engine);
+            let auth = auth.clone();
+            let blob_id = hit.blob_id.clone();
+            let distance = hit.distance;
+            async move {
+                match engine.fetch_one(&blob_id, distance, &auth).await {
+                    Ok(opt) => opt,
+                    Err(e) => {
+                        tracing::warn!("ask fetch failed for {}: {}", blob_id, e);
+                        None
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
-                    None
-                }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
-    let memories: Vec<RecallResult> = futures::future::join_all(tasks)
+    let hydrated: Vec<HydratedMemory> = futures::future::join_all(tasks)
         .await
         .into_iter()
         .flatten()
+        .collect();
+
+    let memories: Vec<RecallResult> = hydrated
+        .into_iter()
+        .map(|h| RecallResult {
+            blob_id: h.blob_id,
+            text: h.text,
+            distance: h.distance,
+        })
         .collect();
 
     let memories_used = memories.len();
