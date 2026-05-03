@@ -15,6 +15,18 @@ use crate::types::*;
 
 use super::{cleanup_expired_blob, truncate_str};
 
+/// Ask handler's system prompt template — sourced from a versioned text
+/// asset. Contains a single `{MEMORY_CONTEXT}` placeholder substituted
+/// at request time with the per-request memory listing.
+///
+/// Path is relative to this file (routes/admin.rs), so we walk up two
+/// levels into services/prompts/ to reach the asset.
+const ASK_SYSTEM_PROMPT: &str = include_str!("../services/prompts/ask.txt");
+
+/// Version ID for the ask system prompt. Bump on every meaningful change.
+#[allow(dead_code)]
+pub const ASK_SYSTEM_PROMPT_VERSION: &str = "ask.v1";
+
 /// GET /health
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -100,11 +112,10 @@ pub async fn ask(
         format!("Known facts about this user:\n{}", lines.join("\n"))
     };
 
-    let system_prompt = format!(
-        "You are a helpful AI assistant with access to the user's personal memories stored in memwal. \
-        Use the following context to provide personalized answers. If the memories don't contain relevant \
-        information, say so honestly.\n\n{}", memory_context
-    );
+    // System prompt template — sourced from a versioned text asset under
+    // services/prompts/. The {MEMORY_CONTEXT} placeholder is replaced at
+    // request time with the per-request memory listing.
+    let system_prompt = ASK_SYSTEM_PROMPT.replace("{MEMORY_CONTEXT}", &memory_context);
 
     // Step 3: Call LLM
     let api_key = state.config.openai_api_key.as_ref().ok_or_else(|| {

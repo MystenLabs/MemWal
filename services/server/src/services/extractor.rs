@@ -28,25 +28,17 @@ pub trait Extractor: Send + Sync {
 // LLM-backed implementation (default for production)
 // ============================================================
 
-const FACT_EXTRACTION_PROMPT: &str = r#"You are a fact extraction system. Given a text or conversation, extract distinct factual statements about the user that are worth remembering for future interactions.
+/// Fact-extraction system prompt. Sourced from a versioned text asset so
+/// changes don't require a Rust edit and the version can be recorded in
+/// benchmark run artifacts. The asset is bundled into the binary at
+/// compile time via `include_str!`.
+const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 
-Rules:
-- Extract personal preferences, habits, constraints, biographical info, and important facts
-- Each fact should be a single, self-contained statement
-- Skip greetings, small talk, and questions
-- If the text contains no memorable facts, respond with NONE
-- Return one fact per line, no numbering or bullets
-- Be concise but specific
-
-Examples:
-Input: "I'm allergic to peanuts and I live in Hanoi. What's the weather like?"
-Output:
-User is allergic to peanuts
-User lives in Hanoi
-
-Input: "Hey, how are you?"
-Output:
-NONE"#;
+/// Version ID for the extraction prompt. Bump on every meaningful prompt
+/// change. Recorded by the benchmark harness so run results are
+/// attributable to a specific prompt version.
+#[allow(dead_code)]
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v1";
 
 pub struct LlmExtractor {
     http_client: reqwest::Client,
