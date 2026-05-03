@@ -323,6 +323,57 @@ pub struct RestoreResponse {
     pub owner: String,
 }
 
+/// POST /api/forget
+///
+/// Hard-delete every memory in a namespace. Used by the benchmark
+/// harness for inter-run cleanup so a fresh ingest starts from an
+/// empty namespace. The `query` and `limit` fields are accepted for
+/// harness compatibility but ignored — namespace is always wiped
+/// wholesale.
+#[derive(Debug, Deserialize)]
+pub struct ForgetRequest {
+    /// Accepted for harness compatibility (it sends "*" for "all"); ignored.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub query: Option<String>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    /// Accepted for harness compatibility; ignored (we always wipe the
+    /// whole namespace).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForgetResponse {
+    pub deleted: u64,
+    pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/stats
+///
+/// Returns counts for a namespace. Used by the benchmark harness for
+/// verification. Kept minimal — we report row count and total stored
+/// bytes, which is what the harness actually consumes. Richer
+/// per-memory-type breakdowns can land later if needed.
+#[derive(Debug, Deserialize)]
+pub struct StatsRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    pub namespace: String,
+    pub owner: String,
+    /// Total number of memories in the namespace.
+    pub total: usize,
+    /// Total bytes stored across all memories (sum of `blob_size_bytes`).
+    pub bytes: i64,
+}
+
 /// Health check
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {

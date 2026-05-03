@@ -293,6 +293,27 @@ impl VectorDb {
         Ok(row.0)
     }
 
+    /// Per-namespace stats: row count and summed blob size.
+    /// Used by the `/api/stats` handler.
+    pub async fn get_namespace_stats(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<(i64, i64), AppError> {
+        let row: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*)::BIGINT, COALESCE(SUM(blob_size_bytes)::BIGINT, 0)
+             FROM vector_entries
+             WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get namespace stats: {}", e)))?;
+
+        Ok((row.0, row.1))
+    }
+
     // ============================================================
     // Accounts (populated by v2-indexer)
     // ============================================================

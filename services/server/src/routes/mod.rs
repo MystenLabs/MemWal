@@ -13,7 +13,7 @@ mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
-pub use admin::{ask, health, restore};
+pub use admin::{ask, forget, health, restore, stats};
 pub use analyze::analyze;
 pub use recall::{recall, recall_manual};
 pub use remember::{remember, remember_manual};

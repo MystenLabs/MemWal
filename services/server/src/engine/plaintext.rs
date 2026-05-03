@@ -37,6 +37,11 @@ impl PlaintextEngine {
 
 #[async_trait]
 impl MemoryEngine for PlaintextEngine {
+    #[tracing::instrument(
+        name = "engine.plaintext.store",
+        skip_all,
+        fields(owner = %record.owner, namespace = %record.namespace, text_len = record.text.len())
+    )]
     async fn store(
         &self,
         record: MemoryRecord,
@@ -67,6 +72,11 @@ impl MemoryEngine for PlaintextEngine {
         Ok(MemoryRef { id, blob_id })
     }
 
+    #[tracing::instrument(
+        name = "engine.plaintext.fetch_one",
+        skip_all,
+        fields(blob_id = %blob_id)
+    )]
     async fn fetch_one(
         &self,
         blob_id: &str,

@@ -35,6 +35,7 @@ impl OpenAiEmbedder {
 
 #[async_trait]
 impl Embedder for OpenAiEmbedder {
+    #[tracing::instrument(name = "embedder.embed", skip_all, fields(text_len = text.len()))]
     async fn embed(&self, text: &str) -> Result<Vec<f32>, AppError> {
         match &self.config.openai_api_key {
             Some(api_key) => {

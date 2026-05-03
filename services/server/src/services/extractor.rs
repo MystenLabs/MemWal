@@ -53,6 +53,7 @@ impl LlmExtractor {
 
 #[async_trait]
 impl Extractor for LlmExtractor {
+    #[tracing::instrument(name = "extractor.extract", skip_all, fields(text_len = text.len()))]
     async fn extract(&self, text: &str) -> Result<Vec<String>, AppError> {
         let api_key = self.config.openai_api_key.as_ref().ok_or_else(|| {
             AppError::Internal("OPENAI_API_KEY required for fact extraction".into())

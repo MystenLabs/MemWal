@@ -59,6 +59,11 @@ impl WalrusSealEngine {
 
 #[async_trait]
 impl MemoryEngine for WalrusSealEngine {
+    #[tracing::instrument(
+        name = "engine.walrus_seal.store",
+        skip_all,
+        fields(owner = %record.owner, namespace = %record.namespace, text_len = record.text.len())
+    )]
     async fn store(
         &self,
         record: MemoryRecord,
@@ -119,6 +124,11 @@ impl MemoryEngine for WalrusSealEngine {
         Ok(MemoryRef { id, blob_id })
     }
 
+    #[tracing::instrument(
+        name = "engine.walrus_seal.fetch_one",
+        skip_all,
+        fields(blob_id = %blob_id)
+    )]
     async fn fetch_one(
         &self,
         blob_id: &str,

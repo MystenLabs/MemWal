@@ -35,6 +35,59 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// POST /api/forget
+///
+/// Hard-delete every memory in a namespace owned by the authenticated
+/// user. Used by the benchmark harness for inter-run cleanup. The
+/// `query` and `limit` request fields are ignored (accepted for harness
+/// compatibility).
+///
+/// Mode-blind: works in both production and benchmark mode. Production
+/// rows leave their Walrus blobs behind (Walrus doesn't have delete
+/// semantics; blobs expire on their epoch schedule). Benchmark rows
+/// are fully removed since plaintext lives in Postgres.
+pub async fn forget(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<ForgetRequest>,
+) -> Result<Json<ForgetResponse>, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+    tracing::info!("forget: owner={} ns={}", owner, namespace);
+
+    let deleted = state.db.delete_by_namespace(owner, namespace).await?;
+
+    Ok(Json(ForgetResponse {
+        deleted,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
+}
+
+/// POST /api/stats
+///
+/// Returns memory count + total stored bytes for a namespace owned by
+/// the authenticated user. Used by the benchmark harness for sanity
+/// verification (e.g. confirming an ingest landed).
+pub async fn stats(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<StatsRequest>,
+) -> Result<Json<StatsResponse>, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+    tracing::info!("stats: owner={} ns={}", owner, namespace);
+
+    let (total, bytes) = state.db.get_namespace_stats(owner, namespace).await?;
+
+    Ok(Json(StatsResponse {
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+        total: total as usize,
+        bytes,
+    }))
+}
+
 /// POST /api/ask
 ///
 /// Full AI-with-memory demo:
