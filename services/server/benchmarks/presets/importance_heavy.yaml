@@ -1,0 +1,7 @@
+# Optimized for critical fact retrieval
+name: importance_heavy
+weights:
+  semantic: 0.3
+  importance: 0.4
+  recency: 0.2
+  frequency: 0.1
