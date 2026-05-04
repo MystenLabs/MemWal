@@ -1,0 +1,385 @@
+name: "[QA] Add automated tests to CI (unit + integration + e2e) for MemWal"
+
+on:
+  pull_request:
+    branches: [main, staging, dev]
+  push:
+    branches: [main, staging, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  chatbot-e2e:
+    name: Chatbot / Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memwal
+          POSTGRES_PASSWORD: memwal_secret
+          POSTGRES_DB: memwal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memwal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_URL: postgresql://memwal:memwal_secret@localhost:5432/memwal
+      REDIS_URL: redis://localhost:6379
+      AUTH_SECRET: ci-test-secret-not-for-production
+      OPENROUTER_API_KEY: mock-not-used-tests-use-local-mocks
+      PORT: "3001"
+      PLAYWRIGHT: "True"
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of chatbot)
+        run: pnpm build:sdk
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pw-${{ runner.os }}-
+
+      - name: Install Playwright (Chromium + OS deps)
+        run: pnpm --filter @memwal/chatbot playwright:install
+
+      - name: Run Playwright E2E
+        run: pnpm --filter @memwal/chatbot test:e2e
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-chatbot
+          path: |
+            apps/chatbot/playwright-report
+            apps/chatbot/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
+  server-e2e:
+    name: Server / E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memwal
+          POSTGRES_PASSWORD: memwal_secret
+          POSTGRES_DB: memwal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memwal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://memwal:memwal_secret@localhost:5432/memwal
+      REDIS_URL: redis://localhost:6379
+      PORT: "8000"
+      TEST_BASE_URL: http://localhost:8000
+      RUST_LOG: info
+      # Public testnet IDs — documented in docs/contract/overview.md. Required
+      # by Config::from_env() so the server boots. The CI-scoped tests here
+      # hit /health + auth-contract paths only; they don't reach onchain
+      # verification, so no real-wallet secrets are needed.
+      SUI_NETWORK: testnet
+      MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
+      MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
+      # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start
+      # without it, and the server panics when the sidecar doesn't come up.
+      # Not a real secret; SEAL encrypt / Walrus upload paths aren't exercised
+      # by the CI-scoped tests, so the sidecar running in degraded mode is
+      # fine for /health + auth-contract checks.
+      SIDECAR_AUTH_TOKEN: ci-test-sidecar-token-not-for-production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/server/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Setup Node (for TS sidecar auto-spawned by server)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install sidecar deps
+        working-directory: services/server/scripts
+        # Server boot spawns `npx tsx sidecar-server.ts` which imports express
+        # et al — those must be installed up-front or the spawn fails fast.
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install -r services/server/tests/requirements.txt
+
+      - name: Build server (release)
+        working-directory: services/server
+        run: cargo build --release --bin memwal-server || cargo build --release
+
+      - name: Start server in background
+        working-directory: services/server
+        run: |
+          # Prefer the named binary; fall back to the only produced bin.
+          BIN=$(ls -1 target/release/memwal-server target/release/memwal 2>/dev/null | head -n1)
+          if [ -z "$BIN" ]; then
+            BIN=$(find target/release -maxdepth 1 -type f -perm -u+x -not -name '*.d' | head -n1)
+          fi
+          echo "Starting $BIN"
+          nohup "$BIN" > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "server is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not come up within 60s" >&2
+          tail -n 100 services/server/server.log || true
+          exit 1
+
+      - name: Run server E2E
+        run: python3 services/server/tests/e2e_test.py
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f services/server/server.pid ]; then
+            kill "$(cat services/server/server.pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-e2e-log
+          path: services/server/server.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  chatbot-checks:
+    name: Chatbot / Lint + Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of chatbot)
+        run: pnpm build:sdk
+
+      # Soft-fail: ultracite 7.3.0 passes a `--skip` flag the bundled biome
+      # rejects (verified locally on `dev`). Pre-existing, unrelated to this
+      # CI ticket. Stage kept so the signal surfaces in logs; flip to
+      # hard-fail once the ultracite/biome version mismatch is fixed.
+      - name: Lint (biome/ultracite)
+        continue-on-error: true
+        run: pnpm --filter @memwal/chatbot lint
+
+      - name: Build (Next.js, type-check inclusive)
+        working-directory: apps/chatbot
+        # Bypass the package.json `build` script's `tsx lib/db/migrate` step —
+        # we aren't running a server here, just verifying the build + types.
+        run: pnpm exec next build
+
+  server-checks:
+    name: Server / Clippy + Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memwal
+          POSTGRES_PASSWORD: memwal_secret
+          POSTGRES_DB: memwal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memwal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://memwal:memwal_secret@localhost:5432/memwal
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (+ clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            services/server/target
+          key: cargo-checks-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
+          restore-keys: cargo-checks-${{ runner.os }}-
+
+      # Soft-fail: services/server emits 25+ pre-existing clippy errors with
+      # `-D warnings` on `dev` (`useless_vec`, `unnecessary_min_or_max`,
+      # `doc_lazy_continuation`, etc., verified locally). Unrelated to this
+      # CI ticket. Stage kept so the signal surfaces in logs; flip to
+      # `-- -D warnings` once the warnings are cleaned up in a follow-up.
+      - name: Clippy
+        continue-on-error: true
+        working-directory: services/server
+        run: cargo clippy --all-targets
+
+      - name: Unit tests (cargo test)
+        working-directory: services/server
+        run: cargo test --bins
+
+  move-contract:
+    name: Move / Contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # Keep pinned so CI is reproducible. Matches Published.toml toolchain.
+      # Bump this together with any Move feature that requires a newer CLI.
+      SUI_VERSION: testnet-v1.67.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Sui CLI
+        id: sui-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/sui
+          key: sui-${{ runner.os }}-${{ env.SUI_VERSION }}
+
+      - name: Install Sui CLI
+        if: steps.sui-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          TMPDIR="$(mktemp -d)"
+          cd "$TMPDIR"
+          curl -fsSL \
+            "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" \
+            -o sui.tgz
+          # Archive ships every Sui binary at its root (./sui, ./sui-node, ...).
+          # Extracting the whole thing is simpler than pattern-matching and is
+          # robust across release layout changes.
+          tar -xzf sui.tgz
+          SUI_BIN="$(find . -maxdepth 2 -type f -name sui -perm -u+x | head -n1)"
+          if [ -z "$SUI_BIN" ]; then
+            echo "::error::sui binary not found in archive"
+            tar -tzf sui.tgz | head -100
+            exit 1
+          fi
+          cp "$SUI_BIN" "$HOME/.local/bin/sui"
+          chmod +x "$HOME/.local/bin/sui"
+          cd /
+          rm -rf "$TMPDIR"
+
+      - name: Add Sui to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Sui version
+        run: sui --version
+
+      - name: Run Move unit tests
+        working-directory: services/contract
+        run: sui move test

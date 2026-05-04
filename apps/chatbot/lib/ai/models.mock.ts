@@ -48,6 +48,11 @@ const createMockModel = (): LanguageModel => {
       return {
         stream: new ReadableStream({
           async start(controller) {
+            // Hold the pre-stream window so E2E can observe UI transitions
+            // that only exist during "submitted" state. Mock-only.
+            await new Promise((resolve) => {
+              setTimeout(resolve, 500);
+            });
             controller.enqueue({ type: "text-start", id: "t1" });
             for (const word of words) {
               controller.enqueue({
