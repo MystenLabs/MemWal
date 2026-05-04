@@ -28,10 +28,20 @@ const ASK_SYSTEM_PROMPT: &str = include_str!("../services/prompts/ask.txt");
 pub const ASK_SYSTEM_PROMPT_VERSION: &str = "ask.v1";
 
 /// GET /health
-pub async fn health() -> Json<HealthResponse> {
+///
+/// Returns server status, version, and operating mode (production
+/// or benchmark). Mode is read from `Config::benchmark_mode`, so
+/// benchmark clients can verify the server is configured correctly
+/// before kicking off a long expensive run.
+pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: if state.config.benchmark_mode {
+            "benchmark".to_string()
+        } else {
+            "production".to_string()
+        },
     })
 }
 

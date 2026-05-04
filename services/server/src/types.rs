@@ -375,10 +375,14 @@ pub struct StatsResponse {
 }
 
 /// Health check
+///
+/// `mode` is "production" or "benchmark"; benchmark clients verify this
+/// at startup so they don't accidentally spend Walrus testnet credits.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub mode: String,
 }
 
 // ============================================================
