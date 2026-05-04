@@ -475,31 +475,50 @@ export class MemWalManual {
     /**
      * SEAL-encrypt a payload.
      *
-     * LOW-24: The `id` passed to SEAL is the on-chain policy identifier used
-     * by `seal_approve` to gate decryption. Previously this was just the
-     * owner's Sui address, which meant every memory the owner ever encrypted
-     * shared one decryption scope — a delegate authorized for namespace "A"
-     * could obtain keys for namespace "B" ciphertext.
+     * LOW-24 (namespace scoping): The `id` passed to SEAL is the on-chain
+     * policy identifier used by `seal_approve` to gate decryption. We scope
+     * encryption keys by namespace so a delegate authorized to decrypt
+     * namespace "A" cannot unwrap ciphertext for namespace "B".
      *
-     * We now include both the account id and the namespace:
-     *   id = hex(accountId) || ":" || hex(utf8(namespace))
+     * ENG-1725 fix: The on-chain `seal_approve` does
+     * `has_suffix(id, bcs::to_bytes(account.owner))` for the owner-caller
+     * branch. The id MUST therefore end with the caller's 32 raw address
+     * bytes (in hex form on the SEAL side, raw on the Move side). The
+     * previous LOW-24 layout — `hex(accountId) || hex(namespace)` — used
+     * the MemWalAccount object id (not the owner address) and put the
+     * namespace as the suffix, so `has_suffix` always failed and owners
+     * could no longer recall their own manually-remembered data. (Delegate
+     * decrypt still worked because the delegate branch skips the suffix
+     * check.)
      *
-     * NOTE (breaking change): Ciphertext produced before this fix was scoped
-     * by ownerAddress only. Legacy blobs created with the old id will still
-     * decrypt against SEAL (the id travels inside the EncryptedObject), but
-     * any on-chain `seal_approve` policy that now expects namespace-scoped
-     * ids will need to be updated in lockstep.
+     * Layout:
+     *   id = hex(utf8(namespace)) || hex(callerAddress[2:])
+     *
+     * - namespace is the prefix → still distinct keys per namespace, so the
+     *   LOW-24 isolation property is preserved (different ns → different
+     *   SEAL key).
+     * - caller address (32 bytes) is the suffix → `has_suffix` passes for
+     *   owner mode; delegate mode still passes via the delegate-list check
+     *   in `seal_approve` regardless of suffix.
+     *
+     * NOTE: Ciphertext written between the original LOW-24 fix and this fix
+     * (id = accountHex + nsHex) is unrecoverable by the owner caller. There
+     * is no production data in that window per the team; if recovery is
+     * needed, decrypt via a delegate key (delegate branch ignores suffix).
      */
     private async sealEncrypt(plaintext: Uint8Array, namespace: string): Promise<Uint8Array> {
         const sealClient = await this.getSealClient();
 
-        // Build a namespace-scoped SEAL id. Hex-encode both components so
-        // the id is a stable ASCII hex string (SEAL expects a hex id).
-        const accountHex = this.config.accountId.startsWith("0x")
-            ? this.config.accountId.slice(2)
-            : this.config.accountId;
+        // Build a namespace-scoped SEAL id whose final 32 bytes are the
+        // caller's address bytes, so the on-chain `seal_approve` owner-branch
+        // `has_suffix(id, bcs::to_bytes(owner))` check passes. Hex-encoded
+        // throughout so the id is a stable ASCII hex string.
+        const callerAddress = await this.getOwnerAddress();
+        const callerHex = callerAddress.startsWith("0x")
+            ? callerAddress.slice(2)
+            : callerAddress;
         const nsHex = bytesToHex(new TextEncoder().encode(namespace));
-        const scopedId = `${accountHex}${nsHex}`;
+        const scopedId = `${nsHex}${callerHex}`;
 
         const result = await sealClient.encrypt({
             threshold: this.sealThreshold,
