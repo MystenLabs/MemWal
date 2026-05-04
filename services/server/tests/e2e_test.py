@@ -39,6 +39,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from nacl.encoding import RawEncoder
 from nacl.signing import SigningKey
@@ -46,10 +47,24 @@ from nacl.signing import SigningKey
 BASE_URL = os.environ.get("TEST_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
-def _sign(signing_key: SigningKey, method: str, path: str, body_bytes: bytes, timestamp: str) -> str:
-    """Return the hex-encoded Ed25519 signature over the canonical message."""
+def _sign(
+    signing_key: SigningKey,
+    method: str,
+    path: str,
+    body_bytes: bytes,
+    timestamp: str,
+    nonce: str,
+    account_id: str,
+) -> str:
+    """Return the hex-encoded Ed25519 signature over the canonical message.
+
+    Server-side payload format (services/server/src/auth.rs):
+        "{timestamp}.{method}.{path}.{body_hash}.{nonce}.{account_id}"
+
+    Empty account_id is signed as the empty string when no x-account-id is sent.
+    """
     body_hash = hashlib.sha256(body_bytes).hexdigest()
-    message = f"{timestamp}.{method}.{path}.{body_hash}".encode()
+    message = f"{timestamp}.{method}.{path}.{body_hash}.{nonce}.{account_id}".encode()
     signed = signing_key.sign(message, encoder=RawEncoder)
     return signed.signature.hex()
 
@@ -64,7 +79,10 @@ def make_signed_request(
     """Send a signed JSON request and return the decoded JSON response."""
     body_bytes = json.dumps(body).encode()
     timestamp = str(int(time.time()))
-    signature_hex = _sign(signing_key, method, path, body_bytes, timestamp)
+    nonce = str(uuid.uuid4())
+    signature_hex = _sign(
+        signing_key, method, path, body_bytes, timestamp, nonce, account_id or ""
+    )
     public_key_hex = signing_key.verify_key.encode().hex()
 
     headers = {
@@ -72,6 +90,7 @@ def make_signed_request(
         "x-public-key": public_key_hex,
         "x-signature": signature_hex,
         "x-timestamp": timestamp,
+        "x-nonce": nonce,
     }
     if account_id:
         headers["x-account-id"] = account_id
@@ -129,7 +148,10 @@ def test_wrong_signature_rejected() -> None:
     body = {"text": "evil", "namespace": "default"}
     body_bytes = json.dumps(body).encode()
     timestamp = str(int(time.time()))
-    signature_hex = _sign(key_a, "POST", "/api/remember", body_bytes, timestamp)
+    nonce = str(uuid.uuid4())
+    signature_hex = _sign(
+        key_a, "POST", "/api/remember", body_bytes, timestamp, nonce, ""
+    )
 
     req = urllib.request.Request(
         f"{BASE_URL}/api/remember",
@@ -139,6 +161,7 @@ def test_wrong_signature_rejected() -> None:
             "x-public-key": key_b.verify_key.encode().hex(),  # mismatched key
             "x-signature": signature_hex,
             "x-timestamp": timestamp,
+            "x-nonce": nonce,
         },
         method="POST",
     )
@@ -158,7 +181,10 @@ def test_expired_timestamp_rejected() -> None:
     body = {"text": "old", "namespace": "default"}
     body_bytes = json.dumps(body).encode()
     timestamp = str(int(time.time()) - 600)  # 10 min past
-    signature_hex = _sign(signing_key, "POST", "/api/remember", body_bytes, timestamp)
+    nonce = str(uuid.uuid4())
+    signature_hex = _sign(
+        signing_key, "POST", "/api/remember", body_bytes, timestamp, nonce, ""
+    )
 
     req = urllib.request.Request(
         f"{BASE_URL}/api/remember",
@@ -168,6 +194,7 @@ def test_expired_timestamp_rejected() -> None:
             "x-public-key": signing_key.verify_key.encode().hex(),
             "x-signature": signature_hex,
             "x-timestamp": timestamp,
+            "x-nonce": nonce,
         },
         method="POST",
     )
