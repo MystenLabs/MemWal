@@ -8,10 +8,6 @@
  * Usage:
  *   npx tsx bench-recall-latency.ts \
  *     --server-url   http://localhost:8000 \
- *     --public-key   <hex> \
- *     --signature    <hex> \
- *     --timestamp    <unix-ms> \
- *     --nonce        <uuid> \
  *     --account-id   <0x...> \
  *     --delegate-key <suiprivkey1... or 64-hex> \
  *     --query        "what do I prefer?" \
@@ -29,18 +25,30 @@
  *   • JSON file with raw per-request timings at --output
  */
 
+import { createHash, randomUUID } from "crypto";
+import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
 // ============================================================
 // CLI
 // ============================================================
 
+const RECALL_METHOD = "POST";
+const RECALL_PATH = "/api/recall";
+const TEXT_ENCODER = new TextEncoder();
+
+interface Auth {
+  delegateKey: string;
+  keypair: Ed25519Keypair;
+  publicKeyHex: string;
+}
+
 interface Args {
   serverUrl: string;
-  publicKey: string;
-  signature: string;
-  timestamp: string;
-  nonce: string;
   accountId: string;
-  delegateKey: string;
+  auth: Auth;
+  bodyStr: string;
+  bodyHash: string;
   query: string;
   namespace: string;
   limit: number;
@@ -57,13 +65,9 @@ bench-recall-latency.ts — ENG-1405: recall latency benchmark
 Usage:
   npx tsx bench-recall-latency.ts [options]
 
-Required auth options (mirror of SDK request headers):
-  --public-key   <hex>          x-public-key header value
-  --signature    <hex>          x-signature header value
-  --timestamp    <unix-ms>      x-timestamp header value
-  --nonce        <uuid>         x-nonce header value
+Required auth options:
   --account-id   <0x...>        x-account-id header value
-  --delegate-key <key>          x-delegate-key header value (suiprivkey1... or 64-hex)
+  --delegate-key <key>          suiprivkey1... or 64-hex delegate private key
 
 Optional:
   --server-url   <url>          Server URL          [default: http://localhost:8000]
@@ -100,17 +104,21 @@ function parseArgs(): Args {
     return v;
   };
 
+  const delegateKey = normalizeDelegateKey(required("--delegate-key", "BENCH_DELEGATE_KEY"));
+  const query = get("--query", "test query")!;
+  const namespace = get("--namespace", "default")!;
+  const limit = parseInt(get("--limit", "5")!, 10);
+  const bodyStr = JSON.stringify({ query, namespace, limit });
+
   return {
     serverUrl: get("--server-url", "http://localhost:8000")!,
-    publicKey: required("--public-key", "BENCH_PUBLIC_KEY"),
-    signature: required("--signature", "BENCH_SIGNATURE"),
-    timestamp: required("--timestamp", "BENCH_TIMESTAMP"),
-    nonce: required("--nonce", "BENCH_NONCE"),
     accountId: required("--account-id", "BENCH_ACCOUNT_ID"),
-    delegateKey: required("--delegate-key", "BENCH_DELEGATE_KEY"),
-    query: get("--query", "test query")!,
-    namespace: get("--namespace", "default")!,
-    limit: parseInt(get("--limit", "5")!, 10),
+    auth: buildAuth(delegateKey),
+    bodyStr,
+    bodyHash: sha256Hex(bodyStr),
+    query,
+    namespace,
+    limit,
     coldRuns: parseInt(get("--cold-runs", "3")!, 10),
     warmRuns: parseInt(get("--warm-runs", "10")!, 10),
     output: get("--output", "bench-recall-results.json")!,
@@ -147,6 +155,59 @@ function color(enabled: boolean, code: string, s: string): string {
   return enabled ? `${code}${s}${C.reset}` : s;
 }
 
+function buildAuth(delegateKey: string): Auth {
+  const keypair = keypairFromDelegateKey(delegateKey);
+  return {
+    delegateKey,
+    keypair,
+    publicKeyHex: Buffer.from(keypair.getPublicKey().toRawBytes()).toString("hex"),
+  };
+}
+
+function keypairFromDelegateKey(delegateKey: string): Ed25519Keypair {
+  if (delegateKey.startsWith("suiprivkey")) {
+    const { scheme, secretKey } = decodeSuiPrivateKey(delegateKey);
+    if (scheme !== "ED25519") {
+      throw new Error(`delegate key must be Ed25519, got ${scheme}`);
+    }
+    return Ed25519Keypair.fromSecretKey(secretKey);
+  }
+
+  const hex = delegateKey.startsWith("0x") ? delegateKey.slice(2) : delegateKey;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error("delegate key must be 64-char hex or suiprivkey bech32");
+  }
+  return Ed25519Keypair.fromSecretKey(Uint8Array.from(Buffer.from(hex, "hex")));
+}
+
+function normalizeDelegateKey(delegateKey: string): string {
+  if (delegateKey.startsWith("0x") && delegateKey.length === 66) {
+    return delegateKey.slice(2);
+  }
+  return delegateKey;
+}
+
+function sha256Hex(data: string): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+async function buildSignedRecallHeaders(args: Args): Promise<Record<string, string>> {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomUUID();
+  const message = `${timestamp}.${RECALL_METHOD}.${RECALL_PATH}.${args.bodyHash}.${nonce}.${args.accountId}`;
+  const signature = await args.auth.keypair.sign(TEXT_ENCODER.encode(message));
+
+  return {
+    "Content-Type": "application/json",
+    "x-public-key": args.auth.publicKeyHex,
+    "x-signature": Buffer.from(signature).toString("hex"),
+    "x-timestamp": timestamp,
+    "x-nonce": nonce,
+    "x-account-id": args.accountId,
+    "x-delegate-key": args.auth.delegateKey,
+  };
+}
+
 function stats(samples: number[]): {
   p50: number; p95: number; p99: number; min: number; max: number; mean: number;
 } {
@@ -179,22 +240,12 @@ interface RecallRunResult {
 async function recallOnce(args: Args): Promise<RecallRunResult> {
   const start = performance.now();
   try {
-    const resp = await fetch(`${args.serverUrl}/api/recall`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-public-key": args.publicKey,
-        "x-signature": args.signature,
-        "x-timestamp": args.timestamp,
-        "x-nonce": args.nonce,
-        "x-account-id": args.accountId,
-        "x-delegate-key": args.delegateKey,
-      },
-      body: JSON.stringify({
-        query: args.query,
-        namespace: args.namespace,
-        limit: args.limit,
-      }),
+    const headers = await buildSignedRecallHeaders(args);
+
+    const resp = await fetch(`${args.serverUrl}${RECALL_PATH}`, {
+      method: RECALL_METHOD,
+      headers,
+      body: args.bodyStr,
     });
 
     const latencyMs = performance.now() - start;
@@ -240,9 +291,8 @@ async function runBatch(args: Args, label: string, runs: number): Promise<BatchR
   for (let i = 0; i < runs; i++) {
     process.stdout.write(`  [${label}] run ${i + 1}/${runs}... `);
     const result = await recallOnce(args);
-    rawMs.push(result.latencyMs);
-
     if (result.ok) {
+      rawMs.push(result.latencyMs);
       successCount++;
       console.log(`ok ${ms(result.latencyMs)} (${result.resultCount} results)`);
     } else {
@@ -281,10 +331,7 @@ function printBatchTable(batches: BatchResult[], col: boolean): void {
   console.log(color(col, C.dim, row(cols.map((_, i) => "─".repeat(colW[i])))));
 
   for (const b of batches) {
-    const s = stats(b.rawMs.filter((_, idx) => {
-      // Only count successful runs
-      return idx < b.successCount + b.failCount;
-    }));
+    const s = stats(b.rawMs);
     const cells = [
       b.label,
       ms(s.p50),
@@ -361,6 +408,10 @@ async function main(): Promise<void> {
   // ── Verdict ─────────────────────────────────────────────────────
   const warmStats = stats(warmBatch.rawMs);
   const TARGET_P50_MS = 500;
+  const totalFailures = batches.reduce((sum, b) => sum + b.failCount, 0);
+  if (totalFailures > 0) {
+    console.log(color(col, C.red, `✘ Benchmark had ${totalFailures} failed request(s)`));
+  }
   if (warmStats.p50 < TARGET_P50_MS) {
     console.log(
       color(col, C.green, `✔ Warm p50 = ${ms(warmStats.p50)} — below ${TARGET_P50_MS}ms target ✓`)
@@ -409,6 +460,10 @@ async function main(): Promise<void> {
   const { writeFileSync } = await import("fs");
   writeFileSync(args.output, JSON.stringify(jsonOut, null, 2));
   console.log(color(col, C.dim, `  Results written to ${args.output}\n`));
+
+  if (totalFailures > 0) {
+    process.exit(1);
+  }
 }
 
 main().catch((err: unknown) => {

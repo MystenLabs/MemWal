@@ -1,0 +1,131 @@
+name: Benchmark Live
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: GitHub benchmark environment to use
+        required: true
+        type: choice
+        default: staging
+        options:
+          - dev
+          - staging
+          - production
+      server_url:
+        description: MemWal server URL. Empty uses BENCH_SERVER_URL environment variable.
+        required: false
+        default: ''
+      namespace:
+        description: Recall namespace
+        required: false
+        default: default
+      query:
+        description: Recall query text
+        required: false
+        default: test query
+      limit:
+        description: Top-K recall result limit
+        required: false
+        default: '5'
+      cold_runs:
+        description: Cold-path runs
+        required: false
+        default: '3'
+      warm_runs:
+        description: Warm-path runs
+        required: false
+        default: '10'
+  schedule:
+    - cron: '0 9 * * 1'
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  recall:
+    name: Recall Latency
+    runs-on: ubuntu-latest
+    environment:
+      name: benchmark-${{ github.event.inputs.target_environment || 'staging' }}
+    timeout-minutes: 30
+
+    env:
+      SERVER_URL: ${{ github.event.inputs.server_url || vars.BENCH_SERVER_URL || 'http://localhost:8000' }}
+      NAMESPACE: ${{ github.event.inputs.namespace || 'default' }}
+      QUERY: ${{ github.event.inputs.query || 'test query' }}
+      LIMIT: ${{ github.event.inputs.limit || '5' }}
+      COLD_RUNS: ${{ github.event.inputs.cold_runs || '3' }}
+      WARM_RUNS: ${{ github.event.inputs.warm_runs || '10' }}
+      BENCH_DELEGATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
+      BENCH_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: services/server/scripts/package-lock.json
+
+      - name: Install sidecar script dependencies
+        working-directory: services/server/scripts
+        run: npm ci
+
+      - name: Run recall latency benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in BENCH_DELEGATE_KEY BENCH_ACCOUNT_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p benchmark-results
+          services/server/scripts/node_modules/.bin/tsx services/server/scripts/bench-recall-latency.ts \
+            --server-url "$SERVER_URL" \
+            --delegate-key "$BENCH_DELEGATE_KEY" \
+            --account-id "$BENCH_ACCOUNT_ID" \
+            --query "$QUERY" \
+            --namespace "$NAMESPACE" \
+            --limit "$LIMIT" \
+            --cold-runs "$COLD_RUNS" \
+            --warm-runs "$WARM_RUNS" \
+            --output benchmark-results/recall.json \
+            --no-color
+
+      - name: Write benchmark summary
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f benchmark-results/recall.json ]; then
+            echo "No benchmark result file was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          node <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          const fs = require('fs');
+          const json = JSON.parse(fs.readFileSync('benchmark-results/recall.json', 'utf8'));
+          console.log('## recall');
+          console.log('');
+          console.log(json.markdownTable || 'No markdown table found in result JSON.');
+          console.log('');
+          NODE
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: benchmark-results/recall.json
+          if-no-files-found: warn
+          retention-days: 14
