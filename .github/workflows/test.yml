@@ -1,10 +1,10 @@
-name: test
+name: "[QA] Add automated tests to CI (unit + integration + e2e) for MemWal"
 
 on:
   pull_request:
-    branches: [dev, staging, main]
+    branches: [main, staging, dev]
   push:
-    branches: [dev, staging, main]
+    branches: [main, staging, dev]
   workflow_dispatch:
 
 concurrency:
@@ -252,9 +252,10 @@ jobs:
       - name: Build SDK (workspace dep of chatbot)
         run: pnpm build:sdk
 
-      # Soft-fail: the repo's biome.jsonc currently has schema issues unrelated
-      # to this CI ticket. Stage is kept so the signal surfaces in logs; flip
-      # to hard-fail once the biome config is cleaned up.
+      # Soft-fail: ultracite 7.3.0 passes a `--skip` flag the bundled biome
+      # rejects (verified locally on `dev`). Pre-existing, unrelated to this
+      # CI ticket. Stage kept so the signal surfaces in logs; flip to
+      # hard-fail once the ultracite/biome version mismatch is fixed.
       - name: Lint (biome/ultracite)
         continue-on-error: true
         run: pnpm --filter @memwal/chatbot lint
@@ -314,10 +315,11 @@ jobs:
           key: cargo-checks-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
           restore-keys: cargo-checks-${{ runner.os }}-
 
-      # Soft-fail: the bin and test sources currently emit pre-existing clippy
-      # warnings (doc_lazy_continuation, useless_vec, etc.) unrelated to this
-      # CI ticket. Stage is kept so the signal surfaces in logs; flip to
-      # `-- -D warnings` once those warnings are cleaned up.
+      # Soft-fail: services/server emits 25+ pre-existing clippy errors with
+      # `-D warnings` on `dev` (`useless_vec`, `unnecessary_min_or_max`,
+      # `doc_lazy_continuation`, etc., verified locally). Unrelated to this
+      # CI ticket. Stage kept so the signal surfaces in logs; flip to
+      # `-- -D warnings` once the warnings are cleaned up in a follow-up.
       - name: Clippy
         continue-on-error: true
         working-directory: services/server
