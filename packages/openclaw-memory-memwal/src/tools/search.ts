@@ -12,6 +12,7 @@ import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
 import { escapeForPrompt, toolError } from "../format.js";
 import type { PluginConfig } from "../types.js";
+import { DEFAULT_SEARCH_LIMIT } from "../constants.js";
 
 /** Register the memory_search agent tool. */
 export function registerSearchTool(api: any, client: MemWal, config: PluginConfig): void {
@@ -35,7 +36,7 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
         ),
       }),
       async execute(_id: string, params: any) {
-        const { query, limit = 5, namespace } = params;
+        const { query, limit = DEFAULT_SEARCH_LIMIT, namespace } = params;
         // LLM may omit namespace (e.g. tools.allow set but hooks disabled) — fall back safely
         const ns = namespace || config.defaultNamespace;
 

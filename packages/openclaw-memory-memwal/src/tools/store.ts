@@ -11,6 +11,7 @@ import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
 import { toolError } from "../format.js";
 import type { PluginConfig } from "../types.js";
+import { MIN_STORE_TEXT_LENGTH, MAX_FACT_PREVIEW_COUNT, MAX_TEXT_PREVIEW_LENGTH } from "../constants.js";
 
 /** Register the memory_store agent tool. */
 export function registerStoreTool(api: any, client: MemWal, config: PluginConfig): void {
@@ -52,7 +53,7 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
           };
         }
 
-        if (!text || text.trim().length < 3) {
+        if (!text || text.trim().length < MIN_STORE_TEXT_LENGTH) {
           return {
             content: [
               {
@@ -71,8 +72,8 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
           // Show first 3 extracted facts as confirmation, or raw text truncation as fallback
           const preview = result.facts
             ?.map((f: any) => f.text)
-            .slice(0, 3)
-            .join("; ") ?? text.slice(0, 100);
+            .slice(0, MAX_FACT_PREVIEW_COUNT)
+            .join("; ") ?? text.slice(0, MAX_TEXT_PREVIEW_LENGTH);
 
           return {
             content: [

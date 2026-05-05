@@ -113,9 +113,18 @@ export const noteRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "Not your note" });
       }
 
-      // Only set title if explicitly provided (rename).
-      // Auto-save (content+plainText only) should NOT overwrite user-set title.
-      const title = input.title ?? existing.title;
+      // Title priority: explicit input > auto-generated from content > existing
+      let title = existing.title;
+      if (input.title) {
+        // User explicitly renamed
+        title = input.title;
+      } else if (input.plainText && (existing.title === "Untitled Note" || existing.title === "New Note")) {
+        // Auto-generate from first line of content (only if still default title)
+        const firstLine = input.plainText.split("\n").find((l) => l.trim())?.trim();
+        if (firstLine) {
+          title = firstLine.length > 60 ? firstLine.slice(0, 60) + "..." : firstLine;
+        }
+      }
 
       const [updated] = await ctx.db
         .update(notes)
@@ -183,7 +192,7 @@ export const noteRouter = router({
       const plainText = input.plainText ?? note.plainText;
 
       // Extract memories using AI
-      const memories = await detectMemoriesForLexical(ctx.userId, plainText);
+      const memories = await detectMemoriesForLexical(ctx.userId, plainText, ctx.memwalKey, ctx.memwalAccountId);
 
       // Return memory data (client will inject as Lexical nodes)
       return {

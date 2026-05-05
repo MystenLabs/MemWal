@@ -18,7 +18,7 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY apps/app/package.json      ./apps/app/
 
 # Install all workspace deps
-RUN pnpm install
+RUN pnpm install --frozen-lockfile
 
 # Build SDK first (apps/app depends on @mysten-incubation/memwal via workspace:*)
 COPY packages/sdk/ ./packages/sdk/

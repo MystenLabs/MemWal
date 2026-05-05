@@ -5,6 +5,12 @@ retrieving them with semantic search.
 
 > MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
+## For AI Agents
+
+- **Single-file guide**: Read [`SKILL.md`](SKILL.md) for a complete integration reference (install, configure, API surface, troubleshooting)
+- **LLM-friendly docs**: [`llms.txt`](https://docs.memwal.ai/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
+- **Full context**: [`llms-full.txt`](https://docs.memwal.ai/llms-full.txt) — expanded version with inlined page content
+
 ## Install
 
 ```bash
@@ -60,7 +66,13 @@ From the repository root:
 pnpm install
 ```
 
-Then start the surface you need, for example:
+> **Important**: Build the SDK first — apps depend on its compiled output.
+
+```bash
+pnpm build:sdk
+```
+
+Then start the surface you need:
 
 ```bash
 pnpm dev:app
@@ -69,7 +81,7 @@ pnpm dev:chatbot
 pnpm dev:researcher
 ```
 
-For broader local setup guidance, see:
+For the full step-by-step setup guide, see:
 
 - [Run the Repo Locally](docs/contributing/run-repo-locally.md)
 
@@ -80,6 +92,18 @@ For broader local setup guidance, see:
 | `@mysten-incubation/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
 | `@mysten-incubation/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
 | `@mysten-incubation/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
+
+## OpenClaw / NemoClaw Plugin
+
+[`@mysten-incubation/oc-memwal`](packages/openclaw-memory-memwal) — a memory plugin for [OpenClaw](https://openclaw.ai) agents. It gives OpenClaw persistent, encrypted memory via MemWal with automatic recall and capture hooks.
+
+```bash
+openclaw plugins install @mysten-incubation/oc-memwal
+```
+
+- [Plugin Quick Start](docs/openclaw/quick-start.md)
+- [How It Works](docs/openclaw/how-it-works.md)
+- [Reference](docs/openclaw/reference.md)
 
 ## How It Works
 

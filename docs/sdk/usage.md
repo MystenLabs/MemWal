@@ -13,7 +13,7 @@ MemWal exposes three entry points:
 
 ## Namespace Rules
 
-- Set a default namespace in `create(...)` when one app or tenant uses one boundary
+- Set a default namespace in `create(...)` when one app or agent uses one boundary
 - Pass `namespace` per call when one client needs multiple boundaries
 - If omitted, namespace falls back to client config, then to `"default"`
 

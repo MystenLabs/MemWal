@@ -213,8 +213,8 @@ Full list of config options for `openclaw.json`:
 
 ### Plugin not loading
 
-- Check the symlink exists: `ls -la ~/.openclaw/extensions/memory-memwal`
-- Check that `openclaw.plugin.json` is in the package root
+- Reinstall the plugin: `openclaw plugins install @mysten-incubation/oc-memwal`
+- Check that `openclaw.plugin.json` exists in the installed extension
 - Restart the gateway after any config changes
 
 ### Health check failed

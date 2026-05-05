@@ -39,11 +39,13 @@ struct QueryBlobsResponse {
 #[serde(rename_all = "camelCase")]
 struct WalrusUploadRequest {
     data: String,
-    private_key: String,
+    key_index: usize,
     owner: String,
     namespace: String,
     package_id: String,
     epochs: u64,
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -61,29 +63,37 @@ struct WalrusUploadResponse {
 /// The server wallet pays for gas + storage. After certify, the blob object
 /// is transferred to `owner_address`. Namespace + owner are stored as
 /// on-chain metadata attributes for discoverability.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_blob(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: Option<&str>,
     data: &[u8],
     epochs: u64,
     owner_address: &str,
-    sui_private_key: &str,
+    key_index: usize,
     namespace: &str,
     package_id: &str,
+    agent_id: Option<&str>,
 ) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let resp = client
+    let mut req = client
         .post(&url)
         .json(&WalrusUploadRequest {
             data: data_b64,
-            private_key: sui_private_key.to_string(),
+            key_index,
             owner: owner_address.to_string(),
             namespace: namespace.to_string(),
             package_id: package_id.to_string(),
             epochs,
-        })
+            agent_id: agent_id.map(|s| s.to_string()),
+        });
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| {
@@ -124,6 +134,7 @@ pub async fn upload_blob(
 pub async fn query_blobs_by_owner(
     client: &reqwest::Client,
     sidecar_url: &str,
+    sidecar_secret: Option<&str>,
     owner_address: &str,
     namespace: Option<&str>,
     package_id: Option<&str>,
@@ -138,9 +149,13 @@ pub async fn query_blobs_by_owner(
         body["packageId"] = serde_json::json!(pkg);
     }
 
-    let resp = client
+    let mut req = client
         .post(&url)
-        .json(&body)
+        .json(&body);
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| {
@@ -176,7 +191,7 @@ pub async fn download_blob(
     // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
     let download_fut = walrus_client.read_blob_by_id(blob_id);
     let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(15),
         download_fut,
     ).await {
         Ok(Ok(data)) => data,

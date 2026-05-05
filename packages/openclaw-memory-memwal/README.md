@@ -1,4 +1,4 @@
-<h1 align="center">@mysten-incubation/memory-memwal</h1>
+<h1 align="center">@mysten-incubation/oc-memwal</h1>
 
 <p align="center">
   Cloud-based long-term memory plugin for NemoClaw/OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>MemWal</strong>.
@@ -44,9 +44,9 @@ The plugin needs three values:
 | **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
 | **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
 
-Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](/getting-started/quick-start) for detailed setup.
+Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](https://docs.memwal.ai/getting-started/quick-start) for detailed setup.
 
-For the relayer, use a managed endpoint or [self-host your own](/relayer/self-hosting):
+For the relayer, use a managed endpoint or [self-host your own](https://docs.memwal.ai/relayer/self-hosting):
 
 | Environment | Relayer URL |
 |-------------|-------------|
@@ -55,15 +55,10 @@ For the relayer, use a managed endpoint or [self-host your own](/relayer/self-ho
 
 ## Quick Start
 
-### 1. Install and link
+### 1. Install
 
 ```bash
-cd packages/openclaw-memory-memwal
-bun install  # or: pnpm install / npm install
-
-# Link into OpenClaw's extensions directory
-mkdir -p ~/.openclaw/extensions
-ln -s "$(pwd)" ~/.openclaw/extensions/memory-memwal
+openclaw plugins install @mysten-incubation/oc-memwal
 ```
 
 ### 2. Set your delegate key
@@ -82,9 +77,9 @@ Add the plugin config to `~/.openclaw/openclaw.json`:
 ```jsonc
 {
   "plugins": {
-    "slots": { "memory": "memory-memwal" },
+    "slots": { "memory": "oc-memwal" },
     "entries": {
-      "memory-memwal": {
+      "oc-memwal": {
         "enabled": true,
         "config": {
           "privateKey": "${MEMWAL_PRIVATE_KEY}",             // References the env var

@@ -1,9 +1,11 @@
 "use client";
 
-import { ChevronUp } from "lucide-react";
+import { ChevronUp, User } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
+import { useDisconnectWallet } from "@mysten/dapp-kit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,6 +24,7 @@ type SessionUser = { id: string; email?: string; publicKey?: string };
 export function SidebarUserNav({ user }: { user: SessionUser }) {
   const router = useRouter();
   const { setTheme, resolvedTheme } = useTheme();
+  const { mutateAsync: disconnectWallet } = useDisconnectWallet();
 
   const displayName = user.publicKey
     ? `${user.publicKey.slice(0, 6)}...${user.publicKey.slice(-4)}`
@@ -54,6 +57,12 @@ export function SidebarUserNav({ user }: { user: SessionUser }) {
             data-testid="user-nav-menu"
             side="top"
           >
+            <DropdownMenuItem asChild className="cursor-pointer">
+              <Link href="/profile">
+                <User className="mr-2 size-4" />
+                Profile
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="cursor-pointer"
               data-testid="user-nav-item-theme"
@@ -69,8 +78,8 @@ export function SidebarUserNav({ user }: { user: SessionUser }) {
                 className="w-full cursor-pointer"
                 onClick={async () => {
                   await fetch("/api/auth/signout", { method: "POST" });
-                  router.push("/login");
-                  router.refresh();
+                  await disconnectWallet().catch(() => {});
+                  window.location.href = "/login";
                 }}
                 type="button"
               >

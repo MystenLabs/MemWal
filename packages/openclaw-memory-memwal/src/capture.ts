@@ -6,12 +6,7 @@
  * Based on patterns from LanceDB's shouldCapture() implementation.
  */
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-const MIN_CAPTURE_LENGTH = 30;
-const MAX_EMOJI_COUNT = 3;
+import { MIN_CAPTURE_LENGTH, MAX_EMOJI_COUNT } from "./constants.js";
 
 /** Filler patterns — exact-match trivial responses. */
 const FILLER_PATTERN = /^(ok|okay|sure|thanks|thank you|thx|yes|yep|yeah|no|nope|nah|got it|hmm|hm|ah|oh|lol|haha|nice|cool|great|right|alright|fine|k|kk)\s*[.!?]*$/i;

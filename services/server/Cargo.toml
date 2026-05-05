@@ -42,7 +42,11 @@ walrus_rs = "0.1"
 # Async utilities
 futures = "0.3"
 
+# Rate limiting (Redis-backed)
+redis = { version = "0.27", features = ["tokio-comp"] }
+
 # Utils
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
+percent-encoding = "2"

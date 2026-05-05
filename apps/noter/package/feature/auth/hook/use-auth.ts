@@ -1,12 +1,13 @@
 /**
  * USE AUTH HOOK
- * Main hook for authentication operations
+ * Main hook for authentication operations (Enoki + delegate key)
  */
 
 "use client";
 
 import { useCallback, useEffect } from "react";
-import { useAtom, useSetAtom, useAtomValue } from "jotai";
+import { useDisconnectWallet } from "@mysten/dapp-kit";
+import { useAtom, useSetAtom } from "jotai";
 import {
   authAtom,
   sessionAtom,
@@ -15,7 +16,6 @@ import {
   setLoadingAtom,
 } from "../state/atom";
 import { trpc } from "@/shared/lib/trpc/client";
-import type { OAuthProvider } from "../constant";
 
 export function useAuth() {
   const [auth, setAuth] = useAtom(authAtom);
@@ -24,13 +24,15 @@ export function useAuth() {
   const clearAuth = useSetAtom(clearAuthAtom);
   const setLoading = useSetAtom(setLoadingAtom);
 
+  // Wallet disconnect (clears dapp-kit autoConnect state)
+  const { mutateAsync: disconnectWallet } = useDisconnectWallet();
+
   // tRPC mutations
-  const initiateLoginMutation = trpc.auth.initiateLogin.useMutation();
-  const completeLoginMutation = trpc.auth.completeLogin.useMutation();
-  const connectWalletMutation = trpc.auth.connectWallet.useMutation();
+  const connectEnokiMutation = trpc.auth.connectEnoki.useMutation();
+  const connectDelegateKeyMutation = trpc.auth.connectDelegateKey.useMutation();
   const logoutMutation = trpc.auth.logout.useMutation();
 
-  // tRPC query for session validation
+  // Session validation query
   const sessionQuery = trpc.auth.getSession.useQuery(
     { sessionId: session?.sessionId || "" },
     {
@@ -41,19 +43,17 @@ export function useAuth() {
     }
   );
 
-  /**
-   * Initialize authentication from persisted session
-   */
+  /** Initialize authentication from persisted session. */
   useEffect(() => {
     if (session && !auth.isAuthenticated && sessionQuery.data) {
       setAuthenticated({
         isAuthenticated: true,
         user: sessionQuery.data.user,
         suiAddress: sessionQuery.data.suiAddress,
-        provider: sessionQuery.data.user.provider as OAuthProvider,
+        provider: null,
       });
     } else if (session && sessionQuery.data === null && !sessionQuery.isLoading) {
-      // Session exists in atom but not in database - it's stale
+      // Stale session — clear it
       setSession(null);
       setLoading(false);
     } else if (sessionQuery.isError || (!session && !auth.isAuthenticated)) {
@@ -61,149 +61,92 @@ export function useAuth() {
     }
   }, [session, sessionQuery.data, sessionQuery.isError, sessionQuery.isLoading, auth.isAuthenticated, setAuthenticated, setLoading, setSession]);
 
-  /**
-   * Initiate OAuth login flow
-   * Redirects user to OAuth provider
-   */
-  const login = useCallback(
-    async (provider: OAuthProvider) => {
+  /** Connect with Enoki zkLogin (two-phase: check returning user, then register). */
+  const connectEnoki = useCallback(
+    async (params: { suiAddress: string; privateKey?: string; accountId?: string }) => {
       try {
         setLoading(true);
-        const result = await initiateLoginMutation.mutateAsync({
-          provider,
-        });
+        const result = await connectEnokiMutation.mutateAsync(params);
 
-        // Store session ID temporarily
-        setSession({
-          sessionId: result.sessionId,
-          ephemeralKeyPair: {
-            privateKey: "",
-            publicKey: "",
-          },
-          maxEpoch: 0,
-          randomness: "",
-          nonce: result.nonce,
-          expiresAt: new Date(),
-        });
+        if ("needsSetup" in result && result.needsSetup) {
+          setLoading(false);
+          return result;
+        }
 
-        // Redirect to OAuth provider
-        window.location.href = result.authUrl;
-      } catch (error) {
-        setLoading(false);
-        console.error("Login failed:", error);
-        throw error;
-      }
-    },
-    [initiateLoginMutation, setSession, setLoading]
-  );
+        if (result.sessionData) {
+          setSession(result.sessionData);
+        }
 
-  /**
-   * Complete login after OAuth callback
-   * Call this from /auth/callback route with JWT
-   */
-  const completeLogin = useCallback(
-    async (jwt: string, sessionId: string) => {
-      try {
-        setLoading(true);
-
-        const result = await completeLoginMutation.mutateAsync({
-          jwt,
-          sessionId,
-        });
-
-        // Update session with complete data
-        setSession(result.sessionData);
-
-        // Update auth state immediately
-        setAuthenticated({
-          isAuthenticated: true,
-          user: result.user,
-          suiAddress: result.suiAddress,
-          provider: result.user.provider as OAuthProvider,
-        });
+        if (result.user) {
+          setAuthenticated({
+            isAuthenticated: true,
+            user: result.user,
+            suiAddress: result.user.suiAddress,
+            provider: null,
+          });
+        }
 
         return result;
       } catch (error) {
         setLoading(false);
-        console.error("Complete login failed:", error);
+        console.error("Enoki connection failed:", error);
         throw error;
       }
     },
-    [completeLoginMutation, setSession, setAuthenticated, setLoading]
+    [connectEnokiMutation, setSession, setAuthenticated, setLoading]
   );
 
-  /**
-   * Connect wallet and authenticate
-   * Call this after user signs message with their wallet
-   */
-  const connectWalletAuth = useCallback(
-    async (params: {
-      walletType: "slush";
-      address: string;
-      signature: string;
-      message: string;
-    }) => {
+  /** Connect with delegate key (manual key + account ID). */
+  const connectDelegateKey = useCallback(
+    async (params: { privateKey: string; accountId: string }) => {
       try {
         setLoading(true);
+        const result = await connectDelegateKeyMutation.mutateAsync(params);
 
-        const result = await connectWalletMutation.mutateAsync(params);
-
-        // Update session with complete data
         setSession(result.sessionData);
 
-        // Update auth state immediately
         setAuthenticated({
           isAuthenticated: true,
           user: result.user,
           suiAddress: result.user.suiAddress,
-          provider: null, // No OAuth provider for wallet auth
+          provider: null,
         });
 
         return result;
       } catch (error) {
         setLoading(false);
-        console.error("Wallet connection failed:", error);
+        console.error("Delegate key connection failed:", error);
         throw error;
       }
     },
-    [connectWalletMutation, setSession, setAuthenticated, setLoading]
+    [connectDelegateKeyMutation, setSession, setAuthenticated, setLoading]
   );
 
-  /**
-   * Logout user
-   * Clears session and auth state
-   */
+  /** Logout — clear session, auth state, and disconnect wallet (prevents autoConnect). */
   const logout = useCallback(async () => {
     try {
       if (session?.sessionId) {
-        await logoutMutation.mutateAsync({
-          sessionId: session.sessionId,
-        });
+        await logoutMutation.mutateAsync({ sessionId: session.sessionId });
       }
-
-      clearAuth();
     } catch (error) {
       console.error("Logout failed:", error);
-      // Clear state anyway
-      clearAuth();
     }
-  }, [session, logoutMutation, clearAuth]);
+    // Always disconnect wallet and clear auth, even if tRPC logout fails
+    try {
+      await disconnectWallet();
+    } catch {
+      // Wallet may already be disconnected
+    }
+    clearAuth();
+  }, [session, logoutMutation, disconnectWallet, clearAuth]);
 
   return {
-    // State
     ...auth,
-
-    // Session data
     session,
-
-    // Actions
-    login,
-    completeLogin,
-    connectWalletAuth,
+    connectEnoki,
+    connectDelegateKey,
     logout,
-
-    // Loading states
-    isLoginPending: initiateLoginMutation.isPending || completeLoginMutation.isPending || connectWalletMutation.isPending,
+    isLoginPending: connectEnokiMutation.isPending || connectDelegateKeyMutation.isPending,
     isLogoutPending: logoutMutation.isPending,
   };
 }
