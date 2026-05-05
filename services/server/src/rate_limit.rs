@@ -111,8 +111,8 @@ impl RateLimitConfig {
 ///   1. Percent-decode the path to neutralise URL-encoded variants
 ///      (e.g. `/api/anal%79ze` → `/api/analyze`).
 ///   2. Strip any trailing slash so `/api/analyze/` == `/api/analyze`.
-///   Both transforms are applied before the match, so no variant can
-///   slip through with a cost of 1 instead of its true weight.
+///      Both transforms are applied before the match, so no variant can
+///      slip through with a cost of 1 instead of its true weight.
 fn endpoint_weight(path: &str) -> i64 {
     // Step 1 — percent-decode (e.g. "%2F" → "/", "%79" → "y")
     // Use lossy decoding: malformed sequences are replaced with U+FFFD
@@ -123,12 +123,13 @@ fn endpoint_weight(path: &str) -> i64 {
     let path = decoded.trim_end_matches('/');
 
     match path {
-        "/api/analyze" => 5,           // LLM extract + N × (1 pt per fact)
-        "/api/remember" => 5,          // embed + SEAL encrypt + Walrus upload
-        "/api/remember/manual" => 3,   // Walrus upload only (client did embed/encrypt)
-        "/api/restore" => 3,           // download + decrypt + re-embed
-        "/api/ask" => 2,               // recall + LLM
-        _ => 1,                        // recall, recall/manual, etc.
+        "/api/analyze" => 5,         // LLM extract + N × (1 pt per fact)
+        "/api/remember" => 5,        // embed + SEAL encrypt + Walrus upload
+        "/api/remember/bulk" => 10,  // N × embed/encrypt/upload in one request
+        "/api/remember/manual" => 3, // Walrus upload only (client did embed/encrypt)
+        "/api/restore" => 3,         // download + decrypt + re-embed
+        "/api/ask" => 2,             // recall + LLM
+        _ => 1,                      // recall, recall/manual, etc.
     }
 }
 
@@ -137,11 +138,14 @@ fn endpoint_weight(path: &str) -> i64 {
 // ============================================================
 
 /// Create a Redis multiplexed connection for shared use across the app.
-pub async fn create_redis_client(redis_url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
+pub async fn create_redis_client(
+    redis_url: &str,
+) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(redis_url)
         .map_err(|e| format!("Failed to create Redis client: {}", e))?;
 
-    let conn = client.get_multiplexed_async_connection()
+    let conn = client
+        .get_multiplexed_async_connection()
         .await
         .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
 
@@ -243,9 +247,18 @@ pub struct InMemoryFallback {
 }
 
 impl InMemoryFallback {
-    pub fn can_consume(&mut self, key: &str, weight: f64, capacity: f64, refill_duration_secs: f64) -> bool {
+    pub fn can_consume(
+        &mut self,
+        key: &str,
+        weight: f64,
+        capacity: f64,
+        refill_duration_secs: f64,
+    ) -> bool {
         let refill_rate = capacity / refill_duration_secs;
-        let bucket = self.buckets.entry(key.to_string()).or_insert_with(|| TokenBucket::new(capacity));
+        let bucket = self
+            .buckets
+            .entry(key.to_string())
+            .or_insert_with(|| TokenBucket::new(capacity));
         bucket.peek(weight, capacity, refill_rate)
     }
 
@@ -254,24 +267,28 @@ impl InMemoryFallback {
         if let Some(bucket) = self.buckets.get_mut(key) {
             bucket.consume(weight, capacity, refill_rate);
         }
-        
+
         self.cleanup_counter += 1;
         if self.cleanup_counter >= 1000 {
             self.cleanup_counter = 0;
             let now = std::time::Instant::now();
-            self.buckets.retain(|_, b| now.duration_since(b.last_update).as_secs_f64() < 7200.0);
+            self.buckets
+                .retain(|_, b| now.duration_since(b.last_update).as_secs_f64() < 7200.0);
         }
     }
 }
 
-pub struct TokenBucket {    
+pub struct TokenBucket {
     pub tokens: f64,
     pub last_update: std::time::Instant,
 }
 
 impl TokenBucket {
     pub fn new(capacity: f64) -> Self {
-        Self { tokens: capacity, last_update: std::time::Instant::now() }
+        Self {
+            tokens: capacity,
+            last_update: std::time::Instant::now(),
+        }
     }
 
     pub fn peek(&self, weight: f64, capacity: f64, refill_rate_per_sec: f64) -> bool {
@@ -307,7 +324,9 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header("Content-Type", "application/json")
         .header("Retry-After", retry_after.to_string())
-        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&body).unwrap(),
+        ))
         .unwrap()
 }
 
@@ -324,7 +343,9 @@ fn rate_limiter_unavailable_response() -> Response {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header("Content-Type", "application/json")
         .header("Retry-After", "30")
-        .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_string(&body).unwrap(),
+        ))
         .unwrap()
 }
 
@@ -375,13 +396,13 @@ pub async fn rate_limit_middleware(
     let weight = endpoint_weight(request.uri().path());
 
     // --- Key definitions for all three rate-limit buckets ---
-    let dk_key           = format!("rate:dk:{}", auth.public_key);
-    let burst_key        = format!("rate:{}", auth.owner);
-    let hourly_key       = format!("rate:hr:{}", auth.owner);
+    let dk_key = format!("rate:dk:{}", auth.public_key);
+    let burst_key = format!("rate:{}", auth.owner);
+    let hourly_key = format!("rate:hr:{}", auth.owner);
 
-    let dk_window_start      = now - 60_000.0;      // 1-min window (ms)
-    let burst_window_start   = now - 60_000.0;      // 1-min window (ms)
-    let hourly_window_start  = now - 3_600_000.0;   // 1-hr  window (ms)
+    let dk_window_start = now - 60_000.0; // 1-min window (ms)
+    let burst_window_start = now - 60_000.0; // 1-min window (ms)
+    let hourly_window_start = now - 3_600_000.0; // 1-hr  window (ms)
 
     // --- MED-19: Atomic check-and-record via Lua script for all 3 layers ---
     // Each layer is checked+recorded atomically. If Redis is unavailable,
@@ -398,14 +419,21 @@ pub async fn rate_limit_middleware(
         config.max_requests_per_delegate_key,
         weight,
         120, // TTL 2 min
-    ).await {
+    )
+    .await
+    {
         Ok(WindowCheckResult::Denied) => {
             tracing::warn!(
                 "rate limit [delegate-key]: key={}... denied (limit={})",
                 &auth.public_key[..16.min(auth.public_key.len())],
                 config.max_requests_per_delegate_key
             );
-            return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
+            return rate_limit_response(
+                "delegate_key",
+                config.max_requests_per_delegate_key,
+                "min",
+                60,
+            );
         }
         Err(e) => {
             tracing::warn!("rate limit [delegate-key] Redis error: {}", e);
@@ -424,15 +452,23 @@ pub async fn rate_limit_middleware(
             config.max_requests_per_minute,
             weight,
             120, // TTL 2 min
-        ).await {
+        )
+        .await
+        {
             Ok(WindowCheckResult::Denied) => {
                 tracing::warn!(
                     "rate limit [burst]: owner={} denied (limit={})",
-                    auth.owner, config.max_requests_per_minute
+                    auth.owner,
+                    config.max_requests_per_minute
                 );
                 // Roll back the delegate-key window entry just recorded above
                 // (best-effort; a Lua multi-key script would be fully atomic across keys)
-                return rate_limit_response("account_burst", config.max_requests_per_minute, "min", 60);
+                return rate_limit_response(
+                    "account_burst",
+                    config.max_requests_per_minute,
+                    "min",
+                    60,
+                );
             }
             Err(e) => {
                 tracing::warn!("rate limit [burst] Redis error: {}", e);
@@ -452,13 +488,21 @@ pub async fn rate_limit_middleware(
             config.max_requests_per_hour,
             weight,
             3700, // TTL ~1hr + buffer
-        ).await {
+        )
+        .await
+        {
             Ok(WindowCheckResult::Denied) => {
                 tracing::warn!(
                     "rate limit [sustained]: owner={} denied (limit={})",
-                    auth.owner, config.max_requests_per_hour
+                    auth.owner,
+                    config.max_requests_per_hour
                 );
-                return rate_limit_response("account_sustained", config.max_requests_per_hour, "hour", 300);
+                return rate_limit_response(
+                    "account_sustained",
+                    config.max_requests_per_hour,
+                    "hour",
+                    300,
+                );
             }
             Err(e) => {
                 tracing::warn!("rate limit [sustained] Redis error: {}", e);
@@ -473,19 +517,59 @@ pub async fn rate_limit_middleware(
         tracing::warn!("rate limit: Redis is unreachable, using in-memory fallback");
         let mut fallback = state.fallback_rate_limit.lock().await;
 
-        if !fallback.can_consume(&dk_key, weight as f64, config.max_requests_per_delegate_key as f64, 60.0) {
-            return rate_limit_response("delegate_key", config.max_requests_per_delegate_key, "min", 60);
+        if !fallback.can_consume(
+            &dk_key,
+            weight as f64,
+            config.max_requests_per_delegate_key as f64,
+            60.0,
+        ) {
+            return rate_limit_response(
+                "delegate_key",
+                config.max_requests_per_delegate_key,
+                "min",
+                60,
+            );
         }
-        if !fallback.can_consume(&burst_key, weight as f64, config.max_requests_per_minute as f64, 60.0) {
+        if !fallback.can_consume(
+            &burst_key,
+            weight as f64,
+            config.max_requests_per_minute as f64,
+            60.0,
+        ) {
             return rate_limit_response("account_burst", config.max_requests_per_minute, "min", 60);
         }
-        if !fallback.can_consume(&hourly_key, weight as f64, config.max_requests_per_hour as f64, 3600.0) {
-            return rate_limit_response("account_sustained", config.max_requests_per_hour, "hour", 300);
+        if !fallback.can_consume(
+            &hourly_key,
+            weight as f64,
+            config.max_requests_per_hour as f64,
+            3600.0,
+        ) {
+            return rate_limit_response(
+                "account_sustained",
+                config.max_requests_per_hour,
+                "hour",
+                300,
+            );
         }
 
-        fallback.consume(&dk_key, weight as f64, config.max_requests_per_delegate_key as f64, 60.0);
-        fallback.consume(&burst_key, weight as f64, config.max_requests_per_minute as f64, 60.0);
-        fallback.consume(&hourly_key, weight as f64, config.max_requests_per_hour as f64, 3600.0);
+        fallback.consume(
+            &dk_key,
+            weight as f64,
+            config.max_requests_per_delegate_key as f64,
+            60.0,
+        );
+        fallback.consume(
+            &burst_key,
+            weight as f64,
+            config.max_requests_per_minute as f64,
+            60.0,
+        );
+        fallback.consume(
+            &hourly_key,
+            weight as f64,
+            config.max_requests_per_hour as f64,
+            3600.0,
+        );
 
         return next.run(request).await;
     }
@@ -522,7 +606,7 @@ pub async fn check_storage_quota(
     // preventing TOCTOU race conditions.
     // We use a stable hash of the owner string as the lock key.
     let lock_key = stable_hash_i64(owner);
-    
+
     // Use the combined method which uses an explicit transaction and pg_advisory_xact_lock
     let used = state.db.get_storage_used_with_lock(owner, lock_key).await?;
     let projected = used + additional_bytes;
@@ -532,7 +616,10 @@ pub async fn check_storage_quota(
         let max_mb = max_bytes as f64 / 1_048_576.0;
         tracing::warn!(
             "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
-            owner, used_mb, additional_bytes as f64 / 1_048_576.0, max_mb
+            owner,
+            used_mb,
+            additional_bytes as f64 / 1_048_576.0,
+            max_mb
         );
         return Err(AppError::QuotaExceeded(format!(
             "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
@@ -549,9 +636,9 @@ fn stable_hash_i64(s: &str) -> i64 {
     const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
     const FNV_PRIME: u64 = 1_099_511_628_211;
 
-    let hash = s.bytes().fold(FNV_OFFSET, |acc, b| {
-        acc.wrapping_mul(FNV_PRIME) ^ b as u64
-    });
+    let hash = s
+        .bytes()
+        .fold(FNV_OFFSET, |acc, b| acc.wrapping_mul(FNV_PRIME) ^ b as u64);
 
     // Fold into i64 range (XOR high and low 32 bits)
     ((hash >> 32) ^ (hash & 0xFFFF_FFFF)) as i64
@@ -582,9 +669,9 @@ pub async fn check_sender_rate_limit(
     let mut redis = state.redis.clone();
 
     let min_key = format!("rate:sponsor:min:{}", sender);
-    let hr_key  = format!("rate:sponsor:hr:{}",  sender);
+    let hr_key = format!("rate:sponsor:hr:{}", sender);
     let min_window_start = now - 60_000.0;
-    let hr_window_start  = now - 3_600_000.0;
+    let hr_window_start = now - 3_600_000.0;
 
     let mut redis_down = false;
 
@@ -597,7 +684,9 @@ pub async fn check_sender_rate_limit(
         per_minute,
         1, // weight = 1 per sponsor request
         120,
-    ).await {
+    )
+    .await
+    {
         Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::MinuteLimitExceeded),
         Err(e) => {
             tracing::warn!("check_sender_rate_limit: Redis error (minute): {} — switching to in-memory fallback", e);
@@ -616,7 +705,9 @@ pub async fn check_sender_rate_limit(
             per_hour,
             1, // weight = 1 per sponsor request
             3700,
-        ).await {
+        )
+        .await
+        {
             Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::HourLimitExceeded),
             Err(e) => {
                 tracing::warn!("check_sender_rate_limit: Redis error (hour): {} — switching to in-memory fallback", e);
@@ -636,7 +727,7 @@ pub async fn check_sender_rate_limit(
             return Ok(SponsorRlResult::HourLimitExceeded);
         }
         fallback.consume(&min_key, 1.0, per_minute as f64, 60.0);
-        fallback.consume(&hr_key,  1.0, per_hour as f64, 3600.0);
+        fallback.consume(&hr_key, 1.0, per_hour as f64, 3600.0);
         return Ok(SponsorRlResult::Allowed);
     }
 
@@ -650,6 +741,7 @@ pub async fn check_sender_rate_limit(
 /// Cost of the /api/analyze endpoint already reserved by the middleware
 /// for the first (LLM extraction) step. The weight value must match
 /// `endpoint_weight("/api/analyze")` = 5.
+#[allow(dead_code)]
 const ANALYZE_BASE_WEIGHT: i64 = 5;
 
 /// Additional weight to charge after fact-count is known.
@@ -665,6 +757,7 @@ pub fn analyze_additional_weight(fact_count: usize) -> i64 {
 }
 
 /// Total effective weight of an `/api/analyze` call given `fact_count`.
+#[allow(dead_code)]
 pub fn analyze_total_weight(fact_count: usize) -> i64 {
     ANALYZE_BASE_WEIGHT + analyze_additional_weight(fact_count)
 }
@@ -688,17 +781,27 @@ pub async fn charge_explicit_weight(
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
-    let dk_key    = format!("rate:dk:{}", auth.public_key);
+    let dk_key = format!("rate:dk:{}", auth.public_key);
     let burst_key = format!("rate:{}", auth.owner);
-    let hr_key    = format!("rate:hr:{}", auth.owner);
+    let hr_key = format!("rate:hr:{}", auth.owner);
 
     // MED-19: Use the same atomic Lua script for explicit weight charges
     // (called from /api/analyze after fact count is known).
     // Ignore WindowCheckResult here — this is a post-hoc charge after
     // the expensive work is done; we prefer not to block the response.
-    let _ = check_and_record_window(&mut redis, &dk_key,    now,       now,       i64::MAX, weight, 120).await;
-    let _ = check_and_record_window(&mut redis, &burst_key, now,       now + 0.1, i64::MAX, weight, 120).await;
-    let _ = check_and_record_window(&mut redis, &hr_key,    now,       now + 0.2, i64::MAX, weight, 3700).await;
+    let _ = check_and_record_window(&mut redis, &dk_key, now, now, i64::MAX, weight, 120).await;
+    let _ = check_and_record_window(
+        &mut redis,
+        &burst_key,
+        now,
+        now + 0.1,
+        i64::MAX,
+        weight,
+        120,
+    )
+    .await;
+    let _ =
+        check_and_record_window(&mut redis, &hr_key, now, now + 0.2, i64::MAX, weight, 3700).await;
 
     Ok(())
 }
@@ -750,9 +853,9 @@ pub async fn sponsor_rate_limit_middleware(
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
     let min_key = format!("rate:sponsor:ip:min:{}", ip);
-    let hr_key  = format!("rate:sponsor:ip:hr:{}",  ip);
+    let hr_key = format!("rate:sponsor:ip:hr:{}", ip);
     let min_window_start = now - 60_000.0;
-    let hr_window_start  = now - 3_600_000.0;
+    let hr_window_start = now - 3_600_000.0;
 
     let mut redis_down = false;
 
@@ -765,9 +868,15 @@ pub async fn sponsor_rate_limit_middleware(
         config.per_minute,
         1,
         120,
-    ).await {
+    )
+    .await
+    {
         Ok(WindowCheckResult::Denied) => {
-            tracing::warn!("sponsor rate limit [IP/min]: ip={} denied (limit={})", ip, config.per_minute);
+            tracing::warn!(
+                "sponsor rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.per_minute
+            );
             return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
         }
         Err(e) => {
@@ -787,9 +896,15 @@ pub async fn sponsor_rate_limit_middleware(
             config.per_hour,
             1,
             3700,
-        ).await {
+        )
+        .await
+        {
             Ok(WindowCheckResult::Denied) => {
-                tracing::warn!("sponsor rate limit [IP/hr]: ip={} denied (limit={})", ip, config.per_hour);
+                tracing::warn!(
+                    "sponsor rate limit [IP/hr]: ip={} denied (limit={})",
+                    ip,
+                    config.per_hour
+                );
                 return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
             }
             Err(e) => {
@@ -813,7 +928,7 @@ pub async fn sponsor_rate_limit_middleware(
         }
 
         fallback.consume(&min_key, 1.0, config.per_minute as f64, 60.0);
-        fallback.consume(&hr_key,  1.0, config.per_hour as f64, 3600.0);
+        fallback.consume(&hr_key, 1.0, config.per_hour as f64, 3600.0);
 
         return next.run(request).await;
     }
@@ -841,8 +956,16 @@ mod tests {
         assert_eq!(endpoint_weight("/api/ask"), 2);
 
         // With trailing slash — must return SAME weight (MED-20 fix)
-        assert_eq!(endpoint_weight("/api/analyze/"), 5, "trailing slash bypass!");
-        assert_eq!(endpoint_weight("/api/remember/"), 5, "trailing slash bypass!");
+        assert_eq!(
+            endpoint_weight("/api/analyze/"),
+            5,
+            "trailing slash bypass!"
+        );
+        assert_eq!(
+            endpoint_weight("/api/remember/"),
+            5,
+            "trailing slash bypass!"
+        );
         assert_eq!(endpoint_weight("/api/ask/"), 2, "trailing slash bypass!");
 
         // Unknown path → weight 1
@@ -905,7 +1028,10 @@ mod tests {
     /// the TOCTOU race is reintroduced.
     #[test]
     fn test_lua_script_contains_atomic_guard() {
-        assert!(!SLIDING_WINDOW_LUA.is_empty(), "Lua script must not be empty");
+        assert!(
+            !SLIDING_WINDOW_LUA.is_empty(),
+            "Lua script must not be empty"
+        );
         assert!(
             SLIDING_WINDOW_LUA.contains("count + weight > limit"),
             "Lua script must contain atomic count+weight guard"
@@ -928,9 +1054,9 @@ mod tests {
     #[test]
     fn test_window_check_result_variants() {
         let allowed = WindowCheckResult::Allowed;
-        let denied  = WindowCheckResult::Denied;
+        let denied = WindowCheckResult::Denied;
         assert_eq!(allowed, WindowCheckResult::Allowed);
-        assert_eq!(denied,  WindowCheckResult::Denied);
+        assert_eq!(denied, WindowCheckResult::Denied);
         assert_ne!(allowed, denied, "Allowed and Denied must be distinct");
     }
 
@@ -939,13 +1065,21 @@ mod tests {
     #[test]
     fn test_endpoint_weight_percent_encoded_analyze() {
         // "%79" = 'y', so "/api/anal%79ze" = "/api/analyze"
-        assert_eq!(endpoint_weight("/api/anal%79ze"), 5, "percent-encoded 'y' bypass");
+        assert_eq!(
+            endpoint_weight("/api/anal%79ze"),
+            5,
+            "percent-encoded 'y' bypass"
+        );
     }
 
     #[test]
     fn test_endpoint_weight_percent_encoded_remember() {
         // "%72" = 'r', so "/api/%72emember" = "/api/remember"
-        assert_eq!(endpoint_weight("/api/%72emember"), 5, "percent-encoded 'r' bypass");
+        assert_eq!(
+            endpoint_weight("/api/%72emember"),
+            5,
+            "percent-encoded 'r' bypass"
+        );
     }
 
     #[test]
@@ -987,9 +1121,17 @@ mod tests {
     fn test_fallback_token_bucket_consume_reduces_tokens() {
         let mut bucket = TokenBucket::new(10.0);
         bucket.consume(3.0, 10.0, 1.0); // consume 3 of 10
-        // tokens should be ~7.0 (with tiny time delta adding a fraction)
-        assert!(bucket.tokens < 8.0, "tokens should be around 7, got {}", bucket.tokens);
-        assert!(bucket.tokens > 6.0, "tokens should be around 7, got {}", bucket.tokens);
+                                        // tokens should be ~7.0 (with tiny time delta adding a fraction)
+        assert!(
+            bucket.tokens < 8.0,
+            "tokens should be around 7, got {}",
+            bucket.tokens
+        );
+        assert!(
+            bucket.tokens > 6.0,
+            "tokens should be around 7, got {}",
+            bucket.tokens
+        );
     }
 
     #[test]
@@ -1007,22 +1149,25 @@ mod tests {
     fn test_fallback_token_bucket_rejects_when_empty() {
         let mut bucket = TokenBucket::new(5.0);
         bucket.consume(5.0, 5.0, 0.0); // consume all, no refill
-        // With 0 refill rate and ~0 elapsed time, no tokens available
+                                       // With 0 refill rate and ~0 elapsed time, no tokens available
         assert!(!bucket.peek(1.0, 5.0, 0.0));
     }
 
     #[test]
     fn test_fallback_inmemory_cleanup() {
-        let mut fb = InMemoryFallback::default();
-
-        // Force cleanup counter to ~1000
-        fb.cleanup_counter = 999;
+        let mut fb = InMemoryFallback {
+            cleanup_counter: 999,
+            ..Default::default()
+        };
 
         // Add a bucket and consume to trigger cleanup
         fb.consume("test_key", 1.0, 10.0, 60.0);
 
         // After cleanup_counter >= 1000, it resets to 0
-        assert_eq!(fb.cleanup_counter, 0, "cleanup counter should reset after reaching 1000");
+        assert_eq!(
+            fb.cleanup_counter, 0,
+            "cleanup counter should reset after reaching 1000"
+        );
     }
 
     #[test]
@@ -1086,9 +1231,21 @@ mod tests {
     #[test]
     fn test_sponsor_rl_result_variants() {
         assert_eq!(SponsorRlResult::Allowed, SponsorRlResult::Allowed);
-        assert_eq!(SponsorRlResult::MinuteLimitExceeded, SponsorRlResult::MinuteLimitExceeded);
-        assert_eq!(SponsorRlResult::HourLimitExceeded, SponsorRlResult::HourLimitExceeded);
-        assert_ne!(SponsorRlResult::Allowed, SponsorRlResult::MinuteLimitExceeded);
-        assert_ne!(SponsorRlResult::MinuteLimitExceeded, SponsorRlResult::HourLimitExceeded);
+        assert_eq!(
+            SponsorRlResult::MinuteLimitExceeded,
+            SponsorRlResult::MinuteLimitExceeded
+        );
+        assert_eq!(
+            SponsorRlResult::HourLimitExceeded,
+            SponsorRlResult::HourLimitExceeded
+        );
+        assert_ne!(
+            SponsorRlResult::Allowed,
+            SponsorRlResult::MinuteLimitExceeded
+        );
+        assert_ne!(
+            SponsorRlResult::MinuteLimitExceeded,
+            SponsorRlResult::HourLimitExceeded
+        );
     }
 }

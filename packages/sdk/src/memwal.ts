@@ -40,6 +40,15 @@ import type {
     RecallManualOptions,
     RecallManualResult,
     RestoreResult,
+    RememberBulkItem,
+    RememberBulkOptions,
+    RememberBulkResult,
+    RememberAcceptedResult,
+    RememberJobStatus,
+    RememberBulkAcceptedResult,
+    RememberBulkStatusResult,
+    RememberBulkStatusItem,
+    RememberBulkItemResult,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
 
@@ -137,22 +146,251 @@ export class MemWal {
     // ============================================================
 
     /**
-     * Remember something — server handles: verify → embed → encrypt → Walrus upload → store
+     * Submit a remember request and return as soon as the server accepts the job.
+     */
+    async rememberAsync(text: string, namespace?: string): Promise<RememberAcceptedResult> {
+        return this.signedRequest<RememberAcceptedResult>(
+            "POST",
+            "/api/remember",
+            { text, namespace: namespace ?? this.namespace },
+            [200, 202],
+        );
+    }
+
+    /**
+     * Poll an accepted remember job until it reaches a terminal state.
+     */
+    async waitForRememberJob(
+        jobId: string,
+        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
+    ): Promise<RememberResult> {
+        const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
+        const deadline = Date.now() + timeoutMs;
+
+        while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, pollIntervalMs));
+
+            const status = await this.signedRequest<RememberJobStatus>(
+                "GET",
+                `/api/remember/${jobId}`,
+                {},
+            );
+
+            if (status.status === "done") {
+                return {
+                    id: jobId,
+                    blob_id: status.blob_id ?? "",
+                    owner: status.owner ?? "",
+                    namespace: status.namespace ?? this.namespace,
+                };
+            }
+            if (status.status === "failed") {
+                throw Object.assign(
+                    new Error(`remember job failed: ${status.error ?? "unknown error"}`),
+                    { status: 500, jobId },
+                );
+            }
+            if (status.status === "not_found") {
+                throw Object.assign(new Error(`remember job not found: ${jobId}`), {
+                    status: 404,
+                    jobId,
+                });
+            }
+        }
+
+        throw Object.assign(
+            new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`),
+            { status: 504, jobId },
+        );
+    }
+
+    /**
+     * Remember something and wait for the background job to complete.
+     */
+    async rememberAndWait(
+        text: string,
+        namespace?: string,
+        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
+    ): Promise<RememberResult> {
+        const accepted = await this.rememberAsync(text, namespace);
+        return this.waitForRememberJob(accepted.job_id, opts);
+    }
+
+    /**
+     * Remember something — server handles: verify → embed → encrypt → Walrus upload → store.
+     *
+     * This keeps the historical SDK behavior by waiting for the async job to complete.
+     * Use rememberAsync() when you need fast-accept semantics.
      *
      * @param text - The text to remember
-     * @returns RememberResult with id, blob_id, owner
+     * @param namespace - Optional namespace override
+     * @param opts.pollIntervalMs - How often to poll (default 1500ms)
+     * @param opts.timeoutMs - Max wait time before throwing (default 60_000ms)
+     */
+    async remember(
+        text: string,
+        namespace?: string,
+        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
+    ): Promise<RememberResult> {
+        return this.rememberAndWait(text, namespace, opts);
+    }
+
+    /**
+     * Remember multiple memories in one batched request (ENG-1408).
+     *
+     * Server handles: verify → embed + SEAL-encrypt all items concurrently →
+     * upload N blobs to Walrus in parallel → 1 PTB per wallet slot for
+     * set-metadata + transfer. This collapses `N × (2 + 1)` Sui transactions
+     * into roughly `2N + K` where K ≤ wallet pool size.
+     *
+     * Returns `202 Accepted` immediately with `job_ids[]`; this method then
+     * polls the batch status endpoint and resolves
+     * once all jobs reach a terminal state (`done`, `failed`, or `timeout`).
+     *
+     * @param items - Array of `{ text, namespace? }` items (max 20 per call)
+     * @param opts.pollIntervalMs - How often to poll each job (default 1500ms)
+     * @param opts.timeoutMs - Max total wait (default 120_000ms)
      *
      * @example
      * ```typescript
-     * const result = await memwal.remember("I'm allergic to peanuts")
-     * console.log(result.blob_id) // "TY8mW0yr..."
+     * const result = await memwal.rememberBulk([
+     *     { text: "I love coffee" },
+     *     { text: "I live in Tokyo", namespace: "profile" },
+     * ])
+     * console.log(`${result.succeeded}/${result.total} stored`)
+     * for (const r of result.results) {
+     *     if (r.status === "done") console.log(r.blob_id)
+     * }
      * ```
      */
-    async remember(text: string, namespace?: string): Promise<RememberResult> {
-        return this.signedRequest<RememberResult>("POST", "/api/remember", {
-            text,
-            namespace: namespace ?? this.namespace,
-        });
+    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
+
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+
+        const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
+            "POST",
+            "/api/remember/bulk",
+            { items: normalised },
+            [200, 202],
+        );
+
+        if (!accepted.job_ids || accepted.job_ids.length !== normalised.length) {
+            throw new Error(
+                `rememberBulkAsync: server returned ${accepted.job_ids?.length ?? 0} job_ids for ${normalised.length} items`,
+            );
+        }
+
+        return accepted;
+    }
+
+    async getRememberBulkStatus(jobIds: string[]): Promise<RememberBulkStatusResult> {
+        return this.signedRequest<RememberBulkStatusResult>(
+            "POST",
+            "/api/remember/bulk/status",
+            { job_ids: jobIds },
+        );
+    }
+
+    async waitForRememberJobs(
+        jobIds: string[],
+        namespaces: string[] = [],
+        opts: RememberBulkOptions = {},
+    ): Promise<RememberBulkResult> {
+        const { pollIntervalMs = 1500, timeoutMs = 120_000 } = opts;
+        const deadline = Date.now() + timeoutMs;
+        const results: RememberBulkItemResult[] = jobIds.map((jobId, idx) => ({
+            id: jobId,
+            blob_id: "",
+            status: "timeout",
+            namespace: namespaces[idx] ?? this.namespace,
+            error: `polling timed out after ${timeoutMs}ms`,
+        }));
+        const pending = new Set(jobIds);
+
+        while (pending.size > 0 && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, pollIntervalMs));
+
+            const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
+            if (pendingIds.length === 0) {
+                break;
+            }
+
+            let batchStatus: RememberBulkStatusResult;
+
+            try {
+                batchStatus = await this.getRememberBulkStatus(pendingIds);
+            } catch (err) {
+                const httpStatus = (err as { status?: number }).status ?? 0;
+                if (httpStatus === 429 || httpStatus >= 500 || httpStatus === 0) {
+                    continue;
+                }
+                throw err;
+            }
+
+            const statusById = new Map<string, RememberBulkStatusItem[]>();
+            for (const item of batchStatus.results) {
+                const bucket = statusById.get(item.job_id);
+                if (bucket) {
+                    bucket.push(item);
+                } else {
+                    statusById.set(item.job_id, [item]);
+                }
+            }
+
+            for (const jobId of pendingIds) {
+                const status = statusById.get(jobId)?.shift();
+                if (!status) {
+                    continue;
+                }
+
+                const idx = jobIds.indexOf(jobId);
+                if (status.status === "done") {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: status.blob_id ?? "",
+                        status: "done",
+                        namespace: namespaces[idx] ?? this.namespace,
+                    };
+                    pending.delete(jobId);
+                } else if (status.status === "failed" || status.status === "not_found") {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: "",
+                        status: "failed",
+                        namespace: namespaces[idx] ?? this.namespace,
+                        error:
+                            status.status === "not_found"
+                                ? "job not found"
+                                : status.error ?? "unknown error",
+                    };
+                    pending.delete(jobId);
+                }
+            }
+        }
+
+        const succeeded = results.filter((r) => r.status === "done").length;
+
+        return {
+            results,
+            total: results.length,
+            succeeded,
+            failed: results.length - succeeded,
+        };
+    }
+
+    async rememberBulk(
+        items: RememberBulkItem[],
+        opts: RememberBulkOptions = {},
+    ): Promise<RememberBulkResult> {
+        const namespaces = items.map((item) => item.namespace ?? this.namespace);
+        const accepted = await this.rememberBulkAsync(items);
+        return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
     }
 
     /**
@@ -527,16 +765,33 @@ export class MemWal {
      * (5-min TTL, scoped to the server's `packageId`) so a wire capture has
      * a bounded blast radius. Requires `@mysten/seal` and `@mysten/sui`.
      */
+    /**
+     * Make a signed request to the server.
+     *
+     * @param acceptedStatuses - HTTP status codes to treat as success (default [200]).
+     *   Pass [200, 202] for endpoints that return 202 Accepted.
+     */
     private async signedRequest<T>(
         method: string,
         path: string,
         body: object,
-        options: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
+        acceptedStatusesOrOptions: number[] | { includeDelegateKey?: boolean; signal?: AbortSignal } = [200],
+        requestOptions: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
     ): Promise<T> {
+        const acceptedStatuses = Array.isArray(acceptedStatusesOrOptions)
+            ? acceptedStatusesOrOptions
+            : [200];
+        const options = Array.isArray(acceptedStatusesOrOptions)
+            ? requestOptions
+            : acceptedStatusesOrOptions;
         const ed = await getEd();
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
-        const bodyStr = JSON.stringify(body);
+        // Canonical body used for both: (a) the HTTP wire body and
+        // (b) the SHA-256 digest inside the signed message. GET requests
+        // carry no body, so the server will hash an EMPTY byte string —
+        // we must sign the same empty string for the signature to verify.
+        const bodyStr = method === "GET" ? "" : JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
 
         // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
@@ -570,11 +825,11 @@ export class MemWal {
         const res = await fetch(url, {
             method,
             headers,
-            body: bodyStr,
+            body: method === "GET" ? undefined : bodyStr,
             signal: options.signal,
         });
 
-        if (!res.ok) {
+        if (!acceptedStatuses.includes(res.status)) {
             // LOW-26: sanitize server error bodies before surfacing to callers.
             const raw = await res.text();
             const { message, serverCode } = sanitizeServerError(res.status, raw);

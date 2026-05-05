@@ -79,33 +79,37 @@ pub async fn upload_blob(
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let mut req = client
-        .post(&url)
-        .json(&WalrusUploadRequest {
-            data: data_b64,
-            key_index,
-            owner: owner_address.to_string(),
-            namespace: namespace.to_string(),
-            package_id: package_id.to_string(),
-            epochs,
-            agent_id: agent_id.map(|s| s.to_string()),
-        });
+    let mut req = client.post(&url).json(&WalrusUploadRequest {
+        data: data_b64,
+        key_index,
+        owner: owner_address.to_string(),
+        namespace: namespace.to_string(),
+        package_id: package_id.to_string(),
+        epochs,
+        agent_id: agent_id.map(|s| s.to_string()),
+    });
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!("Sidecar walrus/upload request failed: {}. Is the sidecar running?", e))
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Sidecar walrus/upload request failed: {}. Is the sidecar running?",
+            e
+        ))
+    })?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(AppError::Internal(format!("walrus upload failed: {}", err.error)));
+            return Err(AppError::Internal(format!(
+                "walrus upload failed: {}",
+                err.error
+            )));
         }
-        return Err(AppError::Internal(format!("walrus upload failed: {}", body)));
+        return Err(AppError::Internal(format!(
+            "walrus upload failed: {}",
+            body
+        )));
     }
 
     let result: WalrusUploadResponse = resp.json().await.map_err(|e| {
@@ -149,31 +153,33 @@ pub async fn query_blobs_by_owner(
         body["packageId"] = serde_json::json!(pkg);
     }
 
-    let mut req = client
-        .post(&url)
-        .json(&body);
+    let mut req = client.post(&url).json(&body);
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
     let resp = req
         .send()
         .await
-        .map_err(|e| {
-            AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
-        })?;
+        .map_err(|e| AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e)))?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!("walrus query-blobs failed: {}", body)));
+        return Err(AppError::Internal(format!(
+            "walrus query-blobs failed: {}",
+            body
+        )));
     }
 
-    let result: QueryBlobsResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse query-blobs response: {}", e))
-    })?;
+    let result: QueryBlobsResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse query-blobs response: {}", e)))?;
 
     tracing::info!(
         "walrus query-blobs ok: {} blobs for owner={}, ns={:?}",
-        result.total, owner_address, namespace
+        result.total,
+        owner_address,
+        namespace
     );
 
     Ok(result.blobs)
@@ -190,10 +196,7 @@ pub async fn download_blob(
 ) -> Result<Vec<u8>, AppError> {
     // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
     let download_fut = walrus_client.read_blob_by_id(blob_id);
-    let bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        download_fut,
-    ).await {
+    let bytes = match tokio::time::timeout(std::time::Duration::from_secs(15), download_fut).await {
         Ok(Ok(data)) => data,
         Ok(Err(e)) => {
             let err_str = e.to_string();
@@ -201,13 +204,22 @@ pub async fn download_blob(
                 || err_str.to_lowercase().contains("not found")
                 || err_str.to_lowercase().contains("blob not found");
             if is_not_found {
-                return Err(AppError::BlobNotFound(format!("Blob {} expired or not found: {}", blob_id, err_str)));
+                return Err(AppError::BlobNotFound(format!(
+                    "Blob {} expired or not found: {}",
+                    blob_id, err_str
+                )));
             } else {
-                return Err(AppError::Internal(format!("Walrus download failed: {}", err_str)));
+                return Err(AppError::Internal(format!(
+                    "Walrus download failed: {}",
+                    err_str
+                )));
             }
         }
         Err(_) => {
-            return Err(AppError::Internal(format!("Walrus download timed out after 10s for blob {}", blob_id)));
+            return Err(AppError::Internal(format!(
+                "Walrus download timed out after 10s for blob {}",
+                blob_id
+            )));
         }
     };
 
@@ -218,4 +230,3 @@ pub async fn download_blob(
     );
     Ok(bytes)
 }
-

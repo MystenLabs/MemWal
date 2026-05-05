@@ -42,10 +42,28 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
 
+        let migration_005 = include_str!("../migrations/005_remember_jobs.sql");
+        sqlx::raw_sql(migration_005)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
+
+        // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
+        let migration_006 = include_str!("../migrations/006_bulk_remember.sql");
+        sqlx::raw_sql(migration_006)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
+    }
+
+    /// Expose a reference to the underlying `PgPool` so job handlers
+    /// can run ad-hoc queries (e.g. `remember_jobs` status updates).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota)
@@ -74,7 +92,14 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
-        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B", id, blob_id, owner, namespace, blob_size_bytes);
+        tracing::debug!(
+            "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
+            id,
+            blob_id,
+            owner,
+            namespace,
+            blob_size_bytes
+        );
         Ok(())
     }
 
@@ -133,22 +158,21 @@ impl VectorDb {
 
     /// Delete all vector entries for a given owner + namespace
     #[allow(dead_code)]
-    pub async fn delete_by_namespace(
-        &self,
-        owner: &str,
-        namespace: &str,
-    ) -> Result<u64, AppError> {
-        let result = sqlx::query(
-            "DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2",
-        )
-        .bind(owner)
-        .bind(namespace)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
+    pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
+            .bind(owner)
+            .bind(namespace)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
 
         let rows = result.rows_affected();
-        tracing::info!("deleted {} entries for owner={}, ns={}", rows, owner, namespace);
+        tracing::info!(
+            "deleted {} entries for owner={}, ns={}",
+            rows,
+            owner,
+            namespace
+        );
         Ok(rows)
     }
 
@@ -161,11 +185,18 @@ impl VectorDb {
             .bind(owner)
             .execute(&self.pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to delete vector by blob_id: {}", e))
+            })?;
 
         let rows = result.rows_affected();
         if rows > 0 {
-            tracing::info!("deleted expired blob from DB: blob_id={}, owner={}, rows={}", blob_id, owner, rows);
+            tracing::info!(
+                "deleted expired blob from DB: blob_id={}, owner={}, rows={}",
+                blob_id,
+                owner,
+                rows
+            );
         }
         Ok(rows)
     }
@@ -211,7 +242,11 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to cache delegate key: {}", e)))?;
 
-        tracing::debug!("cached delegate key: {} -> account {}", public_key_hex, account_id);
+        tracing::debug!(
+            "cached delegate key: {} -> account {}",
+            public_key_hex,
+            account_id
+        );
         Ok(())
     }
 
@@ -220,8 +255,10 @@ impl VectorDb {
         let result = sqlx::query("DELETE FROM delegate_key_cache WHERE expires_at <= NOW()")
             .execute(&self.pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to evict expired delegate keys: {}", e)))?;
-        
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to evict expired delegate keys: {}", e))
+            })?;
+
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!("Evicted {} expired delegate keys from cache", rows);
@@ -236,14 +273,11 @@ impl VectorDb {
     /// request with the revoked key would hit the cache, fail the RPC verify, log
     /// noise, and waste an RPC call — in an infinite loop until TTL expiry.
     pub async fn delete_cached_key(&self, public_key_hex: &str) -> Result<u64, AppError> {
-        let result =
-            sqlx::query("DELETE FROM delegate_key_cache WHERE public_key = $1")
-                .bind(public_key_hex)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to delete stale cached key: {}", e))
-                })?;
+        let result = sqlx::query("DELETE FROM delegate_key_cache WHERE public_key = $1")
+            .bind(public_key_hex)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to delete stale cached key: {}", e)))?;
 
         let rows = result.rows_affected();
         if rows > 0 {
@@ -264,8 +298,15 @@ impl VectorDb {
     /// MED-21 bugfix: using `pg_advisory_lock` with a connection pool causes deadlocks
     /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
     /// transaction so the lock is automatically released on commit/rollback.
-    pub async fn get_storage_used_with_lock(&self, owner: &str, lock_key: i64) -> Result<i64, AppError> {
-        let mut tx = self.pool.begin().await
+    pub async fn get_storage_used_with_lock(
+        &self,
+        owner: &str,
+        lock_key: i64,
+    ) -> Result<i64, AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| AppError::Internal(format!("Failed to begin tx: {}", e)))?;
 
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -282,7 +323,9 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
 
-        tx.commit().await.map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
         Ok(row.0)
     }
@@ -294,17 +337,13 @@ impl VectorDb {
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
     #[allow(dead_code)]
-    pub async fn find_account_by_owner(
-        &self,
-        owner: &str,
-    ) -> Result<Option<String>, AppError> {
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT account_id FROM accounts WHERE owner = $1",
-        )
-        .bind(owner)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
+    pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
+        let result: Option<(String,)> =
+            sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")
+                .bind(owner)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
 
         Ok(result.map(|(id,)| id))
     }
