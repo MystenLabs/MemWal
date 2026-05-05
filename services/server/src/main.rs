@@ -1,11 +1,15 @@
 mod auth;
 mod db;
+mod enoki;
 mod rate_limit;
 mod routes;
 mod seal;
+mod seal_keyserver;
 mod sui;
 mod types;
 mod walrus;
+mod walrus_onchain;
+mod walrus_publisher;
 
 use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
 use std::net::SocketAddr;
@@ -48,48 +52,13 @@ async fn main() {
         config.sponsor_rate_limit.per_hour,
     );
 
-    // Start TS sidecar HTTP server (SEAL + Walrus operations)
-    let sidecar_url = config.sidecar_url.clone();
-    tracing::info!("  sidecar: starting at {}", sidecar_url);
-    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
-    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    let mut sidecar_child = tokio::process::Command::new("npx")
-        .args(["tsx", "sidecar-server.ts"])
-        .current_dir(&scripts_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("Failed to start TS sidecar. Is Node.js installed?");
-
-    // Wait for sidecar to be ready (health check with retry)
-    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    // ENG-1700: Native Rust SDKs replaced the TS sidecar. SEAL/Walrus/Enoki
+    // operations now run in-process (modules: seal, seal_keyserver, walrus,
+    // walrus_publisher, walrus_onchain, enoki). No subprocess to spawn.
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
-    let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
-                }
-            }
-        }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
-        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
-    }
 
     // Initialize database (PostgreSQL + pgvector)
     let db = VectorDb::new(&config.database_url)
@@ -121,6 +90,19 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // Enoki client for sponsored Sui txs (Phase 4 of ENG-1700; replaces
+    // sidecar /sponsor + /sponsor/execute proxies). When ENOKI_API_KEY is
+    // unset, the client returns NotConfigured → /sponsor returns 503.
+    let enoki = crate::enoki::EnokiClient::new(
+        config.enoki_api_key.clone(),
+        config.enoki_network.clone(),
+    );
+    if enoki.is_configured() {
+        tracing::info!("  enoki: configured (network={})", config.enoki_network);
+    } else {
+        tracing::warn!("  enoki: ENOKI_API_KEY unset — /sponsor will return 503");
+    }
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -130,6 +112,7 @@ async fn main() {
         key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        enoki,
     });
 
     // Spawn background task for cache eviction
@@ -253,7 +236,7 @@ async fn main() {
     tracing::info!("  health: http://localhost:{}/health", config.port);
     tracing::info!("  api:    http://localhost:{}/api/{{remember,recall,analyze}}", config.port);
 
-    // Graceful shutdown: kill sidecar when server stops
+    // Graceful shutdown
     let shutdown = async {
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutting down...");
@@ -263,8 +246,4 @@ async fn main() {
         .with_graceful_shutdown(shutdown)
         .await
         .expect("Server failed");
-
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
 }

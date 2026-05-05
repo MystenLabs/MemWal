@@ -19,8 +19,43 @@ ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
-# (no Rust crypto deps needed)
+# Mysten Sui SDK (replaces TS sidecar's @mysten/sui).
+# Pinned to the same revision the seal-sdk crate uses so its
+# `ProgrammableTransaction` / `Address` / `UserSignature` types match the
+# ones we hand to `signed_request` / `Certificate`. Otherwise rustc treats
+# the (otherwise identical) types from crates.io v0.3.1 as a different
+# crate and rejects the call.
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09", features = ["ed25519"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "e494a36a76a0aab8c5d66d5557995faee5c1fb09" }
+
+# SEAL threshold encryption (git, official, not yet on crates.io)
+# — replaces TS sidecar's @mysten/seal. We add reqwest transport ourselves
+# (the SDK ships crypto primitives only, no HTTP client for key servers).
+seal-sdk = { git = "https://github.com/MystenLabs/seal.git", rev = "617941a39f" }
+# `crypto` is the workspace crate inside the seal repo that ships the IBE
+# primitives + EncryptionInput / IBEPublicKeys types we hand to seal_encrypt.
+# seal-sdk only re-exports a subset (seal_encrypt, EncryptedObject); we need
+# the full set for our native encrypt/decrypt pipeline.
+crypto = { git = "https://github.com/MystenLabs/seal.git", rev = "617941a39f", package = "crypto" }
+# fastcrypto provides the Ed25519PublicKey / Ed25519Signature types that
+# seal-sdk uses inside Certificate / FetchKeyRequest. Pinned to the same
+# revision the seal repo uses (read from Cargo.lock for fastcrypto pkg).
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c" }
+
+# CSPRNG used by genkey (ElGamal ephemeral keypair) + session keypair gen.
+rand = "0.8"
+
+# Process-wide caches (SEAL key-server pubkeys + URLs).
+once_cell = "1"
+
+# BCS canonical serialization (Sui native format)
+bcs = "0.1"
+
+# Bech32 decode (Sui private keys: `suiprivkey1...`).
+# Used by walrus_onchain.rs to extract Ed25519 secret bytes from KeyPool entries.
+bech32 = "0.9"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -50,3 +85,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 percent-encoding = "2"
+
+# Error types
+thiserror = "1"
