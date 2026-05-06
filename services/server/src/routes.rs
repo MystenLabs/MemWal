@@ -57,6 +57,205 @@ const MAX_SPONSORED_SIGNATURE_BYTES: usize = 2048;
 // payloads that will fail downstream.
 const MAX_REMEMBER_TEXT_BYTES: usize = 64 * 1024;
 
+struct PendingBulkRememberItem {
+    job_id: String,
+    text: String,
+    namespace: String,
+}
+
+async fn mark_remember_job_failed(state: &AppState, job_id: &str, msg: &str) {
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(msg)
+    .bind(job_id)
+    .execute(state.db.pool())
+    .await;
+}
+
+async fn mark_remember_jobs_failed(state: &AppState, job_ids: &[String], msg: &str) {
+    if job_ids.is_empty() {
+        return;
+    }
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = ANY($2)",
+    )
+    .bind(msg)
+    .bind(job_ids)
+    .execute(state.db.pool())
+    .await;
+}
+
+fn spawn_prepare_remember_job(
+    state: Arc<AppState>,
+    job_id: String,
+    text: String,
+    owner: String,
+    namespace: String,
+    agent_public_key: String,
+) {
+    tokio::spawn(async move {
+        let result: Result<(), AppError> = async {
+            let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
+            let encrypt_fut = crate::seal::seal_encrypt(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                text.as_bytes(),
+                &owner,
+                &state.config.package_id,
+            );
+            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+            let vector = vector_result?;
+            let encrypted = encrypted_result?;
+
+            rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
+
+            let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                AppError::Internal(
+                    "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                        .into(),
+                )
+            })?;
+            let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+
+            enqueue_wallet_job(
+                &state,
+                wallet_index,
+                WalletOperation::UploadAndTransfer {
+                    encrypted_b64,
+                    vector,
+                    owner: owner.clone(),
+                    namespace: namespace.clone(),
+                    package_id: state.config.package_id.clone(),
+                    agent_public_key: Some(agent_public_key.clone()),
+                    remember_job_id: Some(job_id.clone()),
+                    epochs: 50,
+                },
+            )
+            .await?;
+
+            tracing::info!(
+                "remember prepared: job_id={} owner={} ns={} encrypted_bytes={} wallet={}",
+                job_id,
+                owner,
+                namespace,
+                encrypted.len(),
+                wallet_index,
+            );
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            let msg = e.to_string();
+            tracing::error!("remember preparation failed: job_id={} {}", job_id, msg);
+            mark_remember_job_failed(&state, &job_id, &msg).await;
+        }
+    });
+}
+
+fn spawn_prepare_bulk_remember_job(
+    state: Arc<AppState>,
+    owner: String,
+    agent_public_key: String,
+    pending_items: Vec<PendingBulkRememberItem>,
+) {
+    tokio::spawn(async move {
+        let job_ids: Vec<String> = pending_items
+            .iter()
+            .map(|item| item.job_id.clone())
+            .collect();
+        let result: Result<(), AppError> = async {
+            let prep_tasks: Vec<_> = pending_items
+                .into_iter()
+                .map(|item| {
+                    let state = Arc::clone(&state);
+                    let owner = owner.clone();
+                    async move {
+                        let embed_fut =
+                            generate_embedding(&state.http_client, &state.config, &item.text);
+                        let encrypt_fut = crate::seal::seal_encrypt(
+                            &state.http_client,
+                            &state.config.sidecar_url,
+                            state.config.sidecar_secret.as_deref(),
+                            item.text.as_bytes(),
+                            &owner,
+                            &state.config.package_id,
+                        );
+                        let (vector_result, encrypted_result) =
+                            tokio::join!(embed_fut, encrypt_fut);
+                        Ok::<_, AppError>((
+                            item.job_id,
+                            item.namespace,
+                            vector_result?,
+                            encrypted_result?,
+                        ))
+                    }
+                })
+                .collect();
+
+            let prep_results = collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
+
+            let mut prepared: Vec<(String, String, Vec<f32>, Vec<u8>)> =
+                Vec::with_capacity(prep_results.len());
+            let mut total_encrypted_bytes: i64 = 0;
+            for result in prep_results {
+                let (job_id, namespace, vector, encrypted) = result?;
+                total_encrypted_bytes += encrypted.len() as i64;
+                prepared.push((job_id, namespace, vector, encrypted));
+            }
+
+            rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
+
+            let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
+            for (job_id, namespace, vector, encrypted) in prepared {
+                let wallet_index = state
+                    .key_pool
+                    .next_index()
+                    .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+                let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+                bulk_items.push(BulkRememberItem {
+                    job_id,
+                    encrypted_b64,
+                    vector,
+                    namespace,
+                    wallet_index,
+                });
+            }
+
+            let mut storage = state.bulk_job_storage.clone();
+            storage
+                .push(crate::jobs::BulkRememberJob {
+                    owner: owner.clone(),
+                    package_id: state.config.package_id.clone(),
+                    agent_public_key: Some(agent_public_key.clone()),
+                    items: bulk_items,
+                    epochs: 50,
+                })
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to enqueue bulk remember job: {}", e))
+                })?;
+
+            tracing::info!(
+                "remember_bulk prepared: {} items owner={} total_encrypted_bytes={}",
+                job_ids.len(),
+                owner,
+                total_encrypted_bytes
+            );
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            let msg = e.to_string();
+            tracing::error!("remember_bulk preparation failed: {}", msg);
+            mark_remember_jobs_failed(&state, &job_ids, &msg).await;
+        }
+    });
+}
+
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
 /// inside a multi-byte sequence (e.g. emoji).
@@ -164,10 +363,9 @@ async fn generate_embedding(
 
 /// POST /api/remember  (ENG-1406 v3 — fully async)
 ///
-/// Validates the request, enqueues a RememberJob into Apalis Postgres,
-/// inserts a `pending` row into `remember_jobs`, then returns **HTTP 202**
-/// with `{ job_id }`. The caller polls `GET /api/remember/:job_id` to
-/// get status and, once done, the `blob_id`.
+/// Validates the request, inserts a job row, and returns HTTP 202 before
+/// embed/encrypt/upload work starts. Preparation runs in-process and then
+/// enqueues the durable wallet job.
 pub async fn remember(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -185,37 +383,14 @@ pub async fn remember(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-
-    // Step 1: embed + SEAL encrypt concurrently in the route handler.
-    // (~300ms total, parallel). This ensures:
-    //   - No plaintext is stored in the Apalis job payload
-    //   - Exact encrypted size is known for quota check
-    //   - Worker only needs to upload (the slow ~2-3s part)
-    let embed_fut = generate_embedding(&state.http_client, &state.config, &body.text);
-    let encrypt_fut = crate::seal::seal_encrypt(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        body.text.as_bytes(),
-        owner,
-        &state.config.package_id,
-    );
-    let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-    let vector = vector_result?;
-    let encrypted = encrypted_result?;
-
-    // Step 2: Quota check with exact ciphertext size (restored from sync path).
-    // LOW-11: Use encrypted size, not plaintext, to match what's stored in DB.
-    rate_limit::check_storage_quota(&state, owner, encrypted.len() as i64).await?;
+    let owner_owned = owner.clone();
+    let namespace_owned = namespace.clone();
+    let text = body.text;
 
     let job_id = uuid::Uuid::new_v4().to_string();
 
-    // Encode encrypted bytes for job payload (base64, no plaintext stored)
-    let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
-
-    // Step 3: Insert status row BEFORE enqueuing so GET can immediately find it.
     sqlx::query(
-        "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+        "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'running')",
     )
     .bind(&job_id)
     .bind(owner)
@@ -224,58 +399,27 @@ pub async fn remember(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
 
-    // Step 4: Pin a wallet slot at enqueue time and enqueue WalletJob::UploadAndTransfer.
-    // Using WalletJob (vs the legacy RememberJob) guarantees that the upload AND the
-    // subsequent set-metadata + transfer both sign with the SAME wallet — eliminating
-    // the wrong-signer race that occurred when set-metadata picked a different key
-    // from the round-robin pool than the one that owned the freshly-certified blob.
-    let wallet_index = state.key_pool.next_index().ok_or_else(|| {
-        AppError::Internal(
-            "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into(),
-        )
-    })?;
-
-    if let Err(e) = enqueue_wallet_job(
-        &state,
-        wallet_index,
-        WalletOperation::UploadAndTransfer {
-            encrypted_b64,
-            vector,
-            owner: owner.clone(),
-            namespace: namespace.clone(),
-            package_id: state.config.package_id.clone(),
-            agent_public_key: Some(auth.public_key.clone()),
-            remember_job_id: Some(job_id.clone()),
-            epochs: 50,
-        },
-    )
-    .await
-    {
-        let msg = format!("Failed to enqueue remember job: {}", e);
-        let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(&msg)
-        .bind(&job_id)
-        .execute(state.db.pool())
-        .await;
-        return Err(AppError::Internal(msg));
-    }
+    spawn_prepare_remember_job(
+        Arc::clone(&state),
+        job_id.clone(),
+        text,
+        owner_owned,
+        namespace_owned,
+        auth.public_key.clone(),
+    );
 
     tracing::info!(
-        "remember accepted: job_id={} owner={} ns={} encrypted_bytes={} wallet={}",
+        "remember accepted: job_id={} owner={} ns={}",
         job_id,
         owner,
         namespace,
-        encrypted.len(),
-        wallet_index,
     );
 
     Ok((
         StatusCode::ACCEPTED,
         Json(RememberAcceptedResponse {
             job_id,
-            status: "pending".to_string(),
+            status: "running".to_string(),
         }),
     ))
 }
@@ -326,8 +470,9 @@ pub async fn remember_status(
 
 /// POST /api/remember/bulk  (ENG-1408)
 ///
-/// Batch async remember — accepts up to MAX_BULK_ITEMS memories in one call.
-/// Returns 202 with job_ids[]; poll each via GET /api/remember/:job_id.
+/// Accepts up to MAX_BULK_ITEMS memories and returns HTTP 202 after creating
+/// status rows. Embed/encrypt runs in the background; the bulk worker batches
+/// metadata+transfer by wallet after deferred Walrus uploads.
 pub async fn remember_bulk(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -365,115 +510,47 @@ pub async fn remember_bulk(
         &owner[..10.min(owner.len())],
     );
 
-    // ── Concurrent embed + SEAL-encrypt (bounded concurrency) ─────────────
-    let prep_tasks: Vec<_> = body
-        .items
-        .iter()
-        .map(|item| {
-            let state = Arc::clone(&state);
-            let owner = owner.clone();
-            let text = item.text.clone();
-            let namespace = item.namespace.clone();
-            async move {
-                let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
-                let encrypt_fut = crate::seal::seal_encrypt(
-                    &state.http_client,
-                    &state.config.sidecar_url,
-                    state.config.sidecar_secret.as_deref(),
-                    text.as_bytes(),
-                    &owner,
-                    &state.config.package_id,
-                );
-                let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-                Ok::<_, AppError>((namespace, vector_result?, encrypted_result?))
-            }
-        })
-        .collect();
+    let mut job_ids: Vec<String> = Vec::with_capacity(body.items.len());
+    let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
-    let prep_results = collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
-
-    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
-    let mut total_encrypted_bytes: i64 = 0;
-    for r in prep_results {
-        let (namespace, vector, encrypted) = r?;
-        total_encrypted_bytes += encrypted.len() as i64;
-        prepared.push((namespace, vector, encrypted));
-    }
-
-    // ── Quota check ───────────────────────────────────────────────────────
-    rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
-
-    // ── Insert N remember_jobs rows + build BulkRememberItems ─────────────
-    let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
-    let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
-
-    for (namespace, vector, encrypted) in prepared {
+    for item in body.items {
         let job_id = uuid::Uuid::new_v4().to_string();
 
         sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'running')",
         )
         .bind(&job_id)
         .bind(owner)
-        .bind(&namespace)
+        .bind(&item.namespace)
         .execute(state.db.pool())
         .await
         .map_err(|e| AppError::Internal(format!("Failed to create bulk job row: {}", e)))?;
 
-        let wallet_index = state
-            .key_pool
-            .next_index()
-            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
-
-        let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
-        bulk_items.push(BulkRememberItem {
+        pending_items.push(PendingBulkRememberItem {
             job_id: job_id.clone(),
-            encrypted_b64,
-            vector,
-            namespace,
-            wallet_index,
+            text: item.text,
+            namespace: item.namespace,
         });
         job_ids.push(job_id);
     }
 
     let total = job_ids.len();
 
-    // ── Enqueue 1 BulkRememberJob ─────────────────────────────────────────
-    let mut storage = state.bulk_job_storage.clone();
-    if let Err(e) = storage
-        .push(crate::jobs::BulkRememberJob {
-            owner: owner.clone(),
-            package_id: state.config.package_id.clone(),
-            agent_public_key: Some(auth.public_key.clone()),
-            items: bulk_items,
-            epochs: 50,
-        })
-        .await
-    {
-        let msg = format!("Failed to enqueue bulk remember job: {}", e);
-        let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = ANY($2)",
-        )
-        .bind(&msg)
-        .bind(&job_ids)
-        .execute(state.db.pool())
-        .await;
-        return Err(AppError::Internal(msg));
-    }
-
-    tracing::info!(
-        "remember_bulk accepted: {} items owner={} total_encrypted_bytes={}",
-        total,
-        owner,
-        total_encrypted_bytes,
+    spawn_prepare_bulk_remember_job(
+        Arc::clone(&state),
+        owner.clone(),
+        auth.public_key.clone(),
+        pending_items,
     );
+
+    tracing::info!("remember_bulk accepted: {} items owner={}", total, owner,);
 
     Ok((
         StatusCode::ACCEPTED,
         Json(RememberBulkAcceptedResponse {
             job_ids,
             total,
-            status: "pending".to_string(),
+            status: "running".to_string(),
         }),
     ))
 }
@@ -771,25 +848,6 @@ pub async fn remember_manual(
         .insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size)
         .await?;
 
-    // Enqueue metadata+transfer background job (WalletJob, pinned to same key)
-    if !upload.object_id.as_deref().unwrap_or("").is_empty() {
-        if let Err(e) = enqueue_wallet_job(
-            &state,
-            key_index,
-            WalletOperation::SetMetadataAndTransfer {
-                blob_object_id: upload.object_id.clone().unwrap_or_default(),
-                owner: owner.clone(),
-                namespace: namespace.clone(),
-                package_id: Some(state.config.package_id.clone()),
-                agent_id: Some(auth.public_key.clone()),
-            },
-        )
-        .await
-        {
-            tracing::warn!("[remember_manual] failed to enqueue wallet job: {}", e);
-        }
-    }
-
     tracing::info!(
         "remember_manual complete: id={}, blob_id={}, ns={}",
         id,
@@ -892,6 +950,7 @@ pub async fn analyze(
             StatusCode::ACCEPTED,
             Json(AnalyzeAcceptedResponse {
                 job_ids: vec![],
+                facts: vec![],
                 fact_count: 0,
                 status: "pending".to_string(),
                 owner: owner.clone(),
@@ -944,6 +1003,7 @@ pub async fn analyze(
     // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
     // Round-robin across wallet pool so facts upload in parallel.
     let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
+    let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
     for (fact_text, vector, encrypted) in prepared {
         let job_id = uuid::Uuid::new_v4().to_string();
 
@@ -988,6 +1048,11 @@ pub async fn analyze(
             wallet_index,
             truncate_str(&fact_text, 40)
         );
+        accepted_facts.push(AnalyzeAcceptedFact {
+            text: fact_text,
+            id: job_id.clone(),
+            job_id: job_id.clone(),
+        });
         job_ids.push(job_id);
     }
 
@@ -1003,6 +1068,7 @@ pub async fn analyze(
         StatusCode::ACCEPTED,
         Json(AnalyzeAcceptedResponse {
             job_ids,
+            facts: accepted_facts,
             fact_count,
             status: "pending".to_string(),
             owner: owner.clone(),

@@ -44,6 +44,7 @@ struct WalrusUploadRequest {
     namespace: String,
     package_id: String,
     epochs: u64,
+    defer_transfer: bool,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
 }
@@ -53,6 +54,32 @@ struct WalrusUploadRequest {
 struct WalrusUploadResponse {
     blob_id: String,
     object_id: Option<String>,
+    #[serde(default)]
+    transfer_status: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMetadataBatchEntry {
+    pub blob_object_id: String,
+    pub namespace: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMetadataBatchRequest {
+    blobs: Vec<SetMetadataBatchEntry>,
+    owner: String,
+    package_id: String,
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
+    key_index: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMetadataBatchResponse {
+    transferred: usize,
 }
 
 /// Upload an encrypted blob to Walrus via the HTTP sidecar.
@@ -76,6 +103,68 @@ pub async fn upload_blob(
     package_id: &str,
     agent_id: Option<&str>,
 ) -> Result<UploadResult, AppError> {
+    upload_blob_inner(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        data,
+        epochs,
+        owner_address,
+        key_index,
+        namespace,
+        package_id,
+        agent_id,
+        false,
+    )
+    .await
+}
+
+/// Upload an encrypted blob but leave the certified Blob object owned by the
+/// server wallet. Bulk remember uses this so one later PTB can transfer many
+/// blobs together.
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_blob_deferred(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    epochs: u64,
+    owner_address: &str,
+    key_index: usize,
+    namespace: &str,
+    package_id: &str,
+    agent_id: Option<&str>,
+) -> Result<UploadResult, AppError> {
+    upload_blob_inner(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        data,
+        epochs,
+        owner_address,
+        key_index,
+        namespace,
+        package_id,
+        agent_id,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_blob_inner(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    epochs: u64,
+    owner_address: &str,
+    key_index: usize,
+    namespace: &str,
+    package_id: &str,
+    agent_id: Option<&str>,
+    defer_transfer: bool,
+) -> Result<UploadResult, AppError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
@@ -86,6 +175,7 @@ pub async fn upload_blob(
         namespace: namespace.to_string(),
         package_id: package_id.to_string(),
         epochs,
+        defer_transfer,
         agent_id: agent_id.map(|s| s.to_string()),
     });
     if let Some(secret) = sidecar_secret {
@@ -115,11 +205,22 @@ pub async fn upload_blob(
     let result: WalrusUploadResponse = resp.json().await.map_err(|e| {
         AppError::Internal(format!("Failed to parse walrus/upload response: {}", e))
     })?;
+    if result.transfer_status.as_deref() == Some("failed") {
+        return Err(AppError::Internal(
+            "walrus upload completed but metadata/transfer failed".into(),
+        ));
+    }
+    if defer_transfer && result.object_id.is_none() {
+        return Err(AppError::Internal(
+            "walrus deferred upload returned no object_id".into(),
+        ));
+    }
 
     tracing::info!(
-        "walrus upload via sidecar ok: blob_id={}, object_id={:?}, owner={}, ns={}",
+        "walrus upload via sidecar ok: blob_id={}, object_id={:?}, transfer_status={:?}, owner={}, ns={}",
         result.blob_id,
         result.object_id,
+        result.transfer_status,
         owner_address,
         namespace
     );
@@ -128,6 +229,57 @@ pub async fn upload_blob(
         blob_id: result.blob_id,
         object_id: result.object_id,
     })
+}
+
+pub async fn set_metadata_batch(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    key_index: usize,
+    owner_address: &str,
+    package_id: &str,
+    agent_id: Option<&str>,
+    blobs: Vec<SetMetadataBatchEntry>,
+) -> Result<usize, AppError> {
+    let url = format!("{}/walrus/set-metadata-batch", sidecar_url);
+    let mut req = client.post(&url).json(&SetMetadataBatchRequest {
+        blobs,
+        owner: owner_address.to_string(),
+        package_id: package_id.to_string(),
+        agent_id: agent_id.map(|s| s.to_string()),
+        key_index,
+    });
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Sidecar walrus/set-metadata-batch request failed: {}",
+            e
+        ))
+    })?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
+            return Err(AppError::Internal(format!(
+                "walrus set-metadata-batch failed: {}",
+                err.error
+            )));
+        }
+        return Err(AppError::Internal(format!(
+            "walrus set-metadata-batch failed: {}",
+            body
+        )));
+    }
+
+    let result: SetMetadataBatchResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse walrus/set-metadata-batch response: {}",
+            e
+        ))
+    })?;
+    Ok(result.transferred)
 }
 
 /// Query user's Walrus Blob objects from the Sui chain via sidecar.

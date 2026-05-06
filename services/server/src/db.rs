@@ -80,7 +80,13 @@ impl VectorDb {
 
         sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                namespace = EXCLUDED.namespace,
+                blob_id = EXCLUDED.blob_id,
+                embedding = EXCLUDED.embedding,
+                blob_size_bytes = EXCLUDED.blob_size_bytes",
         )
         .bind(id)
         .bind(owner)
@@ -262,6 +268,34 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!("Evicted {} expired delegate keys from cache", rows);
+        }
+        Ok(rows)
+    }
+
+    /// Mark worker-claimed remember jobs as failed when no worker has updated
+    /// them within the stale TTL. Pending rows are left alone because they may
+    /// simply be waiting behind legitimate queue backlog.
+    pub async fn fail_stale_remember_jobs(
+        &self,
+        stale_after: std::time::Duration,
+    ) -> Result<u64, AppError> {
+        let stale_after_secs = stale_after.as_secs().min(i64::MAX as u64) as i64;
+        let result = sqlx::query(
+            "UPDATE remember_jobs
+             SET status = 'failed',
+                 error_msg = COALESCE(error_msg, 'stale/orphaned remember job'),
+                 updated_at = NOW()
+             WHERE status IN ('running', 'uploaded')
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+        )
+        .bind(stale_after_secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fail stale remember jobs: {}", e)))?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::warn!("Marked {} stale remember jobs as failed", rows);
         }
         Ok(rows)
     }

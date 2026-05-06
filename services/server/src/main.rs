@@ -30,6 +30,9 @@ use jobs::{
 };
 use types::{AppState, Config, KeyPool};
 
+const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[tokio::main]
 async fn main() {
     // Load .env file (optional, won't error if missing)
@@ -183,7 +186,6 @@ async fn main() {
         key_pool,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
-        job_storage: job_storage.clone(),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storages: wallet_storages.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
@@ -194,17 +196,18 @@ async fn main() {
         let worker_state = state.clone();
         let storage = job_storage.clone();
         tokio::spawn(async move {
-            let worker = WorkerBuilder::new("meta-transfer")
-                .data(worker_state)
-                .backend(storage)
-                .build_fn(jobs::execute_meta_transfer);
+            loop {
+                let worker = WorkerBuilder::new("meta-transfer")
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(jobs::execute_meta_transfer);
 
-            #[allow(deprecated)]
-            Monitor::new()
-                .register_with_count(2, worker)
-                .run()
-                .await
-                .unwrap_or_else(|e| tracing::error!("Apalis monitor exited: {}", e));
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new().register_with_count(2, worker).run().await {
+                    tracing::error!("Apalis monitor exited: {}", e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
         });
         tracing::info!("  Apalis: worker 'meta-transfer' spawned (concurrency=2)");
     }
@@ -214,17 +217,18 @@ async fn main() {
         let worker_state = state.clone();
         let storage = remember_job_storage.clone();
         tokio::spawn(async move {
-            let worker = WorkerBuilder::new("remember")
-                .data(worker_state)
-                .backend(storage)
-                .build_fn(jobs::execute_remember);
+            loop {
+                let worker = WorkerBuilder::new("remember")
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(jobs::execute_remember);
 
-            #[allow(deprecated)]
-            Monitor::new()
-                .register_with_count(3, worker) // up to 3 concurrent remember pipelines
-                .run()
-                .await
-                .unwrap_or_else(|e| tracing::error!("Apalis remember monitor exited: {}", e));
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new().register_with_count(3, worker).run().await {
+                    tracing::error!("Apalis remember monitor exited: {}", e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
         });
         tracing::info!("  Apalis: worker 'remember' spawned (concurrency=3)");
     }
@@ -234,17 +238,18 @@ async fn main() {
         let worker_state = state.clone();
         let storage = bulk_job_storage.clone();
         tokio::spawn(async move {
-            let worker = WorkerBuilder::new("bulk-remember")
-                .data(worker_state)
-                .backend(storage)
-                .build_fn(execute_bulk_remember);
+            loop {
+                let worker = WorkerBuilder::new("bulk-remember")
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(execute_bulk_remember);
 
-            #[allow(deprecated)]
-            Monitor::new()
-                .register_with_count(2, worker) // 2 concurrent batch jobs
-                .run()
-                .await
-                .unwrap_or_else(|e| tracing::error!("Apalis bulk-remember monitor exited: {}", e));
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new().register_with_count(2, worker).run().await {
+                    tracing::error!("Apalis bulk-remember monitor exited: {}", e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
         });
         tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
     }
@@ -257,19 +262,18 @@ async fn main() {
         let queue_name = format!("wallet-{}", i);
         let queue_label = queue_name.clone();
         tokio::spawn(async move {
-            let worker = WorkerBuilder::new(&queue_name)
-                .data(worker_state)
-                .backend(storage)
-                .build_fn(execute_wallet_job);
+            loop {
+                let worker = WorkerBuilder::new(&queue_name)
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(execute_wallet_job);
 
-            #[allow(deprecated)]
-            Monitor::new()
-                .register_with_count(1, worker) // serial per wallet — no coin lock conflicts
-                .run()
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Apalis wallet worker {} exited: {}", queue_label, e)
-                });
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new().register_with_count(1, worker).run().await {
+                    tracing::error!("Apalis wallet worker {} exited: {}", queue_label, e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
         });
         tracing::info!(
             "  Apalis: wallet worker '{}' spawned (serial)",
@@ -290,11 +294,26 @@ async fn main() {
         }
     });
 
+    // Spawn background task for orphaned async remember jobs
+    let stale_job_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = stale_job_state
+                .db
+                .fail_stale_remember_jobs(STALE_REMEMBER_JOB_AFTER)
+                .await
+            {
+                tracing::error!("Stale remember job sweep failed: {}", e);
+            }
+        }
+    });
+
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
-    // HIGH-13: 256 KiB covers the largest realistic JSON body (64 KiB plaintext
-    // + base64 overhead + JSON framing) while blocking abusive uploads before
-    // auth + rate-limit middleware even sees the request.
+    // Auth middleware caps signed JSON bodies at 2 MiB, which covers bulk remember
+    // payloads while still rejecting oversized requests before route handling.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route(

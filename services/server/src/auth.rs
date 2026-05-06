@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
 use crate::types::{AppState, AuthInfo};
 
+const AUTH_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// Ed25519 signature verification + onchain delegate key verification middleware
 ///
 /// Expects these headers:
@@ -167,7 +169,7 @@ pub async fn verify_signature(
     // Split request to consume body
     let (mut parts, body) = request.into_parts();
 
-    let body_bytes = axum::body::to_bytes(body, 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(body, AUTH_BODY_LIMIT_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 

@@ -243,7 +243,8 @@ const memwal = MemWal.create({
 })
 
 // Remember something
-await memwal.remember("I'm allergic to peanuts")
+const job = await memwal.remember("I'm allergic to peanuts")
+await memwal.waitForRememberJob(job.job_id)
 
 // Recall memories
 const result = await memwal.recall("food allergies")

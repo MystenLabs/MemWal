@@ -24,7 +24,7 @@ export interface MemWalConfig {
 // API Types
 // ============================================================
 
-/** Accepted async remember job returned by the server */
+/** Result from remember() / rememberAsync() */
 export interface RememberAcceptedResult {
     job_id: string;
     status: string;
@@ -40,9 +40,12 @@ export interface RememberJobStatus {
     error?: string;
 }
 
-/** Result from remember() */
+/** Result from rememberAndWait() / waitForRememberJob() */
 export interface RememberResult {
+    /** Stable server job_id used as the vector row id. */
     id: string;
+    /** Async job id returned by remember(). */
+    job_id?: string;
     blob_id: string;
     owner: string;
     namespace: string;
@@ -61,7 +64,7 @@ export interface RecallResult {
     total: number;
 }
 
-/** Result from rememberBulkAsync() */
+/** Result from rememberBulk() / rememberBulkAsync() */
 export interface RememberBulkAcceptedResult {
     job_ids: string[];
     total: number;
@@ -97,7 +100,7 @@ export interface RememberBulkOptions {
     timeoutMs?: number;
 }
 
-/** Per-item result returned from rememberBulk() */
+/** Per-item result returned from rememberBulkAndWait() / waitForRememberJobs() */
 export interface RememberBulkItemResult {
     /** job_id returned by the server */
     id: string;
@@ -111,7 +114,7 @@ export interface RememberBulkItemResult {
     error?: string;
 }
 
-/** Result from rememberBulk() */
+/** Result from rememberBulkAndWait() / waitForRememberJobs() */
 export interface RememberBulkResult {
     /** One result per input item, in the same order */
     results: RememberBulkItemResult[];
@@ -128,17 +131,29 @@ export interface EmbedResult {
     vector: number[];
 }
 
-/** A single extracted fact */
+/** A fact extracted by analyze() and accepted for background storage. */
 export interface AnalyzedFact {
     text: string;
+    /** Stable job id/vector row id for this extracted fact. */
     id: string;
-    blob_id: string;
+    /** Polling id for this extracted fact. */
+    job_id?: string;
+    /** Walrus blob_id once the background job completes. */
+    blob_id?: string;
 }
 
 /** Result from analyze() */
 export interface AnalyzeResult {
+    job_ids: string[];
     facts: AnalyzedFact[];
-    total: number;
+    fact_count: number;
+    status: string;
+    owner: string;
+}
+
+/** Result from analyzeAndWait() */
+export interface AnalyzeWaitResult extends RememberBulkResult {
+    facts: AnalyzedFact[];
     owner: string;
 }
 

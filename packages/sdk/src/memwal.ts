@@ -18,8 +18,9 @@
  *     accountId: process.env.MEMWAL_ACCOUNT_ID, // MemWalAccount object ID
  * })
  *
- * // Remember — server: verify → embed → encrypt → Walrus → store
- * await memwal.remember("I'm allergic to peanuts")
+ * // Remember — returns an accepted background job immediately
+ * const accepted = await memwal.remember("I'm allergic to peanuts")
+ * await memwal.waitForRememberJob(accepted.job_id)
  *
  * // Recall — server: verify → embed query → search → download → decrypt
  * const result = await memwal.recall("food allergies")
@@ -34,6 +35,7 @@ import type {
     RecallMemory,
     EmbedResult,
     AnalyzeResult,
+    AnalyzeWaitResult,
     HealthResult,
     RememberManualOptions,
     RememberManualResult,
@@ -89,6 +91,23 @@ const SEAL_SESSION_TTL_MIN = 5;
 // the client thinks the session is valid but a just-received request hits
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+
+type RememberStatusResponse = RememberJobStatus | { error?: string };
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pollingDelayMs(baseMs: number, attempt: number): number {
+    const base = Math.max(100, baseMs);
+    const capped = Math.min(10_000, base * 1.5 ** Math.min(attempt, 6));
+    const jitter = 0.75 + Math.random() * 0.5;
+    return Math.floor(capped * jitter);
+}
+
+function isTransientPollingStatus(status: number): boolean {
+    return status === 0 || status === 429 || status >= 500;
+}
 
 export class MemWal {
     private privateKey: Uint8Array;
@@ -166,19 +185,39 @@ export class MemWal {
     ): Promise<RememberResult> {
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
+        let attempt = 0;
 
         while (Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
+            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
 
-            const status = await this.signedRequest<RememberJobStatus>(
-                "GET",
-                `/api/remember/${jobId}`,
-                {},
-            );
+            let status: RememberStatusResponse;
+
+            try {
+                status = await this.signedRequest<RememberStatusResponse>(
+                    "GET",
+                    `/api/remember/${jobId}`,
+                    {},
+                    [200, 404],
+                );
+            } catch (err) {
+                const httpStatus = (err as { status?: number }).status ?? 0;
+                if (isTransientPollingStatus(httpStatus)) {
+                    continue;
+                }
+                throw err;
+            }
+
+            if (!("status" in status) || status.status === "not_found") {
+                throw Object.assign(new Error(`remember job not found: ${jobId}`), {
+                    status: 404,
+                    jobId,
+                });
+            }
 
             if (status.status === "done") {
                 return {
-                    id: jobId,
+                    id: status.job_id,
+                    job_id: status.job_id,
                     blob_id: status.blob_id ?? "",
                     owner: status.owner ?? "",
                     namespace: status.namespace ?? this.namespace,
@@ -189,12 +228,6 @@ export class MemWal {
                     new Error(`remember job failed: ${status.error ?? "unknown error"}`),
                     { status: 500, jobId },
                 );
-            }
-            if (status.status === "not_found") {
-                throw Object.assign(new Error(`remember job not found: ${jobId}`), {
-                    status: 404,
-                    jobId,
-                });
             }
         }
 
@@ -217,22 +250,16 @@ export class MemWal {
     }
 
     /**
-     * Remember something — server handles: verify → embed → encrypt → Walrus upload → store.
+     * Remember something and return as soon as the server accepts the job.
      *
-     * This keeps the historical SDK behavior by waiting for the async job to complete.
-     * Use rememberAsync() when you need fast-accept semantics.
+     * The relayer continues embedding, encrypting, uploading, and indexing in the background.
+     * Use rememberAndWait() when the caller needs the final blob_id before continuing.
      *
      * @param text - The text to remember
      * @param namespace - Optional namespace override
-     * @param opts.pollIntervalMs - How often to poll (default 1500ms)
-     * @param opts.timeoutMs - Max wait time before throwing (default 60_000ms)
      */
-    async remember(
-        text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
-    ): Promise<RememberResult> {
-        return this.rememberAndWait(text, namespace, opts);
+    async remember(text: string, namespace?: string): Promise<RememberAcceptedResult> {
+        return this.rememberAsync(text, namespace);
     }
 
     /**
@@ -243,24 +270,17 @@ export class MemWal {
      * set-metadata + transfer. This collapses `N × (2 + 1)` Sui transactions
      * into roughly `2N + K` where K ≤ wallet pool size.
      *
-     * Returns `202 Accepted` immediately with `job_ids[]`; this method then
-     * polls the batch status endpoint and resolves
-     * once all jobs reach a terminal state (`done`, `failed`, or `timeout`).
+     * Returns `202 Accepted` immediately with `job_ids[]`.
      *
      * @param items - Array of `{ text, namespace? }` items (max 20 per call)
-     * @param opts.pollIntervalMs - How often to poll each job (default 1500ms)
-     * @param opts.timeoutMs - Max total wait (default 120_000ms)
      *
      * @example
      * ```typescript
-     * const result = await memwal.rememberBulk([
+     * const accepted = await memwal.rememberBulk([
      *     { text: "I love coffee" },
      *     { text: "I live in Tokyo", namespace: "profile" },
      * ])
-     * console.log(`${result.succeeded}/${result.total} stored`)
-     * for (const r of result.results) {
-     *     if (r.status === "done") console.log(r.blob_id)
-     * }
+     * console.log(accepted.job_ids)
      * ```
      */
     async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
@@ -312,9 +332,10 @@ export class MemWal {
             error: `polling timed out after ${timeoutMs}ms`,
         }));
         const pending = new Set(jobIds);
+        let attempt = 0;
 
         while (pending.size > 0 && Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
+            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -327,7 +348,7 @@ export class MemWal {
                 batchStatus = await this.getRememberBulkStatus(pendingIds);
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
-                if (httpStatus === 429 || httpStatus >= 500 || httpStatus === 0) {
+                if (isTransientPollingStatus(httpStatus)) {
                     continue;
                 }
                 throw err;
@@ -384,7 +405,17 @@ export class MemWal {
         };
     }
 
-    async rememberBulk(
+    /**
+     * Remember multiple memories and return as soon as the server accepts the jobs.
+     */
+    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items);
+    }
+
+    /**
+     * Remember multiple memories and wait until every job reaches a terminal state.
+     */
+    async rememberBulkAndWait(
         items: RememberBulkItem[],
         opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
@@ -515,23 +546,43 @@ export class MemWal {
     }
 
     /**
-     * Analyze conversation text — server uses LLM to extract facts, then
-     * stores each one (embed → encrypt → Walrus → store).
+     * Analyze conversation text and return as soon as extracted facts are accepted.
+     *
+     * The relayer extracts facts synchronously, returns one job_id per fact, then
+     * embeds, encrypts, uploads, and indexes each fact in the background.
      *
      * @param text - Conversation text to analyze
-     * @returns AnalyzeResult with extracted and stored facts
+     * @returns AnalyzeResult with extracted facts and accepted job_ids
      *
      * @example
      * ```typescript
      * const result = await memwal.analyze("I love coffee and live in Tokyo")
-     * console.log(result.facts) // ["User loves coffee", "User lives in Tokyo"]
+     * console.log(result.job_ids)
      * ```
      */
     async analyze(text: string, namespace?: string): Promise<AnalyzeResult> {
         return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", {
             text,
             namespace: namespace ?? this.namespace,
-        });
+        }, [200, 202]);
+    }
+
+    /**
+     * Analyze conversation text and wait until every extracted fact is stored.
+     */
+    async analyzeAndWait(
+        text: string,
+        namespace?: string,
+        opts: RememberBulkOptions = {},
+    ): Promise<AnalyzeWaitResult> {
+        const accepted = await this.analyze(text, namespace);
+        const namespaces = accepted.job_ids.map(() => namespace ?? this.namespace);
+        const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        return {
+            ...completed,
+            facts: accepted.facts,
+            owner: accepted.owner,
+        };
     }
 
     /**

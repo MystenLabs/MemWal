@@ -9,7 +9,7 @@
 --   uploaded → failed   (metadata+transfer permanently failed)
 
 CREATE TABLE IF NOT EXISTS remember_jobs (
-    id          TEXT PRIMARY KEY,          -- UUID, returned as jobId in 202 response
+    id          TEXT PRIMARY KEY,          -- UUID, returned as job_id in 202 response
     owner       TEXT NOT NULL,             -- Sui address of the calling user
     namespace   TEXT NOT NULL DEFAULT 'default',
     status      TEXT NOT NULL DEFAULT 'pending'

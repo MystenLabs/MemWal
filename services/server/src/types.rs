@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::db::VectorDb;
-use crate::jobs::{BulkRememberJobStorage, JobStorage, RememberJobStorage, WalletJobStorage};
+use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
@@ -11,13 +11,8 @@ pub const MAX_BULK_ITEMS: usize = 20;
 /// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
 
-/// ENG-1408: Bounded concurrency for concurrent Walrus uploads inside BulkRememberJob worker.
-pub const BULK_UPLOAD_CONCURRENCY: usize = 3;
-
-/// ENG-1408: Max blobs transferred in one set-metadata-batch PTB.
-/// Sui PTB limit is ~1000 commands; 10 blobs × 4 metadata calls = 40 commands + 1 transfer — well within limits.
-#[allow(dead_code)]
-pub const BULK_PTB_MAX_BLOBS: usize = 20;
+/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
+pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -35,8 +30,6 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    /// Apalis storage for MetaTransferJob (legacy backward-compat)
-    pub job_storage: JobStorage,
     /// Apalis storage for RememberJob — legacy full async pipeline.
     /// Kept so the legacy worker can drain any rows enqueued before the
     /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
@@ -265,7 +258,7 @@ pub struct RememberBulkRequest {
 pub struct RememberBulkAcceptedResponse {
     pub job_ids: Vec<String>,
     pub total: usize,
-    pub status: String, // always "pending"
+    pub status: String, // "running" on accepted background work
 }
 
 /// POST /api/remember/bulk/status request body.
@@ -293,18 +286,18 @@ pub struct RememberBulkStatusResponse {
 }
 
 /// POST /api/remember (async, ENG-1406 v3)
-/// Returns 202 Accepted immediately with a jobId for polling.
+/// Returns 202 Accepted immediately with a job_id for polling.
 #[derive(Debug, Serialize)]
 pub struct RememberAcceptedResponse {
     pub job_id: String,
-    pub status: String, // always "pending"
+    pub status: String, // "running" on accepted background work
 }
 
 /// GET /api/remember/:job_id — job status polling response
 #[derive(Debug, Serialize)]
 pub struct RememberJobStatusResponse {
     pub job_id: String,
-    pub status: String, // "pending" | "running" | "done" | "failed"
+    pub status: String, // "pending" | "running" | "uploaded" | "done" | "failed"
     /// Owner address of the memory (from auth at enqueue time).
     pub owner: String,
     /// Namespace the memory was stored under.
@@ -388,11 +381,20 @@ pub struct AnalyzeRequest {
 pub struct AnalyzeAcceptedResponse {
     /// One job_id per extracted fact — poll GET /api/remember/:job_id for each
     pub job_ids: Vec<String>,
+    /// Extracted facts accepted for background storage. `id` equals `job_id`.
+    pub facts: Vec<AnalyzeAcceptedFact>,
     /// Number of facts extracted from the text
     pub fact_count: usize,
-    /// Always "pending" on 202 response
+    /// "pending" on accepted analyze jobs
     pub status: String,
     pub owner: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnalyzeAcceptedFact {
+    pub text: String,
+    pub id: String,
+    pub job_id: String,
 }
 
 #[allow(dead_code)]

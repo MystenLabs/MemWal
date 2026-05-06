@@ -20,6 +20,7 @@ use futures::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{AppState, BULK_UPLOAD_CONCURRENCY};
+use crate::walrus::SetMetadataBatchEntry;
 
 // ============================================================
 // WalletJob — unified job type for all wallet-signing operations
@@ -53,9 +54,8 @@ pub enum WalletOperation {
         #[serde(default = "default_epochs")]
         epochs: u32,
     },
-    /// Set on-chain metadata attributes + transfer a blob that was ALREADY
-    /// uploaded (used by remember_manual and analyze routes which upload
-    /// synchronously and only need the background metadata+transfer step).
+    /// Legacy metadata+transfer operation for rows created before `/walrus/upload`
+    /// started doing metadata+transfer atomically.
     SetMetadataAndTransfer {
         /// Sui object ID of the certified Walrus Blob.
         blob_object_id: String,
@@ -89,8 +89,7 @@ pub struct WalletJob {
 pub type WalletJobStorage = PostgresStorage<WalletJob>;
 
 // ============================================================
-// Legacy MetaTransferJob — kept for backward-compat with existing
-// DB rows. New code should enqueue WalletJob::SetMetadataAndTransfer.
+// Legacy MetaTransferJob — kept for backward-compat with existing DB rows.
 // ============================================================
 
 /// Payload stored as JSON in the `apalis_jobs` Postgres table.
@@ -119,16 +118,12 @@ pub struct MetaTransferJob {
 #[derive(Debug)]
 pub enum MetaTransferError {
     SidecarError(String),
-    Http { status: u16, body: String },
 }
 
 impl std::fmt::Display for MetaTransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MetaTransferError::SidecarError(msg) => write!(f, "sidecar call failed: {}", msg),
-            MetaTransferError::Http { status, body } => {
-                write!(f, "http error ({}): {}", status, body)
-            }
         }
     }
 }
@@ -136,90 +131,34 @@ impl std::fmt::Display for MetaTransferError {
 impl std::error::Error for MetaTransferError {}
 
 // ============================================================
-// Sidecar request/response types
-// ============================================================
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMetadataRequest<'a> {
-    blob_object_id: &'a str,
-    owner: &'a str,
-    namespace: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    package_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_id: Option<&'a str>,
-    key_index: usize,
-}
-
-// ============================================================
 // Job handler
 // ============================================================
 
 /// Apalis calls this function for each `MetaTransferJob`.
 ///
-/// It POSTs to the sidecar `POST /walrus/set-metadata` endpoint which
-/// builds and executes a Sui transaction that:
-///   1. Sets `memwal_namespace`, `memwal_owner`, `memwal_package_id`,
-///      and `memwal_agent_id` on-chain attributes on the Blob object.
-///   2. Transfers the Blob object to the user's wallet.
-///
-/// Returns `Err(MetaTransferError)` to trigger the Tower retry policy.
+/// Legacy handler for rows created before upload and transfer were collapsed.
 pub async fn execute_meta_transfer(
     job: MetaTransferJob,
     ctx: Data<Arc<AppState>>,
 ) -> Result<(), MetaTransferError> {
     // Data<T> implements Deref<Target=T>, so &*ctx gives &Arc<AppState>
     let state: &AppState = &ctx;
-    let url = format!("{}/walrus/set-metadata", state.config.sidecar_url);
-
     // Use the key_index stored in the job — this is the same key that
     // registered/certified the blob, so the signer address will match
     // the blob's current owner. No round-robin selection here.
     let key_index = job.key_index;
 
-    tracing::info!(
-        "[meta-transfer] blob={} owner={} ns={} key={}",
+    execute_set_metadata_and_transfer(
+        state,
+        key_index,
         job.blob_object_id,
-        &job.owner[..10.min(job.owner.len())],
+        job.owner,
         job.namespace,
-        key_index,
-    );
-
-    let mut req = state.http_client.post(&url).json(&SetMetadataRequest {
-        blob_object_id: &job.blob_object_id,
-        owner: &job.owner,
-        namespace: &job.namespace,
-        package_id: job.package_id.as_deref(),
-        agent_id: job.agent_id.as_deref(),
-        key_index,
-    });
-
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| MetaTransferError::SidecarError(format!("request failed: {}", e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::warn!(
-            "[meta-transfer] sidecar returned {}: {}",
-            status,
-            &body[..200.min(body.len())]
-        );
-        return Err(MetaTransferError::Http { status, body });
-    }
-
-    tracing::info!(
-        "[meta-transfer] ok: blob={} transferred to owner",
-        job.blob_object_id
-    );
-    Ok(())
+        job.package_id,
+        job.agent_id,
+    )
+    .await
+    .map_err(|e| MetaTransferError::SidecarError(e.to_string()))
 }
 
 // ============================================================
@@ -235,9 +174,6 @@ pub const MAX_ATTEMPTS: u32 = 3;
 pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
 }
-
-/// Type alias for the Apalis Postgres storage used throughout the codebase.
-pub type JobStorage = PostgresStorage<MetaTransferJob>;
 
 // ============================================================
 // execute_wallet_job — dispatcher for WalletJob
@@ -315,93 +251,22 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    let url = format!("{}/walrus/set-metadata", state.config.sidecar_url);
-
-    tracing::info!(
-        "[wallet-job:set-meta] blob={} owner={} ns={} key={}",
-        blob_object_id,
-        &owner[..10.min(owner.len())],
-        namespace,
+    crate::walrus::set_metadata_batch(
+        &state.http_client,
+        &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
         wallet_index,
-    );
-
-    // Retry transient network failures (sidecar overload / connection drop /
-    // Enoki sponsor flake). Each attempt re-builds the request because reqwest
-    // RequestBuilder is not Clone-able once a body is attached.
-    const MAX_ATTEMPTS: u32 = 4;
-    let mut attempt: u32 = 0;
-
-    loop {
-        attempt += 1;
-
-        let mut req = state.http_client.post(&url).json(&SetMetadataRequest {
-            blob_object_id: &blob_object_id,
-            owner: &owner,
-            namespace: &namespace,
-            package_id: package_id.as_deref(),
-            agent_id: agent_id.as_deref(),
-            key_index: wallet_index,
-        });
-
-        if let Some(secret) = state.config.sidecar_secret.as_deref() {
-            req = req.header("authorization", format!("Bearer {}", secret));
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(
-                    "[wallet-job:set-meta] ok: blob={} transferred to owner (attempt {})",
-                    blob_object_id,
-                    attempt
-                );
-                return Ok(());
-            }
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                let snippet = &body[..200.min(body.len())];
-                // Retry on 5xx and 408/429; fail fast on other 4xx (bad input).
-                let retriable = status >= 500 || status == 408 || status == 429;
-                tracing::warn!(
-                    "[wallet-job:set-meta] sidecar returned {} (attempt {}/{}, retriable={}): {}",
-                    status,
-                    attempt,
-                    MAX_ATTEMPTS,
-                    retriable,
-                    snippet
-                );
-                if !retriable || attempt >= MAX_ATTEMPTS {
-                    return Err(WalletJobError::Internal(format!(
-                        "set-metadata failed ({}): {}",
-                        status, snippet
-                    )));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[wallet-job:set-meta] network error (attempt {}/{}): {}",
-                    attempt,
-                    MAX_ATTEMPTS,
-                    e
-                );
-                if attempt >= MAX_ATTEMPTS {
-                    return Err(WalletJobError::Internal(format!(
-                        "set-metadata request failed after {} attempts: {}",
-                        MAX_ATTEMPTS, e
-                    )));
-                }
-            }
-        }
-
-        // Exponential backoff: 500ms, 1s, 2s
-        let backoff_ms = 500u64 * (1u64 << (attempt - 1));
-        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-        tracing::info!(
-            "[wallet-job:set-meta] retry {} after {}ms",
-            attempt + 1,
-            backoff_ms,
-        );
-    }
+        &owner,
+        package_id.as_deref().unwrap_or(&state.config.package_id),
+        agent_id.as_deref(),
+        vec![SetMetadataBatchEntry {
+            blob_object_id,
+            namespace,
+        }],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| WalletJobError::Internal(e.to_string()))
 }
 
 // ────────────────────────────────────────────────────────────
@@ -496,24 +361,6 @@ async fn execute_upload_and_transfer(
     };
     let blob_id = upload.blob_id.clone();
 
-    // ── Set metadata + transfer via sidecar (SAME wallet_index!) ─
-    let blob_object_id = match upload.object_id.as_deref() {
-        Some(object_id) if !object_id.is_empty() => object_id.to_string(),
-        _ => {
-            let msg = "walrus upload returned no object_id; cannot transfer".to_string();
-            if let Some(ref jid) = remember_job_id {
-                let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(&msg)
-                .bind(jid)
-                .execute(state.db.pool())
-                .await;
-            }
-            return Err(fail(msg));
-        }
-    };
-
     if let Some(ref jid) = remember_job_id {
         let _ = sqlx::query(
             "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, updated_at = NOW() WHERE id = $2",
@@ -524,38 +371,14 @@ async fn execute_upload_and_transfer(
         .await;
     }
 
-    if let Err(e) = execute_set_metadata_and_transfer(
-        state,
-        wallet_index,
-        blob_object_id,
-        owner.clone(),
-        namespace.clone(),
-        Some(package_id.clone()),
-        agent_public_key.clone(),
-    )
-    .await
-    {
-        let msg = format!("metadata+transfer failed: {}", e);
-        if let Some(ref jid) = remember_job_id {
-            let _ = sqlx::query(
-                "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(&msg)
-            .bind(jid)
-            .execute(state.db.pool())
-            .await;
-        }
-        tracing::warn!(
-            "[wallet-job:upload] set-metadata failed: {} blob_id={}",
-            e,
-            blob_id
-        );
-        return Ok(());
-    }
-
-    // ── Insert vector only after transfer succeeds ─────────────────
+    // ── Insert vector after upload ─────────────────────────────────
+    //
+    // The sidecar's `/walrus/upload` endpoint already performs metadata+transfer
+    // atomically. A successful upload response means the blob is ready to index.
     let blob_size = encrypted.len() as i64;
-    let vector_id = uuid::Uuid::new_v4().to_string();
+    let vector_id = remember_job_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if let Err(e) = state
         .db
         .insert_vector(&vector_id, &owner, &namespace, &blob_id, &vector, blob_size)
@@ -621,7 +444,7 @@ impl std::error::Error for WalletJobError {}
 /// Payload for the full async remember pipeline stored in `apalis_jobs`.
 ///
 /// The route handler enqueues this job and returns HTTP 202 immediately.
-/// The Apalis worker executes embed → encrypt → upload → insert_vector → MetaTransferJob.
+/// The Apalis worker executes embed → encrypt → upload → insert_vector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RememberJob {
     /// Stable job ID returned to the client in the 202 response.
@@ -637,7 +460,7 @@ pub struct RememberJob {
     pub namespace: String,
     /// MemWal package ID (needed by metadata tx).
     pub package_id: String,
-    /// Delegate public key (agent_id for MetaTransferJob).
+    /// Delegate public key (agent_id for upload metadata).
     pub agent_public_key: Option<String>,
 }
 
@@ -667,8 +490,7 @@ impl std::error::Error for RememberJobError {}
 ///   2. embed() + seal_encrypt() concurrently
 ///   3. walrus upload_blob()
 ///   4. insert_vector()
-///   5. push(MetaTransferJob)
-///   6. Mark job `done` with blob_id
+///   5. Mark job `done` with blob_id
 ///
 /// On any error: mark job `failed` with error_msg, then return Err to
 /// prevent Apalis from re-enqueueing (we handle status ourselves).
@@ -737,7 +559,7 @@ pub async fn execute_remember(
 
     // ── Step 4: insert_vector ────────────────────────────────────
     let blob_size = encrypted.len() as i64;
-    let vector_id = uuid::Uuid::new_v4().to_string();
+    let vector_id = job.job_id.clone();
     if let Err(e) = state
         .db
         .insert_vector(
@@ -753,41 +575,9 @@ pub async fn execute_remember(
         fail!(format!("insert_vector failed: {}", e));
     }
 
-    // ── Step 5: enqueue MetaTransferJob (with correct key_index) ─────────
-    if !upload.object_id.as_deref().unwrap_or("").is_empty() {
-        let mut meta_storage = state.job_storage.clone();
-        if let Err(e) = meta_storage
-            .push(MetaTransferJob {
-                blob_object_id: upload.object_id.clone().unwrap_or_default(),
-                owner: job.owner.clone(),
-                namespace: job.namespace.clone(),
-                package_id: Some(job.package_id.clone()),
-                agent_id: job.agent_public_key.clone(),
-                // Pass the SAME key_index used for upload — the blob is owned
-                // by this key's address, so set-metadata must also sign with it.
-                key_index,
-            })
-            .await
-        {
-            // Non-fatal — blob is already indexed; log and continue.
-            tracing::warn!(
-                "[remember-job] failed to enqueue meta-transfer: {} job_id={}",
-                e,
-                job.job_id
-            );
-        }
-    }
-
-    // ── Step 6: mark uploaded ────────────────────────────────────
-    // Note: legacy `RememberJob` enqueues a separate `MetaTransferJob` for the
-    // transfer step, so we cannot mark `done` here — the transfer hasn't
-    // happened yet. The (legacy) `MetaTransferJob` worker does NOT update this
-    // row (it predates the status table); for callers using this legacy path,
-    // a successful upload visible to the client is `status=uploaded` with
-    // a non-null `blob_id`. New code should use `WalletJob::UploadAndTransfer`
-    // which atomically transitions to `done` after transfer.
+    // ── Step 5: mark done ────────────────────────────────────────
     let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, updated_at = NOW() WHERE id = $2",
+        "UPDATE remember_jobs SET status = 'done', blob_id = $1, updated_at = NOW() WHERE id = $2",
     )
     .bind(&blob_id)
     .bind(&job.job_id)
@@ -795,7 +585,7 @@ pub async fn execute_remember(
     .await;
 
     tracing::info!(
-        "[remember-job] uploaded job_id={} blob_id={} owner={} ns={} (transfer enqueued separately)",
+        "[remember-job] done job_id={} blob_id={} owner={} ns={}",
         job.job_id,
         blob_id,
         &job.owner[..10.min(job.owner.len())],
@@ -807,10 +597,7 @@ pub async fn execute_remember(
 // ============================================================
 // BulkRememberJob — ENG-1408
 //
-// Batches N memories into:
-//   - N×2 Sui txs (register + certify per blob, unavoidable)
-//   - K Sui txs for set-metadata+transfer, where K = number of wallet slots used
-//     (one PTB per wallet-slot via /walrus/set-metadata-batch on sidecar)
+// Fans a preprocessed bulk request out into N wallet-pinned jobs.
 // ============================================================
 
 /// One pre-processed item (embed + encrypt already done in route handler).
@@ -862,46 +649,21 @@ impl std::fmt::Display for BulkRememberError {
 impl std::error::Error for BulkRememberError {}
 
 // ─────────────────────────────────────────────────────────────
-// Sidecar request types for POST /walrus/set-metadata-batch
-// ─────────────────────────────────────────────────────────────
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMetadataBatchEntry<'a> {
-    blob_object_id: &'a str,
-    namespace: &'a str,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMetadataBatchRequest<'a> {
-    blobs: Vec<SetMetadataBatchEntry<'a>>,
-    owner: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    package_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_id: Option<&'a str>,
-    key_index: usize,
-}
-
-// ─────────────────────────────────────────────────────────────
 // execute_bulk_remember — Apalis handler
 // ─────────────────────────────────────────────────────────────
 
 /// Apalis worker handler for BulkRememberJob (ENG-1408).
 ///
 /// Steps:
-///   1. Mark all items `running`
-///   2. Upload N blobs to Walrus concurrently (bounded by BULK_UPLOAD_CONCURRENCY)
-///   3. Group blobs with objectId by wallet_index
-///   4. For each group → POST /walrus/set-metadata-batch (1 PTB per wallet slot)
-///      Falls back to per-blob /walrus/set-metadata if batch endpoint unavailable.
-///   5. Insert vectors and mark rows done only after transfer succeeds.
+///   1. Upload each encrypted item with `deferTransfer=true`.
+///   2. Insert vectors once each blob is certified.
+///   3. Group certified Blob object IDs by wallet and transfer each group in
+///      one set-metadata PTB.
 pub async fn execute_bulk_remember(
     job: BulkRememberJob,
     ctx: Data<Arc<AppState>>,
 ) -> Result<(), BulkRememberError> {
-    let state: &AppState = &ctx;
+    let state: Arc<AppState> = Arc::clone(&ctx);
 
     if job.items.is_empty() {
         return Ok(());
@@ -916,7 +678,6 @@ pub async fn execute_bulk_remember(
         job.epochs,
     );
 
-    // ── Step 1: mark all items running ────────────────────────────────────
     for item in &job.items {
         let _ = sqlx::query(
             "UPDATE remember_jobs SET status = 'running', updated_at = NOW() WHERE id = $1",
@@ -926,86 +687,107 @@ pub async fn execute_bulk_remember(
         .await;
     }
 
-    // ── Step 2: upload N blobs concurrently ───────────────
     struct UploadOk {
         job_id: String,
         blob_id: String,
-        object_id: Option<String>,
+        object_id: String,
         wallet_index: usize,
         namespace: String,
         vector: Vec<f32>,
         blob_size: i64,
     }
 
-    let db = &state.db;
-    let http = &state.http_client;
-    let sidecar_url = state.config.sidecar_url.clone();
-    let sidecar_secret = state.config.sidecar_secret.clone();
     let owner = job.owner.clone();
     let package_id = job.package_id.clone();
-    let agent = job.agent_public_key.clone();
+    let agent_public_key = job.agent_public_key.clone();
     let epochs = job.epochs as u64;
 
     let upload_results: Vec<Result<UploadOk, ()>> = stream::iter(job.items)
         .map(|item| {
-            let sidecar_url = sidecar_url.clone();
-            let sidecar_secret = sidecar_secret.clone();
+            let state = Arc::clone(&state);
             let owner = owner.clone();
             let package_id = package_id.clone();
-            let agent = agent.clone();
+            let agent_public_key = agent_public_key.clone();
             async move {
-                let encrypted = match base64::engine::general_purpose::STANDARD.decode(&item.encrypted_b64) {
-                    Ok(b) => b,
+                let encrypted = match base64::engine::general_purpose::STANDARD
+                    .decode(&item.encrypted_b64)
+                {
+                    Ok(bytes) => bytes,
                     Err(e) => {
                         let msg = format!("base64 decode failed: {}", e);
                         tracing::error!("[bulk-remember] job_id={} {}", item.job_id, msg);
                         let _ = sqlx::query(
                             "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
                         )
-                        .bind(&msg).bind(&item.job_id).execute(db.pool()).await;
+                        .bind(&msg)
+                        .bind(&item.job_id)
+                        .execute(state.db.pool())
+                        .await;
                         return Err(());
                     }
                 };
 
-                let upload = match crate::walrus::upload_blob(
-                    http,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
+                let upload = match crate::walrus::upload_blob_deferred(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
                     &encrypted,
                     epochs,
                     &owner,
                     item.wallet_index,
                     &item.namespace,
                     &package_id,
-                    agent.as_deref(),
-                ).await {
-                    Ok(u) => u,
+                    agent_public_key.as_deref(),
+                )
+                .await
+                {
+                    Ok(upload) => upload,
                     Err(e) => {
                         let msg = format!("walrus upload failed: {}", e);
                         tracing::error!("[bulk-remember] job_id={} {}", item.job_id, msg);
                         let _ = sqlx::query(
                             "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
                         )
-                        .bind(&msg).bind(&item.job_id).execute(db.pool()).await;
+                        .bind(&msg)
+                        .bind(&item.job_id)
+                        .execute(state.db.pool())
+                        .await;
                         return Err(());
                     }
                 };
-                let blob_id = upload.blob_id.clone();
-                let blob_size = encrypted.len() as i64;
+
+                let object_id = match upload.object_id {
+                    Some(object_id) if !object_id.is_empty() => object_id,
+                    _ => {
+                        let msg = "walrus deferred upload returned no object_id".to_string();
+                        tracing::error!("[bulk-remember] job_id={} {}", item.job_id, msg);
+                        let _ = sqlx::query(
+                            "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+                        )
+                        .bind(&msg)
+                        .bind(&item.job_id)
+                        .execute(state.db.pool())
+                        .await;
+                        return Err(());
+                    }
+                };
 
                 let _ = sqlx::query(
                     "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, updated_at = NOW() WHERE id = $2",
                 )
-                .bind(&blob_id).bind(&item.job_id).execute(db.pool()).await;
+                .bind(&upload.blob_id)
+                .bind(&item.job_id)
+                .execute(state.db.pool())
+                .await;
 
                 Ok(UploadOk {
-                    job_id: item.job_id.clone(),
-                    blob_id,
-                    object_id: upload.object_id,
+                    job_id: item.job_id,
+                    blob_id: upload.blob_id,
+                    object_id,
                     wallet_index: item.wallet_index,
-                    namespace: item.namespace.clone(),
+                    namespace: item.namespace,
                     vector: item.vector,
-                    blob_size,
+                    blob_size: encrypted.len() as i64,
                 })
             }
         })
@@ -1013,241 +795,113 @@ pub async fn execute_bulk_remember(
         .collect()
         .await;
 
-    // ── Step 3: group successful blobs by wallet_index ────────────────────
-    struct TransferReady {
-        object_id: String,
-        namespace: String,
-        job_id: String,
-        blob_id: String,
-        vector: Vec<f32>,
-        blob_size: i64,
-    }
-    let mut groups: HashMap<usize, Vec<TransferReady>> = HashMap::new();
-    let mut upload_count = 0usize;
-    let mut success_count = 0usize;
+    let mut groups: HashMap<usize, Vec<UploadOk>> = HashMap::new();
     let mut fail_count = 0usize;
+    let mut uploaded_count = 0usize;
 
-    for r in upload_results {
-        match r {
-            Ok(ok) => match ok.object_id {
-                Some(object_id) if !object_id.is_empty() => {
-                    upload_count += 1;
-                    groups
-                        .entry(ok.wallet_index)
-                        .or_default()
-                        .push(TransferReady {
-                            object_id,
-                            namespace: ok.namespace,
-                            job_id: ok.job_id,
-                            blob_id: ok.blob_id,
-                            vector: ok.vector,
-                            blob_size: ok.blob_size,
-                        });
-                }
-                _ => {
+    for result in upload_results {
+        match result {
+            Ok(upload) => {
+                uploaded_count += 1;
+                let vector_id = upload.job_id.clone();
+                if let Err(e) = state
+                    .db
+                    .insert_vector(
+                        &vector_id,
+                        &job.owner,
+                        &upload.namespace,
+                        &upload.blob_id,
+                        &upload.vector,
+                        upload.blob_size,
+                    )
+                    .await
+                {
                     fail_count += 1;
-                    let msg = "walrus upload returned no object_id; cannot transfer";
+                    let msg = format!("insert_vector failed: {}", e);
+                    tracing::error!("[bulk-remember] job_id={} {}", upload.job_id, msg);
                     let _ = sqlx::query(
-                            "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-                        )
-                        .bind(msg)
-                        .bind(&ok.job_id)
-                        .execute(state.db.pool())
-                        .await;
+                        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+                    )
+                    .bind(&msg)
+                    .bind(&upload.job_id)
+                    .execute(state.db.pool())
+                    .await;
+                    continue;
                 }
-            },
-            Err(()) => fail_count += 1,
+                groups.entry(upload.wallet_index).or_default().push(upload);
+            }
+            Err(()) => {
+                fail_count += 1;
+            }
         }
     }
 
-    tracing::info!(
-        "[bulk-remember] uploads done: ok={} fail={} wallet_groups={}",
-        upload_count,
-        fail_count,
-        groups.len(),
-    );
-
-    // ── Step 4: batch set-metadata + transfer per wallet group ────────────
-    //
-    // For each wallet slot we try ONE batched PTB; if that fails we fall back
-    // to per-blob set-metadata calls. Only after a blob's transfer definitively
-    // succeeds do we mark its remember_jobs row `done`. Permanent failures
-    // transition the row from `uploaded → failed` with a diagnostic error.
-    let insert_vector_after_transfer = |blob: &TransferReady| {
-        let state = Arc::clone(&ctx);
-        let pool = state.db.pool().clone();
-        let owner = job.owner.clone();
-        let namespace = blob.namespace.clone();
-        let blob_id = blob.blob_id.clone();
-        let vector = blob.vector.clone();
-        let blob_size = blob.blob_size;
-        let job_id = blob.job_id.clone();
-        async move {
-            let vector_id = uuid::Uuid::new_v4().to_string();
-            if let Err(e) = state
-                .db
-                .insert_vector(&vector_id, &owner, &namespace, &blob_id, &vector, blob_size)
-                .await
-            {
-                let msg = format!("insert_vector failed: {}", e);
-                tracing::error!("[bulk-remember] job_id={} {}", job_id, msg);
-                let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(&msg)
-                .bind(&job_id)
-                .execute(&pool)
-                .await;
-                return false;
-            }
-
-            let _ = sqlx::query(
-                "UPDATE remember_jobs SET status = 'done', updated_at = NOW() WHERE id = $1",
-            )
-            .bind(&job_id)
-            .execute(&pool)
-            .await;
-            true
-        }
-    };
-    let mark_transfer_failed = |jid: &str, err: &str| {
-        let pool = state.db.pool().clone();
-        let jid = jid.to_string();
-        let err = err.to_string();
-        async move {
-            let _ = sqlx::query(
-                "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(&err)
-            .bind(&jid)
-            .execute(&pool)
-            .await;
-        }
-    };
-
-    for (wallet_index, blobs) in &groups {
-        if blobs.is_empty() {
-            continue;
-        }
-
-        let url = format!("{}/walrus/set-metadata-batch", state.config.sidecar_url);
-        let blob_entries: Vec<SetMetadataBatchEntry<'_>> = blobs
+    let mut success_count = 0usize;
+    for (wallet_index, uploads) in groups {
+        let entries: Vec<SetMetadataBatchEntry> = uploads
             .iter()
-            .map(|blob| SetMetadataBatchEntry {
-                blob_object_id: blob.object_id.as_str(),
-                namespace: blob.namespace.as_str(),
+            .map(|upload| SetMetadataBatchEntry {
+                blob_object_id: upload.object_id.clone(),
+                namespace: upload.namespace.clone(),
             })
             .collect();
 
-        let mut req = state.http_client.post(&url).json(&SetMetadataBatchRequest {
-            blobs: blob_entries,
-            owner: &job.owner,
-            package_id: Some(job.package_id.as_str()),
-            agent_id: job.agent_public_key.as_deref(),
-            key_index: *wallet_index,
-        });
-        if let Some(secret) = state.config.sidecar_secret.as_deref() {
-            req = req.header("authorization", format!("Bearer {}", secret));
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
+        match crate::walrus::set_metadata_batch(
+            &state.http_client,
+            &state.config.sidecar_url,
+            state.config.sidecar_secret.as_deref(),
+            wallet_index,
+            &job.owner,
+            &job.package_id,
+            job.agent_public_key.as_deref(),
+            entries,
+        )
+        .await
+        {
+            Ok(transferred) => {
                 tracing::info!(
-                    "[bulk-remember] set-metadata-batch ok: {} blobs wallet={}",
-                    blobs.len(),
-                    wallet_index,
+                    "[bulk-remember] metadata batch transferred {} blobs wallet={}",
+                    transferred,
+                    wallet_index
                 );
-                for blob in blobs {
-                    if insert_vector_after_transfer(blob).await {
-                        success_count += 1;
-                    }
-                }
-            }
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                tracing::warn!(
-                    "[bulk-remember] set-metadata-batch ({}) failed: {} wallet={} — falling back per-blob",
-                    status, &body[..200.min(body.len())], wallet_index,
-                );
-                for blob in blobs {
-                    match execute_set_metadata_and_transfer(
-                        state,
-                        *wallet_index,
-                        blob.object_id.clone(),
-                        job.owner.clone(),
-                        blob.namespace.clone(),
-                        Some(job.package_id.clone()),
-                        job.agent_public_key.clone(),
+                for upload in uploads {
+                    let _ = sqlx::query(
+                        "UPDATE remember_jobs SET status = 'done', blob_id = $1, updated_at = NOW() WHERE id = $2",
                     )
-                    .await
-                    {
-                        Ok(()) => {
-                            if insert_vector_after_transfer(blob).await {
-                                success_count += 1;
-                            }
-                        }
-                        Err(e) => {
-                            fail_count += 1;
-                            tracing::warn!(
-                                "[bulk-remember] fallback set-metadata failed blob={}: {}",
-                                blob.object_id,
-                                e
-                            );
-                            mark_transfer_failed(
-                                &blob.job_id,
-                                &format!("metadata+transfer permanently failed: {}", e),
-                            )
-                            .await;
-                        }
-                    }
+                    .bind(&upload.blob_id)
+                    .bind(&upload.job_id)
+                    .execute(state.db.pool())
+                    .await;
+                    success_count += 1;
                 }
             }
             Err(e) => {
+                fail_count += uploads.len();
+                let msg = format!("metadata batch failed: {}", e);
                 tracing::warn!(
-                    "[bulk-remember] set-metadata-batch network error: {} wallet={} — falling back per-blob",
-                    e, wallet_index,
+                    "[bulk-remember] wallet={} {} ({} blobs)",
+                    wallet_index,
+                    msg,
+                    uploads.len()
                 );
-                for blob in blobs {
-                    match execute_set_metadata_and_transfer(
-                        state,
-                        *wallet_index,
-                        blob.object_id.clone(),
-                        job.owner.clone(),
-                        blob.namespace.clone(),
-                        Some(job.package_id.clone()),
-                        job.agent_public_key.clone(),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            if insert_vector_after_transfer(blob).await {
-                                success_count += 1;
-                            }
-                        }
-                        Err(e) => {
-                            fail_count += 1;
-                            tracing::warn!(
-                                "[bulk-remember] fallback set-metadata failed blob={}: {}",
-                                blob.object_id,
-                                e
-                            );
-                            mark_transfer_failed(
-                                &blob.job_id,
-                                &format!("metadata+transfer permanently failed: {}", e),
-                            )
-                            .await;
-                        }
-                    }
-                }
+                let failed_job_ids: Vec<String> =
+                    uploads.iter().map(|upload| upload.job_id.clone()).collect();
+                let _ = sqlx::query(
+                    "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = ANY($2)",
+                )
+                .bind(&msg)
+                .bind(&failed_job_ids)
+                .execute(state.db.pool())
+                .await;
             }
         }
     }
 
     tracing::info!(
-        "[bulk-remember] complete: owner={} total={} ok={} fail={}",
+        "[bulk-remember] complete: owner={} total={} uploaded={} done={} fail={}",
         &job.owner[..10.min(job.owner.len())],
         items_total,
+        uploaded_count,
         success_count,
         fail_count,
     );
