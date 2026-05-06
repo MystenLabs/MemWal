@@ -22,14 +22,23 @@ Quick start::
     result = client.remember("I love coffee")
 """
 
-from .client import MemWal, MemWalError, MemWalSync
+from .client import (
+    MemWal,
+    MemWalError,
+    MemWalRememberJobFailed,
+    MemWalRememberJobNotFound,
+    MemWalRememberJobTimeout,
+    MemWalSync,
+)
 from .middleware import with_memwal_langchain, with_memwal_openai
 from .utils import delegate_key_to_sui_address, delegate_key_to_public_key
 from .types import (
     AnalyzedFact,
     AnalyzeResult,
+    AnalyzeWaitResult,
     AskMemory,
     AskResult,
+    EmbedResult,
     HealthResult,
     MemWalConfig,
     RecallManualHit,
@@ -37,6 +46,15 @@ from .types import (
     RecallManualResult,
     RecallMemory,
     RecallResult,
+    RememberAcceptedResult,
+    RememberBulkAcceptedResult,
+    RememberBulkItem,
+    RememberBulkItemResult,
+    RememberBulkOptions,
+    RememberBulkResult,
+    RememberBulkStatusItem,
+    RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -51,6 +69,9 @@ __all__ = [
     "MemWal",
     "MemWalSync",
     "MemWalError",
+    "MemWalRememberJobFailed",
+    "MemWalRememberJobNotFound",
+    "MemWalRememberJobTimeout",
     # Delegate key utilities
     "delegate_key_to_sui_address",
     "delegate_key_to_public_key",
@@ -63,9 +84,20 @@ __all__ = [
     "AskMemory",
     "AskResult",
     "RememberResult",
+    "RememberAcceptedResult",
+    "RememberJobStatus",
+    "RememberBulkItem",
+    "RememberBulkOptions",
+    "RememberBulkAcceptedResult",
+    "RememberBulkStatusItem",
+    "RememberBulkStatusResult",
+    "RememberBulkItemResult",
+    "RememberBulkResult",
     "RecallResult",
     "RecallMemory",
+    "EmbedResult",
     "AnalyzeResult",
+    "AnalyzeWaitResult",
     "AnalyzedFact",
     "HealthResult",
     "RestoreResult",

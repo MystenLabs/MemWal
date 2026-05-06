@@ -93,21 +93,31 @@ def build_signature_message(
     method: str,
     path: str,
     body_sha256: str,
+    nonce: str = "",
+    account_id: str = "",
 ) -> str:
     """Build the canonical signing message.
 
-    Format: ``{timestamp}.{method}.{path}.{body_sha256}``
+    Current format (matches Rust server ``services/server/src/auth.rs``)::
+
+        "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+
+    The trailing ``nonce`` was added in MED-1 (replay protection); the
+    ``account_id`` was added in LOW-23 so an intermediary can't swap the
+    account hint without invalidating the signature. Both fields are
+    REQUIRED — passing empty strings will fail signature verification on
+    the server.
 
     Args:
         timestamp: Unix seconds as string.
         method: Uppercase HTTP method (e.g. ``"POST"``).
-        path: URL path (e.g. ``"/api/remember"``).
+        path: URL path with query (e.g. ``"/api/remember"``).
         body_sha256: SHA-256 hex digest of the JSON body string.
-
-    Returns:
-        The message string to sign.
+        nonce: UUID v4 sent as the ``x-nonce`` header (required).
+        account_id: MemWalAccount object ID sent as ``x-account-id``
+            (required; empty string here will mismatch on server).
     """
-    return f"{timestamp}.{method}.{path}.{body_sha256}"
+    return f"{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
 
 
 def delegate_key_to_sui_address(private_key_hex: str) -> str:

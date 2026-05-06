@@ -52,12 +52,10 @@ class TestRemember:
         """remember() should POST to /api/remember with text and namespace."""
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
-                200,
+                202,
                 json={
-                    "id": "mem-1",
-                    "blob_id": "blob-abc",
-                    "owner": "0xowner",
-                    "namespace": "default",
+                    "job_id": "job-1",
+                    "status": "pending",
                 },
             )
         )
@@ -69,22 +67,18 @@ class TestRemember:
         body = json.loads(request.content)
         assert body["text"] == "I love coffee"
         assert body["namespace"] == "default"
-        assert result.id == "mem-1"
-        assert result.blob_id == "blob-abc"
-        assert result.owner == "0xowner"
-        assert result.namespace == "default"
+        assert result.job_id == "job-1"
+        assert result.status == "pending"
 
     @respx.mock
     async def test_sends_correct_headers(self, memwal_client: MemWal) -> None:
         """remember() should include all required auth headers."""
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
-                200,
+                202,
                 json={
-                    "id": "mem-1",
-                    "blob_id": "blob-abc",
-                    "owner": "0xowner",
-                    "namespace": "default",
+                    "job_id": "job-1",
+                    "status": "pending",
                 },
             )
         )
@@ -109,12 +103,10 @@ class TestRemember:
         """The signature in headers should be verifiable with the public key."""
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
-                200,
+                202,
                 json={
-                    "id": "mem-1",
-                    "blob_id": "blob-abc",
-                    "owner": "0xowner",
-                    "namespace": "default",
+                    "job_id": "job-1",
+                    "status": "pending",
                 },
             )
         )
@@ -142,12 +134,10 @@ class TestRemember:
         """remember() should use custom namespace when provided."""
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
-                200,
+                202,
                 json={
-                    "id": "mem-1",
-                    "blob_id": "blob-abc",
-                    "owner": "0xowner",
-                    "namespace": "custom-ns",
+                    "job_id": "job-2",
+                    "status": "pending",
                 },
             )
         )
@@ -156,7 +146,8 @@ class TestRemember:
 
         body = json.loads(route.calls[0].request.content)
         assert body["namespace"] == "custom-ns"
-        assert result.namespace == "custom-ns"
+        assert result.job_id == "job-2"
+        assert result.status == "pending"
 
 
 # ============================================================

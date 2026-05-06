@@ -25,17 +25,21 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import time
-from typing import Any, Dict, Optional, TypeVar
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
 
 from .types import (
     AnalyzedFact,
     AnalyzeResult,
+    AnalyzeWaitResult,
     AskMemory,
     AskResult,
+    EmbedResult,
     HealthResult,
     MemWalConfig,
     RecallManualHit,
@@ -43,6 +47,15 @@ from .types import (
     RecallManualResult,
     RecallMemory,
     RecallResult,
+    RememberAcceptedResult,
+    RememberBulkAcceptedResult,
+    RememberBulkItem,
+    RememberBulkItemResult,
+    RememberBulkOptions,
+    RememberBulkResult,
+    RememberBulkStatusItem,
+    RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -57,6 +70,43 @@ from .utils import (
 )
 
 T = TypeVar("T")
+
+
+# ============================================================
+# Polling helpers (PR #121 parity with TS SDK)
+# ============================================================
+
+
+def _now_ms() -> int:
+    return int(time.monotonic() * 1000)
+
+
+async def _sleep_ms(ms: int) -> None:
+    await asyncio.sleep(max(ms, 0) / 1000.0)
+
+
+def _polling_delay_ms(base_ms: int, attempt: int) -> int:
+    """Jittered exponential backoff matching TS ``pollingDelayMs``.
+
+    base * 1.5^min(attempt, 6), capped at 10s, with ±25% jitter so
+    concurrent clients don't synchronise.
+    """
+
+    base = max(100, base_ms)
+    capped = min(10_000, base * (1.5 ** min(attempt, 6)))
+    jitter = 0.75 + random.random() * 0.5
+    return int(capped * jitter)
+
+
+def _is_transient_polling_status(status: int) -> bool:
+    """Classify HTTP status codes for the polling retry loop.
+
+    Mirrors TS ``isTransientPollingStatus``: connection drop (0), rate
+    limit (429), or any 5xx → retry. Anything else (including 4xx other
+    than 404 which is special-cased upstream) → surface to caller.
+    """
+
+    return status == 0 or status == 429 or status >= 500
 
 
 class MemWal:
@@ -124,28 +174,278 @@ class MemWal:
     # Core API
     # ============================================================
 
-    async def remember(self, text: str, namespace: Optional[str] = None) -> RememberResult:
-        """Remember something.
+    async def remember(
+        self, text: str, namespace: Optional[str] = None
+    ) -> RememberAcceptedResult:
+        """Submit a remember request and return as soon as the server accepts it.
 
-        Server handles: verify -> embed -> encrypt -> Walrus upload -> store.
+        Per PR #121 (ENG-1406): the server returns ``HTTP 202 + job_id``
+        immediately (~500ms). The actual Walrus upload + on-chain commit run
+        in a background worker. Use :meth:`wait_for_remember_job` to follow
+        the job to completion, or :meth:`remember_and_wait` for a single
+        call that does both.
 
         Args:
             text: The text to remember.
             namespace: Override the default namespace.
 
         Returns:
-            :class:`RememberResult` with id, blob_id, owner, namespace.
+            :class:`RememberAcceptedResult` with ``job_id`` and initial
+            status (``"pending"``).
         """
-        data = await self._signed_request("POST", "/api/remember", {
-            "text": text,
-            "namespace": namespace or self._namespace,
-        })
-        return RememberResult(
-            id=data["id"],
-            blob_id=data["blob_id"],
-            owner=data["owner"],
-            namespace=data["namespace"],
+        data = await self._signed_request(
+            "POST",
+            "/api/remember",
+            {"text": text, "namespace": namespace or self._namespace},
+            accepted_statuses=(200, 202),
         )
+        return RememberAcceptedResult(
+            job_id=data["job_id"],
+            status=data.get("status", "pending"),
+        )
+
+    # Alias for parity with TS SDK ``rememberAsync``.
+    async def remember_async(
+        self, text: str, namespace: Optional[str] = None
+    ) -> RememberAcceptedResult:
+        return await self.remember(text, namespace)
+
+    async def wait_for_remember_job(
+        self,
+        job_id: str,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
+    ) -> RememberResult:
+        """Poll an accepted remember job until it reaches a terminal state.
+
+        Mirrors TS ``waitForRememberJob``:
+
+        - Accepts 200 + 404 from the status endpoint and dispatches on
+          ``status`` field (404 / ``status == "not_found"`` raises).
+        - Transient HTTP errors (429, 5xx, network drop) are retried until
+          the timeout, not surfaced as polling failures.
+        - Backoff is jittered exponential (1.5x cap 10s, ±25%) to avoid
+          thundering-herd at scale.
+        """
+
+        deadline_ms = _now_ms() + timeout_ms
+        attempt = 0
+
+        while _now_ms() < deadline_ms:
+            await _sleep_ms(_polling_delay_ms(poll_interval_ms, attempt))
+            attempt += 1
+
+            try:
+                data = await self._signed_request(
+                    "GET",
+                    f"/api/remember/{job_id}",
+                    {},
+                    accepted_statuses=(200, 404),
+                )
+            except _HttpStatusError as err:
+                if _is_transient_polling_status(err.status):
+                    continue
+                raise
+
+            status_str = data.get("status")
+            if status_str is None or status_str == "not_found":
+                raise MemWalRememberJobNotFound(job_id)
+
+            if status_str == "done":
+                return RememberResult(
+                    id=data.get("job_id", job_id),
+                    blob_id=data.get("blob_id") or "",
+                    owner=data.get("owner") or "",
+                    namespace=data.get("namespace") or self._namespace,
+                )
+
+            if status_str == "failed":
+                raise MemWalRememberJobFailed(
+                    job_id=job_id, error=data.get("error") or "unknown error"
+                )
+
+            # pending / running / uploaded — keep polling.
+
+        raise MemWalRememberJobTimeout(job_id=job_id, timeout_ms=timeout_ms)
+
+    async def remember_and_wait(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
+    ) -> RememberResult:
+        """Submit a remember and wait for the background worker to finish.
+
+        Convenience wrapper around :meth:`remember` (returns ``job_id`` in
+        ~500ms) + :meth:`wait_for_remember_job` (polls until ``done`` or
+        ``failed``). Mirrors TS ``rememberAndWait``.
+        """
+
+        accepted = await self.remember(text, namespace)
+        return await self.wait_for_remember_job(
+            accepted.job_id,
+            poll_interval_ms=poll_interval_ms,
+            timeout_ms=timeout_ms,
+        )
+
+    # ============================================================
+    # Bulk remember (ENG-1408)
+    # ============================================================
+
+    async def remember_bulk_async(
+        self, items: Sequence[RememberBulkItem]
+    ) -> RememberBulkAcceptedResult:
+        """Submit a bulk remember and return as soon as the server accepts the batch.
+
+        Server returns ``HTTP 202`` with ``job_ids`` aligned positionally with
+        ``items``. Each item then progresses through the same async pipeline
+        as :meth:`remember` independently.
+
+        Up to ``MAX_BULK_ITEMS`` (= 20) items per call; each item's text
+        capped at ``MAX_REMEMBER_TEXT_BYTES`` (= 64 KiB).
+        """
+
+        payload_items: List[Dict[str, Any]] = [
+            {
+                "text": item.text,
+                "namespace": item.namespace or self._namespace,
+            }
+            for item in items
+        ]
+        data = await self._signed_request(
+            "POST",
+            "/api/remember/bulk",
+            {"items": payload_items},
+            accepted_statuses=(200, 202),
+        )
+        return RememberBulkAcceptedResult(
+            job_ids=list(data.get("job_ids", [])),
+            total=int(data.get("total", len(payload_items))),
+            status=data.get("status", "pending"),
+        )
+
+    # Alias for parity with TS SDK ``rememberBulk``.
+    async def remember_bulk(
+        self, items: Sequence[RememberBulkItem]
+    ) -> RememberBulkAcceptedResult:
+        return await self.remember_bulk_async(items)
+
+    async def get_remember_bulk_status(
+        self, job_ids: Sequence[str]
+    ) -> RememberBulkStatusResult:
+        """Poll the bulk-status endpoint for a batch of job_ids.
+
+        Returns one :class:`RememberBulkStatusItem` per requested job (order
+        not guaranteed; callers should index by ``job_id``).
+        """
+
+        data = await self._signed_request(
+            "POST",
+            "/api/remember/bulk/status",
+            {"job_ids": list(job_ids)},
+        )
+        return RememberBulkStatusResult(
+            results=[
+                RememberBulkStatusItem(
+                    job_id=item.get("job_id", ""),
+                    status=item.get("status", "pending"),
+                    blob_id=item.get("blob_id"),
+                    error=item.get("error"),
+                )
+                for item in data.get("results", [])
+            ]
+        )
+
+    async def wait_for_remember_jobs(
+        self,
+        job_ids: Sequence[str],
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> RememberBulkResult:
+        """Poll the bulk-status endpoint until every job is terminal.
+
+        Mirrors TS ``waitForRememberJobs``:
+
+        - Each item settles to ``"done"``, ``"failed"``, or ``"timeout"``.
+        - Same transient-retry + jitter strategy as the single-job poll.
+        - Result list preserves the order of the input ``job_ids``.
+
+        Default ``timeout_ms`` is 120s — bulk pipelines run longer than
+        single remember.
+        """
+
+        opts = opts or RememberBulkOptions()
+        deadline_ms = _now_ms() + opts.timeout_ms
+
+        # Track per-job final state.
+        results: Dict[str, RememberBulkItemResult] = {
+            job_id: RememberBulkItemResult(
+                id=job_id,
+                blob_id="",
+                status="timeout",
+                error=None,
+            )
+            for job_id in job_ids
+        }
+        pending: List[str] = list(job_ids)
+        attempt = 0
+
+        while pending and _now_ms() < deadline_ms:
+            await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
+            attempt += 1
+
+            try:
+                batch = await self.get_remember_bulk_status(pending)
+            except _HttpStatusError as err:
+                if _is_transient_polling_status(err.status):
+                    continue
+                raise
+
+            still_pending: List[str] = []
+            for item in batch.results:
+                if item.status == "done":
+                    results[item.job_id] = RememberBulkItemResult(
+                        id=item.job_id,
+                        blob_id=item.blob_id or "",
+                        status="done",
+                        error=None,
+                    )
+                elif item.status in ("failed", "not_found"):
+                    results[item.job_id] = RememberBulkItemResult(
+                        id=item.job_id,
+                        blob_id=item.blob_id or "",
+                        status="failed",
+                        error=item.error,
+                    )
+                else:
+                    still_pending.append(item.job_id)
+            pending = still_pending
+
+        ordered = [results[job_id] for job_id in job_ids]
+        succeeded = sum(1 for r in ordered if r.status == "done")
+        failed = sum(1 for r in ordered if r.status == "failed")
+        timed_out = sum(1 for r in ordered if r.status == "timeout")
+        return RememberBulkResult(
+            results=ordered,
+            total=len(ordered),
+            succeeded=succeeded,
+            failed=failed,
+            timed_out=timed_out,
+        )
+
+    async def remember_bulk_and_wait(
+        self,
+        items: Sequence[RememberBulkItem],
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> RememberBulkResult:
+        """Submit bulk + wait for every item to settle.
+
+        Convenience wrapper around :meth:`remember_bulk_async` +
+        :meth:`wait_for_remember_jobs`. Mirrors TS ``rememberBulkAndWait``.
+        """
+
+        accepted = await self.remember_bulk_async(items)
+        return await self.wait_for_remember_jobs(accepted.job_ids, opts)
 
     async def recall(
         self,
@@ -181,31 +481,90 @@ class MemWal:
         return RecallResult(results=memories, total=data.get("total", len(memories)))
 
     async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
-        """Analyze conversation text.
+        """Analyze conversation text and return as soon as facts are accepted.
 
-        Server uses LLM to extract facts, then stores each one
-        (embed -> encrypt -> Walrus -> store).
+        Per PR #121: server extracts atomic facts synchronously via LLM, then
+        enqueues one background remember job per fact. Returns 202 with
+        ``job_ids`` aligned to ``facts``.
+
+        Use :meth:`analyze_and_wait` to also wait for every fact to finish
+        persisting (poll all job_ids together).
 
         Args:
             text: Conversation text to analyze.
             namespace: Override the default namespace.
 
         Returns:
-            :class:`AnalyzeResult` with extracted and stored facts.
+            :class:`AnalyzeResult` with extracted ``facts`` + per-fact
+            ``job_ids`` for downstream polling.
         """
-        data = await self._signed_request("POST", "/api/analyze", {
-            "text": text,
-            "namespace": namespace or self._namespace,
-        })
+        data = await self._signed_request(
+            "POST",
+            "/api/analyze",
+            {"text": text, "namespace": namespace or self._namespace},
+            accepted_statuses=(200, 202),
+        )
+        # Backward-compat: older server shape returned `facts[].id` and
+        # `facts[].blob_id` directly. New async shape may omit `blob_id`
+        # at this point (set later by the worker) and add `job_ids`.
         facts = [
-            AnalyzedFact(text=f["text"], id=f["id"], blob_id=f["blob_id"])
+            AnalyzedFact(
+                text=f["text"],
+                id=f.get("id", ""),
+                blob_id=f.get("blob_id", ""),
+            )
             for f in data.get("facts", [])
         ]
+        job_ids = list(data.get("job_ids", []))
+        fact_count = int(data.get("fact_count", data.get("total", len(facts))))
         return AnalyzeResult(
             facts=facts,
-            total=data.get("total", len(facts)),
+            fact_count=fact_count,
+            job_ids=job_ids,
+            status=data.get("status", "pending"),
             owner=data.get("owner", ""),
         )
+
+    async def analyze_and_wait(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> AnalyzeWaitResult:
+        """Analyze + wait for every extracted fact to finish persisting.
+
+        Mirrors TS ``analyzeAndWait``: calls :meth:`analyze` then
+        :meth:`wait_for_remember_jobs` on the returned ``job_ids``. The
+        result combines the analyze fact list with the bulk-style settled
+        per-job results.
+        """
+
+        accepted = await self.analyze(text, namespace)
+        completed = await self.wait_for_remember_jobs(accepted.job_ids, opts)
+        return AnalyzeWaitResult(
+            results=completed.results,
+            total=completed.total,
+            succeeded=completed.succeeded,
+            failed=completed.failed,
+            timed_out=completed.timed_out,
+            facts=accepted.facts,
+            owner=accepted.owner,
+        )
+
+    async def embed(self, text: str) -> EmbedResult:
+        """Compute the embedding vector for ``text`` without storing anything.
+
+        Calls ``POST /api/embed``. Useful for callers that want to do their
+        own indexing or vector math; for the standard "remember" flow, use
+        :meth:`remember` (server handles embed + encrypt + upload).
+        """
+
+        data = await self._signed_request(
+            "POST",
+            "/api/embed",
+            {"text": text},
+        )
+        return EmbedResult(vector=list(data.get("vector", [])))
 
     async def ask(
         self,
@@ -346,6 +705,7 @@ class MemWal:
         method: str,
         path: str,
         body: Dict[str, Any],
+        accepted_statuses: tuple = (200,),
     ) -> Dict[str, Any]:
         """Make a signed request to the server.
 
@@ -359,11 +719,24 @@ class MemWal:
             - ``x-account-id``: MemWalAccount object ID
             - ``Content-Type``: application/json
         """
+        import uuid
+
         timestamp = str(int(time.time()))
         body_str = json.dumps(body, separators=(",", ":"))
         body_hash = sha256_hex(body_str)
+        # MED-1 / LOW-23: nonce + account_id are part of the canonical signed
+        # message. Server rejects the request as "unsupported legacy SDK"
+        # (HTTP 426) if x-nonce is missing or not UUID-formatted.
+        nonce = str(uuid.uuid4())
 
-        message = build_signature_message(timestamp, method.upper(), path, body_hash)
+        message = build_signature_message(
+            timestamp,
+            method.upper(),
+            path,
+            body_hash,
+            nonce=nonce,
+            account_id=self._account_id,
+        )
         signature_hex, public_key_hex = sign_message(message, self._signing_key)
 
         url = f"{self._server_url}{path}"
@@ -372,6 +745,7 @@ class MemWal:
             "x-public-key": public_key_hex,
             "x-signature": signature_hex,
             "x-timestamp": timestamp,
+            "x-nonce": nonce,
             "x-delegate-key": self._private_key_hex,
             "x-account-id": self._account_id,
         }
@@ -383,10 +757,11 @@ class MemWal:
             content=body_str,
         )
 
-        if response.status_code != 200:
+        if response.status_code not in accepted_statuses:
             err_text = response.text
-            raise MemWalError(
-                f"MemWal API error ({response.status_code}): {err_text}"
+            raise _HttpStatusError(
+                status=response.status_code,
+                body=err_text,
             )
 
         return response.json()
@@ -396,6 +771,51 @@ class MemWalError(Exception):
     """Exception raised for MemWal API errors."""
 
     pass
+
+
+class _HttpStatusError(MemWalError):
+    """Internal: raised when an HTTP response status is not in ``accepted_statuses``.
+
+    Carries ``.status`` so polling loops can decide whether to retry
+    (transient: 0/429/5xx) or surface (terminal: 4xx other than 404 when
+    explicitly accepted).
+    """
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"MemWal API error ({status}): {body}")
+        self.status = status
+        self.body = body
+
+
+class MemWalRememberJobNotFound(MemWalError):
+    """The polled job_id does not exist or is not owned by the caller."""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(f"remember job not found: {job_id}")
+        self.status = 404
+        self.job_id = job_id
+
+
+class MemWalRememberJobFailed(MemWalError):
+    """The async remember job reached terminal status=failed."""
+
+    def __init__(self, job_id: str, error: str) -> None:
+        super().__init__(f"remember job failed: {error}")
+        self.status = 500
+        self.job_id = job_id
+        self.error = error
+
+
+class MemWalRememberJobTimeout(MemWalError):
+    """Polling loop exceeded the configured timeout."""
+
+    def __init__(self, job_id: str, timeout_ms: int) -> None:
+        super().__init__(
+            f"remember job timed out after {timeout_ms}ms (job_id={job_id})"
+        )
+        self.status = 504
+        self.job_id = job_id
+        self.timeout_ms = timeout_ms
 
 
 class MemWalSync:
@@ -460,9 +880,82 @@ class MemWalSync:
             self._inner._client = None
             return asyncio.run(coro)
 
-    def remember(self, text: str, namespace: Optional[str] = None) -> RememberResult:
-        """Synchronous version of :meth:`MemWal.remember`."""
+    def remember(
+        self, text: str, namespace: Optional[str] = None
+    ) -> RememberAcceptedResult:
+        """Synchronous version of :meth:`MemWal.remember` (async accept)."""
         return self._run(self._inner.remember(text, namespace))
+
+    # Alias for parity with TS SDK ``rememberAsync``.
+    def remember_async(
+        self, text: str, namespace: Optional[str] = None
+    ) -> RememberAcceptedResult:
+        return self._run(self._inner.remember_async(text, namespace))
+
+    def wait_for_remember_job(
+        self,
+        job_id: str,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
+    ) -> RememberResult:
+        """Synchronous version of :meth:`MemWal.wait_for_remember_job`."""
+        return self._run(
+            self._inner.wait_for_remember_job(
+                job_id,
+                poll_interval_ms=poll_interval_ms,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    def remember_and_wait(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
+    ) -> RememberResult:
+        """Synchronous version of :meth:`MemWal.remember_and_wait`."""
+        return self._run(
+            self._inner.remember_and_wait(
+                text,
+                namespace,
+                poll_interval_ms=poll_interval_ms,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    def remember_bulk(
+        self, items: Sequence[RememberBulkItem]
+    ) -> RememberBulkAcceptedResult:
+        """Synchronous version of :meth:`MemWal.remember_bulk`."""
+        return self._run(self._inner.remember_bulk(items))
+
+    def remember_bulk_async(
+        self, items: Sequence[RememberBulkItem]
+    ) -> RememberBulkAcceptedResult:
+        return self._run(self._inner.remember_bulk_async(items))
+
+    def get_remember_bulk_status(
+        self, job_ids: Sequence[str]
+    ) -> RememberBulkStatusResult:
+        """Synchronous version of :meth:`MemWal.get_remember_bulk_status`."""
+        return self._run(self._inner.get_remember_bulk_status(job_ids))
+
+    def wait_for_remember_jobs(
+        self,
+        job_ids: Sequence[str],
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> RememberBulkResult:
+        """Synchronous version of :meth:`MemWal.wait_for_remember_jobs`."""
+        return self._run(self._inner.wait_for_remember_jobs(job_ids, opts))
+
+    def remember_bulk_and_wait(
+        self,
+        items: Sequence[RememberBulkItem],
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> RememberBulkResult:
+        """Synchronous version of :meth:`MemWal.remember_bulk_and_wait`."""
+        return self._run(self._inner.remember_bulk_and_wait(items, opts))
 
     def recall(
         self, query: str, limit: int = 10, namespace: Optional[str] = None
@@ -473,6 +966,19 @@ class MemWalSync:
     def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
         return self._run(self._inner.analyze(text, namespace))
+
+    def analyze_and_wait(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        opts: Optional[RememberBulkOptions] = None,
+    ) -> AnalyzeWaitResult:
+        """Synchronous version of :meth:`MemWal.analyze_and_wait`."""
+        return self._run(self._inner.analyze_and_wait(text, namespace, opts))
+
+    def embed(self, text: str) -> EmbedResult:
+        """Synchronous version of :meth:`MemWal.embed`."""
+        return self._run(self._inner.embed(text))
 
     def ask(self, question: str, limit: int = 5, namespace: Optional[str] = None) -> AskResult:
         """Synchronous version of :meth:`MemWal.ask`."""
