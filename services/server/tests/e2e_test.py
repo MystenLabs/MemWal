@@ -265,6 +265,105 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
     print(f"[pass] POST /api/recall → {recall_result['total']} hits, top distance={top['distance']:.4f}")
 
 
+MAX_REMEMBER_TEXT_BYTES = 1024 * 1024  # mirrors src/routes.rs constant
+# Largest plaintext we exercise in the e2e test. Smaller than the route
+# ceiling — bigger payloads work too (see scripts/bench-remember-sizes.ts)
+# but at 1 MiB the summarize path fans out to 16 parallel LLM calls, which
+# multiplies any upstream flake into a per-request failure. 512 KiB still
+# exercises the chunked map-reduce path (8 chunks) without that risk.
+LARGE_TEXT_BYTES = 512 * 1024
+
+
+def _send_remember_raw(
+    text: str,
+    signing_key: SigningKey,
+    account_id: str | None,
+) -> tuple[int, str]:
+    """Send a signed /api/remember and return (status_code, response_body).
+
+    Used for negative tests where we expect a 4xx — make_signed_request would
+    raise on non-2xx, so we drop down to urllib here to inspect the status.
+    """
+    body = {"text": text, "namespace": "e2e-size-test"}
+    body_bytes = json.dumps(body).encode()
+    timestamp = str(int(time.time()))
+    nonce = str(uuid.uuid4())
+    signature_hex = _sign(
+        signing_key, "POST", "/api/remember", body_bytes, timestamp, nonce, account_id or ""
+    )
+    public_key_hex = signing_key.verify_key.encode().hex()
+    headers = {
+        "Content-Type": "application/json",
+        "x-public-key": public_key_hex,
+        "x-signature": signature_hex,
+        "x-timestamp": timestamp,
+        "x-nonce": nonce,
+    }
+    if account_id:
+        headers["x-account-id"] = account_id
+    req = urllib.request.Request(
+        f"{BASE_URL}/api/remember", data=body_bytes, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
+
+
+def test_remember_size_64kb_summarized(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """64 KiB plaintext: must succeed via the new summarize path (ENG-1407).
+
+    On the pre-PR baseline this size errors out at the embedding API token
+    limit. PR routes text > SUMMARIZE_THRESHOLD_BYTES through gpt-4o-mini
+    summarization first; this is the regression test that proves the path
+    works end-to-end against real Walrus + SEAL.
+    """
+    text = ("The quick brown fox jumps over the lazy dog. " * (64 * 1024 // 45 + 1))[:64 * 1024]
+    assert len(text) == 64 * 1024
+    body = {"text": text, "namespace": "e2e-size-test"}
+    result = make_signed_request("POST", "/api/remember", body, signing_key, account_id)
+    assert "id" in result, f"64 KiB remember failed: {result}"
+    print(f"[pass] POST /api/remember 64 KiB → id={result['id']} (summarize path)")
+
+
+def test_remember_size_large_accepted(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """`LARGE_TEXT_BYTES` plaintext: must succeed end-to-end.
+
+    Exercises the chunked map-reduce path (8 chunks at this size), the
+    auth body cap, the sidecar `/seal/encrypt` body limit, SEAL encrypt
+    on the full plaintext, and the Walrus upload. If any of those caps is
+    too tight, this returns 400 (auth/route layer) or 500 (sidecar).
+    """
+    text = ("The quick brown fox jumps over the lazy dog. " * (LARGE_TEXT_BYTES // 45 + 1))[:LARGE_TEXT_BYTES]
+    assert len(text) == LARGE_TEXT_BYTES
+    body = {"text": text, "namespace": "e2e-size-test"}
+    result = make_signed_request("POST", "/api/remember", body, signing_key, account_id)
+    assert "id" in result, f"large-size remember failed: {result}"
+    print(f"[pass] POST /api/remember {LARGE_TEXT_BYTES} bytes → id={result['id']}")
+
+
+def test_remember_size_over_limit_rejected(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """`MAX_REMEMBER_TEXT_BYTES + 1`: must return 400 from the handler size check.
+
+    Should fail with HTTP 400 and a body that names the byte ceiling — not
+    the empty 400 you'd see if upstream auth/body limits were too tight.
+    """
+    text = "x" * (MAX_REMEMBER_TEXT_BYTES + 1)
+    status, body = _send_remember_raw(text, signing_key, account_id)
+    assert status == 400, f"expected 400 over limit, got {status}: {body[:200]}"
+    assert "exceeds maximum length" in body, (
+        f"expected handler-level rejection message, got: {body[:200]}"
+    )
+    print(f"[pass] POST /api/remember {len(text)} bytes → 400 (handler-level reject)")
+
+
 def main() -> int:
     print("=" * 60)
     print(f"  memwal Server E2E — target {BASE_URL}")
@@ -297,8 +396,24 @@ def main() -> int:
         except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
             failures.append(f"remember_recall_happy_path: {e}")
             print(f"[FAIL] remember_recall_happy_path: {e}")
+
+        # ENG-1407: parametric size cases that the prior tiny-payload tests
+        # missed. Share the same Walrus + SEAL prerequisites as the happy
+        # path, so they run together.
+        size_checks = (
+            ("size_64kb_summarized", test_remember_size_64kb_summarized),
+            ("size_large_accepted", test_remember_size_large_accepted),
+            ("size_over_limit_rejected", test_remember_size_over_limit_rejected),
+        )
+        for name, fn in size_checks:
+            try:
+                fn(delegate_key, account_id)
+            except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                failures.append(f"{name}: {e}")
+                print(f"[FAIL] {name}: {e}")
     else:
         print("[skip] remember_recall_happy_path (no TEST_DELEGATE_KEY)")
+        print("[skip] size_*_test (no TEST_DELEGATE_KEY)")
 
     print()
     print("=" * 60)
