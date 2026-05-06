@@ -76,19 +76,12 @@ pub async fn upload_blob(
     // LOW-17 parity: cap epochs at 5 to prevent accidental large storage spend.
     let capped_epochs = epochs.min(5);
 
-    // Resolve sui rpc + walrus publisher + walrus package id from env. We
-    // can't reach into AppState from here without a wider refactor, so
+    // Resolve sui rpc + walrus upload endpoint + walrus package id from env.
+    // We can't reach into AppState from here without a wider refactor, so
     // pull from env directly (matches the existing pattern in routes).
-    let sui_rpc_url = std::env::var("SUI_RPC_URL").unwrap_or_else(|_| {
-        match std::env::var("SUI_NETWORK").as_deref() {
-            Ok("testnet") => "https://fullnode.testnet.sui.io:443".to_string(),
-            Ok("devnet") => "https://fullnode.devnet.sui.io:443".to_string(),
-            _ => "https://fullnode.mainnet.sui.io:443".to_string(),
-        }
-    });
-    let publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
-        .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
     let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+    let sui_rpc_url = sui_rpc_url_from_network(&network);
+    let upload_url = walrus_upload_url_from_env(&network);
     let walrus_pkg = walrus_onchain::resolve_walrus_package_id(&network);
 
     // Step 1: load signer from KeyPool via env (KeyPool itself is on AppState
@@ -105,7 +98,7 @@ pub async fn upload_blob(
     // Step 2: publish to Walrus
     let published = walrus_publisher::upload_blob_via_publisher(
         client,
-        &publisher_url,
+        &upload_url,
         data,
         capped_epochs,
         &server_address,
@@ -169,6 +162,44 @@ pub async fn upload_blob(
     })
 }
 
+/// Resolve the Sui JSON-RPC fullnode URL for `network`. Mirrors the
+/// per-network fallback used in the legacy sidecar (`getJsonRpcFullnodeUrl`).
+fn sui_rpc_url_from_network(network: &str) -> String {
+    if let Ok(v) = std::env::var("SUI_RPC_URL") {
+        return v;
+    }
+    match network {
+        "testnet" => "https://fullnode.testnet.sui.io:443".to_string(),
+        "devnet" => "https://fullnode.devnet.sui.io:443".to_string(),
+        _ => "https://fullnode.mainnet.sui.io:443".to_string(),
+    }
+}
+
+/// Resolve the Walrus upload endpoint URL.
+///
+/// Reads `WALRUS_UPLOAD_RELAY_URL` env var, falling back to the per-network
+/// upload-relay default — matches the legacy sidecar
+/// (`scripts/sidecar-server.ts:65-69`) so Railway's dev/staging/mainnet env
+/// values keep working without rename.
+///
+/// **NOTE — protocol gap (ENG-1700 follow-up):** the upload-relay default
+/// URLs (`upload-relay.{net}.walrus.space`) speak the multi-step
+/// register/upload/certify relay protocol used by `@mysten/walrus`. The
+/// current implementation in `walrus_publisher.rs` only speaks the simpler
+/// `PUT /v1/blobs` public-publisher protocol, so it will fail against the
+/// default relay URL. Until the relay protocol is ported (Path A), set
+/// `WALRUS_UPLOAD_RELAY_URL` to a `publisher.walrus-{net}.walrus.space`
+/// endpoint instead.
+fn walrus_upload_url_from_env(network: &str) -> String {
+    if let Ok(v) = std::env::var("WALRUS_UPLOAD_RELAY_URL") {
+        return v;
+    }
+    match network {
+        "testnet" => "https://upload-relay.testnet.walrus.space".to_string(),
+        _ => "https://upload-relay.mainnet.walrus.space".to_string(),
+    }
+}
+
 fn load_pool_keys_from_env() -> Vec<String> {
     if let Ok(s) = std::env::var("SERVER_SUI_PRIVATE_KEYS") {
         let v: Vec<String> = s
@@ -216,14 +247,8 @@ pub async fn query_blobs_by_owner(
     namespace: Option<&str>,
     package_id: Option<&str>,
 ) -> Result<Vec<OnChainBlob>, AppError> {
-    let sui_rpc_url = std::env::var("SUI_RPC_URL").unwrap_or_else(|_| {
-        match std::env::var("SUI_NETWORK").as_deref() {
-            Ok("testnet") => "https://fullnode.testnet.sui.io:443".to_string(),
-            Ok("devnet") => "https://fullnode.devnet.sui.io:443".to_string(),
-            _ => "https://fullnode.mainnet.sui.io:443".to_string(),
-        }
-    });
     let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+    let sui_rpc_url = sui_rpc_url_from_network(&network);
     let walrus_pkg = walrus_onchain::resolve_walrus_package_id(&network);
     let walrus_blob_type = format!("{}::blob::Blob", walrus_pkg);
 
