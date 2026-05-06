@@ -47,7 +47,6 @@ export type RegisterActionState = {
     | "in_progress"
     | "success"
     | "failed"
-    | "user_exists"
     | "invalid_data";
 };
 
@@ -63,8 +62,10 @@ export const register = async (
 
     const [user] = await getUser(validatedData.email);
 
+    // HIGH-11: Return generic failure — do not reveal whether the email is registered.
+    // Distinct "user_exists" status enables account enumeration.
     if (user) {
-      return { status: "user_exists" } as RegisterActionState;
+      return { status: "failed" };
     }
     await createUser(validatedData.email, validatedData.password);
     await signIn("credentials", {

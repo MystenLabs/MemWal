@@ -61,7 +61,7 @@ Proxy to the sidecar's `/sponsor/execute` endpoint. No authentication required.
 
 ### `POST /api/remember`
 
-Store text as an encrypted memory. The relayer handles embedding, SEAL encryption, Walrus upload, and vector indexing.
+Submit text as an encrypted memory job. The relayer returns after creating a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
 
 **Request:**
 
@@ -74,14 +74,76 @@ Store text as an encrypted memory. The relayer handles embedding, SEAL encryptio
 
 `namespace` defaults to `"default"` if omitted.
 
+**Response:** `202 Accepted`
+
+```json
+{
+  "job_id": "uuid",
+  "status": "running"
+}
+```
+
+### `GET /api/remember/:job_id`
+
+Poll a remember job.
+
 **Response:**
 
 ```json
 {
-  "id": "uuid",
-  "blob_id": "walrus-blob-id",
+  "job_id": "uuid",
+  "status": "done",
   "owner": "0x...",
-  "namespace": "demo"
+  "namespace": "demo",
+  "blob_id": "walrus-blob-id"
+}
+```
+
+### `POST /api/remember/bulk`
+
+Submit up to 20 memories in one request. `job_ids[i]` corresponds to `items[i]`.
+
+**Request:**
+
+```json
+{
+  "items": [
+    { "text": "User prefers dark mode", "namespace": "demo" },
+    { "text": "User works in TypeScript", "namespace": "demo" }
+  ]
+}
+```
+
+**Response:** `202 Accepted`
+
+```json
+{
+  "job_ids": ["uuid-1", "uuid-2"],
+  "total": 2,
+  "status": "running"
+}
+```
+
+### `POST /api/remember/bulk/status`
+
+Poll a batch of remember jobs.
+
+**Request:**
+
+```json
+{
+  "job_ids": ["uuid-1", "uuid-2"]
+}
+```
+
+**Response:**
+
+```json
+{
+  "results": [
+    { "job_id": "uuid-1", "status": "done", "blob_id": "walrus-blob-id" },
+    { "job_id": "uuid-2", "status": "running" }
+  ]
 }
 ```
 
@@ -171,7 +233,7 @@ Search with a precomputed query vector. Returns blob IDs and distances only — 
 
 ### `POST /api/analyze`
 
-Extract facts from text using an LLM, then store each fact as a separate memory (embed, encrypt, upload, index).
+Extract facts from text using an LLM, then enqueue each fact as a separate memory job.
 
 **Request:**
 
@@ -182,23 +244,17 @@ Extract facts from text using an LLM, then store each fact as a separate memory 
 }
 ```
 
-**Response:**
+**Response:** `202 Accepted`
 
 ```json
 {
+  "job_ids": ["uuid-1", "uuid-2"],
   "facts": [
-    {
-      "text": "User lives in Hanoi",
-      "id": "uuid",
-      "blob_id": "walrus-blob-id"
-    },
-    {
-      "text": "User prefers dark mode",
-      "id": "uuid",
-      "blob_id": "walrus-blob-id"
-    }
+    { "text": "User lives in Hanoi", "id": "uuid-1", "job_id": "uuid-1" },
+    { "text": "User prefers dark mode", "id": "uuid-2", "job_id": "uuid-2" }
   ],
-  "total": 2,
+  "fact_count": 2,
+  "status": "pending",
   "owner": "0x..."
 }
 ```

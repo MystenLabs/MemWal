@@ -36,9 +36,34 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
+        let migration_004 = include_str!("../migrations/004_delegate_key_cache_expires.sql");
+        sqlx::raw_sql(migration_004)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
+
+        let migration_005 = include_str!("../migrations/005_remember_jobs.sql");
+        sqlx::raw_sql(migration_005)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
+
+        // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
+        let migration_006 = include_str!("../migrations/006_bulk_remember.sql");
+        sqlx::raw_sql(migration_006)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
+    }
+
+    /// Expose a reference to the underlying `PgPool` so job handlers
+    /// can run ad-hoc queries (e.g. `remember_jobs` status updates).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota)
@@ -55,7 +80,13 @@ impl VectorDb {
 
         sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                namespace = EXCLUDED.namespace,
+                blob_id = EXCLUDED.blob_id,
+                embedding = EXCLUDED.embedding,
+                blob_size_bytes = EXCLUDED.blob_size_bytes",
         )
         .bind(id)
         .bind(owner)
@@ -67,7 +98,14 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
 
-        tracing::debug!("inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B", id, blob_id, owner, namespace, blob_size_bytes);
+        tracing::debug!(
+            "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
+            id,
+            blob_id,
+            owner,
+            namespace,
+            blob_size_bytes
+        );
         Ok(())
     }
 
@@ -126,37 +164,45 @@ impl VectorDb {
 
     /// Delete all vector entries for a given owner + namespace
     #[allow(dead_code)]
-    pub async fn delete_by_namespace(
-        &self,
-        owner: &str,
-        namespace: &str,
-    ) -> Result<u64, AppError> {
-        let result = sqlx::query(
-            "DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2",
-        )
-        .bind(owner)
-        .bind(namespace)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
+    pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
+            .bind(owner)
+            .bind(namespace)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
 
         let rows = result.rows_affected();
-        tracing::info!("deleted {} entries for owner={}, ns={}", rows, owner, namespace);
+        tracing::info!(
+            "deleted {} entries for owner={}, ns={}",
+            rows,
+            owner,
+            namespace
+        );
         Ok(rows)
     }
 
     /// Delete a vector entry by blob_id (used for expired blob cleanup).
     /// Called reactively when Walrus returns 404 during blob download.
-    pub async fn delete_by_blob_id(&self, blob_id: &str) -> Result<u64, AppError> {
-        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1")
+    /// LOW-10: Requires owner to prevent cross-user blob deletion.
+    pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
             .bind(blob_id)
+            .bind(owner)
             .execute(&self.pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to delete vector by blob_id: {}", e))
+            })?;
 
         let rows = result.rows_affected();
         if rows > 0 {
-            tracing::info!("deleted expired blob from DB: blob_id={}, rows={}", blob_id, rows);
+            tracing::info!(
+                "deleted expired blob from DB: blob_id={}, owner={}, rows={}",
+                blob_id,
+                owner,
+                rows
+            );
         }
         Ok(rows)
     }
@@ -172,7 +218,7 @@ impl VectorDb {
         public_key_hex: &str,
     ) -> Result<Option<(String, String)>, AppError> {
         let result: Option<(String, String)> = sqlx::query_as(
-            "SELECT account_id, owner FROM delegate_key_cache WHERE public_key = $1",
+            "SELECT account_id, owner FROM delegate_key_cache WHERE public_key = $1 AND expires_at > NOW()",
         )
         .bind(public_key_hex)
         .fetch_optional(&self.pool)
@@ -190,10 +236,10 @@ impl VectorDb {
         owner: &str,
     ) -> Result<(), AppError> {
         sqlx::query(
-            "INSERT INTO delegate_key_cache (public_key, account_id, owner)
-             VALUES ($1, $2, $3)
+            "INSERT INTO delegate_key_cache (public_key, account_id, owner, expires_at)
+             VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
              ON CONFLICT (public_key)
-             DO UPDATE SET account_id = $2, owner = $3, cached_at = NOW()",
+             DO UPDATE SET account_id = $2, owner = $3, cached_at = NOW(), expires_at = NOW() + INTERVAL '24 hours'",
         )
         .bind(public_key_hex)
         .bind(account_id)
@@ -202,23 +248,118 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to cache delegate key: {}", e)))?;
 
-        tracing::debug!("cached delegate key: {} -> account {}", public_key_hex, account_id);
+        tracing::debug!(
+            "cached delegate key: {} -> account {}",
+            public_key_hex,
+            account_id
+        );
         Ok(())
+    }
+
+    /// Periodically called to evict expired keys
+    pub async fn evict_expired_delegate_keys(&self) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM delegate_key_cache WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to evict expired delegate keys: {}", e))
+            })?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!("Evicted {} expired delegate keys from cache", rows);
+        }
+        Ok(rows)
+    }
+
+    /// Mark worker-claimed remember jobs as failed when no worker has updated
+    /// them within the stale TTL. Pending rows are left alone because they may
+    /// simply be waiting behind legitimate queue backlog.
+    pub async fn fail_stale_remember_jobs(
+        &self,
+        stale_after: std::time::Duration,
+    ) -> Result<u64, AppError> {
+        let stale_after_secs = stale_after.as_secs().min(i64::MAX as u64) as i64;
+        let result = sqlx::query(
+            "UPDATE remember_jobs
+             SET status = 'failed',
+                 error_msg = COALESCE(error_msg, 'stale/orphaned remember job'),
+                 updated_at = NOW()
+             WHERE status IN ('running', 'uploaded')
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+        )
+        .bind(stale_after_secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fail stale remember jobs: {}", e)))?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::warn!("Marked {} stale remember jobs as failed", rows);
+        }
+        Ok(rows)
+    }
+
+    /// LOW-3 fix: Immediately remove a single stale/revoked delegate key from the cache.
+    ///
+    /// Called when `verify_delegate_key_onchain` returns `Err` for a cached entry,
+    /// meaning the key has been revoked on-chain. Without this, every subsequent
+    /// request with the revoked key would hit the cache, fail the RPC verify, log
+    /// noise, and waste an RPC call — in an infinite loop until TTL expiry.
+    pub async fn delete_cached_key(&self, public_key_hex: &str) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM delegate_key_cache WHERE public_key = $1")
+            .bind(public_key_hex)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to delete stale cached key: {}", e)))?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!(
+                "LOW-3: evicted stale/revoked delegate key from cache: {}",
+                public_key_hex
+            );
+        }
+        Ok(rows)
     }
 
     // ============================================================
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================
 
-    /// Get total storage used by a user (sum of blob_size_bytes for active entries).
-    pub async fn get_storage_used(&self, owner: &str) -> Result<i64, AppError> {
+    /// Acquire an advisory lock and get storage used within a single transaction.
+    ///
+    /// MED-21 bugfix: using `pg_advisory_lock` with a connection pool causes deadlocks
+    /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
+    /// transaction so the lock is automatically released on commit/rollback.
+    pub async fn get_storage_used_with_lock(
+        &self,
+        owner: &str,
+        lock_key: i64,
+    ) -> Result<i64, AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to begin tx: {}", e)))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to acquire advisory lock: {}", e)))?;
+
         let row: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
         )
         .bind(owner)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
         Ok(row.0)
     }
@@ -230,17 +371,13 @@ impl VectorDb {
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
     #[allow(dead_code)]
-    pub async fn find_account_by_owner(
-        &self,
-        owner: &str,
-    ) -> Result<Option<String>, AppError> {
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT account_id FROM accounts WHERE owner = $1",
-        )
-        .bind(owner)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
+    pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
+        let result: Option<(String,)> =
+            sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")
+                .bind(owner)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
 
         Ok(result.map(|(id,)| id))
     }

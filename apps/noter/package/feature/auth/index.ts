@@ -49,10 +49,7 @@ export { truncateSuiAddress } from "./domain/zklogin";
 export { useAuth } from "./hook/use-auth";
 
 // UI Components
-export { LoginButton } from "./ui/login-button";
-export { WalletButton } from "./ui/wallet-button";
 export { AuthButtonGroup } from "./ui/auth-button-group";
-export { UserMenu } from "./ui/user-menu";
 export { AuthGuard } from "./ui/auth-guard";
 
 // State atoms (for advanced usage)

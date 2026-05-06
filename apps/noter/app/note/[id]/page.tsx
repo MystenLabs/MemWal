@@ -9,8 +9,10 @@
 
 import { NoteEditor } from "@/feature/note/ui/note-editor";
 import { NoteList } from "@/feature/note/ui/note-list";
+import { useAuth } from "@/feature/auth";
 import Image from "next/image";
-import { use } from "react";
+import { use, useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 export default function NoteDetailPage({
   params,
@@ -18,6 +20,14 @@ export default function NoteDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { isAuthenticated, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      router.replace("/");
+    }
+  }, [isLoading, isAuthenticated, router]);
 
   if (!id || typeof id !== "string") {
     return (

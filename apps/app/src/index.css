@@ -774,6 +774,39 @@ h1, h2, h3 {
   box-shadow: 5px 5px 0 #000000 !important;
 }
 
+/* ── Login popover: ConnectButton full-width + matching style ── */
+
+.lp-login-wallet-btn {
+  width: 100%;
+}
+
+.lp-login-wallet-btn [class*="ConnectButton"],
+.lp-login-wallet-btn div {
+  width: 100% !important;
+}
+
+.lp-login-wallet-btn [class*="ConnectButton"] button,
+.lp-login-wallet-btn button[data-dapp-kit] {
+  width: 100% !important;
+  background: #E8FF75 !important;
+  color: #000000 !important;
+  border: 2px solid #000000 !important;
+  border-radius: 10px !important;
+  padding: 10px 16px !important;
+  font-size: 0.88rem !important;
+  font-weight: 700 !important;
+  font-family: var(--font-sans) !important;
+  box-shadow: 3px 3px 0 #000000 !important;
+  transition: transform 0.15s, box-shadow 0.15s !important;
+  justify-content: center !important;
+}
+
+.lp-login-wallet-btn [class*="ConnectButton"] button:hover,
+.lp-login-wallet-btn button[data-dapp-kit]:hover {
+  transform: translate(-1px, -1px) !important;
+  box-shadow: 4px 4px 0 #000000 !important;
+}
+
 /* ── Responsive ── */
 
 @media (max-width: 860px) {

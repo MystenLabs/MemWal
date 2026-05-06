@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: chatbot
       POSTGRES_PASSWORD: chatbot_secret
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - chatbot_pgdata:/var/lib/postgresql/data
     healthcheck:

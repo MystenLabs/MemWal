@@ -10,6 +10,7 @@
 /// The indexer tracks its cursor in `indexer_state` table so it can resume
 /// from where it left off after restarts.
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 // ============================================================
 // Config
@@ -26,12 +27,10 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         Self {
-            database_url: std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set"),
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
                 .unwrap_or_else(|_| "https://fullnode.mainnet.sui.io:443".to_string()),
-            package_id: std::env::var("MEMWAL_PACKAGE_ID")
-                .expect("MEMWAL_PACKAGE_ID must be set"),
+            package_id: std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set"),
             poll_interval_secs: std::env::var("POLL_INTERVAL_SECS")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
@@ -125,7 +124,11 @@ async fn main() {
 
     tracing::info!("database connected, tables ready");
 
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("memwal-indexer/0.1")
+        .build()
+        .expect("Failed to build HTTP client");
 
     // Load saved cursor (if any)
     let mut cursor = load_cursor(&pool).await;
@@ -205,15 +208,48 @@ async fn poll_events(
 
     let resp = client
         .post(&config.sui_rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .json(&body)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-    let resp_json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_string();
+
+    let resp_bytes = resp.bytes().await.map_err(|e| {
+        format!(
+            "Failed to read response body: {} (status={}, content-type={})",
+            e, status, content_type
+        )
+    })?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "RPC HTTP error: status={}, content-type={}, body={}",
+            status,
+            content_type,
+            body_snippet(&resp_bytes),
+        ));
+    }
+
+    parse_event_page_response(&resp_bytes, &content_type)
+}
+
+fn parse_event_page_response(resp_bytes: &[u8], content_type: &str) -> Result<EventPage, String> {
+    let resp_json: serde_json::Value = serde_json::from_slice(resp_bytes).map_err(|e| {
+        format!(
+            "Failed to parse response JSON: {} (content-type={}, body={})",
+            e,
+            content_type,
+            body_snippet(resp_bytes),
+        )
+    })?;
 
     if let Some(error) = resp_json.get("error") {
         return Err(format!("RPC error: {}", error));
@@ -227,6 +263,17 @@ async fn poll_events(
         .map_err(|e| format!("Failed to parse event page: {}", e))?;
 
     Ok(page)
+}
+
+fn body_snippet(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 512;
+
+    let text = String::from_utf8_lossy(bytes);
+    let mut snippet: String = text.chars().take(MAX_CHARS).collect();
+    if text.chars().count() > MAX_CHARS {
+        snippet.push_str("...");
+    }
+    snippet.replace('\n', "\\n").replace('\r', "\\r")
 }
 
 // ============================================================
@@ -288,7 +335,10 @@ async fn save_cursor(pool: &sqlx::PgPool, cursor: &EventCursor) {
     .execute(pool)
     .await
     {
-        tracing::warn!("failed to save cursor (will re-process events on restart): {}", e);
+        tracing::warn!(
+            "failed to save cursor (will re-process events on restart): {}",
+            e
+        );
     }
 }
 
@@ -307,4 +357,46 @@ fn redact_url(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_event_page_response_accepts_valid_rpc_result() {
+        let body = br#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "data": [],
+                "nextCursor": null,
+                "hasNextPage": false
+            }
+        }"#;
+
+        let page = parse_event_page_response(body, "application/json").unwrap();
+        assert_eq!(page.data.len(), 0);
+        assert!(!page.has_next_page);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn parse_event_page_response_reports_non_json_body() {
+        let err = parse_event_page_response(b"<html>rate limited</html>", "text/html").unwrap_err();
+
+        assert!(err.contains("Failed to parse response JSON"));
+        assert!(err.contains("content-type=text/html"));
+        assert!(err.contains("<html>rate limited</html>"));
+    }
+
+    #[test]
+    fn body_snippet_escapes_newlines_and_truncates() {
+        let body = format!("{}\nnext", "a".repeat(600));
+        let snippet = body_snippet(body.as_bytes());
+
+        assert!(snippet.ends_with("..."));
+        assert!(!snippet.contains('\n'));
+        assert!(snippet.len() < body.len());
+    }
 }

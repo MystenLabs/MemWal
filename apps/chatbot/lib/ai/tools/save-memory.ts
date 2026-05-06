@@ -34,7 +34,7 @@ export const saveMemory = ({
 
       try {
         const memwal = MemWal.create({ key, accountId, serverUrl });
-        await memwal.remember(text);
+        await memwal.rememberAndWait(text);
         return { saved: true, text };
       } catch (error) {
         console.error("[Tool] saveMemory error:", error);

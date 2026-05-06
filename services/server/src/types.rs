@@ -1,8 +1,18 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::db::VectorDb;
+use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
+
+/// ENG-1408: Max items in a single POST /api/remember/bulk request.
+pub const MAX_BULK_ITEMS: usize = 20;
+
+/// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
+pub const BULK_EMBED_CONCURRENCY: usize = 5;
+
+/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
+pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -18,6 +28,19 @@ pub struct AppState {
     pub key_pool: KeyPool,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
+    /// In-memory token bucket fallback for when Redis is unavailable
+    pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    /// Apalis storage for RememberJob — legacy full async pipeline.
+    /// Kept so the legacy worker can drain any rows enqueued before the
+    /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
+    #[allow(dead_code)]
+    pub remember_job_storage: RememberJobStorage,
+    /// Per-wallet Apalis storages — wallet_storages[i] maps to pool key[i].
+    /// New code should enqueue WalletJob here instead of using
+    /// MetaTransferJob/RememberJob directly.
+    pub wallet_storages: Vec<WalletJobStorage>,
+    /// ENG-1408: Apalis storage for BulkRememberJob.
+    pub bulk_job_storage: BulkRememberJobStorage,
 }
 
 // ============================================================
@@ -41,12 +64,21 @@ impl KeyPool {
     }
 
     /// Returns the next key in round-robin order, or `None` if the pool is empty.
+    #[allow(dead_code)]
     pub fn next(&self) -> Option<&str> {
         if self.keys.is_empty() {
             return None;
         }
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
         Some(&self.keys[idx])
+    }
+
+    /// Returns the pool index for the next key in round-robin order.
+    pub fn next_index(&self) -> Option<usize> {
+        if self.keys.is_empty() {
+            return None;
+        }
+        Some(self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len())
     }
 
     #[allow(dead_code)]
@@ -64,6 +96,10 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
+    /// ENG-1697: network name (mainnet/testnet/devnet). Surfaced via
+    /// `GET /config` so the SDK can select the matching Sui fullnode
+    /// without the user having to configure it.
+    pub sui_network: String,
     pub memwal_account_id: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_api_base: String,
@@ -78,14 +114,19 @@ pub struct Config {
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
+    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
+    pub sidecar_secret: Option<String>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
+    /// Sponsor-specific rate limiting and concurrency config
+    pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
+    pub allowed_origins: String,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let network = std::env::var("SUI_NETWORK")
-            .unwrap_or_else(|_| "mainnet".to_string());
+        let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
         let default_rpc = match network.as_str() {
             "testnet" => "https://fullnode.testnet.sui.io:443",
             "devnet" => "https://fullnode.devnet.sui.io:443",
@@ -101,6 +142,7 @@ impl Config {
                 .expect("DATABASE_URL must be set (e.g. postgresql://memwal:memwal_secret@localhost:5432/memwal)"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
                 .unwrap_or_else(|_| default_rpc.to_string()),
+            sui_network: network.clone(),
             memwal_account_id: std::env::var("MEMWAL_ACCOUNT_ID").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE")
@@ -129,8 +171,50 @@ impl Config {
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
+            sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            allowed_origins: std::env::var("ALLOWED_ORIGINS")
+                .unwrap_or_default(),
         }
+    }
+}
+
+// ============================================================
+// Sponsor Rate Limit Config
+// ============================================================
+
+#[derive(Debug, Clone)]
+pub struct SponsorRateLimitConfig {
+    /// Max sponsor requests per minute per IP (default: 10)
+    pub per_minute: i64,
+    /// Max sponsor requests per hour per IP (default: 30)
+    pub per_hour: i64,
+}
+
+impl Default for SponsorRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 10,
+            per_hour: 30,
+        }
+    }
+}
+
+impl SponsorRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        c
     }
 }
 
@@ -149,9 +233,85 @@ pub struct RememberRequest {
     pub namespace: String,
 }
 
+// ============================================================
+// Bulk Remember types (ENG-1408)
+// ============================================================
+
+/// One item in a POST /api/remember/bulk request.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkItem {
+    pub text: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+/// POST /api/remember/bulk request body.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkRequest {
+    /// 1–MAX_BULK_ITEMS items to remember in one batched operation.
+    pub items: Vec<RememberBulkItem>,
+}
+
+/// POST /api/remember/bulk — 202 Accepted response.
+/// `job_ids[i]` corresponds to `items[i]`; poll each via GET /api/remember/:job_id.
+#[derive(Debug, Serialize)]
+pub struct RememberBulkAcceptedResponse {
+    pub job_ids: Vec<String>,
+    pub total: usize,
+    pub status: String, // "running" on accepted background work
+}
+
+/// POST /api/remember/bulk/status request body.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkStatusRequest {
+    /// 1–MAX_BULK_ITEMS job IDs from a prior POST /api/remember/bulk call.
+    pub job_ids: Vec<String>,
+}
+
+/// One item in a POST /api/remember/bulk/status response.
+#[derive(Debug, Serialize, Clone)]
+pub struct RememberBulkStatusItem {
+    pub job_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// POST /api/remember/bulk/status response.
+#[derive(Debug, Serialize)]
+pub struct RememberBulkStatusResponse {
+    pub results: Vec<RememberBulkStatusItem>,
+}
+
+/// POST /api/remember (async, ENG-1406 v3)
+/// Returns 202 Accepted immediately with a job_id for polling.
+#[derive(Debug, Serialize)]
+pub struct RememberAcceptedResponse {
+    pub job_id: String,
+    pub status: String, // "running" on accepted background work
+}
+
+/// GET /api/remember/:job_id — job status polling response
+#[derive(Debug, Serialize)]
+pub struct RememberJobStatusResponse {
+    pub job_id: String,
+    pub status: String, // "pending" | "running" | "uploaded" | "done" | "failed"
+    /// Owner address of the memory (from auth at enqueue time).
+    pub owner: String,
+    /// Namespace the memory was stored under.
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// POST /api/remember (legacy sync response, kept for remember_manual)
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct RememberResponse {
-    pub id: String,
     pub blob_id: String,
     pub owner: String,
     pub namespace: String,
@@ -181,6 +341,14 @@ pub struct RecallRequest {
 pub struct RecallResponse {
     pub results: Vec<RecallResult>,
     pub total: usize,
+    /// LOW-7: Count of matches whose blob download / SEAL decrypt / UTF-8 decode
+    /// failed and were silently omitted from `results`. Zero on the happy path.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub dropped_count: usize,
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -196,8 +364,6 @@ pub struct SearchHit {
     pub distance: f64,
 }
 
-
-
 /// POST /api/analyze
 /// Extract facts from conversation text using LLM, then remember each fact
 /// Owner is derived from delegate key via onchain verification (auth middleware)
@@ -209,6 +375,29 @@ pub struct AnalyzeRequest {
     pub namespace: String,
 }
 
+/// POST /api/analyze (async, returns 202 immediately)
+/// Returns job_ids for each extracted fact; poll via GET /api/remember/:job_id
+#[derive(Debug, Serialize)]
+pub struct AnalyzeAcceptedResponse {
+    /// One job_id per extracted fact — poll GET /api/remember/:job_id for each
+    pub job_ids: Vec<String>,
+    /// Extracted facts accepted for background storage. `id` equals `job_id`.
+    pub facts: Vec<AnalyzeAcceptedFact>,
+    /// Number of facts extracted from the text
+    pub fact_count: usize,
+    /// "pending" on accepted analyze jobs
+    pub status: String,
+    pub owner: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnalyzeAcceptedFact {
+    pub text: String,
+    pub id: String,
+    pub job_id: String,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct AnalyzedFact {
     pub text: String,
@@ -216,6 +405,7 @@ pub struct AnalyzedFact {
     pub blob_id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct AnalyzeResponse {
     pub facts: Vec<AnalyzedFact>,
@@ -228,7 +418,7 @@ pub struct AnalyzeResponse {
 /// Server uploads to Walrus via sidecar, then stores the vector ↔ blobId mapping.
 #[derive(Debug, Deserialize)]
 pub struct RememberManualRequest {
-    pub encrypted_data: String,  // base64-encoded SEAL-encrypted bytes
+    pub encrypted_data: String, // base64-encoded SEAL-encrypted bytes
     pub vector: Vec<f32>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
@@ -309,12 +499,49 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+/// GET /config response (ENG-1697).
+///
+/// Public deployment parameters the SDK needs to build a SEAL SessionKey
+/// client-side. All fields are non-secret (on-chain / public RPC URL).
+#[derive(Debug, Serialize)]
+pub struct ConfigResponse {
+    #[serde(rename = "packageId")]
+    pub package_id: String,
+    pub network: String,
+    #[serde(rename = "suiRpcUrl")]
+    pub sui_rpc_url: String,
+}
+
+// ============================================================
+// Sponsor Types
+// ============================================================
+
+/// POST /sponsor — validated request body forwarded to sidecar
+#[derive(Debug, Deserialize)]
+pub struct SponsorRequest {
+    pub sender: String,
+    #[serde(rename = "transactionBlockKindBytes")]
+    pub transaction_block_kind_bytes: String,
+}
+
+/// POST /sponsor/execute — validated request body forwarded to sidecar.
+/// `sender` is optional — when present it is validated and counted against
+/// the per-sender rate limit bucket (same axis as POST /sponsor).
+#[derive(Debug, Deserialize)]
+pub struct SponsorExecuteRequest {
+    pub digest: String,
+    pub signature: String,
+    /// Sui address of the transaction sender (0x + 64 hex). Optional but
+    /// recommended — enables per-sender rate limiting on this endpoint too.
+    pub sender: Option<String>,
+}
+
 // ============================================================
 // Auth Types
 // ============================================================
 
 /// Headers required for authenticated requests
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthInfo {
     #[allow(dead_code)]
     pub public_key: String,
@@ -322,8 +549,36 @@ pub struct AuthInfo {
     pub owner: String,
     /// MemWalAccount object ID (set after onchain verification)
     pub account_id: String,
-    /// Delegate private key (hex) — used for SEAL decrypt SessionKey
+    /// Delegate private key (hex) — legacy path for SEAL decrypt. Optional;
+    /// modern SDKs send `seal_session` instead. Retained during the
+    /// transition so older clients keep working.
     pub delegate_key: Option<String>,
+    /// Exported SEAL SessionKey (base64-encoded JSON) — replaces the raw
+    /// delegate private key on the wire. When present it is preferred over
+    /// `delegate_key`. TTL-bounded, package-scoped, signed by the delegate
+    /// key on the client; the server never handles private-key material.
+    pub seal_session: Option<String>,
+}
+
+// LOW-5 / ENG-1697: Manual Debug redacts both credential fields so accidental
+// `{:?}` formatting never leaks delegate private key material or session
+// tokens into logs.
+impl std::fmt::Debug for AuthInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthInfo")
+            .field("public_key", &self.public_key)
+            .field("owner", &self.owner)
+            .field("account_id", &self.account_id)
+            .field(
+                "delegate_key",
+                &self.delegate_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "seal_session",
+                &self.seal_session.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 // ============================================================
@@ -363,10 +618,21 @@ impl axum::response::IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Internal(msg) => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                msg.clone(),
-            ),
+            AppError::Internal(msg) => {
+                // SEC: Never leak internal error details to the client.
+                // Log the full message server-side with a trace ID so
+                // operators can correlate, then return a generic message.
+                let trace_id = uuid::Uuid::new_v4().to_string();
+                tracing::error!(
+                    trace_id = %trace_id,
+                    "Internal server error: {}",
+                    msg,
+                );
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal server error (traceId: {})", trace_id),
+                )
+            }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
@@ -385,4 +651,218 @@ impl axum::response::IntoResponse for AppError {
 #[derive(Debug, Deserialize)]
 pub struct SidecarError {
     pub error: String,
+}
+
+// ============================================================
+// Unit Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
+
+    #[test]
+    fn auth_info_debug_redacts_delegate_key() {
+        let auth = AuthInfo {
+            public_key: "aabbccdd".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: Some("supersecretprivatekeyinhex1234567890abcdef".to_string()),
+            seal_session: None,
+        };
+
+        let debug_str = format!("{:?}", auth);
+
+        // Must contain the redacted marker
+        assert!(
+            debug_str.contains("<redacted>"),
+            "delegate_key must be redacted in Debug output, got: {}",
+            debug_str
+        );
+        // Must NOT contain the actual key
+        assert!(
+            !debug_str.contains("supersecretprivatekeyinhex"),
+            "actual delegate key leaked in Debug output: {}",
+            debug_str
+        );
+        // Public fields are still visible
+        assert!(debug_str.contains("aabbccdd"));
+        assert!(debug_str.contains("0xowner"));
+        assert!(debug_str.contains("0xaccount"));
+    }
+
+    #[test]
+    fn auth_info_debug_shows_none_when_no_delegate_key() {
+        let auth = AuthInfo {
+            public_key: "aabb".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: None,
+            seal_session: None,
+        };
+
+        let debug_str = format!("{:?}", auth);
+
+        // None variant should render as None
+        assert!(
+            debug_str.contains("None"),
+            "expected None in debug: {}",
+            debug_str
+        );
+        assert!(!debug_str.contains("<redacted>"));
+    }
+
+    // ENG-1697: seal_session must also be redacted in Debug output. While
+    // less catastrophic than the raw private key (bounded TTL, bounded
+    // scope), it is still an authorization token and must not surface in
+    // structured logs.
+    #[test]
+    fn auth_info_debug_redacts_seal_session() {
+        let auth = AuthInfo {
+            public_key: "aabbccdd".to_string(),
+            owner: "0xowner".to_string(),
+            account_id: "0xaccount".to_string(),
+            delegate_key: None,
+            seal_session: Some("eyJhZGRyZXNzIjoiMHhhYmMiLCJwYWNrYWdlSWQiOiIweGRlZiJ9".to_string()),
+        };
+
+        let debug_str = format!("{:?}", auth);
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("eyJhZGRyZXNzIjo"));
+    }
+
+    // ── AppError: status code mapping ───────────────────────────────────
+
+    #[test]
+    fn app_error_bad_request_status() {
+        let err = AppError::BadRequest("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn app_error_unauthorized_status() {
+        let err = AppError::Unauthorized("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn app_error_internal_status() {
+        let err = AppError::Internal("secret db connection string".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn app_error_internal_redacts_message() {
+        let err = AppError::Internal("secret db connection string".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        // Must NOT contain the internal message
+        assert!(
+            !body_str.contains("secret db connection string"),
+            "internal error details leaked to client: {}",
+            body_str,
+        );
+        // Must contain a traceId for correlation
+        assert!(
+            body_str.contains("traceId"),
+            "response should contain traceId: {}",
+            body_str,
+        );
+    }
+
+    #[test]
+    fn app_error_blob_not_found_status() {
+        let err = AppError::BlobNotFound("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn app_error_rate_limited_status() {
+        let err = AppError::RateLimited("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn app_error_quota_exceeded_status() {
+        let err = AppError::QuotaExceeded("test".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
+    }
+
+    // ── KeyPool: round-robin selection ───────────────────────────────────
+
+    #[test]
+    fn key_pool_round_robin() {
+        let pool = KeyPool::new(vec!["key_a".into(), "key_b".into(), "key_c".into()]);
+
+        assert_eq!(pool.next(), Some("key_a"));
+        assert_eq!(pool.next(), Some("key_b"));
+        assert_eq!(pool.next(), Some("key_c"));
+        assert_eq!(pool.next(), Some("key_a")); // wraps around
+    }
+
+    #[test]
+    fn key_pool_empty_returns_none() {
+        let pool = KeyPool::new(vec![]);
+        assert_eq!(pool.next(), None);
+        assert_eq!(pool.next_index(), None);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn key_pool_single_key() {
+        let pool = KeyPool::new(vec!["only_key".into()]);
+        assert_eq!(pool.next(), Some("only_key"));
+        assert_eq!(pool.next(), Some("only_key"));
+        assert!(!pool.is_empty());
+    }
+
+    #[test]
+    fn key_pool_next_index_wraps() {
+        let pool = KeyPool::new(vec!["a".into(), "b".into()]);
+        assert_eq!(pool.next_index(), Some(0));
+        assert_eq!(pool.next_index(), Some(1));
+        assert_eq!(pool.next_index(), Some(0));
+    }
+
+    // ── SponsorRateLimitConfig defaults ─────────────────────────────────
+
+    #[test]
+    fn sponsor_rate_limit_default_values() {
+        let config = SponsorRateLimitConfig::default();
+        assert_eq!(config.per_minute, 10);
+        assert_eq!(config.per_hour, 30);
+    }
+
+    // ── AppError Display implementations ────────────────────────────────
+
+    #[test]
+    fn app_error_display_all_variants() {
+        assert!(AppError::BadRequest("x".into())
+            .to_string()
+            .contains("Bad Request"));
+        assert!(AppError::Unauthorized("x".into())
+            .to_string()
+            .contains("Unauthorized"));
+        assert!(AppError::Internal("x".into())
+            .to_string()
+            .contains("Internal"));
+        assert!(AppError::BlobNotFound("x".into())
+            .to_string()
+            .contains("Blob Not Found"));
+        assert!(AppError::RateLimited("x".into())
+            .to_string()
+            .contains("Rate Limited"));
+        assert!(AppError::QuotaExceeded("x".into())
+            .to_string()
+            .contains("Quota Exceeded"));
+    }
 }
