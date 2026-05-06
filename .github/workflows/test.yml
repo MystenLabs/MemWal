@@ -132,12 +132,9 @@ jobs:
       SUI_NETWORK: testnet
       MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
-      # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start
-      # without it, and the server panics when the sidecar doesn't come up.
-      # Not a real secret; SEAL encrypt / Walrus upload paths aren't exercised
-      # by the CI-scoped tests, so the sidecar running in degraded mode is
-      # fine for /health + auth-contract checks.
-      SIDECAR_AUTH_TOKEN: ci-test-sidecar-token-not-for-production
+      # ENG-1700: Node.js sidecar removed; SEAL/Walrus/Enoki run in-process
+      # via Mysten Rust SDKs (sui-sdk-types, seal-sdk, walrus_publisher,
+      # walrus_onchain, enoki). No SIDECAR_AUTH_TOKEN required.
 
     steps:
       - name: Checkout
@@ -155,22 +152,6 @@ jobs:
             services/server/target
           key: cargo-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
-
-      - name: Setup Node (for TS sidecar auto-spawned by server)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install sidecar deps
-        working-directory: services/server/scripts
-        # Server boot spawns `npx tsx sidecar-server.ts` which imports express
-        # et al — those must be installed up-front or the spawn fails fast.
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5

@@ -12,7 +12,6 @@ export const config = {
     suiNetwork: (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') as 'testnet' | 'mainnet',
     sealKeyServers: (import.meta.env.VITE_SEAL_KEY_SERVERS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
-    sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
     docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
     demoUrls: (import.meta.env.VITE_DEMO_URLS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean)

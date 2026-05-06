@@ -20,6 +20,8 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    /// Enoki client for sponsored Sui transactions. Configured (or not) at boot.
+    pub enoki: crate::enoki::EnokiClient,
 }
 
 // ============================================================
@@ -91,10 +93,21 @@ pub struct Config {
     pub sui_private_keys: Vec<String>,
     pub package_id: String,
     pub registry_id: String,
-    /// URL of the SEAL/Walrus TS sidecar HTTP server
-    pub sidecar_url: String,
-    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
-    pub sidecar_secret: Option<String>,
+    /// Enoki API key for sponsored Sui transactions. None → /sponsor returns 503.
+    pub enoki_api_key: Option<String>,
+    /// Enoki network ("mainnet" / "testnet" / "devnet"). Defaults to `sui_network`.
+    pub enoki_network: String,
+    /// ENG-1700: when Enoki sponsorship fails for the metadata+transfer PTB,
+    /// fall back to direct signing with the server's key pool. Default true,
+    /// matching legacy sidecar `ENOKI_FALLBACK_TO_DIRECT_SIGN`.
+    ///
+    /// Read via env per call inside `walrus::upload_blob` (matching the
+    /// existing per-call env-read pattern for related Walrus / Enoki vars),
+    /// so this Config field is currently informational — kept on the struct
+    /// for completeness, ops dashboards, and future refactors that thread
+    /// `&AppState` into the Walrus pipeline.
+    #[allow(dead_code)]
+    pub enoki_fallback_to_direct_sign: bool,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
@@ -149,14 +162,29 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
-            sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            enoki_api_key: std::env::var("ENOKI_API_KEY").ok().filter(|s| !s.is_empty()),
+            enoki_network: std::env::var("ENOKI_NETWORK")
+                .unwrap_or_else(|_| network.clone()),
+            enoki_fallback_to_direct_sign: parse_enoki_fallback_to_direct_sign(
+                std::env::var("ENOKI_FALLBACK_TO_DIRECT_SIGN").ok(),
+            ),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
         }
+    }
+}
+
+/// Parse `ENOKI_FALLBACK_TO_DIRECT_SIGN` env var to a bool.
+///
+/// Default is `true`. Only `"0"` / `"false"` / `"no"` (case/whitespace
+/// insensitive) yield `false`; any other value (including unset) yields
+/// `true`. Preserves prior behavior so existing deploys keep working.
+pub(crate) fn parse_enoki_fallback_to_direct_sign(raw: Option<String>) -> bool {
+    match raw.map(|s| s.trim().to_lowercase()) {
+        Some(s) if matches!(s.as_str(), "0" | "false" | "no") => false,
+        _ => true,
     }
 }
 
@@ -297,7 +325,7 @@ pub struct AnalyzeResponse {
 
 /// POST /api/remember/manual
 /// Client sends SEAL-encrypted data (base64) + pre-computed embedding vector.
-/// Server uploads to Walrus via sidecar, then stores the vector ↔ blobId mapping.
+/// Server uploads to Walrus, then stores the vector ↔ blobId mapping.
 #[derive(Debug, Deserialize)]
 pub struct RememberManualRequest {
     pub encrypted_data: String,  // base64-encoded SEAL-encrypted bytes
@@ -398,15 +426,24 @@ pub struct ConfigResponse {
 // Sponsor Types
 // ============================================================
 
-/// POST /sponsor — validated request body forwarded to sidecar
+/// POST /sponsor — validated request body forwarded to Enoki.
+///
+/// `allowed_addresses` is forwarded to Enoki (`allowedAddresses`) when
+/// present so multi-tenant clients can scope sponsorship to a recipient
+/// wallet that isn't pre-allow-listed at the API-key level. The Enoki
+/// API treats an absent `allowedAddresses` field as "no extra
+/// restrictions"; `routes::sponsor` only forwards the field when the
+/// array is non-empty.
 #[derive(Debug, Deserialize)]
 pub struct SponsorRequest {
     pub sender: String,
     #[serde(rename = "transactionBlockKindBytes")]
     pub transaction_block_kind_bytes: String,
+    #[serde(rename = "allowedAddresses", default)]
+    pub allowed_addresses: Option<Vec<String>>,
 }
 
-/// POST /sponsor/execute — validated request body forwarded to sidecar.
+/// POST /sponsor/execute — validated request body forwarded to Enoki.
 /// `sender` is optional — when present it is validated and counted against
 /// the per-sender rate limit bucket (same axis as POST /sponsor).
 #[derive(Debug, Deserialize)]
@@ -523,16 +560,6 @@ impl axum::response::IntoResponse for AppError {
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
     }
-}
-
-// ============================================================
-// Sidecar Types (shared by seal.rs + walrus.rs)
-// ============================================================
-
-/// Error response from the TS sidecar HTTP server
-#[derive(Debug, Deserialize)]
-pub struct SidecarError {
-    pub error: String,
 }
 
 // ============================================================
@@ -736,5 +763,37 @@ mod tests {
         assert!(AppError::BlobNotFound("x".into()).to_string().contains("Blob Not Found"));
         assert!(AppError::RateLimited("x".into()).to_string().contains("Rate Limited"));
         assert!(AppError::QuotaExceeded("x".into()).to_string().contains("Quota Exceeded"));
+    }
+
+    // ── parse_enoki_fallback_to_direct_sign (ENG-1700) ──────────────────
+
+    #[test]
+    fn parse_enoki_fallback_default_true_when_unset() {
+        // Unset env → fallback enabled (legacy sidecar default).
+        assert!(parse_enoki_fallback_to_direct_sign(None));
+    }
+
+    #[test]
+    fn parse_enoki_fallback_recognizes_disable_aliases() {
+        // Only "0" / "false" / "no" (case + whitespace insensitive) disable it.
+        for raw in ["0", "false", "FALSE", "False", "no", "NO", " false ", "0\n"] {
+            assert!(
+                !parse_enoki_fallback_to_direct_sign(Some(raw.to_string())),
+                "expected {:?} to parse as disable",
+                raw,
+            );
+        }
+    }
+
+    #[test]
+    fn parse_enoki_fallback_other_values_keep_default_true() {
+        // Anything not matching the disable aliases stays true (matches sidecar).
+        for raw in ["true", "1", "yes", "garbage", ""] {
+            assert!(
+                parse_enoki_fallback_to_direct_sign(Some(raw.to_string())),
+                "expected {:?} to parse as enable",
+                raw,
+            );
+        }
     }
 }

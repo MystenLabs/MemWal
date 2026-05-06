@@ -166,8 +166,6 @@ pub async fn remember(
     let embed_fut = generate_embedding(&state.http_client, &state.config, text);
     let encrypt_fut = seal::seal_encrypt(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         text.as_bytes(),
         owner,
         &state.config.package_id,
@@ -186,8 +184,6 @@ pub async fn remember(
         .ok_or_else(|| AppError::Internal("No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into()))?;
     let upload_result = walrus::upload_blob(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         &encrypted,
         50,
         owner,
@@ -279,8 +275,6 @@ pub async fn recall(
         .map(|hit| {
             let walrus_client = &state.walrus_client;
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
             let credential = credential.clone();
@@ -305,8 +299,6 @@ pub async fn recall(
                 // Decrypt using SEAL (via sidecar HTTP)
                 match seal::seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
                     &encrypted_data,
                     &credential,
                     &package_id,
@@ -417,8 +409,6 @@ pub async fn remember_manual(
 
     let upload = walrus::upload_blob(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         &encrypted_bytes,
         50,
         owner,
@@ -577,8 +567,7 @@ pub async fn analyze(
             // Embed + SEAL encrypt concurrently (independent operations)
             let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
             let encrypt_fut = seal::seal_encrypt(
-                &state.http_client, &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
+                &state.http_client,
                 fact_text.as_bytes(), &owner, &state.config.package_id,
             );
             let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -588,8 +577,6 @@ pub async fn analyze(
             // Upload to Walrus (via sidecar HTTP)
             let upload_result = walrus::upload_blob(
                 &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
                 &encrypted,
                 50,
                 &owner,
@@ -1135,8 +1122,6 @@ pub async fn ask(
         .map(|hit| {
             let walrus_client = &state.walrus_client;
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
             let credential = credential.clone();
@@ -1159,8 +1144,6 @@ pub async fn ask(
                 };
                 match seal::seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
                     &encrypted_data,
                     &credential,
                     &package_id,
@@ -1370,8 +1353,6 @@ pub async fn restore(
     );
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
         owner,
         Some(namespace),
         Some(&state.config.package_id),
@@ -1496,8 +1477,6 @@ pub async fn restore(
     let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded.into_iter())
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
             let credential = credential.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids
@@ -1508,8 +1487,6 @@ pub async fn restore(
             async move {
                 match seal::seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
                     &encrypted_data,
                     &credential,
                     &package_id,
@@ -1604,27 +1581,13 @@ pub async fn restore(
 }
 
 // ============================================================
-// Enoki Sponsor Proxy — forwards FE requests to internal sidecar
+// Enoki Sponsor Proxy — forwards client requests to api.enoki.mystenlabs.com
 // ============================================================
-
-/// Map a non-2xx upstream status to a generic (status, message) pair.
-///
-/// Never forward raw upstream bodies — they may contain API keys, internal
-/// service names, or stack traces. The full response is logged server-side.
-fn mask_upstream(status: u16) -> (axum::http::StatusCode, &'static str) {
-    match status {
-        429 => (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Sponsor service temporarily overloaded",
-        ),
-        401 | 403 => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            "Sponsor service misconfigured",
-        ),
-        500..=599 => (axum::http::StatusCode::BAD_GATEWAY, "Sponsor service error"),
-        _ => (axum::http::StatusCode::BAD_REQUEST, "Sponsor request rejected"),
-    }
-}
+//
+// `EnokiError::to_status()` (in `crate::enoki`) owns the upstream→client
+// status mapping. Raw upstream bodies are never forwarded — they may
+// contain API keys, internal service names, or stack traces. Full
+// upstream detail is logged server-side via `tracing::error!`.
 
 fn json_error_response(status: axum::http::StatusCode, msg: &'static str) -> Response<Body> {
     Response::builder()
@@ -1723,46 +1686,47 @@ pub async fn sponsor_proxy(
         }
     }
 
-    // Re-serialise only validated fields before forwarding.
-    let forwarded = serde_json::json!({
-        "sender": req.sender,
-        "transactionBlockKindBytes": req.transaction_block_kind_bytes,
-    });
-
-    let url = format!("{}/sponsor", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
-        .send()
+    // ENG-1700 / Phase 4: call Enoki directly. The sidecar proxy used to wrap
+    // the same `https://api.enoki.mystenlabs.com` endpoint with a Bearer
+    // ENOKI_API_KEY; we now do that here. Wire-compatible response shape:
+    // `{ bytes, digest }` matches what callers (chatbot/noter) already parse.
+    //
+    // Forward `allowedAddresses` if the client included it — sidecar parity
+    // for the multi-tenant case where Enoki must approve a recipient wallet
+    // that isn't pre-allow-listed at API key level.
+    let allow_owned: Vec<String> = req.allowed_addresses.clone().unwrap_or_default();
+    let allow_refs: Vec<&str> = allow_owned.iter().map(String::as_str).collect();
+    match state
+        .enoki
+        .sponsor(&req.sender, &req.transaction_block_kind_bytes, &allow_refs)
         .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy read failed: {}", e)))?;
-
-    if upstream_status.is_success() {
-        Ok(Response::builder()
-            .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
-            .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
-            .unwrap())
-    } else {
-        tracing::error!(
-            "sponsor upstream error {}: {}",
-            upstream_status,
-            String::from_utf8_lossy(&resp_body)
-        );
-        let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
-        Ok(json_error_response(masked_status, masked_msg))
+    {
+        Ok(result) => {
+            let body = serde_json::json!({
+                "bytes": result.bytes,
+                "digest": result.digest,
+            });
+            Ok(Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap())
+        }
+        Err(e) => {
+            // Log full upstream detail server-side; mask to caller.
+            tracing::error!("sponsor: enoki error: {}", e);
+            let masked = e.to_status();
+            let msg = match masked {
+                503 => "Sponsor service temporarily overloaded",
+                502 => "Sponsor service error",
+                400 => "Sponsor request rejected",
+                _ => "Sponsor service error",
+            };
+            Ok(json_error_response(
+                axum::http::StatusCode::from_u16(masked).unwrap(),
+                msg,
+            ))
+        }
     }
 }
 
@@ -1814,45 +1778,30 @@ pub async fn sponsor_execute_proxy(
         }
     }
 
-    let forwarded = serde_json::json!({
-        "digest": req.digest,
-        "signature": req.signature,
-    });
-
-    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
-
-    if upstream_status.is_success() {
-        Ok(Response::builder()
-            .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
-            .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
-            .unwrap())
-    } else {
-        tracing::error!(
-            "sponsor/execute upstream error {}: {}",
-            upstream_status,
-            String::from_utf8_lossy(&resp_body)
-        );
-        let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
-        Ok(json_error_response(masked_status, masked_msg))
+    // ENG-1700 / Phase 4: call Enoki directly (see sponsor_proxy).
+    match state.enoki.sponsor_execute(&req.digest, &req.signature).await {
+        Ok(result) => {
+            let body = serde_json::json!({ "digest": result.digest });
+            Ok(Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap())
+        }
+        Err(e) => {
+            tracing::error!("sponsor/execute: enoki error: {}", e);
+            let masked = e.to_status();
+            let msg = match masked {
+                503 => "Sponsor service temporarily overloaded",
+                502 => "Sponsor service error",
+                400 => "Sponsor request rejected",
+                _ => "Sponsor service error",
+            };
+            Ok(json_error_response(
+                axum::http::StatusCode::from_u16(masked).unwrap(),
+                msg,
+            ))
+        }
     }
 }
 
@@ -2030,58 +1979,6 @@ mod more_tests {
         assert!(decoded.len() > 7000); // caller must reject this
     }
 
-    // ---- mask_upstream — must never leak internal details ----
-
-    #[test]
-    fn test_mask_upstream_429_to_503() {
-        let (status, msg) = mask_upstream(429);
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(msg, "Sponsor service temporarily overloaded");
-    }
-
-    #[test]
-    fn test_mask_upstream_401_to_502() {
-        let (status, msg) = mask_upstream(401);
-        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(msg, "Sponsor service misconfigured");
-    }
-
-    #[test]
-    fn test_mask_upstream_403_to_502() {
-        let (status, msg) = mask_upstream(403);
-        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(msg, "Sponsor service misconfigured");
-    }
-
-    #[test]
-    fn test_mask_upstream_500_to_502() {
-        let (status, msg) = mask_upstream(500);
-        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(msg, "Sponsor service error");
-    }
-
-    #[test]
-    fn test_mask_upstream_503_to_502() {
-        let (status, msg) = mask_upstream(503);
-        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(msg, "Sponsor service error");
-    }
-
-    #[test]
-    fn test_mask_upstream_404_to_400() {
-        let (status, msg) = mask_upstream(404);
-        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(msg, "Sponsor request rejected");
-    }
-
-    #[test]
-    fn test_mask_upstream_returns_static_strings_only() {
-        // Verify no dynamic content leaks through for any common error code
-        for code in [400u16, 401, 403, 404, 422, 429, 500, 502, 503] {
-            let (_, msg) = mask_upstream(code);
-            assert!(!msg.is_empty(), "mask must always return a message");
-            // Message must not look like it came from serde_json / reqwest
-            assert!(!msg.contains("Error"), "raw error strings must not leak");
-        }
-    }
+    // ---- Enoki error → client status mapping owned by `crate::enoki`.
+    //      See `enoki::tests::enoki_error_status_mapping`. ----
 }

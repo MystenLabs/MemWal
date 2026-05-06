@@ -1,6 +1,6 @@
 # ============================================================
 # memwal Server — Dockerfile
-# Multi-stage build: Rust binary + Node.js sidecar scripts
+# Single-stage Rust binary (ENG-1700: Node.js sidecar removed)
 # ============================================================
 
 # ── Stage 1: Build Rust binary ──────────────────────────────
@@ -23,11 +23,13 @@ COPY migrations/ migrations/
 RUN touch src/main.rs
 RUN cargo build --release
 
-# ── Stage 2: Runtime (Node.js slim) ─────────────────────────
-# LOW-28: pinned by digest for reproducible, supply-chain-safe builds.
-# Tag: node:22-bookworm-slim  |  arch: linux/amd64  |  pinned: 2026-04-16
-# To refresh: docker inspect --format='{{index .RepoDigests 0}}' node:22-bookworm-slim
-FROM node:22-bookworm-slim@sha256:db9a3a15e8e8e2adbaf1e1c3d93dfb04c2e294bdd027490addb2391b8e61cc6a AS runtime
+# ── Stage 2: Runtime (debian-slim, no Node) ─────────────────
+# LOW-28: pinned by digest. Was node:22-bookworm-slim (Node sidecar host) —
+# replaced with plain debian-slim now that all Mysten SDK calls (SEAL,
+# Walrus, Enoki) run in-process via Rust crates (ENG-1700).
+# Tag: debian:bookworm-slim  |  arch: linux/amd64  |  pinned: 2026-05-05
+# To refresh: docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 # Install Rust runtime deps (ca-certificates and libssl3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,19 +45,11 @@ WORKDIR /app
 # Copy Rust binary
 COPY --from=builder --chown=appuser:appuser /app/target/release/memwal-server ./memwal-server
 
-# Copy TS sidecar scripts + install deps
-COPY --chown=appuser:appuser scripts/package.json scripts/package-lock.json ./scripts/
-RUN cd scripts && npm ci --omit=dev
-COPY --chown=appuser:appuser scripts/*.ts ./scripts/
-
 # Copy migrations (for reference / manual runs)
 COPY --chown=appuser:appuser migrations/ ./migrations/
 
-# Port config — must match defaults in types.rs + sidecar-server.ts
+# Port config — must match defaults in types.rs
 ENV PORT=8000
-ENV SIDECAR_PORT=9000
-ENV SIDECAR_URL=http://localhost:9000
-ENV SIDECAR_SCRIPTS_DIR=/app/scripts
 EXPOSE ${PORT}
 
 CMD ["./memwal-server"]
