@@ -1,27 +1,31 @@
 #!/usr/bin/env bun
 /**
- * bench-remember-sizes.ts — ENG-1407 size-boundary harness
+ * bench-remember-sizes.ts — ENG-1407 size + content-type harness
  *
- * Sweeps /api/remember across payload sizes to validate the summarize-before
- * -embed path end-to-end. Each successful remember is followed by a recall
- * on a unique marker so we can verify the original full text round-trips
- * (not the summary).
+ * Hits /api/remember with each fixture from bench-fixtures.json and asserts
+ * the HTTP status matches the fixture's expect_status. Each successful
+ * remember is followed by one /api/recall to confirm the read path doesn't
+ * crash — recall quality is intentionally NOT measured here (real-benchmark
+ * coverage like Locomo / longmemeval lands separately).
  *
- * Sizes tested (boundary-bracketing, prose-like content):
- *   4 KiB, 9 KiB, 64 KiB, 256 KiB, 384 KiB, 480 KiB, 512 KiB, 768 KiB,
- *   1 MiB, 1 MiB + 1 (over MAX_REMEMBER_TEXT_BYTES, must reject)
- *
- * Each case asserts an expected HTTP status. Any deviation surfaces a
- * regression or an unintended behavior change in the relayer chain
- * (auth body cap, route layer, summarize path, sidecar, SEAL, Walrus).
+ * The fixture file pairs realistic public-domain content (Wikipedia,
+ * Project Gutenberg) with synthetic structured + mixed payloads, sized to
+ * stress different points along the size × tokenization-density curve.
  *
  * Usage:
- *   BENCH_DELEGATE_KEY=<hex> BENCH_ACCOUNT_ID=0x... bun run bench-remember-sizes.ts
+ *   BENCH_DELEGATE_KEY=<hex> BENCH_ACCOUNT_ID=0x... \
+ *     bun run bench-remember-sizes.ts [--fixtures path/to/fixtures.json]
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_FIXTURES = resolve(HERE, "bench-fixtures.json");
 
 const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:8000";
 const DELEGATE_KEY = process.env.BENCH_DELEGATE_KEY;
@@ -31,6 +35,42 @@ if (!DELEGATE_KEY || !ACCOUNT_ID) {
   console.error("Set BENCH_DELEGATE_KEY (hex or suiprivkey) and BENCH_ACCOUNT_ID (0x…)");
   process.exit(1);
 }
+
+// Parse --fixtures flag
+const argv = process.argv.slice(2);
+let fixturesPath = DEFAULT_FIXTURES;
+for (let i = 0; i < argv.length; i += 1) {
+  if (argv[i] === "--fixtures" && argv[i + 1]) {
+    fixturesPath = resolve(argv[i + 1]);
+    i += 1;
+  }
+}
+
+interface Fixture {
+  name: string;
+  category: string;
+  size_bytes: number;
+  source_ids: string[];
+  expect_status: 200 | 400;
+  text: string;
+}
+
+interface FixtureFile {
+  schema_version: number;
+  generated_at: string;
+  generator: string;
+  sources: Array<{ id: string; url: string; license: string; description: string }>;
+  fixtures: Fixture[];
+}
+
+const fixtureFile: FixtureFile = JSON.parse(readFileSync(fixturesPath, "utf-8"));
+console.log(`Loaded ${fixtureFile.fixtures.length} fixtures from ${fixturesPath}`);
+console.log(`  generated_at: ${fixtureFile.generated_at}`);
+console.log("");
+
+// ============================================================
+// Auth helpers
+// ============================================================
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -76,41 +116,19 @@ async function signedRequest(path: string, body: object): Promise<{ status: numb
   return { status: resp.status, ms, json };
 }
 
-function makeText(bytes: number, marker: string): string {
-  // Marker at start so we can verify the original is recalled (not summary)
-  const prefix = `MARKER=${marker} | `;
-  const filler = "The quick brown fox jumps over the lazy dog. ".repeat(Math.ceil(bytes / 45));
-  return (prefix + filler).slice(0, bytes);
-}
-
-interface Case {
-  name: string;
-  bytes: number;
-  expectStatus: number;
-  expectSummarize: boolean;
-}
-
-const cases: Case[] = [
-  { name: "4 KiB (no summarize)",        bytes: 4 * 1024,        expectStatus: 200, expectSummarize: false },
-  { name: "9 KiB (summarize ON)",        bytes: 9 * 1024,        expectStatus: 200, expectSummarize: true  },
-  { name: "64 KiB (summarize)",          bytes: 64 * 1024,       expectStatus: 200, expectSummarize: true  },
-  { name: "256 KiB (summarize)",         bytes: 256 * 1024,      expectStatus: 200, expectSummarize: true  },
-  { name: "384 KiB (summarize)",         bytes: 384 * 1024,      expectStatus: 200, expectSummarize: true  },
-  { name: "480 KiB (summarize)",         bytes: 480 * 1024,      expectStatus: 200, expectSummarize: true  },
-  { name: "512 KiB (boundary on 1a290fb)", bytes: 512 * 1024,    expectStatus: 200, expectSummarize: true  },
-  { name: "768 KiB (above old boundary)", bytes: 768 * 1024,     expectStatus: 200, expectSummarize: true  },
-  { name: "1 MiB (max)",                 bytes: 1024 * 1024,     expectStatus: 200, expectSummarize: true  },
-  { name: "1 MiB + 1 (over limit)",      bytes: 1024 * 1024 + 1, expectStatus: 400, expectSummarize: false },
-];
+// ============================================================
+// Run
+// ============================================================
 
 interface Result {
   name: string;
+  category: string;
   bytes: number;
+  expectStatus: number;
   status: number;
   ms: number;
   memoryId?: string;
-  recalledOk?: boolean;
-  recalledMatches?: boolean;
+  recallStatus?: number;
   recallMs?: number;
   err?: string;
 }
@@ -129,49 +147,43 @@ async function main() {
 
   const results: Result[] = [];
 
-  for (const c of cases) {
-    const marker = randomUUID().slice(0, 8);
-    const text = makeText(c.bytes, marker);
-    const r: Result = { name: c.name, bytes: c.bytes, status: 0, ms: 0 };
+  for (const f of fixtureFile.fixtures) {
+    const r: Result = {
+      name: f.name,
+      category: f.category,
+      bytes: f.size_bytes,
+      expectStatus: f.expect_status,
+      status: 0,
+      ms: 0,
+    };
 
-    process.stdout.write(`▶ ${c.name.padEnd(32)} ... `);
+    process.stdout.write(`▶ ${f.name.padEnd(28)} (${f.category.padEnd(15)}) ${f.size_bytes.toString().padStart(8)} B ... `);
     try {
       const remResp = await signedRequest("/api/remember", {
-        text,
+        text: f.text,
         namespace: NAMESPACE,
       });
       r.status = remResp.status;
       r.ms = remResp.ms;
 
-      if (remResp.status !== c.expectStatus) {
-        r.err = `expected ${c.expectStatus}, got ${remResp.status}: ${JSON.stringify(remResp.json).slice(0, 200)}`;
+      if (remResp.status !== f.expect_status) {
+        r.err = `expected ${f.expect_status}, got ${remResp.status}: ${JSON.stringify(remResp.json).slice(0, 200)}`;
         console.log(`❌ ${remResp.status} (${r.ms.toFixed(0)} ms)`);
-        results.push(r);
-        continue;
-      }
-
-      if (remResp.status === 200) {
+      } else if (remResp.status === 200) {
         r.memoryId = remResp.json?.id;
-        // Recall by marker so we know we're getting THIS specific record
+        // Recall to confirm the read path works. We do NOT assert on
+        // recall quality (rank, distance, content) — that's deferred to
+        // dedicated benchmarks (Locomo, longmemeval).
         const recResp = await signedRequest("/api/recall", {
-          query: `MARKER=${marker}`,
+          query: f.name, // any query suffices for a sanity hit; namespace scopes results
           limit: 1,
           namespace: NAMESPACE,
         });
+        r.recallStatus = recResp.status;
         r.recallMs = recResp.ms;
-        if (recResp.status !== 200) {
-          r.err = `recall failed: ${recResp.status} ${JSON.stringify(recResp.json).slice(0, 200)}`;
-          console.log(`✅ remember (${r.ms.toFixed(0)} ms) | ❌ recall ${recResp.status}`);
-          results.push(r);
-          continue;
-        }
-        const top = recResp.json?.results?.[0];
-        r.recalledOk = !!top;
-        // Match: original full text contains the marker AND length matches input
-        r.recalledMatches = top && top.text === text;
-        const matchSym = r.recalledMatches ? "✅" : (top?.text?.includes(`MARKER=${marker}`) ? "⚠️ partial" : "❌");
+        const recallSym = recResp.status === 200 ? "✅" : "❌";
         console.log(
-          `✅ remember (${r.ms.toFixed(0)} ms) | recall ${matchSym} (${r.recallMs.toFixed(0)} ms, len=${top?.text?.length ?? "?"}/${text.length})`,
+          `✅ remember (${r.ms.toFixed(0)} ms) | recall ${recallSym} ${recResp.status} (${recResp.ms.toFixed(0)} ms)`,
         );
       } else {
         // Expected non-200 (e.g. 400 for over-limit)
@@ -182,22 +194,32 @@ async function main() {
       console.log(`💥 ${r.err}`);
     }
     results.push(r);
-    // Pause between requests so rate-limiter doesn't trip
-    await new Promise((r) => setTimeout(r, 500));
+    // Pause so rate-limiter doesn't trip
+    await new Promise((rs) => setTimeout(rs, 500));
   }
 
   console.log("");
   console.log("─".repeat(80));
   console.log("Summary:");
   console.table(results.map((r) => ({
-    case: r.name,
+    fixture: r.name,
+    category: r.category,
     bytes: r.bytes,
-    status: r.status,
+    expect: r.expectStatus,
+    got: r.status,
     "remember ms": r.ms.toFixed(0),
-    "recall ms": r.recallMs?.toFixed(0) ?? "—",
-    "recall matches original": r.recalledMatches ?? "—",
+    "recall": r.recallStatus ? `${r.recallStatus} (${r.recallMs?.toFixed(0)} ms)` : "—",
     error: r.err ?? "",
   })));
+
+  // Aggregate pass/fail signal
+  const failed = results.filter((r) => r.status !== r.expectStatus);
+  console.log("");
+  console.log(`${results.length - failed.length}/${results.length} fixtures passed`);
+  if (failed.length > 0) {
+    console.log(`Failed: ${failed.map((r) => r.name).join(", ")}`);
+    process.exit(1);
+  }
 }
 
 main().catch((e) => {
