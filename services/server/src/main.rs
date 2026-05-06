@@ -346,8 +346,12 @@ async fn main() {
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
-    // Auth middleware caps signed JSON bodies at 2 MiB, which covers bulk remember
-    // payloads while still rejecting oversized requests before route handling.
+    // HIGH-13 / ENG-1407 / ENG-1408: 2 MiB covers the largest realistic JSON
+    // body — single remember at 1 MiB plaintext + framing, and bulk remember
+    // batches up to ~1.5 MB. Blocks abusive uploads before auth + rate-limit
+    // middleware see them. Must equal auth::PROTECTED_BODY_LIMIT_BYTES — these
+    // caps are enforced independently and a mismatch silently rejects valid
+    // requests.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route(

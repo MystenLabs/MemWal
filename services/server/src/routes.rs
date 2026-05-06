@@ -52,7 +52,20 @@ const ANALYZE_CONCURRENCY: usize = 5;
 const ANALYZE_MAX_OUTPUT_TOKENS: u32 = 256;
 const MAX_SPONSORED_SIGNATURE_BYTES: usize = 2048;
 
+// LOW-6 / ENG-1407: Upper bound on plaintext accepted by /api/remember.
+// 1 MiB supports large markdown documents while staying within the auth
+// middleware's PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) once JSON framing is
+// factored in. Text above SUMMARIZE_THRESHOLD_BYTES is summarized via
+// gpt-4o-mini before embedding so the embedding input stays under
+// text-embedding-3-small's ~8k token limit. Inputs over
+// SUMMARIZE_CHUNK_BYTES are chunk-summarized and reduced.
 const MAX_REMEMBER_TEXT_BYTES: usize = 1024 * 1024;
+// LOW-6: /api/analyze does not benefit from larger inputs — it sends the
+// full text to gpt-4o-mini for fact extraction in a single LLM call (no
+// chunking like remember). Cap it at the previous /api/remember ceiling
+// so a hostile client cannot burn ~1 MiB of LLM tokens for the same
+// rate-limit weight as a tiny request.
+const MAX_ANALYZE_TEXT_BYTES: usize = 64 * 1024;
 const SUMMARIZE_THRESHOLD_BYTES: usize = 8 * 1024;
 const SUMMARIZE_CHUNK_BYTES: usize = 64 * 1024;
 const SUMMARIZE_BATCH_INPUT_BYTES: usize = 64 * 1024;
@@ -717,6 +730,7 @@ pub async fn remember(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
+    // LOW-6: Reject oversize plaintext before spending embed + encrypt compute.
     if body.text.len() > MAX_REMEMBER_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
             "Text exceeds maximum length of {} bytes",
@@ -1390,6 +1404,13 @@ pub async fn analyze(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
+    // LOW-6: Reject oversize plaintext before spending an LLM call.
+    if body.text.len() > MAX_ANALYZE_TEXT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "Text exceeds maximum length of {} bytes",
+            MAX_ANALYZE_TEXT_BYTES
+        )));
+    }
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -1734,8 +1755,8 @@ mod tests {
     use super::{
         batch_summary_inputs, build_bulk_status_results, collect_bounded_results,
         parse_extracted_facts, split_text_chunks, summarize_for_embedding, ANALYZE_CONCURRENCY,
-        MAX_ANALYZE_FACTS, MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES,
-        SUMMARIZE_CHUNK_BYTES,
+        MAX_ANALYZE_FACTS, MAX_ANALYZE_TEXT_BYTES, MAX_REMEMBER_TEXT_BYTES,
+        SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1852,6 +1873,18 @@ mod tests {
     fn text_over_limit_rejected() {
         let text = "a".repeat(MAX_REMEMBER_TEXT_BYTES + 1);
         assert!(text.len() > MAX_REMEMBER_TEXT_BYTES);
+    }
+
+    #[test]
+    fn max_analyze_text_bytes_is_64kb() {
+        assert_eq!(MAX_ANALYZE_TEXT_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn analyze_text_strictly_smaller_than_remember() {
+        // Analyze does fact extraction in a single LLM call without
+        // chunking, so its ceiling must stay below remember's.
+        assert!(MAX_ANALYZE_TEXT_BYTES < MAX_REMEMBER_TEXT_BYTES);
     }
 
     #[test]
