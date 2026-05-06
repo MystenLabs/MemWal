@@ -379,7 +379,7 @@ async fn main() {
             state.clone(),
             auth::verify_signature,
         ))
-        .layer(DefaultBodyLimit::max(1536 * 1024));
+        .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
     // Sponsor routes — body limits + IP rate limit middleware
     let sponsor_routes = Router::new()
