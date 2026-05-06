@@ -12,7 +12,7 @@ For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting
 | `DATABASE_URL` | PostgreSQL connection string. `pgvector` must already exist |
 | `MEMWAL_PACKAGE_ID` | Sui package ID. See [Contract Overview](/contract/overview) |
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID. See [Contract Overview](/contract/overview) |
-| `SEAL_KEY_SERVERS` | Comma-separated SEAL key server object IDs used by the sidecar for encrypt and decrypt |
+| `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | SEAL server config used by the sidecar for encrypt and decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers |
 
 ## Usually Required
 
@@ -38,6 +38,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `MEMWAL_ACCOUNT_ID` | none | Optional account ID in server config |
 | `WALRUS_PACKAGE_ID` | network default | Override the Walrus on-chain package used by the sidecar |
 | `WALRUS_UPLOAD_RELAY_URL` | network default | Override the Walrus upload relay used by the sidecar |
+| `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
 
@@ -47,6 +48,10 @@ These are not all enforced at boot, but most real deployments need them.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
 - `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
+- `SEAL_SERVER_CONFIGS` is a JSON array of `{ objectId, weight, aggregatorUrl?, apiKeyName?, apiKey? }`. Committee key server configs require `aggregatorUrl`.
+- `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset.
+- If `SUI_NETWORK=testnet` and neither SEAL variable is set, the sidecar defaults to the official Mysten testnet committee config: `[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]`.
+- Mainnet committee mode is supported through `SEAL_SERVER_CONFIGS`, but do not hardcode a mainnet default until Mysten publishes the object ID and aggregator URL.
 - The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).

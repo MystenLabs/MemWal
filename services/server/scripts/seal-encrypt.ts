@@ -20,13 +20,11 @@
 
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { SealClient } from "@mysten/seal";
+import { getSealServerConfigsFromEnv } from "./seal-config.ts";
 
 // Network config from env vars
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
 
 // ============================================================
 // Parse CLI arguments
@@ -89,10 +87,7 @@ async function main() {
 
     const sealClient = new SealClient({
         suiClient: suiClient as any,
-        serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-            objectId: id,
-            weight: 1,
-        })),
+        serverConfigs: SEAL_SERVER_CONFIGS,
         verifyKeyServers: true,
     });
 

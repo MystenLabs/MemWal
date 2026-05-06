@@ -121,6 +121,20 @@ export interface RestoreResult {
 // Full Client-Side Manual Flow — MemWalManual class
 // ============================================================
 
+/** Full @mysten/seal server config. Committee servers require aggregatorUrl. */
+export interface SealServerConfig {
+    /** On-chain SEAL key server or committee object ID */
+    objectId: string;
+    /** Server weight for threshold encryption. Defaults to 1. */
+    weight?: number;
+    /** Committee aggregator URL. Required for committee mode servers. */
+    aggregatorUrl?: string;
+    /** Optional API key header name for permissioned key servers */
+    apiKeyName?: string;
+    /** Optional API key value for permissioned key servers */
+    apiKey?: string;
+}
+
 /** Config for MemWalManual (full client-side: SEAL + Walrus + embedding) */
 export interface MemWalManualConfig {
     /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
@@ -157,15 +171,20 @@ export interface MemWalManualConfig {
     /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
     /**
-     * Custom SEAL key server object IDs (overrides built-in defaults per network).
+     * Full SEAL server configs, including committee aggregators.
+     * Takes priority over legacy sealKeyServers when provided.
+     */
+    sealServerConfigs?: SealServerConfig[];
+    /**
+     * Legacy custom SEAL independent key server object IDs.
      * Array of on-chain object IDs, e.g. ["0x..."].
-     * If omitted, uses built-in defaults for the selected suiNetwork.
+     * If omitted, uses sealServerConfigs or built-in defaults for the selected suiNetwork.
      */
     sealKeyServers?: string[];
     /**
      * SEAL threshold — number of key server shares required for encrypt/decrypt.
-     * Must be ≤ number of entries in sealKeyServers.
-     * Default: 2 (matches sidecar SEAL_THRESHOLD default).
+     * Must be ≤ the total configured SEAL server weight.
+     * Default: 2, capped to the total configured SEAL server weight.
      */
     sealThreshold?: number;
     /** Walrus storage epochs (default: 50) */

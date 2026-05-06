@@ -50,7 +50,9 @@ Walrus and network fields:
 | Field | Required | Notes |
 | --- | --- | --- |
 | `suiNetwork` | no | `testnet` or `mainnet`. Default: `mainnet` |
-| `sealKeyServers` | no | Override built-in SEAL key server object IDs for the selected network |
+| `sealServerConfigs` | no | Full SEAL configs for independent or committee servers. Committee entries require `aggregatorUrl` |
+| `sealKeyServers` | no | Legacy override for independent SEAL key server object IDs |
+| `sealThreshold` | no | Default: `2`, capped to total configured server weight |
 | `walrusEpochs` | no | Default: `50` |
 | `walrusAggregatorUrl` | no | Walrus download endpoint. Defaults follow `suiNetwork` |
 | `walrusPublisherUrl` | no | Walrus upload endpoint. Defaults follow `suiNetwork` |
@@ -73,4 +75,5 @@ Walrus and network fields:
 - `MemWalManual` is the manual client path, but it still uses the relayer for registration, search, and restore.
 - `withMemWal` builds on top of `MemWal`, so it uses the same relayer-backed config shape.
 - `MemWalManual` now defaults to `mainnet` network settings unless you pass `suiNetwork: "testnet"`.
-- `sealKeyServers` lets the client override the built-in SEAL key server list for the selected network.
+- `sealServerConfigs` takes priority over `sealKeyServers`; `sealKeyServers` remains supported for legacy independent key server lists.
+- The built-in testnet SEAL default uses the Mysten committee aggregator. Mainnet committee config must be provided explicitly until official values are published.

@@ -19,6 +19,7 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
+import { getSealServerConfigsFromEnv } from "./seal-config.ts";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -29,17 +30,17 @@ import { WalrusClient } from "@mysten/walrus";
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
 
-// SEAL key server object IDs (comma-separated via env var)
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+const SEAL_CONFIG_TOTAL_WEIGHT = SEAL_SERVER_CONFIGS.reduce((sum, config) => sum + config.weight, 0);
+const DEFAULT_SEAL_THRESHOLD = SEAL_CONFIG_TOTAL_WEIGHT > 0 ? Math.min(2, SEAL_CONFIG_TOTAL_WEIGHT) : 2;
 
-if (SEAL_KEY_SERVERS.length === 0) {
-    console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
+if (SEAL_SERVER_CONFIGS.length === 0) {
+    console.error(
+        "[sidecar] WARNING: SEAL_SERVER_CONFIGS/SEAL_KEY_SERVERS env vars are empty and no network default exists — SEAL encrypt/decrypt will fail",
+    );
 }
 
-const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
+const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || String(DEFAULT_SEAL_THRESHOLD), 10);
 
 // Server Sui Private Keys for Walrus uploads
 const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
@@ -77,10 +78,7 @@ const suiClient = new SuiJsonRpcClient({
 
 const sealClient = new SealClient({
     suiClient: suiClient as any,
-    serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-        objectId: id,
-        weight: 1,
-    })),
+    serverConfigs: SEAL_SERVER_CONFIGS,
     verifyKeyServers: true,
 });
 
