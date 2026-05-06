@@ -9,7 +9,7 @@ The recommended default client. The relayer handles embeddings, SEAL encryption,
 
 1. The SDK signs each request with your delegate key
 2. The relayer verifies delegate access
-3. `remember` encrypts via SEAL, uploads to Walrus, and indexes the vector embedding
+3. `remember` returns an accepted job while the relayer encrypts, uploads, and indexes in the background
 4. `recall` searches by Memory Space and returns decrypted matches
 
 ```ts
@@ -27,7 +27,8 @@ const memwal = MemWal.create({
 
 ```ts
 // Store a memory
-await memwal.remember("User prefers dark mode and works in TypeScript.");
+const job = await memwal.remember("User prefers dark mode and works in TypeScript.");
+await memwal.waitForRememberJob(job.job_id);
 
 // Recall relevant memories
 const result = await memwal.recall("What do we know about this user?", 5);
@@ -36,7 +37,7 @@ const result = await memwal.recall("What do we know about this user?", 5);
 const analyzed = await memwal.analyze(
   "I live in Hanoi, prefer dark mode, and usually work late at night."
 );
-console.log(analyzed.facts);
+console.log(analyzed.job_ids);
 
 // Check relayer health
 await memwal.health();

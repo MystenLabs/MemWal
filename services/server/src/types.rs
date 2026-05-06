@@ -1,8 +1,18 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::db::VectorDb;
+use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
+
+/// ENG-1408: Max items in a single POST /api/remember/bulk request.
+pub const MAX_BULK_ITEMS: usize = 20;
+
+/// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
+pub const BULK_EMBED_CONCURRENCY: usize = 5;
+
+/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
+pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -20,6 +30,17 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
+    /// Apalis storage for RememberJob — legacy full async pipeline.
+    /// Kept so the legacy worker can drain any rows enqueued before the
+    /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
+    #[allow(dead_code)]
+    pub remember_job_storage: RememberJobStorage,
+    /// Per-wallet Apalis storages — wallet_storages[i] maps to pool key[i].
+    /// New code should enqueue WalletJob here instead of using
+    /// MetaTransferJob/RememberJob directly.
+    pub wallet_storages: Vec<WalletJobStorage>,
+    /// ENG-1408: Apalis storage for BulkRememberJob.
+    pub bulk_job_storage: BulkRememberJobStorage,
 }
 
 // ============================================================
@@ -105,8 +126,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let network = std::env::var("SUI_NETWORK")
-            .unwrap_or_else(|_| "mainnet".to_string());
+        let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
         let default_rpc = match network.as_str() {
             "testnet" => "https://fullnode.testnet.sui.io:443",
             "devnet" => "https://fullnode.devnet.sui.io:443",
@@ -213,9 +233,85 @@ pub struct RememberRequest {
     pub namespace: String,
 }
 
+// ============================================================
+// Bulk Remember types (ENG-1408)
+// ============================================================
+
+/// One item in a POST /api/remember/bulk request.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkItem {
+    pub text: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+/// POST /api/remember/bulk request body.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkRequest {
+    /// 1–MAX_BULK_ITEMS items to remember in one batched operation.
+    pub items: Vec<RememberBulkItem>,
+}
+
+/// POST /api/remember/bulk — 202 Accepted response.
+/// `job_ids[i]` corresponds to `items[i]`; poll each via GET /api/remember/:job_id.
+#[derive(Debug, Serialize)]
+pub struct RememberBulkAcceptedResponse {
+    pub job_ids: Vec<String>,
+    pub total: usize,
+    pub status: String, // "running" on accepted background work
+}
+
+/// POST /api/remember/bulk/status request body.
+#[derive(Debug, Deserialize)]
+pub struct RememberBulkStatusRequest {
+    /// 1–MAX_BULK_ITEMS job IDs from a prior POST /api/remember/bulk call.
+    pub job_ids: Vec<String>,
+}
+
+/// One item in a POST /api/remember/bulk/status response.
+#[derive(Debug, Serialize, Clone)]
+pub struct RememberBulkStatusItem {
+    pub job_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// POST /api/remember/bulk/status response.
+#[derive(Debug, Serialize)]
+pub struct RememberBulkStatusResponse {
+    pub results: Vec<RememberBulkStatusItem>,
+}
+
+/// POST /api/remember (async, ENG-1406 v3)
+/// Returns 202 Accepted immediately with a job_id for polling.
+#[derive(Debug, Serialize)]
+pub struct RememberAcceptedResponse {
+    pub job_id: String,
+    pub status: String, // "running" on accepted background work
+}
+
+/// GET /api/remember/:job_id — job status polling response
+#[derive(Debug, Serialize)]
+pub struct RememberJobStatusResponse {
+    pub job_id: String,
+    pub status: String, // "pending" | "running" | "uploaded" | "done" | "failed"
+    /// Owner address of the memory (from auth at enqueue time).
+    pub owner: String,
+    /// Namespace the memory was stored under.
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// POST /api/remember (legacy sync response, kept for remember_manual)
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct RememberResponse {
-    pub id: String,
     pub blob_id: String,
     pub owner: String,
     pub namespace: String,
@@ -268,8 +364,6 @@ pub struct SearchHit {
     pub distance: f64,
 }
 
-
-
 /// POST /api/analyze
 /// Extract facts from conversation text using LLM, then remember each fact
 /// Owner is derived from delegate key via onchain verification (auth middleware)
@@ -281,6 +375,29 @@ pub struct AnalyzeRequest {
     pub namespace: String,
 }
 
+/// POST /api/analyze (async, returns 202 immediately)
+/// Returns job_ids for each extracted fact; poll via GET /api/remember/:job_id
+#[derive(Debug, Serialize)]
+pub struct AnalyzeAcceptedResponse {
+    /// One job_id per extracted fact — poll GET /api/remember/:job_id for each
+    pub job_ids: Vec<String>,
+    /// Extracted facts accepted for background storage. `id` equals `job_id`.
+    pub facts: Vec<AnalyzeAcceptedFact>,
+    /// Number of facts extracted from the text
+    pub fact_count: usize,
+    /// "pending" on accepted analyze jobs
+    pub status: String,
+    pub owner: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnalyzeAcceptedFact {
+    pub text: String,
+    pub id: String,
+    pub job_id: String,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct AnalyzedFact {
     pub text: String,
@@ -288,6 +405,7 @@ pub struct AnalyzedFact {
     pub blob_id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct AnalyzeResponse {
     pub facts: Vec<AnalyzedFact>,
@@ -300,7 +418,7 @@ pub struct AnalyzeResponse {
 /// Server uploads to Walrus via sidecar, then stores the vector ↔ blobId mapping.
 #[derive(Debug, Deserialize)]
 pub struct RememberManualRequest {
-    pub encrypted_data: String,  // base64-encoded SEAL-encrypted bytes
+    pub encrypted_data: String, // base64-encoded SEAL-encrypted bytes
     pub vector: Vec<f32>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
@@ -588,7 +706,11 @@ mod tests {
         let debug_str = format!("{:?}", auth);
 
         // None variant should render as None
-        assert!(debug_str.contains("None"), "expected None in debug: {}", debug_str);
+        assert!(
+            debug_str.contains("None"),
+            "expected None in debug: {}",
+            debug_str
+        );
         assert!(!debug_str.contains("<redacted>"));
     }
 
@@ -603,9 +725,7 @@ mod tests {
             owner: "0xowner".to_string(),
             account_id: "0xaccount".to_string(),
             delegate_key: None,
-            seal_session: Some(
-                "eyJhZGRyZXNzIjoiMHhhYmMiLCJwYWNrYWdlSWQiOiIweGRlZiJ9".to_string(),
-            ),
+            seal_session: Some("eyJhZGRyZXNzIjoiMHhhYmMiLCJwYWNrYWdlSWQiOiIweGRlZiJ9".to_string()),
         };
 
         let debug_str = format!("{:?}", auth);
@@ -681,11 +801,7 @@ mod tests {
 
     #[test]
     fn key_pool_round_robin() {
-        let pool = KeyPool::new(vec![
-            "key_a".into(),
-            "key_b".into(),
-            "key_c".into(),
-        ]);
+        let pool = KeyPool::new(vec!["key_a".into(), "key_b".into(), "key_c".into()]);
 
         assert_eq!(pool.next(), Some("key_a"));
         assert_eq!(pool.next(), Some("key_b"));
@@ -730,11 +846,23 @@ mod tests {
 
     #[test]
     fn app_error_display_all_variants() {
-        assert!(AppError::BadRequest("x".into()).to_string().contains("Bad Request"));
-        assert!(AppError::Unauthorized("x".into()).to_string().contains("Unauthorized"));
-        assert!(AppError::Internal("x".into()).to_string().contains("Internal"));
-        assert!(AppError::BlobNotFound("x".into()).to_string().contains("Blob Not Found"));
-        assert!(AppError::RateLimited("x".into()).to_string().contains("Rate Limited"));
-        assert!(AppError::QuotaExceeded("x".into()).to_string().contains("Quota Exceeded"));
+        assert!(AppError::BadRequest("x".into())
+            .to_string()
+            .contains("Bad Request"));
+        assert!(AppError::Unauthorized("x".into())
+            .to_string()
+            .contains("Unauthorized"));
+        assert!(AppError::Internal("x".into())
+            .to_string()
+            .contains("Internal"));
+        assert!(AppError::BlobNotFound("x".into())
+            .to_string()
+            .contains("Blob Not Found"));
+        assert!(AppError::RateLimited("x".into())
+            .to_string()
+            .contains("Rate Limited"));
+        assert!(AppError::QuotaExceeded("x".into())
+            .to_string()
+            .contains("Quota Exceeded"));
     }
 }

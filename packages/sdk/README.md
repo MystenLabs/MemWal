@@ -32,7 +32,8 @@ const memwal = MemWal.create({
   namespace: "demo",
 });
 
-await memwal.remember("User prefers dark mode and uses TypeScript.");
+const job = await memwal.remember("User prefers dark mode and uses TypeScript.");
+await memwal.waitForRememberJob(job.job_id);
 const memories = await memwal.recall("What are the user's preferences?");
 await memwal.restore("demo");
 ```

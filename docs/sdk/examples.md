@@ -18,9 +18,10 @@ const memwal = MemWal.create({
 
 await memwal.health();
 
-const stored = await memwal.remember(
+const accepted = await memwal.remember(
   "User prefers dark mode and works in TypeScript."
 );
+const stored = await memwal.waitForRememberJob(accepted.job_id);
 
 const recalled = await memwal.recall(
   "What do we know about this user?",
@@ -34,7 +35,8 @@ console.log(recalled.results);
 What you should see:
 
 - `health()` succeeds
-- `remember()` returns a `blob_id`
+- `remember()` returns a `job_id` immediately
+- `waitForRememberJob()` returns a `blob_id`
 - `recall()` returns plaintext results for the same namespace
 
 ## Advanced: Manual Methods and Analyze
@@ -53,7 +55,7 @@ memories.
 const analyzed = await memwal.analyze(
   "I live in Hanoi, prefer dark mode, and usually work late at night."
 );
-console.log(analyzed.facts);
+console.log(analyzed.facts, analyzed.job_ids);
 ```
 
 ### AI Middleware
@@ -65,7 +67,7 @@ See [AI Integration](/sdk/ai-integration) for the full setup.
 
 Use this when you want to store structured research findings and recall them in later sessions.
 
-1. Save a structured summary with `remember()`
+1. Submit a structured summary with `remember()` and wait for completion when immediate recall is needed
 2. Generate targeted queries later
 3. Use `recall()` to pull relevant findings back into context
 
