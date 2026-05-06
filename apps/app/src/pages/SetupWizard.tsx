@@ -24,10 +24,57 @@ import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
+const MAX_DELEGATE_KEYS = 20
+const MAX_DELEGATE_KEYS_ERROR = `this wallet already has ${MAX_DELEGATE_KEYS} delegate keys. go to the dashboard, remove an old key, then create a new delegate key.`
+
 const AUTH_METHOD_KEY = 'memwal_auth_method'
 
 function getPersistedAuthMethod(): string | null {
     return sessionStorage.getItem(AUTH_METHOD_KEY)
+}
+
+function isMaxDelegateKeysError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err)
+    return message.includes('abort code: 2') && message.includes('add_delegate_key')
+}
+
+async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
+    try {
+        const registryObj = await suiClient.getObject({
+            id: config.memwalRegistryId,
+            options: { showContent: true },
+        })
+        if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
+            const fields = registryObj.data.content.fields as any
+            const tableId = fields?.accounts?.fields?.id?.id
+            if (tableId) {
+                const dynField = await suiClient.getDynamicFieldObject({
+                    parentId: tableId,
+                    name: { type: 'address', value: ownerAddress },
+                })
+                if (dynField?.data?.content && 'fields' in dynField.data.content) {
+                    return (dynField.data.content.fields as any).value as string
+                }
+            }
+        }
+    } catch {
+        return null
+    }
+
+    return null
+}
+
+async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<number> {
+    const obj = await suiClient.getObject({
+        id: accountId,
+        options: { showContent: true },
+    })
+    if (obj?.data?.content && 'fields' in obj.data.content) {
+        const fields = obj.data.content.fields as any
+        return (fields?.delegate_keys ?? []).length
+    }
+
+    return 0
 }
 
 export default function SetupWizard() {
@@ -86,29 +133,7 @@ export default function SetupWizard() {
         pubKeyHex: string,
         delegateSuiAddress: string,
     ): Promise<string> => {
-        let knownAccountId: string | null = null
-
-        try {
-            const registryObj = await suiClient.getObject({
-                id: config.memwalRegistryId,
-                options: { showContent: true },
-            })
-            if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-                const fields = registryObj.data.content.fields as any
-                const tableId = fields?.accounts?.fields?.id?.id
-                if (tableId) {
-                    const dynField = await suiClient.getDynamicFieldObject({
-                        parentId: tableId,
-                        name: { type: 'address', value: ownerAddress },
-                    })
-                    if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                        knownAccountId = (dynField.data.content.fields as any).value as string
-                    }
-                }
-            }
-        } catch {
-            // Dynamic field not found → no account yet
-        }
+        let knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
 
         const pubKeyBytes = Array.from(
             { length: pubKeyHex.length / 2 },
@@ -116,6 +141,11 @@ export default function SetupWizard() {
         )
 
         if (knownAccountId) {
+            const delegateKeyCount = await getDelegateKeyCount(suiClient, knownAccountId)
+            if (delegateKeyCount >= MAX_DELEGATE_KEYS) {
+                throw new Error(MAX_DELEGATE_KEYS_ERROR)
+            }
+
             setTxStatus('account found! adding delegate key...')
             const tx = new Transaction()
             tx.moveCall({
@@ -220,8 +250,7 @@ export default function SetupWizard() {
             setStep('done')
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)
-            const message = err instanceof Error ? err.message : 'transaction failed. please try again.'
-            setError(message)
+            setError((isMaxDelegateKeysError(err) || (err instanceof Error && err.message === MAX_DELEGATE_KEYS_ERROR)) ? MAX_DELEGATE_KEYS_ERROR : err instanceof Error ? err.message : 'transaction failed. please try again.')
             setStep('show-key')
         } finally {
             setupRunningRef.current = false
@@ -360,7 +389,12 @@ export default function SetupWizard() {
                                     color: 'var(--danger)',
                                     fontSize: '0.85rem',
                                 }}>
-                                    {error}
+                                    <div>{error}</div>
+                                    {error === MAX_DELEGATE_KEYS_ERROR && (
+                                        <Link to="/dashboard" className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
+                                            manage keys in dashboard
+                                        </Link>
+                                    )}
                                 </div>
                             )}
 
