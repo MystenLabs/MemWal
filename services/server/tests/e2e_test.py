@@ -72,12 +72,12 @@ def _sign(
 def make_signed_request(
     method: str,
     path: str,
-    body: dict,
+    body: dict | None,
     signing_key: SigningKey,
     account_id: str | None = None,
 ) -> dict:
     """Send a signed JSON request and return the decoded JSON response."""
-    body_bytes = json.dumps(body).encode()
+    body_bytes = b"" if method == "GET" else json.dumps(body or {}).encode()
     timestamp = str(int(time.time()))
     nonce = str(uuid.uuid4())
     signature_hex = _sign(
@@ -95,9 +95,29 @@ def make_signed_request(
     if account_id:
         headers["x-account-id"] = account_id
 
-    req = urllib.request.Request(f"{BASE_URL}{path}", data=body_bytes, headers=headers, method=method)
+    data = None if method == "GET" else body_bytes
+    req = urllib.request.Request(f"{BASE_URL}{path}", data=data, headers=headers, method=method)
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read())
+
+
+def wait_for_remember_job(
+    signing_key: SigningKey,
+    account_id: str | None,
+    job_id: str,
+    timeout_s: int = 120,
+) -> dict:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        status = make_signed_request(
+            "GET", f"/api/remember/{job_id}", None, signing_key, account_id=account_id
+        )
+        if status.get("status") == "done":
+            return status
+        if status.get("status") == "failed":
+            raise AssertionError(f"remember job failed: {status}")
+        time.sleep(2)
+    raise AssertionError(f"remember job timed out after {timeout_s}s: {job_id}")
 
 
 def _load_delegate_key() -> SigningKey | None:
@@ -220,9 +240,14 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
     result = make_signed_request(
         "POST", "/api/remember", remember_body, signing_key, account_id=account_id
     )
-    assert "id" in result, f"Expected 'id' in remember response, got {result}"
-    assert result["namespace"] == "e2e-test", f"Unexpected namespace: {result}"
-    print(f"[pass] POST /api/remember → id={result['id']}, blob_id={result['blob_id']}")
+    assert "job_id" in result, f"Expected 'job_id' in remember response, got {result}"
+    assert result["status"] in ("pending", "running"), f"Unexpected status: {result}"
+    print(f"[pass] POST /api/remember → job_id={result['job_id']}, status={result['status']}")
+
+    completed = wait_for_remember_job(signing_key, account_id, result["job_id"])
+    assert completed["namespace"] == "e2e-test", f"Unexpected namespace: {completed}"
+    assert "blob_id" in completed, f"Expected completed job blob_id, got {completed}"
+    print(f"[pass] GET /api/remember/{result['job_id']} → blob_id={completed['blob_id']}")
 
     recall_body = {
         "query": "What is the capital of France?",

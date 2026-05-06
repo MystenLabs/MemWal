@@ -26,20 +26,56 @@ For the full config surface, see [Configuration](/reference/configuration).
 
 ## `MemWal` Methods
 
-### `remember(text, namespace?): Promise<RememberResult>`
+### `remember(text, namespace?): Promise<RememberAcceptedResult>`
 
-Store one memory through the relayer. The relayer handles embedding, SEAL encryption, Walrus upload, and vector indexing.
+Submit one memory through the relayer. The method returns after the relayer creates a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
 
 **Returns:**
 
 ```ts
 {
-  id: string;        // UUID for this entry
+  job_id: string; // Polling id
+  status: string; // Usually "running"
+}
+```
+
+### `rememberAndWait(text, namespace?, opts?): Promise<RememberResult>`
+
+Submit one memory and poll until the background job completes.
+
+**Returns:**
+
+```ts
+{
+  id: string;        // Stable job id/vector row id
+  job_id: string;    // Polling id
   blob_id: string;   // Walrus blob ID
   owner: string;     // Owner Sui address
   namespace: string; // Namespace used
 }
 ```
+
+### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
+
+Poll a previously accepted remember job until it reaches `done` or `failed`.
+
+### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
+
+Submit up to 20 memories in one request and return the accepted job IDs immediately.
+
+**Returns:**
+
+```ts
+{
+  job_ids: string[];
+  total: number;
+  status: string; // Usually "running"
+}
+```
+
+### `rememberBulkAndWait(items, opts?): Promise<RememberBulkResult>`
+
+Submit a bulk remember request and wait until every job reaches a terminal state.
 
 ### `recall(query, limit?, namespace?): Promise<RecallResult>`
 
@@ -62,21 +98,25 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 
-Extract memorable facts from text using an LLM, then store each fact as a separate memory.
+Extract memorable facts from text using an LLM, then return accepted background jobs for storing each fact.
 
 **Returns:**
 
 ```ts
 {
+  job_ids: string[];
   facts: Array<{
     text: string;     // Extracted fact
-    id: string;       // UUID
-    blob_id: string;  // Walrus blob ID
+    id: string;       // Same value as job_id
+    job_id: string;   // Polling id
   }>;
-  total: number;
+  fact_count: number;
+  status: string;     // Usually "pending"
   owner: string;
 }
 ```
+
+Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact job to finish and return per-job storage results.
 
 ### `restore(namespace, limit?): Promise<RestoreResult>`
 

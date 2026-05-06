@@ -80,38 +80,40 @@ pub async fn seal_encrypt(
     let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let mut req = client
-        .post(&url)
-        .json(&SealEncryptRequest {
-            data: data_b64,
-            owner: owner_address.to_string(),
-            package_id: package_id.to_string(),
-        });
+    let mut req = client.post(&url).json(&SealEncryptRequest {
+        data: data_b64,
+        owner: owner_address.to_string(),
+        package_id: package_id.to_string(),
+    });
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!("Sidecar seal/encrypt request failed: {}. Is the sidecar running?", e))
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Sidecar seal/encrypt request failed: {}. Is the sidecar running?",
+            e
+        ))
+    })?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(AppError::Internal(format!("seal encrypt failed: {}", err.error)));
+            return Err(AppError::Internal(format!(
+                "seal encrypt failed: {}",
+                err.error
+            )));
         }
         return Err(AppError::Internal(format!("seal encrypt failed: {}", body)));
     }
 
-    let result: SealEncryptResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse seal/encrypt response: {}", e))
-    })?;
+    let result: SealEncryptResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse seal/encrypt response: {}", e)))?;
 
-    let encrypted_bytes = BASE64.decode(&result.encrypted_data).map_err(|e| {
-        AppError::Internal(format!("Failed to decode encrypted base64: {}", e))
-    })?;
+    let encrypted_bytes = BASE64
+        .decode(&result.encrypted_data)
+        .map_err(|e| AppError::Internal(format!("Failed to decode encrypted base64: {}", e)))?;
 
     tracing::info!(
         "seal encrypt ok: {} bytes -> {} encrypted bytes",
@@ -142,13 +144,11 @@ pub async fn seal_decrypt(
     let url = format!("{}/seal/decrypt", sidecar_url);
     let data_b64 = BASE64.encode(encrypted_data);
 
-    let mut req = client
-        .post(&url)
-        .json(&SealDecryptRequest {
-            data: data_b64,
-            package_id: package_id.to_string(),
-            account_id: account_id.to_string(),
-        });
+    let mut req = client.post(&url).json(&SealDecryptRequest {
+        data: data_b64,
+        package_id: package_id.to_string(),
+        account_id: account_id.to_string(),
+    });
     req = match credential {
         SealCredential::Session(s) => req.header("x-seal-session", s),
         SealCredential::DelegateKey(k) => req.header("x-delegate-key", k),
@@ -156,28 +156,32 @@ pub async fn seal_decrypt(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!("Sidecar seal/decrypt request failed: {}. Is the sidecar running?", e))
-        })?;
+    let resp = req.send().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Sidecar seal/decrypt request failed: {}. Is the sidecar running?",
+            e
+        ))
+    })?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(AppError::Internal(format!("seal decrypt failed: {}", err.error)));
+            return Err(AppError::Internal(format!(
+                "seal decrypt failed: {}",
+                err.error
+            )));
         }
         return Err(AppError::Internal(format!("seal decrypt failed: {}", body)));
     }
 
-    let result: SealDecryptResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse seal/decrypt response: {}", e))
-    })?;
+    let result: SealDecryptResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse seal/decrypt response: {}", e)))?;
 
-    let decrypted_bytes = BASE64.decode(&result.decrypted_data).map_err(|e| {
-        AppError::Internal(format!("Failed to decode decrypted base64: {}", e))
-    })?;
+    let decrypted_bytes = BASE64
+        .decode(&result.decrypted_data)
+        .map_err(|e| AppError::Internal(format!("Failed to decode decrypted base64: {}", e)))?;
 
     tracing::info!(
         "seal decrypt ok: {} encrypted bytes -> {} decrypted bytes",
@@ -187,6 +191,3 @@ pub async fn seal_decrypt(
 
     Ok(decrypted_bytes)
 }
-
-
-

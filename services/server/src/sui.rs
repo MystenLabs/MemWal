@@ -31,10 +31,9 @@ pub async fn verify_delegate_key_onchain(
         .await
         .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
 
-    let rpc_response: RpcResponse = response
-        .json()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("Failed to parse RPC response: {}", e)))?;
+    let rpc_response: RpcResponse = response.json().await.map_err(|e| {
+        OnchainVerifyError::RpcError(format!("Failed to parse RPC response: {}", e))
+    })?;
 
     if let Some(error) = rpc_response.error {
         return Err(OnchainVerifyError::RpcError(format!(
@@ -97,18 +96,13 @@ pub async fn verify_delegate_key_onchain(
     for dk in delegate_keys {
         // Each delegate key is a struct with fields: { public_key, label, created_at }
         // The onchain representation has a "fields" wrapper
-        let dk_fields = dk
-            .get("fields")
-            .or(Some(dk)); // fallback if no "fields" wrapper
+        let dk_fields = dk.get("fields").or(Some(dk)); // fallback if no "fields" wrapper
 
         if let Some(stored_key) = dk_fields.and_then(|f| f.get("public_key")) {
             // Compare as arrays of numbers
             if let Some(stored_arr) = stored_key.as_array() {
                 if *stored_arr == pk_as_numbers {
-                    tracing::info!(
-                        "delegate key verified onchain, owner: {}",
-                        owner
-                    );
+                    tracing::info!("delegate key verified onchain, owner: {}", owner);
                     return Ok(owner);
                 }
             }
@@ -184,10 +178,9 @@ pub async fn find_account_by_delegate_key(
             .await
             .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
 
-        let resp_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| OnchainVerifyError::RpcError(format!("Failed to parse response: {}", e)))?;
+        let resp_json: serde_json::Value = response.json().await.map_err(|e| {
+            OnchainVerifyError::RpcError(format!("Failed to parse response: {}", e))
+        })?;
 
         if let Some(error) = resp_json.get("error") {
             return Err(OnchainVerifyError::RpcError(format!(
@@ -246,13 +239,8 @@ pub async fn find_account_by_delegate_key(
             }
 
             // Fetch the actual MemWalAccount to check delegate_keys
-            match verify_delegate_key_onchain(
-                http_client,
-                rpc_url,
-                account_id,
-                public_key_bytes,
-            )
-            .await
+            match verify_delegate_key_onchain(http_client, rpc_url, account_id, public_key_bytes)
+                .await
             {
                 Ok(owner) => {
                     tracing::info!(
@@ -340,7 +328,9 @@ impl std::fmt::Display for OnchainVerifyError {
         match self {
             OnchainVerifyError::RpcError(msg) => write!(f, "Sui RPC error: {}", msg),
             OnchainVerifyError::KeyNotFound(msg) => write!(f, "Key not found: {}", msg),
-            OnchainVerifyError::AccountDeactivated(msg) => write!(f, "Account deactivated: {}", msg),
+            OnchainVerifyError::AccountDeactivated(msg) => {
+                write!(f, "Account deactivated: {}", msg)
+            }
         }
     }
 }
@@ -359,7 +349,8 @@ mod tests {
 
     #[test]
     fn test_account_deactivated_display() {
-        let err = OnchainVerifyError::AccountDeactivated("Account 0xabc has been deactivated".into());
+        let err =
+            OnchainVerifyError::AccountDeactivated("Account 0xabc has been deactivated".into());
         assert!(err.to_string().contains("deactivated"));
     }
 
@@ -382,7 +373,10 @@ mod tests {
         let deactivated = OnchainVerifyError::AccountDeactivated("msg".into());
         let not_found = OnchainVerifyError::KeyNotFound("msg".into());
         // Both are Err variants but must match differently:
-        assert!(matches!(deactivated, OnchainVerifyError::AccountDeactivated(_)));
+        assert!(matches!(
+            deactivated,
+            OnchainVerifyError::AccountDeactivated(_)
+        ));
         assert!(matches!(not_found, OnchainVerifyError::KeyNotFound(_)));
     }
 
@@ -396,26 +390,41 @@ mod tests {
         // active: true → account is active
         let fields_active: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"active": true, "owner": "0xabc"}"#).unwrap();
-        let active = fields_active.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let active = fields_active
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         assert!(active);
 
         // active: false → account is deactivated
         let fields_inactive: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"active": false, "owner": "0xabc"}"#).unwrap();
-        let inactive = fields_inactive.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let inactive = fields_inactive
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         assert!(!inactive);
 
         // active field missing → defaults to true (backward compat)
         let fields_missing: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"owner": "0xabc"}"#).unwrap();
-        let missing = fields_missing.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let missing = fields_missing
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         assert!(missing, "missing 'active' field should default to true");
 
         // active field is a string (malformed) → defaults to true
         let fields_string: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"active": "false", "owner": "0xabc"}"#).unwrap();
-        let string_val = fields_string.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
-        assert!(string_val, "string 'false' should not be treated as bool false");
+        let string_val = fields_string
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        assert!(
+            string_val,
+            "string 'false' should not be treated as bool false"
+        );
     }
 
     // ── Delegate key matching — public key as JSON array ────────────────
@@ -424,9 +433,7 @@ mod tests {
     fn test_public_key_to_json_array_conversion() {
         // Test the exact conversion done in verify_delegate_key_onchain
         let pk_bytes: [u8; 32] = [
-            1, 2, 3, 4, 5, 6, 7, 8,
-            9, 10, 11, 12, 13, 14, 15, 16,
-            17, 18, 19, 20, 21, 22, 23, 24,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
         ];
 
@@ -474,11 +481,14 @@ mod tests {
         let dk_fields = dk_json.get("fields").or(Some(&dk_json));
         let stored_key = dk_fields.and_then(|f| f.get("public_key"));
         assert!(stored_key.is_some());
-        assert_eq!(stored_key.unwrap().as_array().unwrap(), &vec![
-            serde_json::json!(1),
-            serde_json::json!(2),
-            serde_json::json!(3),
-        ]);
+        assert_eq!(
+            stored_key.unwrap().as_array().unwrap(),
+            &vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3),
+            ]
+        );
     }
 
     #[test]
@@ -492,18 +502,22 @@ mod tests {
         let dk_fields = dk_json.get("fields").or(Some(&dk_json));
         let stored_key = dk_fields.and_then(|f| f.get("public_key"));
         assert!(stored_key.is_some());
-        assert_eq!(stored_key.unwrap().as_array().unwrap(), &vec![
-            serde_json::json!(4),
-            serde_json::json!(5),
-            serde_json::json!(6),
-        ]);
+        assert_eq!(
+            stored_key.unwrap().as_array().unwrap(),
+            &vec![
+                serde_json::json!(4),
+                serde_json::json!(5),
+                serde_json::json!(6),
+            ]
+        );
     }
 
     // ── OnchainVerifyError: Display correctness ─────────────────────────
 
     #[test]
     fn test_account_deactivated_display_includes_account_id() {
-        let err = OnchainVerifyError::AccountDeactivated("Account 0xabc has been deactivated".into());
+        let err =
+            OnchainVerifyError::AccountDeactivated("Account 0xabc has been deactivated".into());
         let display = err.to_string();
         assert!(display.contains("deactivated"));
         assert!(display.contains("0xabc"));
@@ -517,4 +531,3 @@ mod tests {
         assert!(err.to_string().contains("deactivated"));
     }
 }
-

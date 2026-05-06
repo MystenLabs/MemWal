@@ -95,14 +95,16 @@ const memwal = MemWal.create({
 
 ```ts
 // Store a memory
-await memwal.remember("User prefers dark mode and works in TypeScript.");
+const job = await memwal.remember("User prefers dark mode and works in TypeScript.");
+await memwal.waitForRememberJob(job.job_id);
 
 // Recall by meaning
 const result = await memwal.recall("What are the user's preferences?");
 console.log(result.results);
 
 // Extract and store facts from text
-await memwal.analyze("I live in Hanoi and prefer dark mode.");
+const analyzed = await memwal.analyze("I live in Hanoi and prefer dark mode.");
+await memwal.waitForRememberJobs(analyzed.job_ids);
 
 // Check relayer health
 await memwal.health();
@@ -127,9 +129,11 @@ await memwal.health();
 
 | Method | Description | Returns |
 |---|---|---|
-| `remember(text, namespace?)` | Store one memory (relayer embeds, encrypts, uploads) | `{ id, blob_id, owner, namespace }` |
+| `remember(text, namespace?)` | Accept one memory job immediately | `{ job_id, status }` |
+| `rememberAndWait(text, namespace?, opts?)` | Store one memory and wait for completion | `{ id, job_id, blob_id, owner, namespace }` |
 | `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
-| `analyze(text, namespace?)` | Extract facts via LLM, store each as a memory | `{ facts: [{ text, id, blob_id }], total, owner }` |
+| `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
+| `analyzeAndWait(text, namespace?, opts?)` | Extract facts and wait for all fact jobs to complete | `{ results, facts, total, succeeded, failed, owner }` |
 | `restore(namespace, limit?)` | Rebuild missing index entries from Walrus | `{ restored, skipped, total, namespace, owner }` |
 | `health()` | Check relayer health | `{ status, version }` |
 | `getPublicKeyHex()` | Get hex-encoded public key | `string` |

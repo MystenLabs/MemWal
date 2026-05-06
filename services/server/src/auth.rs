@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
 use crate::types::{AppState, AuthInfo};
 
+const AUTH_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// Ed25519 signature verification + onchain delegate key verification middleware
 ///
 /// Expects these headers:
@@ -26,6 +28,7 @@ use crate::types::{AppState, AuthInfo};
 /// 3. Verify onchain: public_key ∈ MemWalAccount.delegate_keys
 /// 4. Cache the mapping for future requests
 /// 5. Store AuthInfo { public_key, owner } in request extensions
+///
 /// LOW-2 fix: Normalize response timing across all auth failure paths.
 /// Returns UNAUTHORIZED after a constant 100 ms delay so that an attacker
 /// cannot distinguish "account does not exist" (fast RPC fail) from
@@ -108,18 +111,21 @@ pub async fn verify_signature(
     let nonce = headers
         .get("x-nonce")
         .and_then(|v| v.to_str().ok())
-        .map(String::from)
         .ok_or_else(|| {
             tracing::warn!(
                 target: "memwal::deprecation",
                 "request missing x-nonce; rejecting unsupported legacy SDK"
             );
             unsupported_legacy_sdk()
-        })?;
+        })?
+        .to_string();
 
     // Validate nonce is UUID format (prevents injection attacks)
     if uuid::Uuid::parse_str(&nonce).is_err() {
-        tracing::warn!("Invalid nonce format (not UUID): {}", &nonce[..nonce.len().min(36)]);
+        tracing::warn!(
+            "Invalid nonce format (not UUID): {}",
+            &nonce[..nonce.len().min(36)]
+        );
         return Err(constant_time_reject().await);
     }
 
@@ -130,31 +136,32 @@ pub async fn verify_signature(
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let now = chrono::Utc::now().timestamp();
     let age = now.checked_sub(timestamp).unwrap_or(i64::MAX);
-    if age > 300 || age < -300 {
-        tracing::warn!("Request timestamp too old or future: {} (now: {})", timestamp, now);
+    if !(-300..=300).contains(&age) {
+        tracing::warn!(
+            "Request timestamp too old or future: {} (now: {})",
+            timestamp,
+            now
+        );
         // LOW-2: Use constant_time_reject to normalize timing on timestamp failures
         return Err(constant_time_reject().await);
     }
 
     // Decode public key
     let pk_bytes = hex::decode(&public_key_hex).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let pk_array: [u8; 32] = pk_bytes
-        .try_into()
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let pk_array: [u8; 32] = pk_bytes.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let verifying_key =
         VerifyingKey::from_bytes(&pk_array).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Decode signature
     let sig_bytes = hex::decode(&signature_hex).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let sig_array: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let signature = Signature::from_bytes(&sig_array);
 
     // Build the signed message: "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}"
     // LOW-1: Include query parameters in signed message to prevent query-param tampering
     let method = request.method().as_str().to_string();
-    let path = request.uri()
+    let path = request
+        .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| request.uri().path().to_string());
@@ -162,7 +169,7 @@ pub async fn verify_signature(
     // Split request to consume body
     let (mut parts, body) = request.into_parts();
 
-    let body_bytes = axum::body::to_bytes(body, 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(body, AUTH_BODY_LIMIT_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -234,13 +241,14 @@ pub async fn verify_signature(
     // Step 2: Resolve account — cache → indexed accounts → registry scan → header hint → config fallback
     // LOW-2: Always use constant_time_reject so that timing of the resolution error
     // ("account not found" vs "key not in account") cannot be observed by callers.
-    let (account_id, owner) = match resolve_account(&state, &public_key_hex, &pk_array, account_id_hint).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!("Account resolution failed: {}", e);
-            return Err(constant_time_reject().await);
-        }
-    };
+    let (account_id, owner) =
+        match resolve_account(&state, &public_key_hex, &pk_array, account_id_hint).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!("Account resolution failed: {}", e);
+                return Err(constant_time_reject().await);
+            }
+        };
 
     tracing::debug!("account resolved: {} (owner: {})", account_id, owner);
 
@@ -313,7 +321,10 @@ async fn resolve_account(
     {
         Ok((account_id, owner)) => {
             // Cache for future requests
-            let _ = state.db.cache_delegate_key(public_key_hex, &account_id, &owner).await;
+            let _ = state
+                .db
+                .cache_delegate_key(public_key_hex, &account_id, &owner)
+                .await;
             return Ok((account_id, owner));
         }
         Err(e) => {
@@ -333,10 +344,18 @@ async fn resolve_account(
         pk_bytes,
     )
     .await
-    .map_err(|e| format!("fallback account {} verification failed: {}", fallback_account_id, e))?;
+    .map_err(|e| {
+        format!(
+            "fallback account {} verification failed: {}",
+            fallback_account_id, e
+        )
+    })?;
 
     // Cache for future requests
-    let _ = state.db.cache_delegate_key(public_key_hex, &fallback_account_id, &owner).await;
+    let _ = state
+        .db
+        .cache_delegate_key(public_key_hex, &fallback_account_id, &owner)
+        .await;
 
     Ok((fallback_account_id, owner))
 }
@@ -363,7 +382,7 @@ mod tests {
             "",
             "not-a-uuid",
             "12345",
-            "550e8400-e29b-41d4-a716",            // truncated
+            "550e8400-e29b-41d4-a716",              // truncated
             "ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ", // non-hex
             "../../../etc/passwd",                  // injection attempt
         ];
@@ -389,7 +408,6 @@ mod tests {
         // age is a huge negative value, well below -300
         assert!(age < -300, "age {} should be less than -300", age);
     }
-
 
     #[test]
     fn checked_sub_handles_negative_overflow() {
@@ -427,8 +445,8 @@ mod tests {
         let timestamp_past = now - 300;
         let age_past = now.checked_sub(timestamp_past).unwrap_or(i64::MAX);
         assert_eq!(age_past, 300);
-        // The check is `age > 300 || age < -300`, so exactly 300 passes
-        assert!(!(age_past > 300 || age_past < -300));
+        // The check is `!(-300..=300).contains(&age)`, so exactly 300 passes
+        assert!((-300..=300).contains(&age_past));
 
         // At +301s — should be rejected
         let timestamp_expired = now - 301;
@@ -502,8 +520,7 @@ mod tests {
 
     #[test]
     fn canonical_message_without_account_id_uses_empty_string() {
-        let account_id_hint: Option<String> = None;
-        let account_id_for_sig = account_id_hint.unwrap_or_default();
+        let account_id_for_sig = String::new();
 
         let message = format!(
             "{}.{}.{}.{}.{}.{}",
@@ -541,10 +558,9 @@ mod tests {
     /// Uses a fixed 32-byte secret key — NOT for production use.
     fn test_signing_key() -> ed25519_dalek::SigningKey {
         let secret: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
         ed25519_dalek::SigningKey::from_bytes(&secret)
     }
@@ -556,15 +572,19 @@ mod tests {
         let signing_key = test_signing_key();
         let verifying_key = signing_key.verifying_key();
 
-        let message = "1700000000.POST./api/remember.abc123.f47ac10b-58cc-4372-a567-0e02b2c3d479.0xdead";
+        let message =
+            "1700000000.POST./api/remember.abc123.f47ac10b-58cc-4372-a567-0e02b2c3d479.0xdead";
         let signature = signing_key.sign(message.as_bytes());
 
         // Valid signature passes
         assert!(verifying_key.verify(message.as_bytes(), &signature).is_ok());
 
         // Tampered message fails
-        let tampered = "1700000001.POST./api/remember.abc123.f47ac10b-58cc-4372-a567-0e02b2c3d479.0xdead";
-        assert!(verifying_key.verify(tampered.as_bytes(), &signature).is_err());
+        let tampered =
+            "1700000001.POST./api/remember.abc123.f47ac10b-58cc-4372-a567-0e02b2c3d479.0xdead";
+        assert!(verifying_key
+            .verify(tampered.as_bytes(), &signature)
+            .is_err());
     }
 
     #[test]
@@ -597,7 +617,9 @@ mod tests {
 
         // Swapping account_id → signature fails (LOW-23)
         let swapped = "1700000000.POST./api/recall.hash.nonce.0xaccount_b";
-        assert!(verifying_key.verify(swapped.as_bytes(), &signature).is_err());
+        assert!(verifying_key
+            .verify(swapped.as_bytes(), &signature)
+            .is_err());
     }
 
     // ── ENG-1696: Manual-mode trust boundary ────────────────────────────
