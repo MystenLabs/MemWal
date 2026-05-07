@@ -63,7 +63,8 @@
             "pages": [
               "fundamentals/architecture/core-components",
               "fundamentals/architecture/how-storage-works",
-              "fundamentals/architecture/data-flow-security-model"
+              "fundamentals/architecture/data-flow-security-model",
+              "architecture/memory-pipeline-redesign-plan"
             ]
           }
         ]
