@@ -521,6 +521,10 @@ pub struct ConfigResponse {
     pub network: String,
     #[serde(rename = "suiRpcUrl")]
     pub sui_rpc_url: String,
+    /// Mirror of `RateLimitConfig::bench_bypass_enabled`. Lets benchmark
+    /// scripts pre-flight the server config before running.
+    #[serde(rename = "rateLimitDisabled")]
+    pub rate_limit_disabled: bool,
 }
 
 // ============================================================
