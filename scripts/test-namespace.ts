@@ -37,7 +37,7 @@ async function main() {
     // Step 1: Remember with namespace
     console.log("1. Remember (with namespace)...");
     try {
-        const rememberResult = await memwal.remember("I love Sui blockchain and Move language");
+        const rememberResult = await memwal.rememberAndWait("I love Sui blockchain and Move language");
         console.log(`   ✅ Remember OK`);
         console.log(`   id: ${rememberResult.id}`);
         console.log(`   blob_id: ${rememberResult.blob_id}`);

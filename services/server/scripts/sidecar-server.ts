@@ -290,12 +290,16 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // ============================================================
 
 const app = express();
-// HIGH-13: Use a conservative global default — routes that need more bytes
-// (e.g. /walrus/upload, /seal/decrypt-batch) apply their own per-route
-// json() middleware that overrides this default.
-// Global floor: 256 KiB is enough for every metadata-only JSON body
-// (seal/encrypt, seal/decrypt, walrus/query-blobs, sponsor, sponsor/execute).
-app.use(express.json({ limit: "256kb" }));
+// HIGH-13 / ENG-1407: JSON body limits are per-route. A global app.use(json())
+// would parse and reject oversize bodies before any per-route json() ran
+// (Express middleware fires in declaration order; whichever json() consumes
+// the body first wins). We declare named limits and apply them explicitly
+// on each route instead.
+const JSON_LIMIT_METADATA = "256kb"; // walrus/query-blobs, sponsor, sponsor/execute
+const JSON_LIMIT_SEAL_ENCRYPT = "2mb"; // matches PROTECTED_BODY_LIMIT_BYTES (auth cap)
+const JSON_LIMIT_SEAL_DECRYPT = "2mb"; // single encrypted blob, same size class as encrypt
+const JSON_LIMIT_SEAL_DECRYPT_BATCH = "8mb"; // up to 25 × ~320 KiB items
+const JSON_LIMIT_WALRUS_UPLOAD = "10mb"; // base64-encoded encrypted blob
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
@@ -340,7 +344,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ============================================================
 // POST /seal/encrypt
 // ============================================================
-app.post("/seal/encrypt", async (req, res) => {
+// ENG-1407: receives the full plaintext for SEAL encryption. Must accept up
+// to PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) of plaintext plus base64 + JSON
+// framing overhead.
+app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
     try {
         const { data, owner, packageId } = req.body;
         if (!data || !owner || !packageId) {
@@ -419,7 +426,7 @@ async function resolveSessionKey(
 // ============================================================
 // POST /seal/decrypt
 // ============================================================
-app.post("/seal/decrypt", async (req, res) => {
+app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), async (req, res) => {
     try {
         const { data, packageId, accountId } = req.body;
         if (!data || !packageId || !accountId) {
@@ -485,9 +492,8 @@ app.post("/seal/decrypt", async (req, res) => {
 // Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
 // Avoids "Not enough shares" errors when decrypting many blobs at once.
 // ============================================================
-// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB)
-// Apply a per-route json() that overrides the 256 KiB global for this endpoint only.
-app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res) => {
+// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
+app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
     try {
         const { items, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
@@ -588,11 +594,99 @@ app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res)
 // ============================================================
 // POST /walrus/upload
 // ============================================================
+
+type MetadataTransferBlob = {
+    blobObjectId: string;
+    namespace?: string;
+};
+
+function extractBlobObjectId(blob: any): string | null {
+    const rawId = blob?.blobObject?.id;
+    if (typeof rawId === "string") {
+        return rawId;
+    }
+    if (rawId && typeof rawId === "object" && typeof rawId.id === "string") {
+        return rawId.id;
+    }
+    return null;
+}
+
+async function setMetadataAndTransferBlobs(
+    signer: Ed25519Keypair,
+    blobs: MetadataTransferBlob[],
+    owner: string,
+    packageId?: string,
+    agentId?: string,
+): Promise<string> {
+    if (blobs.length === 0) {
+        throw new Error("No blobs to transfer");
+    }
+
+    const signerAddress = signer.toSuiAddress();
+    return runExclusiveBySigner(signerAddress, async () => {
+        const metaTx = new Transaction();
+        const blobArgs = [];
+
+        for (const blob of blobs) {
+            const blobArg = metaTx.object(blob.blobObjectId);
+            blobArgs.push(blobArg);
+
+            metaTx.moveCall({
+                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_namespace"),
+                    metaTx.pure.string(blob.namespace || "default"),
+                ],
+                typeArguments: [],
+            });
+
+            metaTx.moveCall({
+                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_owner"),
+                    metaTx.pure.string(owner),
+                ],
+                typeArguments: [],
+            });
+
+            if (packageId) {
+                metaTx.moveCall({
+                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_package_id"),
+                        metaTx.pure.string(packageId),
+                    ],
+                    typeArguments: [],
+                });
+            }
+
+            if (agentId) {
+                metaTx.moveCall({
+                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_agent_id"),
+                        metaTx.pure.string(agentId),
+                    ],
+                    typeArguments: [],
+                });
+            }
+        }
+
+        metaTx.transferObjects(blobArgs, owner);
+        const digest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
+        await suiClient.waitForTransaction({ digest });
+        return digest;
+    });
+}
+
 // HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
-// The 10 MB ceiling matches the sidecar's original global Walrus limit and is
-// well above any realistic single-memory upload size.
-app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => {
+// 10 MB sits well above any realistic single-memory upload size.
+app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
     try {
         const {
             data,
@@ -601,6 +695,7 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
             namespace,
             packageId,
             agentId,
+            deferTransfer = false,
             epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
         // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
@@ -669,77 +764,18 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
             return flow.getBlob();
         });
 
-        // Extract objectId — handle both { id: "0x..." } and { id: { id: "0x..." } }
-        let blobObjectId: string | null = null;
-        const rawId = (blob.blobObject as any)?.id;
-        if (typeof rawId === 'string') {
-            blobObjectId = rawId;
-        } else if (rawId && typeof rawId === 'object' && typeof rawId.id === 'string') {
-            blobObjectId = rawId.id;
-        }
-
-        // Walrus package for on-chain Move calls (from env-driven WALRUS_PACKAGE_ID)
-        const WALRUS_PKG = WALRUS_PACKAGE_ID;
+        const blobObjectId = extractBlobObjectId(blob);
 
         // Set on-chain metadata + transfer blob to user in a single transaction
-        if (owner && owner !== signerAddress && blobObjectId) {
+        if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
             try {
-                const metaTx = new Transaction();
-                const blobArg = metaTx.object(blobObjectId);
-
-                // Set memwal_namespace metadata on-chain
-                metaTx.moveCall({
-                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_namespace"),
-                        metaTx.pure.string(namespace || "default"),
-                    ],
-                    typeArguments: [],
-                });
-
-                // Set memwal_owner
-                metaTx.moveCall({
-                    target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_owner"),
-                        metaTx.pure.string(owner),
-                    ],
-                    typeArguments: [],
-                });
-
-                // Set memwal_package_id
-                if (packageId) {
-                    metaTx.moveCall({
-                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                        arguments: [
-                            blobArg,
-                            metaTx.pure.string("memwal_package_id"),
-                            metaTx.pure.string(packageId),
-                        ],
-                        typeArguments: [],
-                    });
-                }
-
-                // Set memwal_agent_id
-                if (agentId) {
-                    metaTx.moveCall({
-                        target: `${WALRUS_PKG}::blob::insert_or_update_metadata_pair`,
-                        arguments: [
-                            blobArg,
-                            metaTx.pure.string("memwal_agent_id"),
-                            metaTx.pure.string(agentId),
-                        ],
-                        typeArguments: [],
-                    });
-                }
-
-                // Transfer blob to user
-                metaTx.transferObjects([blobArg], owner);
-
-                const metaDigest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
-                await suiClient.waitForTransaction({ digest: metaDigest });
+                await setMetadataAndTransferBlobs(
+                    signer,
+                    [{ blobObjectId, namespace }],
+                    owner,
+                    packageId,
+                    agentId,
+                );
                 console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
             } catch (metaErr: any) {
                 // LOW-14: Previously the metadata-set + transfer failure was swallowed
@@ -764,11 +800,88 @@ app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => 
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
-            transferStatus: "ok",
+            transferStatus: deferTransfer ? "deferred" : "ok",
         });
     } catch (err: any) {
         const traceId = randomUUID();
         console.error(`[walrus/upload] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
+    }
+});
+
+// ============================================================
+// POST /walrus/set-metadata-batch
+// ============================================================
+app.post("/walrus/set-metadata-batch", express.json({ limit: "1mb" }), async (req, res) => {
+    try {
+        const { blobs, owner, packageId, agentId, keyIndex } = req.body;
+        if (!Array.isArray(blobs) || blobs.length === 0 || !owner || keyIndex === undefined) {
+            return res.status(400).json({ error: "Missing required fields: blobs, owner, keyIndex" });
+        }
+        if (blobs.length > 20) {
+            return res.status(400).json({ error: "Too many blobs in batch" });
+        }
+        if (!/^0x[0-9a-fA-F]{64}$/.test(owner)) {
+            return res.status(400).json({ error: "Invalid owner address format" });
+        }
+        if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
+            return res.status(400).json({ error: "Invalid packageId format" });
+        }
+
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[keyIndex];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
+        }
+
+        const normalized: MetadataTransferBlob[] = blobs.map((blob: any, idx: number) => {
+            const blobObjectId = blob?.blobObjectId;
+            if (typeof blobObjectId !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(blobObjectId)) {
+                throw new Error(`Invalid blobs[${idx}].blobObjectId`);
+            }
+            const namespace = typeof blob?.namespace === "string" && blob.namespace.length > 0
+                ? blob.namespace
+                : "default";
+            return { blobObjectId, namespace };
+        });
+
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        const signer = Ed25519Keypair.fromSecretKey(secretKey);
+        const digest = await setMetadataAndTransferBlobs(signer, normalized, owner, packageId, agentId);
+        console.log(`[walrus/set-metadata-batch] transferred ${normalized.length} blobs to owner`);
+        res.json({ transferred: normalized.length, digest });
+    } catch (err: any) {
+        const traceId = randomUUID();
+        console.error(`[walrus/set-metadata-batch] [${traceId}] error:`, err);
+        res.status(500).json({ error: "Internal server error", traceId });
+    }
+});
+
+// Legacy single-blob endpoint kept for older queued jobs.
+app.post("/walrus/set-metadata", express.json({ limit: "128kb" }), async (req, res) => {
+    try {
+        const { blobObjectId, owner, namespace, packageId, agentId, keyIndex } = req.body;
+        if (!blobObjectId || !owner || keyIndex === undefined) {
+            return res.status(400).json({ error: "Missing required fields: blobObjectId, owner, keyIndex" });
+        }
+        req.body.blobs = [{ blobObjectId, namespace: namespace || "default" }];
+
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[keyIndex];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
+        }
+        const { secretKey } = decodeSuiPrivateKey(privateKey);
+        const signer = Ed25519Keypair.fromSecretKey(secretKey);
+        const digest = await setMetadataAndTransferBlobs(
+            signer,
+            [{ blobObjectId, namespace: namespace || "default" }],
+            owner,
+            packageId,
+            agentId,
+        );
+        res.json({ transferred: 1, digest });
+    } catch (err: any) {
+        const traceId = randomUUID();
+        console.error(`[walrus/set-metadata] [${traceId}] error:`, err);
         res.status(500).json({ error: "Internal server error", traceId });
     }
 });
@@ -832,7 +945,7 @@ async function mapConcurrent<T, R>(
     return results;
 }
 
-app.post("/walrus/query-blobs", async (req, res) => {
+app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { owner, namespace, packageId } = req.body;
         if (!owner) {
@@ -958,7 +1071,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
 // POST /sponsor — Create Enoki-sponsored transaction for frontend
 // Frontend sends TransactionKind bytes + sender → returns sponsored { bytes, digest }
 // ============================================================
-app.post("/sponsor", async (req, res) => {
+app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { transactionBlockKindBytes, sender } = req.body;
         if (!transactionBlockKindBytes || !sender) {
@@ -990,7 +1103,7 @@ app.post("/sponsor", async (req, res) => {
 // POST /sponsor/execute — Execute signed sponsored transaction
 // Frontend sends { digest, signature } after user wallet signs → returns { digest }
 // ============================================================
-app.post("/sponsor/execute", async (req, res) => {
+app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { digest, signature } = req.body;
         if (!digest || !signature) {
