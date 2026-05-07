@@ -28,7 +28,9 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use types::{AppState, Config, KeyPool};
+use types::{
+    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_TTL_SECS, DEFAULT_EMBEDDING_CACHE_TTL_SECS,
+};
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -177,6 +179,36 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // ENG-1405: Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
+    let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_TTL_SECS);
+    let embedding_cache_ttl_secs = std::env::var("EMBEDDING_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_EMBEDDING_CACHE_TTL_SECS);
+    tracing::info!(
+        "  blob cache: redis ttl={}s (BLOB_CACHE_TTL_SECS={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
+        blob_cache_ttl_secs,
+        blob_cache_ttl_secs,
+        embedding_cache_ttl_secs,
+        embedding_cache_ttl_secs
+    );
+    let blob_cache_ttl = std::time::Duration::from_secs(blob_cache_ttl_secs);
+    let embedding_cache_ttl = std::time::Duration::from_secs(embedding_cache_ttl_secs);
+
+    if blob_cache_ttl.is_zero() {
+        tracing::warn!(
+            "  blob cache: BLOB_CACHE_TTL_SECS=0 disables cache hits and forces Walrus revalidation"
+        );
+    }
+    if embedding_cache_ttl.is_zero() {
+        tracing::warn!(
+            "  embedding cache: EMBEDDING_CACHE_TTL_SECS=0 disables recall query embedding cache hits"
+        );
+    }
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -189,6 +221,8 @@ async fn main() {
         remember_job_storage: remember_job_storage.clone(),
         wallet_storages: wallet_storages.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
+        blob_cache_ttl,
+        embedding_cache_ttl,
     });
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)

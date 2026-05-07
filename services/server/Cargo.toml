@@ -54,4 +54,3 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 percent-encoding = "2"
-
