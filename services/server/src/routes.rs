@@ -1747,6 +1747,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigRespon
         package_id: state.config.package_id.clone(),
         network: state.config.sui_network.clone(),
         sui_rpc_url: state.config.sui_rpc_url.clone(),
+        rate_limit_disabled: state.config.rate_limit.bench_bypass_enabled,
     })
 }
 

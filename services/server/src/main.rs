@@ -73,6 +73,14 @@ async fn main() {
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
     );
+    if config.rate_limit.bench_bypass_enabled {
+        // Storage quota is unaffected — this only skips the request-rate
+        // buckets. The warning is split across lines so each one is grep-able
+        // and renders clearly in stacked log output.
+        tracing::warn!("⚠️  RATE_LIMIT_DISABLED=1 — request-rate limiter BYPASSED.");
+        tracing::warn!("⚠️  Benchmark-only escape hatch. UNSAFE outside localhost benches.");
+        tracing::warn!("⚠️  Unset RATE_LIMIT_DISABLED to restore protection.");
+    }
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
