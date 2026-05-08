@@ -11,6 +11,10 @@ use apalis::prelude::Storage as _;
 
 use crate::db::VectorDb;
 use crate::jobs::{BulkRememberItem, WalletJob, WalletOperation};
+use crate::memory_artifact::{
+    build_artifact, index_texts_for_artifact, index_texts_for_payload, parse_payload,
+    recall_text_for_hit, serialize_artifact, DEFAULT_EMBEDDING_MODEL, MEMORY_PIPELINE_VERSION,
+};
 use crate::rate_limit;
 use crate::seal;
 use crate::types::*;
@@ -63,6 +67,12 @@ struct PendingBulkRememberItem {
     namespace: String,
 }
 
+struct PreparedMemoryPayload {
+    plaintext_to_encrypt: String,
+    vector: Vec<f32>,
+    index_entries: Vec<MemoryIndexPayload>,
+}
+
 async fn mark_remember_job_failed(state: &AppState, job_id: &str, msg: &str) {
     let _ = sqlx::query(
         "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
@@ -96,18 +106,24 @@ fn spawn_prepare_remember_job(
 ) {
     tokio::spawn(async move {
         let result: Result<(), AppError> = async {
-            let embed_fut = generate_embedding(&state.http_client, &state.config, &text);
+            let prepared = prepare_memory_payload(
+                &state,
+                &job_id,
+                text,
+                &owner,
+                &namespace,
+                &agent_public_key,
+            )
+            .await?;
             let encrypt_fut = crate::seal::seal_encrypt(
                 &state.http_client,
                 &state.config.sidecar_url,
                 state.config.sidecar_secret.as_deref(),
-                text.as_bytes(),
+                prepared.plaintext_to_encrypt.as_bytes(),
                 &owner,
                 &state.config.package_id,
             );
-            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-            let vector = vector_result?;
-            let encrypted = encrypted_result?;
+            let encrypted = encrypt_fut.await?;
 
             rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
 
@@ -124,7 +140,8 @@ fn spawn_prepare_remember_job(
                 wallet_index,
                 WalletOperation::UploadAndTransfer {
                     encrypted_b64,
-                    vector,
+                    vector: prepared.vector,
+                    index_entries: prepared.index_entries,
                     owner: owner.clone(),
                     namespace: namespace.clone(),
                     package_id: state.config.package_id.clone(),
@@ -172,24 +189,32 @@ fn spawn_prepare_bulk_remember_job(
                 .map(|item| {
                     let state = Arc::clone(&state);
                     let owner = owner.clone();
+                    let agent_public_key = agent_public_key.clone();
                     async move {
-                        let embed_fut =
-                            generate_embedding(&state.http_client, &state.config, &item.text);
+                        let prepared = prepare_memory_payload(
+                            &state,
+                            &item.job_id,
+                            item.text,
+                            &owner,
+                            &item.namespace,
+                            &agent_public_key,
+                        )
+                        .await?;
                         let encrypt_fut = crate::seal::seal_encrypt(
                             &state.http_client,
                             &state.config.sidecar_url,
                             state.config.sidecar_secret.as_deref(),
-                            item.text.as_bytes(),
+                            prepared.plaintext_to_encrypt.as_bytes(),
                             &owner,
                             &state.config.package_id,
                         );
-                        let (vector_result, encrypted_result) =
-                            tokio::join!(embed_fut, encrypt_fut);
+                        let encrypted = encrypt_fut.await?;
                         Ok::<_, AppError>((
                             item.job_id,
                             item.namespace,
-                            vector_result?,
-                            encrypted_result?,
+                            prepared.vector,
+                            prepared.index_entries,
+                            encrypted,
                         ))
                     }
                 })
@@ -197,19 +222,19 @@ fn spawn_prepare_bulk_remember_job(
 
             let prep_results = collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
 
-            let mut prepared: Vec<(String, String, Vec<f32>, Vec<u8>)> =
+            let mut prepared: Vec<(String, String, Vec<f32>, Vec<MemoryIndexPayload>, Vec<u8>)> =
                 Vec::with_capacity(prep_results.len());
             let mut total_encrypted_bytes: i64 = 0;
             for result in prep_results {
-                let (job_id, namespace, vector, encrypted) = result?;
+                let (job_id, namespace, vector, index_entries, encrypted) = result?;
                 total_encrypted_bytes += encrypted.len() as i64;
-                prepared.push((job_id, namespace, vector, encrypted));
+                prepared.push((job_id, namespace, vector, index_entries, encrypted));
             }
 
             rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
 
             let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
-            for (job_id, namespace, vector, encrypted) in prepared {
+            for (job_id, namespace, vector, index_entries, encrypted) in prepared {
                 let wallet_index = state
                     .key_pool
                     .next_index()
@@ -219,6 +244,7 @@ fn spawn_prepare_bulk_remember_job(
                     job_id,
                     encrypted_b64,
                     vector,
+                    index_entries,
                     namespace,
                     wallet_index,
                 });
@@ -355,6 +381,57 @@ async fn generate_embedding(
             Ok(mock_vector)
         }
     }
+}
+
+async fn prepare_memory_payload(
+    state: &AppState,
+    job_id: &str,
+    text: String,
+    owner: &str,
+    namespace: &str,
+    author_id: &str,
+) -> Result<PreparedMemoryPayload, AppError> {
+    if !state.config.memory_rag_enabled {
+        let vector = generate_embedding(&state.http_client, &state.config, &text).await?;
+        return Ok(PreparedMemoryPayload {
+            plaintext_to_encrypt: text,
+            vector,
+            index_entries: Vec::new(),
+        });
+    }
+
+    let artifact = build_artifact(owner, namespace, text, author_id);
+    let index_texts = index_texts_for_artifact(&artifact);
+    let plaintext_to_encrypt = serialize_artifact(&artifact)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize memory artifact: {}", e)))?;
+
+    let mut index_entries = Vec::with_capacity(index_texts.len());
+    for index_text in index_texts {
+        let vector =
+            generate_embedding(&state.http_client, &state.config, &index_text.text).await?;
+        index_entries.push(MemoryIndexPayload {
+            id: format!("{}:{}", job_id, index_text.id_suffix),
+            vector,
+            artifact_id: index_text.artifact_id,
+            index_kind: index_text.index_kind,
+            source_ref: index_text.source_ref,
+            indexed_text_kind: index_text.indexed_text_kind,
+            embedding_model: DEFAULT_EMBEDDING_MODEL.to_string(),
+            pipeline_version: MEMORY_PIPELINE_VERSION.to_string(),
+            lexical_document: Some(index_text.text),
+        });
+    }
+
+    let vector = index_entries
+        .first()
+        .map(|entry| entry.vector.clone())
+        .ok_or_else(|| AppError::Internal("memory artifact produced no index entries".into()))?;
+
+    Ok(PreparedMemoryPayload {
+        plaintext_to_encrypt,
+        vector,
+        index_entries,
+    })
 }
 
 // ============================================================
@@ -672,10 +749,17 @@ pub async fn recall(
     // MED-3 fix: Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
-    let hits = state
-        .db
-        .search_similar(&query_vector, owner, namespace, limit)
-        .await?;
+    let hits = if state.config.memory_rag_enabled {
+        state
+            .db
+            .search_rag(&query_vector, owner, namespace, limit)
+            .await?
+    } else {
+        state
+            .db
+            .search_similar(&query_vector, owner, namespace, limit)
+            .await?
+    };
 
     // Step 3: Download + SEAL decrypt all results concurrently
     let db = &state.db;
@@ -688,6 +772,7 @@ pub async fn recall(
             let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
+            let source_ref = hit.source_ref.clone();
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
@@ -720,11 +805,14 @@ pub async fn recall(
                 .await
                 {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult {
-                            blob_id,
-                            text,
-                            distance,
-                        }),
+                        Ok(text) => {
+                            let payload = parse_payload(text);
+                            Some(RecallResult {
+                                blob_id,
+                                text: recall_text_for_hit(&payload, source_ref.as_deref()),
+                                distance,
+                            })
+                        }
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8 in decrypted data: {}", e);
                             None
@@ -966,24 +1054,45 @@ pub async fn analyze(
     //   - No plaintext stored in job payload
     //   - Exact ciphertext size known for quota check
     let auth_pubkey_base = auth.public_key.clone();
-    let prep_tasks: Vec<_> = facts
+    let fact_jobs: Vec<(String, String)> = facts
+        .into_iter()
+        .map(|fact_text| (uuid::Uuid::new_v4().to_string(), fact_text))
+        .collect();
+    let prep_tasks: Vec<_> = fact_jobs
         .iter()
-        .map(|fact_text| {
+        .map(|(job_id, fact_text)| {
             let state = Arc::clone(&state);
             let owner = owner.clone();
+            let namespace = namespace.clone();
+            let auth_pubkey_base = auth_pubkey_base.clone();
+            let job_id = job_id.clone();
             let fact_text = fact_text.clone();
             async move {
-                let embed_fut = generate_embedding(&state.http_client, &state.config, &fact_text);
+                let prepared = prepare_memory_payload(
+                    &state,
+                    &job_id,
+                    fact_text.clone(),
+                    &owner,
+                    &namespace,
+                    &auth_pubkey_base,
+                )
+                .await?;
                 let encrypt_fut = crate::seal::seal_encrypt(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),
-                    fact_text.as_bytes(),
+                    prepared.plaintext_to_encrypt.as_bytes(),
                     &owner,
                     &state.config.package_id,
                 );
-                let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-                Ok::<_, AppError>((fact_text, vector_result?, encrypted_result?))
+                let encrypted = encrypt_fut.await?;
+                Ok::<_, AppError>((
+                    job_id,
+                    fact_text,
+                    prepared.vector,
+                    prepared.index_entries,
+                    encrypted,
+                ))
             }
         })
         .collect();
@@ -991,12 +1100,13 @@ pub async fn analyze(
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
     // Quota check on total ciphertext size
-    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut prepared: Vec<(String, String, Vec<f32>, Vec<MemoryIndexPayload>, Vec<u8>)> =
+        Vec::with_capacity(prep_results.len());
     let mut total_encrypted_bytes: i64 = 0;
     for r in prep_results {
-        let (fact_text, vector, encrypted) = r?;
+        let (job_id, fact_text, vector, index_entries, encrypted) = r?;
         total_encrypted_bytes += encrypted.len() as i64;
-        prepared.push((fact_text, vector, encrypted));
+        prepared.push((job_id, fact_text, vector, index_entries, encrypted));
     }
     rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
 
@@ -1004,9 +1114,7 @@ pub async fn analyze(
     // Round-robin across wallet pool so facts upload in parallel.
     let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
     let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
-    for (fact_text, vector, encrypted) in prepared {
-        let job_id = uuid::Uuid::new_v4().to_string();
-
+    for (job_id, fact_text, vector, index_entries, encrypted) in prepared {
         // Insert status row
         sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
@@ -1031,6 +1139,7 @@ pub async fn analyze(
             WalletOperation::UploadAndTransfer {
                 encrypted_b64,
                 vector,
+                index_entries,
                 owner: owner.clone(),
                 namespace: namespace.clone(),
                 package_id: state.config.package_id.clone(),
@@ -1596,10 +1705,17 @@ pub async fn ask(
     // Step 1: Recall relevant memories
     let query_vector =
         generate_embedding(&state.http_client, &state.config, &body.question).await?;
-    let hits = state
-        .db
-        .search_similar(&query_vector, owner, namespace, limit)
-        .await?;
+    let hits = if state.config.memory_rag_enabled {
+        state
+            .db
+            .search_rag(&query_vector, owner, namespace, limit)
+            .await?
+    } else {
+        state
+            .db
+            .search_similar(&query_vector, owner, namespace, limit)
+            .await?
+    };
 
     // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
     // delegate key, then to the server's own key.
@@ -1623,6 +1739,7 @@ pub async fn ask(
             let sidecar_secret = state.config.sidecar_secret.clone();
             let blob_id = hit.blob_id.clone();
             let distance = hit.distance;
+            let source_ref = hit.source_ref.clone();
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();
             let account_id = auth.account_id.clone();
@@ -1653,11 +1770,14 @@ pub async fn ask(
                 .await
                 {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult {
-                            blob_id,
-                            text,
-                            distance,
-                        }),
+                        Ok(text) => {
+                            let payload = parse_payload(text);
+                            Some(RecallResult {
+                                blob_id,
+                                text: recall_text_for_hit(&payload, source_ref.as_deref()),
+                                distance,
+                            })
+                        }
                         Err(e) => {
                             tracing::warn!("Invalid UTF-8: {}", e);
                             None
@@ -2026,27 +2146,48 @@ pub async fn restore(
         missing_blob_ids.len()
     );
 
-    // Step 5: Re-embed all decrypted texts concurrently
+    // Step 5: Parse artifact payloads and re-embed their rebuildable index rows.
     let embed_tasks: Vec<_> = decrypted_texts
-        .iter()
+        .into_iter()
         .map(|(blob_id, text)| {
             let http_client = &state.http_client;
             let config = state.config.clone();
-            let blob_id = blob_id.clone();
-            let text = text.clone();
             async move {
-                match generate_embedding(http_client, &config, &text).await {
-                    Ok(vector) => Some((blob_id, vector)),
-                    Err(e) => {
-                        tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
-                        None
+                let payload = parse_payload(text);
+                let index_texts = index_texts_for_payload(&payload);
+                let base_id = uuid::Uuid::new_v4().to_string();
+                let mut entries = Vec::with_capacity(index_texts.len());
+
+                for index_text in index_texts {
+                    match generate_embedding(http_client, &config, &index_text.text).await {
+                        Ok(vector) => entries.push(MemoryIndexPayload {
+                            id: format!("{}:{}", base_id, index_text.id_suffix),
+                            vector,
+                            artifact_id: index_text.artifact_id,
+                            index_kind: index_text.index_kind,
+                            source_ref: index_text.source_ref,
+                            indexed_text_kind: index_text.indexed_text_kind,
+                            embedding_model: DEFAULT_EMBEDDING_MODEL.to_string(),
+                            pipeline_version: MEMORY_PIPELINE_VERSION.to_string(),
+                            lexical_document: Some(index_text.text),
+                        }),
+                        Err(e) => {
+                            tracing::warn!("restore: embedding failed for {}: {}", blob_id, e);
+                            return None;
+                        }
                     }
+                }
+
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some((blob_id, entries))
                 }
             }
         })
         .collect();
 
-    let results: Vec<(String, Vec<f32>)> = futures::future::join_all(embed_tasks)
+    let results: Vec<(String, Vec<MemoryIndexPayload>)> = futures::future::join_all(embed_tasks)
         .await
         .into_iter()
         .flatten()
@@ -2054,8 +2195,7 @@ pub async fn restore(
 
     // Step 6: Insert only new entries (no delete!)
     let restored = results.len();
-    for (blob_id, vector) in &results {
-        let id = uuid::Uuid::new_v4().to_string();
+    for (blob_id, index_entries) in &results {
         let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
             tracing::warn!(
                 "restore: missing blob size for {}, defaulting to 0 for quota tracking",
@@ -2065,7 +2205,7 @@ pub async fn restore(
         });
         state
             .db
-            .insert_vector(&id, owner, namespace, blob_id, vector, blob_size)
+            .insert_memory_indexes(owner, namespace, blob_id, index_entries, blob_size)
             .await?;
     }
 

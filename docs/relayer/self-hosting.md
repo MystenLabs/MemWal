@@ -100,6 +100,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `PORT` defaults to `8000`
 - `SIDECAR_URL` defaults to `http://localhost:9000`
 - `SUI_NETWORK` defaults to `mainnet`
+- `MEMWAL_RAG_ENABLED` defaults to `true`, so new memories are stored as versioned artifacts and indexed by source-preserving chunks
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
 - The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
 
@@ -136,7 +137,7 @@ Using official key server of SDK is recommended.
 
 The relayer requires PostgreSQL with the `pgvector` extension. The relayer runs migrations automatically on boot, creating these tables:
 
-- `vector_entries` — 1536-dimensional embeddings with HNSW index for cosine similarity search
+- `vector_entries` — 1536-dimensional embeddings with HNSW index for cosine similarity search, plus memory artifact/chunk metadata for RAG retrieval
 - `delegate_key_cache` — auth optimization (delegate key → account mapping)
 - `accounts` — populated by the indexer (account → owner mapping)
 - `indexer_state` — indexer cursor tracking

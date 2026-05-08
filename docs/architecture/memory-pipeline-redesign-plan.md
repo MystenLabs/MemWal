@@ -448,3 +448,216 @@ Output:
 ## Immediate Next Step
 
 Build the benchmark harness before changing production storage semantics. The harness should objectively compare the current baseline against summary-only, chunking-only, and catalog-plus-chunk retrieval on the same fixtures and queries.
+
+## Codebase-Grounded Implementation Backlog
+
+This backlog maps the plan above to the current repository shape. It is intentionally ordered so each phase can ship independently without breaking existing plaintext blob restore.
+
+### 0. Baseline Inventory
+
+Current server touchpoints:
+
+- `services/server/src/routes.rs`
+  - `/api/remember` and `/api/remember/bulk` generate one embedding from the full plaintext and SEAL-encrypt the same plaintext.
+  - `/api/recall` generates one query embedding, searches `vector_entries`, downloads each blob from Walrus, decrypts it, and returns plaintext.
+  - `/api/analyze` extracts fact strings, then stores each fact through the same remember flow.
+  - `/api/restore` discovers on-chain blobs, downloads and decrypts ciphertext, then re-embeds each plaintext to recreate a single vector row.
+- `services/server/src/jobs.rs`
+  - `WalletOperation::UploadAndTransfer`, `RememberJob`, and `BulkRememberJob` carry ciphertext and one vector per remembered item.
+  - Job completion inserts into `vector_entries` with `id`, `owner`, `namespace`, `blob_id`, `embedding`, and `blob_size_bytes`.
+- `services/server/src/db.rs`
+  - `insert_vector` and `search_similar` assume one vector row maps directly to one blob.
+- `services/server/migrations/*.sql`
+  - Existing migrations create and extend `vector_entries`; new index metadata must be additive.
+- `services/server/scripts/bench-recall-latency.ts`
+  - Existing benchmark is live API latency only. The redesign needs a separate offline retrieval quality harness.
+
+### 1. Offline Benchmark Harness First
+
+Owner candidate: Margo
+
+Deliverables:
+
+- Add static benchmark fixtures under `services/server/benchmarks/fixtures/`.
+- Add a benchmark runner under `services/server/scripts/bench-memory-retrieval.ts`.
+- Produce `benchmark-results.json` and `benchmark-report.md`.
+- Keep the harness independent from Walrus, SEAL, and PostgreSQL so strategy changes can be tested quickly.
+
+Minimum fixture set:
+
+- `conversation.json`
+- `contract.json`
+- `deal-memo.json`
+- `long-note.json`
+- `noisy-web.json`
+
+Each fixture should include:
+
+- `id`, `kind`, `raw_text`, optional `cleaned_text`
+- expected `authors`, `source`, and timestamps
+- `queries[]` with expected source spans or expected answer evidence
+
+Initial strategy adapters:
+
+- `whole_blob_embedding`
+- `summary_only`
+- `chunking_only`
+- `contextual_chunking`
+- `catalog_plus_chunks`
+- `fact_extraction_only`
+
+Acceptance criteria:
+
+- Runner can execute all strategies against the same fixtures with one command.
+- Report includes Recall@k, MRR, source-span hit rate, latency, vector row count, and failure examples.
+- Current whole-blob behavior is represented as the baseline.
+
+### 2. Artifact Schema And Translator
+
+Owner candidate: Henry
+
+Deliverables:
+
+- Add Rust types for `MemoryArtifactV1` in `services/server/src/types.rs` or a new `services/server/src/memory_artifact.rs`.
+- Add a translator that wraps incoming plaintext into the artifact JSON before encryption.
+- Add a compatibility parser that treats decrypted legacy blobs as raw plaintext when artifact JSON parsing fails.
+
+Recommended v1 mandatory fields:
+
+- `schema`
+- `version`
+- `artifact_id`
+- `owner`
+- `namespace`
+- `kind`
+- `source`
+- `authors`
+- `raw`
+- `metadata`
+
+Implementation notes:
+
+- Keep `remember(text)` simple by defaulting `kind = "note"` and source type to `chat` or `note`.
+- Store exact authored text in `raw.text` for v1 unless a later policy explicitly allows cleaned-only storage.
+- Compute `raw.sha256` before encryption.
+- Add unit tests for artifact serialization, legacy plaintext fallback, and invalid artifact handling.
+
+### 3. Additive DB Migration For Multi-Index Rows
+
+Owner candidate: Harry Phan
+
+Deliverables:
+
+- Add a new migration, for example `services/server/migrations/007_memory_index_metadata.sql`.
+- Keep existing `vector_entries` rows readable.
+- Add nullable metadata columns first, then backfill defaults for existing rows.
+
+Suggested additive columns:
+
+- `artifact_id TEXT`
+- `index_kind TEXT NOT NULL DEFAULT 'whole'`
+- `source_ref TEXT`
+- `indexed_text_kind TEXT NOT NULL DEFAULT 'raw'`
+- `embedding_model TEXT`
+- `pipeline_version TEXT`
+- `lexical_document TEXT`
+
+Suggested indexes:
+
+- `(owner, namespace, artifact_id)`
+- `(owner, namespace, index_kind)`
+- PostgreSQL full-text index over `lexical_document` or a generated `tsvector`, if BM25/full-text experiments graduate from the benchmark.
+
+Compatibility requirements:
+
+- Existing `insert_vector` calls continue to work.
+- Existing `/api/recall/manual` still returns blob IDs and distances.
+- Storage quota accounting continues to count Walrus ciphertext bytes once per blob, not once per derived index row.
+
+### 4. Ingest Pipeline Behind A Feature Flag
+
+Owner candidate: shared
+
+Deliverables:
+
+- Add an env flag such as `MEMWAL_MEMORY_ARTIFACTS_ENABLED`.
+- When disabled, keep current plaintext encryption behavior.
+- When enabled, `/api/remember` and `/api/remember/bulk` encrypt artifact JSON instead of raw text.
+- Add chunk/catalog derivation only after benchmark results justify the default strategy.
+
+Phase order:
+
+1. Artifact-only mode: whole artifact embedding, no chunk rows.
+2. Chunk-index mode: source-preserving chunks with `index_kind = 'chunk'`.
+3. Catalog mode: derived summary/catalog rows with `index_kind = 'catalog'`.
+4. Hybrid retrieval mode: dense plus lexical search with rank fusion.
+
+Compatibility requirements:
+
+- Job status contracts remain unchanged.
+- Existing SDKs do not need new request fields.
+- `RecallResult.text` should keep returning user-authored text or matching source text, not internal contextual headers.
+
+### 5. Artifact-Aware Restore
+
+Owner candidate: Harry Phan
+
+Deliverables:
+
+- Update `/api/restore` to parse decrypted payloads as artifact JSON first.
+- If parsing succeeds, rebuild index rows from artifact fields according to the active pipeline version.
+- If parsing fails, use the existing legacy plaintext restore path.
+- Track restore metrics by `legacy_plaintext`, `artifact_v1`, `skipped`, and `failed`.
+
+Acceptance criteria:
+
+- A namespace containing mixed legacy plaintext blobs and artifact blobs restores successfully.
+- Restore can rebuild indexes after deleting local vector rows.
+- Restore never requires old derived summaries/chunks if raw authored text is present.
+
+### 6. Retrieval Strategy Upgrade
+
+Owner candidate: shared
+
+Deliverables:
+
+- Refactor `VectorDb::search_similar` into a strategy-aware search function.
+- Add filters for `index_kind` and `indexed_text_kind`.
+- Add result grouping by `blob_id` and `artifact_id` so multiple chunk hits do not duplicate the same memory unless requested.
+- Add optional lexical retrieval only after the benchmark confirms it improves source-span hit rate.
+
+Production candidate sequence:
+
+1. `whole` index only, current behavior.
+2. `chunk` dense retrieval returning exact chunk text plus source metadata.
+3. `catalog + chunk` dense retrieval.
+4. `catalog + hybrid chunk` retrieval using RRF.
+5. Optional reranking if latency and cost are acceptable.
+
+### 7. API Surface And Docs
+
+Owner candidate: shared
+
+Deliverables:
+
+- Keep existing endpoints backward compatible.
+- Add optional request metadata only when needed:
+  - `kind`
+  - `source`
+  - `authors`
+- Update SDK docs after server behavior is feature-flagged and tested.
+- Add a migration note explaining that Walrus blobs remain restorable even when the relayer index schema changes.
+
+### 8. PR Breakdown
+
+Recommended PR order:
+
+1. Benchmark fixtures and offline harness.
+2. Artifact schema types, translator, and legacy parser tests.
+3. Additive DB migration and `VectorDb` metadata support.
+4. Feature-flagged artifact ingest for single and bulk remember.
+5. Artifact-aware restore with mixed legacy/artifact tests.
+6. Chunk/catalog indexing behind a second feature flag.
+7. Strategy-aware recall and benchmark-driven default selection.
+
+Do not combine benchmark work and production storage changes in the same PR. The benchmark should be reviewable before storage semantics change.

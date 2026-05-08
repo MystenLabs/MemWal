@@ -2,7 +2,7 @@ use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-use crate::types::{AppError, SearchHit};
+use crate::types::{AppError, MemoryIndexPayload, SearchHit};
 
 pub struct VectorDb {
     pool: PgPool,
@@ -54,6 +54,12 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
+
+        let migration_007 = include_str!("../migrations/007_memory_index_metadata.sql");
+        sqlx::raw_sql(migration_007)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -109,6 +115,85 @@ impl VectorDb {
         Ok(())
     }
 
+    /// Insert a strategy-specific memory index row.
+    pub async fn insert_memory_index(
+        &self,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        entry: &MemoryIndexPayload,
+        blob_size_bytes: i64,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(entry.vector.clone());
+
+        sqlx::query(
+            "INSERT INTO vector_entries (
+                id, owner, namespace, blob_id, embedding, blob_size_bytes,
+                artifact_id, index_kind, source_ref, indexed_text_kind,
+                embedding_model, pipeline_version, lexical_document
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (id) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                namespace = EXCLUDED.namespace,
+                blob_id = EXCLUDED.blob_id,
+                embedding = EXCLUDED.embedding,
+                blob_size_bytes = EXCLUDED.blob_size_bytes,
+                artifact_id = EXCLUDED.artifact_id,
+                index_kind = EXCLUDED.index_kind,
+                source_ref = EXCLUDED.source_ref,
+                indexed_text_kind = EXCLUDED.indexed_text_kind,
+                embedding_model = EXCLUDED.embedding_model,
+                pipeline_version = EXCLUDED.pipeline_version,
+                lexical_document = EXCLUDED.lexical_document",
+        )
+        .bind(&entry.id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(embedding)
+        .bind(blob_size_bytes)
+        .bind(&entry.artifact_id)
+        .bind(&entry.index_kind)
+        .bind(&entry.source_ref)
+        .bind(&entry.indexed_text_kind)
+        .bind(&entry.embedding_model)
+        .bind(&entry.pipeline_version)
+        .bind(&entry.lexical_document)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert memory index: {}", e)))?;
+
+        tracing::debug!(
+            "inserted memory index: id={}, blob_id={}, owner={}, ns={}, kind={}, size={}B",
+            entry.id,
+            blob_id,
+            owner,
+            namespace,
+            entry.index_kind,
+            blob_size_bytes
+        );
+        Ok(())
+    }
+
+    /// Insert multiple index rows for the same blob. The encrypted blob size is
+    /// charged only on the first row so quota accounting remains per Walrus blob.
+    pub async fn insert_memory_indexes(
+        &self,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        entries: &[MemoryIndexPayload],
+        blob_size_bytes: i64,
+    ) -> Result<(), AppError> {
+        for (idx, entry) in entries.iter().enumerate() {
+            let charged_size = if idx == 0 { blob_size_bytes } else { 0 };
+            self.insert_memory_index(owner, namespace, blob_id, entry, charged_size)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Search for similar vectors using pgvector cosine distance (<=>)
     /// Returns blob_id and distance for each match
     pub async fn search_similar(
@@ -120,8 +205,16 @@ impl VectorDb {
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
-        let rows: Vec<(String, f64)> = sqlx::query_as(
-            "SELECT blob_id, (embedding <=> $1)::float8 AS distance
+        let rows: Vec<(
+            String,
+            f64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT blob_id, (embedding <=> $1)::float8 AS distance,
+                    artifact_id, index_kind, source_ref, indexed_text_kind
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
@@ -137,10 +230,77 @@ impl VectorDb {
 
         let results = rows
             .into_iter()
-            .map(|(blob_id, distance)| SearchHit { blob_id, distance })
+            .map(
+                |(blob_id, distance, artifact_id, index_kind, source_ref, indexed_text_kind)| {
+                    SearchHit {
+                        blob_id,
+                        distance,
+                        artifact_id,
+                        index_kind,
+                        source_ref,
+                        indexed_text_kind,
+                    }
+                },
+            )
             .collect();
 
         Ok(results)
+    }
+
+    /// Search RAG index rows. New artifacts return source-preserving chunks;
+    /// legacy/manual plaintext rows fall back to their whole-blob index.
+    pub async fn search_rag(
+        &self,
+        query_vector: &[f32],
+        owner: &str,
+        namespace: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, AppError> {
+        let embedding = Vector::from(query_vector.to_vec());
+
+        let rows: Vec<(
+            String,
+            f64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT blob_id, (embedding <=> $1)::float8 AS distance,
+                    artifact_id, index_kind, source_ref, indexed_text_kind
+             FROM vector_entries
+             WHERE owner = $2
+               AND namespace = $3
+               AND (
+                    index_kind = 'chunk'
+                    OR (index_kind = 'whole' AND artifact_id IS NULL)
+               )
+             ORDER BY embedding <=> $1
+             LIMIT $4",
+        )
+        .bind(embedding)
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to search RAG indexes: {}", e)))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(blob_id, distance, artifact_id, index_kind, source_ref, indexed_text_kind)| {
+                    SearchHit {
+                        blob_id,
+                        distance,
+                        artifact_id,
+                        index_kind,
+                        source_ref,
+                        indexed_text_kind,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)

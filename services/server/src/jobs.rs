@@ -19,7 +19,7 @@ use futures::stream::{self, StreamExt as _};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AppState, BULK_UPLOAD_CONCURRENCY};
+use crate::types::{AppState, MemoryIndexPayload, BULK_UPLOAD_CONCURRENCY};
 use crate::walrus::SetMetadataBatchEntry;
 
 // ============================================================
@@ -40,6 +40,11 @@ pub enum WalletOperation {
         encrypted_b64: String,
         /// Pre-computed embedding vector (1536-dim).
         vector: Vec<f32>,
+        /// Optional RAG index rows. When present, these rows replace the legacy
+        /// single whole-blob vector insert while keeping `vector` as a fallback
+        /// for old queued jobs and old deployments.
+        #[serde(default)]
+        index_entries: Vec<MemoryIndexPayload>,
         /// MemWal owner address.
         owner: String,
         /// Namespace for isolation.
@@ -196,6 +201,7 @@ pub async fn execute_wallet_job(
         WalletOperation::UploadAndTransfer {
             encrypted_b64,
             vector,
+            index_entries,
             owner,
             namespace,
             package_id,
@@ -208,6 +214,7 @@ pub async fn execute_wallet_job(
                 wallet_index,
                 encrypted_b64,
                 vector,
+                index_entries,
                 owner,
                 namespace,
                 package_id,
@@ -279,6 +286,7 @@ async fn execute_upload_and_transfer(
     wallet_index: usize,
     encrypted_b64: String,
     vector: Vec<f32>,
+    index_entries: Vec<MemoryIndexPayload>,
     owner: String,
     namespace: String,
     package_id: String,
@@ -379,12 +387,20 @@ async fn execute_upload_and_transfer(
     let vector_id = remember_job_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if let Err(e) = state
-        .db
-        .insert_vector(&vector_id, &owner, &namespace, &blob_id, &vector, blob_size)
-        .await
-    {
-        let msg = format!("insert_vector failed: {}", e);
+    let insert_result = if index_entries.is_empty() {
+        state
+            .db
+            .insert_vector(&vector_id, &owner, &namespace, &blob_id, &vector, blob_size)
+            .await
+    } else {
+        state
+            .db
+            .insert_memory_indexes(&owner, &namespace, &blob_id, &index_entries, blob_size)
+            .await
+    };
+
+    if let Err(e) = insert_result {
+        let msg = format!("insert memory index failed: {}", e);
         if let Some(ref jid) = remember_job_id {
             let _ = sqlx::query(
                 "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
@@ -454,6 +470,9 @@ pub struct RememberJob {
     pub encrypted_b64: String,
     /// Pre-computed embedding vector (generated in route handler alongside encrypt).
     pub vector: Vec<f32>,
+    /// Optional RAG index rows.
+    #[serde(default)]
+    pub index_entries: Vec<MemoryIndexPayload>,
     /// MemWal owner address (from auth middleware).
     pub owner: String,
     /// Namespace for isolation.
@@ -560,19 +579,32 @@ pub async fn execute_remember(
     // ── Step 4: insert_vector ────────────────────────────────────
     let blob_size = encrypted.len() as i64;
     let vector_id = job.job_id.clone();
-    if let Err(e) = state
-        .db
-        .insert_vector(
-            &vector_id,
-            &job.owner,
-            &job.namespace,
-            &blob_id,
-            &job.vector,
-            blob_size,
-        )
-        .await
-    {
-        fail!(format!("insert_vector failed: {}", e));
+    let insert_result = if job.index_entries.is_empty() {
+        state
+            .db
+            .insert_vector(
+                &vector_id,
+                &job.owner,
+                &job.namespace,
+                &blob_id,
+                &job.vector,
+                blob_size,
+            )
+            .await
+    } else {
+        state
+            .db
+            .insert_memory_indexes(
+                &job.owner,
+                &job.namespace,
+                &blob_id,
+                &job.index_entries,
+                blob_size,
+            )
+            .await
+    };
+    if let Err(e) = insert_result {
+        fail!(format!("insert memory index failed: {}", e));
     }
 
     // ── Step 5: mark done ────────────────────────────────────────
@@ -609,6 +641,9 @@ pub struct BulkRememberItem {
     pub encrypted_b64: String,
     /// Pre-computed embedding vector (1536-dim).
     pub vector: Vec<f32>,
+    /// Optional RAG index rows.
+    #[serde(default)]
+    pub index_entries: Vec<MemoryIndexPayload>,
     pub namespace: String,
     /// Wallet pool index assigned at enqueue time (round-robin).
     pub wallet_index: usize,
@@ -694,6 +729,7 @@ pub async fn execute_bulk_remember(
         wallet_index: usize,
         namespace: String,
         vector: Vec<f32>,
+        index_entries: Vec<MemoryIndexPayload>,
         blob_size: i64,
     }
 
@@ -787,6 +823,7 @@ pub async fn execute_bulk_remember(
                     wallet_index: item.wallet_index,
                     namespace: item.namespace,
                     vector: item.vector,
+                    index_entries: item.index_entries,
                     blob_size: encrypted.len() as i64,
                 })
             }
@@ -804,20 +841,33 @@ pub async fn execute_bulk_remember(
             Ok(upload) => {
                 uploaded_count += 1;
                 let vector_id = upload.job_id.clone();
-                if let Err(e) = state
-                    .db
-                    .insert_vector(
-                        &vector_id,
-                        &job.owner,
-                        &upload.namespace,
-                        &upload.blob_id,
-                        &upload.vector,
-                        upload.blob_size,
-                    )
-                    .await
-                {
+                let insert_result = if upload.index_entries.is_empty() {
+                    state
+                        .db
+                        .insert_vector(
+                            &vector_id,
+                            &job.owner,
+                            &upload.namespace,
+                            &upload.blob_id,
+                            &upload.vector,
+                            upload.blob_size,
+                        )
+                        .await
+                } else {
+                    state
+                        .db
+                        .insert_memory_indexes(
+                            &job.owner,
+                            &upload.namespace,
+                            &upload.blob_id,
+                            &upload.index_entries,
+                            upload.blob_size,
+                        )
+                        .await
+                };
+                if let Err(e) = insert_result {
                     fail_count += 1;
-                    let msg = format!("insert_vector failed: {}", e);
+                    let msg = format!("insert memory index failed: {}", e);
                     tracing::error!("[bulk-remember] job_id={} {}", upload.job_id, msg);
                     let _ = sqlx::query(
                         "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",

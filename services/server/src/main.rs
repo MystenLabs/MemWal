@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod jobs;
+mod memory_artifact;
 mod rate_limit;
 mod routes;
 mod seal;
@@ -70,6 +71,14 @@ async fn main() {
         "  sponsor rate limit: {}/min, {}/hr per IP+sender",
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
+    );
+    tracing::info!(
+        "  memory RAG pipeline: {}",
+        if config.memory_rag_enabled {
+            "enabled"
+        } else {
+            "disabled (legacy)"
+        }
     );
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)

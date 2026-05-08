@@ -36,6 +36,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `WALRUS_AGGREGATOR_URL` | Walrus mainnet aggregator | Override download endpoint |
 | `SERVER_SUI_PRIVATE_KEYS` | none | Comma-separated upload key pool. Takes priority over `SERVER_SUI_PRIVATE_KEY` for uploads |
 | `MEMWAL_ACCOUNT_ID` | none | Optional account ID in server config |
+| `MEMWAL_RAG_ENABLED` | `true` | Stores versioned memory artifacts and indexes source-preserving chunks. Set to `false` for the legacy one-vector-per-blob pipeline |
 | `WALRUS_PACKAGE_ID` | network default | Override the Walrus on-chain package used by the sidecar |
 | `WALRUS_UPLOAD_RELAY_URL` | network default | Override the Walrus upload relay used by the sidecar |
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
@@ -45,6 +46,7 @@ These are not all enforced at boot, but most real deployments need them.
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
+- `MEMWAL_RAG_ENABLED=true` makes new memories store artifact JSON on Walrus and multiple recall indexes in PostgreSQL. Existing legacy plaintext blobs still recall and restore through the compatibility path.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
 - `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
 - The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.

@@ -122,6 +122,8 @@ pub struct Config {
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
+    /// Store versioned memory artifacts and index source-preserving chunks.
+    pub memory_rag_enabled: bool,
 }
 
 impl Config {
@@ -176,6 +178,9 @@ impl Config {
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
+            memory_rag_enabled: std::env::var("MEMWAL_RAG_ENABLED")
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "off" | "OFF"))
+                .unwrap_or(true),
         }
     }
 }
@@ -362,6 +367,27 @@ pub struct RecallResult {
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexed_text_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryIndexPayload {
+    pub id: String,
+    pub vector: Vec<f32>,
+    pub artifact_id: Option<String>,
+    pub index_kind: String,
+    pub source_ref: Option<String>,
+    pub indexed_text_kind: String,
+    pub embedding_model: String,
+    pub pipeline_version: String,
+    pub lexical_document: Option<String>,
 }
 
 /// POST /api/analyze
