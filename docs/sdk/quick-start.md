@@ -99,7 +99,8 @@ const memwal = MemWal.create({
 });
 
 await memwal.health();
-await memwal.remember("I live in Hanoi and prefer dark mode.");
+const job = await memwal.remember("I live in Hanoi and prefer dark mode.");
+await memwal.waitForRememberJob(job.job_id);
 
 const result = await memwal.recall("What do we know about this user?");
 console.log(result.results);

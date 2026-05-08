@@ -515,15 +515,15 @@ const data = await memwal.health()
                 <DemoStep
                     number={2}
                     title="remember"
-                    description="store a memory → embed → encrypt → Walrus"
+                    description="accept a memory job → embed → encrypt → Walrus"
                     code={`const result = await memwal.remember(
   "${rememberText.slice(0, 60)}..."
 )
 // namespace: "${namespace || 'default'}"
-// → { id, blob_id, owner, namespace }`}
+// → { job_id, status }`}
                     onRun={runRemember}
                     result={rememberResult}
-                    resultLabel="stored on Walrus (encrypted)"
+                    resultLabel="memory job accepted"
                     error={rememberError}
                     loading={rememberLoading}
                 >
@@ -568,15 +568,15 @@ const data = await memwal.health()
                 <DemoStep
                     number={4}
                     title="analyze"
-                    description="LLM extracts facts → stores each as memory"
+                    description="LLM extracts facts → accepts memory jobs"
                     code={`const result = await memwal.analyze(
   "${analyzeText.slice(0, 50)}..."
 )
-// Server: LLM extracts facts → embed → encrypt → Walrus → store
-// → { facts: [{ text, id, blob_id }], total, owner }`}
+// Server: LLM extracts facts → async memory jobs
+// → { job_ids, facts, fact_count, status, owner }`}
                     onRun={runAnalyze}
                     result={analyzeResult}
-                    resultLabel="facts extracted & stored"
+                    resultLabel="fact jobs accepted"
                     error={analyzeError}
                     loading={analyzeLoading}
                 >

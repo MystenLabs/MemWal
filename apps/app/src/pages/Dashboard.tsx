@@ -36,6 +36,9 @@ interface OnChainDelegateKey {
     createdAt: number
 }
 
+const MAX_DELEGATE_KEYS = 20
+const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
+
 // ============================================================
 // Dashboard Component
 // ============================================================
@@ -49,6 +52,9 @@ export default function Dashboard() {
     const { delegateKey, delegatePublicKey, accountObjectId, clearDelegateKeys } = useDelegateKey()
 
     const address = currentAccount?.address || ''
+    const [resolvedAccountObjectId, setResolvedAccountObjectId] = useState<string | null>(accountObjectId)
+    const [loadingAccount, setLoadingAccount] = useState(false)
+    const effectiveAccountObjectId = accountObjectId ?? resolvedAccountObjectId
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
     const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
@@ -86,16 +92,70 @@ export default function Dashboard() {
         await disconnect()
     }, [clearDelegateKeys, disconnect])
 
+    const fetchAccountObjectId = useCallback(async () => {
+        if (!address) {
+            setResolvedAccountObjectId(null)
+            return
+        }
+        if (accountObjectId) return
+        setResolvedAccountObjectId(null)
+        setLoadingAccount(true)
+        try {
+            const registryObj = await suiClient.getObject({
+                id: config.memwalRegistryId,
+                options: { showContent: true },
+            })
+            if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
+                const fields = registryObj.data.content.fields as any
+                const tableId = fields?.accounts?.fields?.id?.id
+                if (tableId) {
+                    const dynField = await suiClient.getDynamicFieldObject({
+                        parentId: tableId,
+                        name: { type: 'address', value: address },
+                    })
+                    if (dynField?.data?.content && 'fields' in dynField.data.content) {
+                        setResolvedAccountObjectId((dynField.data.content.fields as any).value as string)
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Failed to fetch account object ID:', err)
+            setResolvedAccountObjectId(null)
+        } finally {
+            setLoadingAccount(false)
+        }
+    }, [address, accountObjectId, suiClient])
+
+    useEffect(() => {
+        setResolvedAccountObjectId(accountObjectId)
+    }, [accountObjectId])
+
+    useEffect(() => {
+        fetchAccountObjectId()
+    }, [fetchAccountObjectId])
+
+    const hasResolvedAccount = Boolean(effectiveAccountObjectId)
+    const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount
+    const isNewAccount = !delegateKey && !loadingAccount && !hasResolvedAccount
+    const dashboardSubtitle = delegateKey
+        ? 'manage your memwal account and delegate keys'
+        : loadingAccount
+            ? 'checking your memwal account...'
+            : hasResolvedAccount
+                ? 'remove an old delegate key, then create a new one'
+                : 'no memwal account found for this wallet'
+    const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
+
     // ============================================================
     // Fetch on-chain delegate keys
     // ============================================================
 
     const fetchOnChainKeys = useCallback(async () => {
-        if (!accountObjectId) return
+        if (!effectiveAccountObjectId) return
         setLoadingKeys(true)
         try {
             const obj = await suiClient.getObject({
-                id: accountObjectId,
+                id: effectiveAccountObjectId,
                 options: { showContent: true },
             })
             if (obj?.data?.content && 'fields' in obj.data.content) {
@@ -113,15 +173,18 @@ export default function Dashboard() {
                     }
                 })
                 setOnChainKeys(parsed)
+            } else {
+                setOnChainKeys([])
             }
         } catch (err) {
             console.error('Failed to fetch on-chain keys:', err)
         } finally {
             setLoadingKeys(false)
         }
-    }, [accountObjectId, suiClient])
+    }, [effectiveAccountObjectId, suiClient])
 
     useEffect(() => {
+        setOnChainKeys([])
         fetchOnChainKeys()
     }, [fetchOnChainKeys])
 
@@ -140,6 +203,16 @@ export default function Dashboard() {
 
     const handleAddKey = useCallback(async () => {
         if (!walletSigner) return
+
+        if (!effectiveAccountObjectId) {
+            setKeyError('account is still loading. please try again in a moment.')
+            return
+        }
+
+        if (hasMaxDelegateKeys) {
+            setKeyError(MAX_DELEGATE_KEYS_MESSAGE)
+            return
+        }
 
         // LOW-31: validate label before submitting on-chain
         const trimmedLabel = sanitizeLabel(newKeyLabel)
@@ -162,7 +235,7 @@ export default function Dashboard() {
             // Register on-chain via SDK
             await addDelegateKey({
                 packageId: config.memwalPackageId,
-                accountId: accountObjectId!,
+                accountId: effectiveAccountObjectId!,
                 publicKey: delegate.publicKey,
                 label: trimmedLabel,
                 walletSigner,
@@ -185,7 +258,7 @@ export default function Dashboard() {
         } finally {
             setAddingKey(false)
         }
-    }, [walletSigner, accountObjectId, newKeyLabel, suiClient, fetchOnChainKeys])
+    }, [walletSigner, hasMaxDelegateKeys, effectiveAccountObjectId, newKeyLabel, suiClient, fetchOnChainKeys])
 
     // ============================================================
     // Remove a delegate key (via SDK)
@@ -200,7 +273,7 @@ export default function Dashboard() {
         try {
             await removeDelegateKey({
                 packageId: config.memwalPackageId,
-                accountId: accountObjectId!,
+                accountId: effectiveAccountObjectId!,
                 publicKey: publicKeyHex,
                 walletSigner,
                 suiClient,
@@ -223,7 +296,7 @@ export default function Dashboard() {
 
             setRemovingKey(null)
         }
-    }, [walletSigner, accountObjectId, delegatePublicKey, suiClient, fetchOnChainKeys, clearDelegateKeys])
+    }, [walletSigner, effectiveAccountObjectId, delegatePublicKey, suiClient, fetchOnChainKeys, clearDelegateKeys])
 
     // ============================================================
     // SDK code snippets
@@ -238,12 +311,13 @@ export default function Dashboard() {
 
 const memwal = MemWal.create({
   key: "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
+  accountId: "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 
 // Remember something
-await memwal.remember("I'm allergic to peanuts")
+const job = await memwal.remember("I'm allergic to peanuts")
+await memwal.waitForRememberJob(job.job_id)
 
 // Recall memories
 const result = await memwal.recall("food allergies")
@@ -255,7 +329,7 @@ import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
   key: "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: "${accountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
+  accountId: "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: "${config.memwalServerUrl}",
 })
 
@@ -289,22 +363,72 @@ const result = await generateText({
                 {/* Header */}
                 <div className="dashboard-header">
                     <h2>dashboard</h2>
-                    <p>manage your memwal account and delegate keys</p>
+                    <p>{dashboardSubtitle}</p>
                 </div>
+
+                {isRecoveringExistingAccount && (
+                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                        <p>
+                            your wallet already has a MemWal account, but this browser does not have a saved delegate key.
+                            remove an old on-chain key below or create a new delegate key.
+                        </p>
+                    </div>
+                )}
+
+                {isNewAccount && (
+                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                        <p>
+                            no MemWal account found for this wallet.
+                            create a delegate key to get started.
+                        </p>
+                    </div>
+                )}
+
+                {hasMaxDelegateKeys && (
+                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                        <p>{MAX_DELEGATE_KEYS_MESSAGE}</p>
+                    </div>
+                )}
 
                 {/* Action CTAs */}
                 <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
-                    <Link to="/playground" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
-                        <div>
-                            <div className="dashboard-cta-title">
-                                try interactive demo
+                    {delegateKey ? (
+                        <Link to="/playground" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                            <div>
+                                <div className="dashboard-cta-title">
+                                    try interactive demo
+                                </div>
+                                <div className="dashboard-cta-subtitle">
+                                    test remember, recall & analyze with your live server
+                                </div>
                             </div>
-                            <div className="dashboard-cta-subtitle">
-                                test remember, recall & analyze with your live server
+                            <div className="dashboard-cta-arrow">→</div>
+                        </Link>
+                    ) : hasMaxDelegateKeys ? (
+                        <div className="dashboard-cta" style={{ flex: 1, marginBottom: 0, cursor: 'default', opacity: 0.75 }}>
+                            <div>
+                                <div className="dashboard-cta-title">
+                                    remove a key first
+                                </div>
+                                <div className="dashboard-cta-subtitle">
+                                    this wallet already has {MAX_DELEGATE_KEYS} delegate keys
+                                </div>
                             </div>
+                            <div className="dashboard-cta-arrow">↓</div>
                         </div>
-                        <div className="dashboard-cta-arrow">→</div>
-                    </Link>
+                    ) : (
+                        <Link to="/setup" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                            <div>
+                                <div className="dashboard-cta-title">
+                                    create delegate key
+                                </div>
+                                <div className="dashboard-cta-subtitle">
+                                    generate and register a new SDK key
+                                </div>
+                            </div>
+                            <div className="dashboard-cta-arrow">→</div>
+                        </Link>
+                    )}
                     {config.docsUrl && (
                         <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
                             <div>
@@ -322,7 +446,8 @@ const result = await generateText({
 
 
                 {/* Current Delegate Key */}
-                <div className="card" style={{ marginBottom: 24 }}>
+                {delegateKey && (
+                    <div className="card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
                             <div className="card-title">your delegate key</div>
@@ -331,16 +456,16 @@ const result = await generateText({
                     </div>
 
                     {/* Account ID */}
-                    {accountObjectId && (
+                    {effectiveAccountObjectId && (
                         <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
                             <div className="key-label">account ID</div>
                             <div className="key-value" style={{ fontSize: '0.78rem' }}>
-                                {accountObjectId}
+                                {effectiveAccountObjectId}
                             </div>
                             <div className="key-actions">
                                 <button
                                     className="btn btn-secondary btn-sm"
-                                    onClick={() => copyToClipboard(accountObjectId, 'acct')}
+                                    onClick={() => copyToClipboard(effectiveAccountObjectId, 'acct')}
                                 >
                                     <Copy size={12} /> {copied === 'acct' ? 'copied!' : 'copy'}
                                 </button>
@@ -395,7 +520,8 @@ const result = await generateText({
                             </>
                         )}
                     </div>
-                </div>
+                    </div>
+                )}
 
                 {/* On-Chain Delegate Keys Management */}
                 <div className="card" style={{ marginBottom: 24 }}>
@@ -410,14 +536,20 @@ const result = await generateText({
                             <button
                                 className="btn btn-secondary btn-sm"
                                 onClick={fetchOnChainKeys}
-                                disabled={loadingKeys}
+                                disabled={loadingKeys || loadingAccount}
                             >
-                                <RefreshCw size={12} /> {loadingKeys ? '...' : 'refresh'}
+                                <RefreshCw size={12} /> {loadingKeys || loadingAccount ? '...' : 'refresh'}
                             </button>
                             <button
                                 className="lp-nav-cta"
-                                onClick={() => setShowAddForm(true)}
-                                disabled={showAddForm || addingKey}
+                                onClick={() => {
+                                    if (hasMaxDelegateKeys) {
+                                        setKeyError(MAX_DELEGATE_KEYS_MESSAGE)
+                                        return
+                                    }
+                                    setShowAddForm(true)
+                                }}
+                                disabled={showAddForm || addingKey || !effectiveAccountObjectId || hasMaxDelegateKeys}
                             >
                                 <Plus size={14} /> add key
                             </button>
@@ -512,7 +644,7 @@ const result = await generateText({
                                 <button
                                     className="btn btn-primary btn-sm"
                                     onClick={handleAddKey}
-                                    disabled={addingKey}
+                                    disabled={addingKey || hasMaxDelegateKeys || !effectiveAccountObjectId}
                                 >
                                     {addingKey ? 'generating & registering...' : 'generate & register on-chain'}
                                 </button>
@@ -525,9 +657,17 @@ const result = await generateText({
                     )}
 
                     {/* Key List */}
-                    {loadingKeys ? (
+                    {loadingAccount ? (
+                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            loading account...
+                        </div>
+                    ) : loadingKeys ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                             loading keys...
+                        </div>
+                    ) : !effectiveAccountObjectId ? (
+                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            no MemWal account found for this wallet. create a delegate key to get started.
                         </div>
                     ) : onChainKeys.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>

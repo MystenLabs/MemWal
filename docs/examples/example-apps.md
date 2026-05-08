@@ -27,7 +27,8 @@ const memwal = MemWal.create({
   namespace,
 });
 
-await memwal.remember(rememberText);
+const job = await memwal.remember(rememberText);
+await memwal.waitForRememberJob(job.job_id);
 await memwal.recall(recallQuery, 5);
 await memwal.analyze(analyzeText);
 ```
@@ -64,7 +65,7 @@ export const extractMemories = async (text: string): Promise<string[]> => {
 };
 ```
 
-This app shows note-to-memory extraction. Noter keeps a shared server-side MemWal client, lets the user configure the key and account at runtime, and uses `analyze()` to turn note content into structured facts that can be reused by the editor and AI features.
+This app shows note-to-memory extraction. Noter keeps a shared server-side MemWal client, lets the user configure the key and account at runtime, and uses `analyze()` to turn note content into structured facts while the relayer stores them asynchronously.
 
 ## [Researcher](https://github.com/MystenLabs/MemWal/tree/main/apps/researcher)
 
@@ -77,7 +78,8 @@ const fullText =
   `References:\n${references}\n\n` +
   `Sources: ${sourceList}`;
 
-await memwal.remember(fullText);
+const job = await memwal.remember(fullText);
+await memwal.waitForRememberJob(job.job_id);
 const { results } = await memwal.recall(query, 5);
 ```
 

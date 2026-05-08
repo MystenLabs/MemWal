@@ -15,7 +15,10 @@
     "db:pull": "drizzle-kit pull",
     "db:check": "drizzle-kit check",
     "db:up": "drizzle-kit up",
-    "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
+    "playwright:install": "playwright install --with-deps chromium",
+    "test:e2e": "PLAYWRIGHT=True playwright test",
+    "test:e2e:ui": "PLAYWRIGHT=True playwright test --ui",
+    "test": "pnpm test:e2e"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.15",

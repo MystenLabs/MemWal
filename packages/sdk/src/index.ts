@@ -20,12 +20,22 @@ export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 // Types (server-mode only — no manual types here)
 export type {
     MemWalConfig,
+    RememberAcceptedResult,
+    RememberJobStatus,
     RememberResult,
     RecallResult,
     RecallMemory,
     EmbedResult,
     AnalyzeResult,
+    AnalyzeWaitResult,
     AnalyzedFact,
     HealthResult,
     RestoreResult,
+    RememberBulkItem,
+    RememberBulkOptions,
+    RememberBulkAcceptedResult,
+    RememberBulkStatusItem,
+    RememberBulkStatusResult,
+    RememberBulkResult,
+    RememberBulkItemResult,
 } from "./types.js";

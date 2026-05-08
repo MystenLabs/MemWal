@@ -3,7 +3,7 @@ title: "How Storage Works"
 description: "The lifecycle of a memory in MemWal — from plaintext to encrypted blob on Walrus and searchable vector in the database."
 ---
 
-When you call `memwal.remember(...)`, your data goes through several steps before it's stored. Here's what happens.
+When you call `memwal.remember(...)`, the relayer accepts a background job immediately and then stores the memory asynchronously. Here's what happens.
 
 ## Storing a memory
 
@@ -16,13 +16,15 @@ sequenceDiagram
     participant DB as Indexed Database
 
     App->>Relayer: plaintext memory
+    Relayer->>DB: create remember job
+    Relayer-->>App: job_id + running status
     Relayer->>Relayer: generate vector embedding
     Relayer->>SEAL: encrypt content
     SEAL-->>Relayer: encrypted payload
     Relayer->>Walrus: upload blob + namespace metadata
     Walrus-->>Relayer: blob ID
     Relayer->>DB: store vector + blob ID + owner + namespace
-    Relayer-->>App: success
+    Relayer->>DB: mark job done
 ```
 
 <Steps>

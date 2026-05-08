@@ -202,8 +202,11 @@ function AppContent() {
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/dashboard" element={
+        !currentAccount ? <Navigate to="/" replace /> : <Dashboard />
+      } />
+      <Route path="/setup" element={
         !currentAccount ? <Navigate to="/" replace /> :
-        delegateKey ? <Dashboard /> : <SetupWizard />
+        delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
       } />
       <Route path="/playground" element={
         !currentAccount ? <Navigate to="/" replace /> :
