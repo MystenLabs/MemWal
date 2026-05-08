@@ -1,5 +1,19 @@
 # @mysten-incubation/memwal
 
+## 0.0.3
+
+### Changed
+
+- Updated `remember()` for the relayer's async `/api/remember` flow. It now returns the accepted job payload immediately.
+- Added `rememberAsync()`, `waitForRememberJob()`, and `rememberAndWait()` for callers that need the final `blob_id`.
+- Added bulk remember helpers: `rememberBulk()`, `rememberBulkAsync()`, `waitForRememberJobs()`, and `rememberBulkAndWait()`.
+- Updated `analyze()` for async fact storage and added `analyzeAndWait()`.
+
+### Compatibility
+
+- `recall()` and `restore()` remain wire-compatible with the existing relayer responses.
+- The SDK continues to use `x-seal-session` for relayer-mode decrypt credentials.
+
 ## 0.0.2
 
 ### Security

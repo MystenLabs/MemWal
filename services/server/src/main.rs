@@ -28,7 +28,9 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use types::{AppState, Config, KeyPool};
+use types::{
+    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_TTL_SECS, DEFAULT_EMBEDDING_CACHE_TTL_SECS,
+};
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -71,6 +73,14 @@ async fn main() {
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
     );
+    if config.rate_limit.bench_bypass_enabled {
+        // Storage quota is unaffected — this only skips the request-rate
+        // buckets. The warning is split across lines so each one is grep-able
+        // and renders clearly in stacked log output.
+        tracing::warn!("⚠️  RATE_LIMIT_DISABLED=1 — request-rate limiter BYPASSED.");
+        tracing::warn!("⚠️  Benchmark-only escape hatch. UNSAFE outside localhost benches.");
+        tracing::warn!("⚠️  Unset RATE_LIMIT_DISABLED to restore protection.");
+    }
 
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
@@ -177,6 +187,36 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
+    // ENG-1405: Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
+    let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_TTL_SECS);
+    let embedding_cache_ttl_secs = std::env::var("EMBEDDING_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_EMBEDDING_CACHE_TTL_SECS);
+    tracing::info!(
+        "  blob cache: redis ttl={}s (BLOB_CACHE_TTL_SECS={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
+        blob_cache_ttl_secs,
+        blob_cache_ttl_secs,
+        embedding_cache_ttl_secs,
+        embedding_cache_ttl_secs
+    );
+    let blob_cache_ttl = std::time::Duration::from_secs(blob_cache_ttl_secs);
+    let embedding_cache_ttl = std::time::Duration::from_secs(embedding_cache_ttl_secs);
+
+    if blob_cache_ttl.is_zero() {
+        tracing::warn!(
+            "  blob cache: BLOB_CACHE_TTL_SECS=0 disables cache hits and forces Walrus revalidation"
+        );
+    }
+    if embedding_cache_ttl.is_zero() {
+        tracing::warn!(
+            "  embedding cache: EMBEDDING_CACHE_TTL_SECS=0 disables recall query embedding cache hits"
+        );
+    }
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -189,6 +229,8 @@ async fn main() {
         remember_job_storage: remember_job_storage.clone(),
         wallet_storages: wallet_storages.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
+        blob_cache_ttl,
+        embedding_cache_ttl,
     });
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
@@ -312,8 +354,12 @@ async fn main() {
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
-    // Auth middleware caps signed JSON bodies at 2 MiB, which covers bulk remember
-    // payloads while still rejecting oversized requests before route handling.
+    // HIGH-13 / ENG-1407 / ENG-1408: 2 MiB covers the largest realistic JSON
+    // body — single remember at 1 MiB plaintext + framing, and bulk remember
+    // batches up to ~1.5 MB. Blocks abusive uploads before auth + rate-limit
+    // middleware see them. Must equal auth::PROTECTED_BODY_LIMIT_BYTES — these
+    // caps are enforced independently and a mismatch silently rejects valid
+    // requests.
     let protected_routes = Router::new()
         .route("/api/remember", post(routes::remember))
         .route(
@@ -345,7 +391,7 @@ async fn main() {
             state.clone(),
             auth::verify_signature,
         ))
-        .layer(DefaultBodyLimit::max(256 * 1024));
+        .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
     // Sponsor routes — body limits + IP rate limit middleware
     let sponsor_routes = Router::new()

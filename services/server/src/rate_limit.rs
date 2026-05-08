@@ -48,6 +48,12 @@ pub struct RateLimitConfig {
 
     /// Redis URL (default: redis://localhost:6379)
     pub redis_url: String,
+
+    /// Bypass all request-rate buckets (per-key, per-account burst/sustained,
+    /// sponsor IP+sender) when set. Storage quota and auth still apply.
+    /// Off unless `RATE_LIMIT_DISABLED=1` (or `true`) is set; intended only
+    /// for localhost benchmarks. Logs a loud warning at startup when on.
+    pub bench_bypass_enabled: bool,
 }
 
 impl Default for RateLimitConfig {
@@ -58,6 +64,7 @@ impl Default for RateLimitConfig {
             max_requests_per_delegate_key: 30,
             max_storage_bytes: 1_073_741_824, // 1 GB
             redis_url: "redis://127.0.0.1:6379".to_string(),
+            bench_bypass_enabled: false,
         }
     }
 }
@@ -92,6 +99,12 @@ impl RateLimitConfig {
 
         if let Ok(val) = std::env::var("REDIS_URL") {
             config.redis_url = val;
+        }
+
+        // Accepted: "1" or "true" (case-insensitive). Anything else,
+        // including unset, leaves the limiter active.
+        if let Ok(val) = std::env::var("RATE_LIMIT_DISABLED") {
+            config.bench_bypass_enabled = val == "1" || val.eq_ignore_ascii_case("true");
         }
 
         config
@@ -374,6 +387,11 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
     // Extract auth info (set by auth middleware)
     let auth_info = request
         .extensions()
@@ -824,6 +842,12 @@ pub async fn sponsor_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    // Covers the IP+sender sponsor bucket too so benches can hit /sponsor.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
     // Extract client IP from X-Forwarded-For (set by reverse proxy) or
     // fall back to the direct connection address stored by axum.
     let ip: Option<String> = request
@@ -1224,6 +1248,8 @@ mod tests {
         assert_eq!(config.max_requests_per_delegate_key, 30);
         assert_eq!(config.max_storage_bytes, 1_073_741_824); // 1 GB
         assert_eq!(config.redis_url, "redis://127.0.0.1:6379");
+        // Bench bypass MUST default to false — production safety net.
+        assert!(!config.bench_bypass_enabled);
     }
 
     // ---- SponsorRlResult variants ----

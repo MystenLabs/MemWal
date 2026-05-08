@@ -14,6 +14,12 @@ pub const BULK_EMBED_CONCURRENCY: usize = 5;
 /// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
 pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
 
+/// Default max age for Redis-cached Walrus ciphertext before revalidating via Walrus.
+pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 5 * 60;
+
+/// Default max age for Redis-cached recall query embeddings.
+pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -41,6 +47,11 @@ pub struct AppState {
     pub wallet_storages: Vec<WalletJobStorage>,
     /// ENG-1408: Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
+    /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
+    /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
+    pub blob_cache_ttl: std::time::Duration,
+    /// ENG-1405: Redis TTL for recall query embedding cache entries.
+    pub embedding_cache_ttl: std::time::Duration,
 }
 
 // ============================================================
@@ -510,6 +521,10 @@ pub struct ConfigResponse {
     pub network: String,
     #[serde(rename = "suiRpcUrl")]
     pub sui_rpc_url: String,
+    /// Mirror of `RateLimitConfig::bench_bypass_enabled`. Lets benchmark
+    /// scripts pre-flight the server config before running.
+    #[serde(rename = "rateLimitDisabled")]
+    pub rate_limit_disabled: bool,
 }
 
 // ============================================================

@@ -12,7 +12,11 @@ use std::sync::Arc;
 use crate::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
 use crate::types::{AppState, AuthInfo};
 
-const AUTH_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum signed-JSON body the auth middleware will buffer before computing
+/// the SHA-256 digest. Must be ≥ the largest per-route body limit so the auth
+/// layer never rejects requests the routes themselves would accept.
+/// Today the bulk-remember route is the largest at 2 MiB (ENG-1408).
+pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Ed25519 signature verification + onchain delegate key verification middleware
 ///
@@ -169,7 +173,7 @@ pub async fn verify_signature(
     // Split request to consume body
     let (mut parts, body) = request.into_parts();
 
-    let body_bytes = axum::body::to_bytes(body, AUTH_BODY_LIMIT_BYTES)
+    let body_bytes = axum::body::to_bytes(body, PROTECTED_BODY_LIMIT_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -367,6 +371,18 @@ async fn resolve_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_body_limit_allows_one_mb_remember_json() {
+        let body = serde_json::json!({
+            "text": "a".repeat(1024 * 1024),
+            "namespace": "default",
+        })
+        .to_string();
+
+        assert!(body.len() > 1024 * 1024);
+        assert!(body.len() <= PROTECTED_BODY_LIMIT_BYTES);
+    }
 
     // ── MED-1: Nonce must be valid UUID v4 ──────────────────────────────
 

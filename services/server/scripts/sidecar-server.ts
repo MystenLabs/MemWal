@@ -290,12 +290,16 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
 // ============================================================
 
 const app = express();
-// HIGH-13: Use a conservative global default — routes that need more bytes
-// (e.g. /walrus/upload, /seal/decrypt-batch) apply their own per-route
-// json() middleware that overrides this default.
-// Global floor: 256 KiB is enough for every metadata-only JSON body
-// (seal/encrypt, seal/decrypt, walrus/query-blobs, sponsor, sponsor/execute).
-app.use(express.json({ limit: "256kb" }));
+// HIGH-13 / ENG-1407: JSON body limits are per-route. A global app.use(json())
+// would parse and reject oversize bodies before any per-route json() ran
+// (Express middleware fires in declaration order; whichever json() consumes
+// the body first wins). We declare named limits and apply them explicitly
+// on each route instead.
+const JSON_LIMIT_METADATA = "256kb"; // walrus/query-blobs, sponsor, sponsor/execute
+const JSON_LIMIT_SEAL_ENCRYPT = "2mb"; // matches PROTECTED_BODY_LIMIT_BYTES (auth cap)
+const JSON_LIMIT_SEAL_DECRYPT = "2mb"; // single encrypted blob, same size class as encrypt
+const JSON_LIMIT_SEAL_DECRYPT_BATCH = "8mb"; // up to 25 × ~320 KiB items
+const JSON_LIMIT_WALRUS_UPLOAD = "10mb"; // base64-encoded encrypted blob
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
@@ -340,7 +344,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ============================================================
 // POST /seal/encrypt
 // ============================================================
-app.post("/seal/encrypt", async (req, res) => {
+// ENG-1407: receives the full plaintext for SEAL encryption. Must accept up
+// to PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) of plaintext plus base64 + JSON
+// framing overhead.
+app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
     try {
         const { data, owner, packageId } = req.body;
         if (!data || !owner || !packageId) {
@@ -419,7 +426,7 @@ async function resolveSessionKey(
 // ============================================================
 // POST /seal/decrypt
 // ============================================================
-app.post("/seal/decrypt", async (req, res) => {
+app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), async (req, res) => {
     try {
         const { data, packageId, accountId } = req.body;
         if (!data || !packageId || !accountId) {
@@ -485,9 +492,8 @@ app.post("/seal/decrypt", async (req, res) => {
 // Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
 // Avoids "Not enough shares" errors when decrypting many blobs at once.
 // ============================================================
-// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB)
-// Apply a per-route json() that overrides the 256 KiB global for this endpoint only.
-app.post("/seal/decrypt-batch", express.json({ limit: "8mb" }), async (req, res) => {
+// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
+app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
     try {
         const { items, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
@@ -679,9 +685,8 @@ async function setMetadataAndTransferBlobs(
 
 // HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
-// The 10 MB ceiling matches the sidecar's original global Walrus limit and is
-// well above any realistic single-memory upload size.
-app.post("/walrus/upload", express.json({ limit: "10mb" }), async (req, res) => {
+// 10 MB sits well above any realistic single-memory upload size.
+app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
     try {
         const {
             data,
@@ -940,7 +945,7 @@ async function mapConcurrent<T, R>(
     return results;
 }
 
-app.post("/walrus/query-blobs", async (req, res) => {
+app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { owner, namespace, packageId } = req.body;
         if (!owner) {
@@ -1066,7 +1071,7 @@ app.post("/walrus/query-blobs", async (req, res) => {
 // POST /sponsor — Create Enoki-sponsored transaction for frontend
 // Frontend sends TransactionKind bytes + sender → returns sponsored { bytes, digest }
 // ============================================================
-app.post("/sponsor", async (req, res) => {
+app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { transactionBlockKindBytes, sender } = req.body;
         if (!transactionBlockKindBytes || !sender) {
@@ -1098,7 +1103,7 @@ app.post("/sponsor", async (req, res) => {
 // POST /sponsor/execute — Execute signed sponsored transaction
 // Frontend sends { digest, signature } after user wallet signs → returns { digest }
 // ============================================================
-app.post("/sponsor/execute", async (req, res) => {
+app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
         const { digest, signature } = req.body;
         if (!digest || !signature) {
