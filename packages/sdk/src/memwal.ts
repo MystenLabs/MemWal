@@ -177,6 +177,24 @@ export class MemWal {
     }
 
     /**
+     * One-shot lookup of a remember job's current state. Returns the
+     * full state machine value (`pending` | `running` | `uploaded` |
+     * `done` | `failed` | `not_found`) without polling.
+     *
+     * Useful when the caller wants to drive its own polling loop and
+     * surface intermediate states to a UI — `waitForRememberJob` only
+     * resolves at the terminal state and hides progress.
+     */
+    async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
+        return this.signedRequest<RememberJobStatus>(
+            "GET",
+            `/api/remember/${jobId}`,
+            {},
+            [200, 404],
+        );
+    }
+
+    /**
      * Poll an accepted remember job until it reaches a terminal state.
      */
     async waitForRememberJob(

@@ -21,6 +21,7 @@ import {
 } from '@mysten/dapp-kit'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { MemWal } from '@mysten-incubation/memwal'
+import type { RememberJobStatus } from '@mysten-incubation/memwal'
 import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
@@ -236,36 +237,118 @@ export default function Playground() {
         setRememberResult(null)
         setRememberError(null)
         const t0 = Date.now()
+        const elapsed = () => ((Date.now() - t0) / 1000).toFixed(1)
+
         try {
             // Stage 1 — fire-and-accept. The relayer returns 202 with
             // {job_id, status: "running"} as soon as the work is enqueued.
-            // Show this in the UI so the user can see the async-job pattern
-            // (the value prop the playground is demonstrating) before the
-            // polling stage replaces it.
+            // Show this immediately so the user can see the async-job
+            // pattern (the playground's whole value prop).
             const accepted = await memwal.rememberAsync(rememberText)
-            setRememberResult(
-                `// 1. accepted (HTTP 202) at T+${Date.now() - t0}ms\n` +
-                    JSON.stringify(accepted, null, 2) +
-                    `\n\n// 2. polling for terminal state (max 90s)...`
-            )
+            const acceptedBlock =
+                `// 1. accepted (HTTP 202) at T+${elapsed()}s\n` +
+                JSON.stringify(accepted, null, 2)
 
-            // Stage 2 — poll until terminal (done | failed | timeout).
-            // waitForRememberJob does signed GET /api/remember/{job_id}
-            // every ~1.5s with backoff, returns the final RememberResult
-            // on `done` or throws on `failed`/timeout.
-            const final = await memwal.waitForRememberJob(accepted.job_id, {
-                timeoutMs: 90_000,
-            })
+            // Stage 2 — drive our own polling loop instead of letting
+            // waitForRememberJob block to terminal. That way each
+            // intermediate state (pending → running → uploaded → done)
+            // surfaces to the UI as it happens, not just the final
+            // value. Server-side state machine: routes.rs writes
+            // status='running' on accept, jobs.rs flips to 'uploaded'
+            // after the walrus write certifies, then 'done' once the
+            // meta-transfer + blob_id is committed.
+            const TIMEOUT_MS = 90_000
+            const POLL_MS = 1500
+            const deadline = Date.now() + TIMEOUT_MS
+
+            let lastStatus = accepted.status
+            const transitions: Array<{ status: string; tSec: string }> = [
+                { status: accepted.status, tSec: '0.0' },
+            ]
+
+            const renderProgress = (current: RememberJobStatus | null) => {
+                const ladder = transitions
+                    .map((t) => `//   [${t.tSec}s] ${t.status}`)
+                    .join('\n')
+                const tail = current
+                    ? JSON.stringify(current, null, 2)
+                    : '// (polling...)'
+                setRememberResult(
+                    `${acceptedBlock}\n\n` +
+                        `// 2. polling /api/remember/${accepted.job_id} ` +
+                        `every ${POLL_MS}ms (max ${TIMEOUT_MS / 1000}s)\n` +
+                        `${ladder}\n\n` +
+                        `// current (T+${elapsed()}s)\n${tail}`
+                )
+            }
+            renderProgress(null)
+
+            // Polling loop. await-in-loop is intentional — we want strict
+            // serial requests so we don't pile up retries when the server
+            // is briefly slow.
+            let terminal: RememberJobStatus | null = null
+            while (Date.now() < deadline && !terminal) {
+                await new Promise((r) => setTimeout(r, POLL_MS))
+                const current = await memwal.getRememberStatus(
+                    accepted.job_id
+                )
+                if (current.status !== lastStatus) {
+                    transitions.push({
+                        status: current.status,
+                        tSec: elapsed(),
+                    })
+                    lastStatus = current.status
+                }
+                renderProgress(current)
+
+                if (
+                    current.status === 'done' ||
+                    current.status === 'failed' ||
+                    current.status === 'not_found'
+                ) {
+                    terminal = current
+                }
+            }
+
+            if (!terminal) {
+                throw Object.assign(
+                    new Error(
+                        `remember job timed out after ${TIMEOUT_MS / 1000}s ` +
+                            `(job_id=${accepted.job_id})`
+                    ),
+                    { jobId: accepted.job_id }
+                )
+            }
+
+            if (terminal.status === 'failed') {
+                throw Object.assign(
+                    new Error(
+                        `remember job failed: ${terminal.error ?? 'unknown error'}`
+                    ),
+                    { jobId: accepted.job_id }
+                )
+            }
+            if (terminal.status === 'not_found') {
+                throw Object.assign(
+                    new Error(
+                        `remember job not_found (job_id=${accepted.job_id})`
+                    ),
+                    { jobId: accepted.job_id }
+                )
+            }
+
+            // terminal.status === 'done'
+            const ladder = transitions
+                .map((t) => `//   [${t.tSec}s] ${t.status}`)
+                .join('\n')
             setRememberResult(
-                `// 1. accepted (HTTP 202)\n` +
-                    JSON.stringify(accepted, null, 2) +
-                    `\n\n// 2. terminal state at T+${((Date.now() - t0) / 1000).toFixed(1)}s\n` +
-                    JSON.stringify(final, null, 2)
+                `${acceptedBlock}\n\n` +
+                    `// 2. state machine traversal\n${ladder}\n\n` +
+                    `// 3. terminal at T+${elapsed()}s\n` +
+                    JSON.stringify(terminal, null, 2)
             )
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err)
-            // SDK timeout error includes job_id — surface it so the user can
-            // check the status manually via curl or hit Run again.
             const jobId = (err as { jobId?: string } | null)?.jobId
             if (jobId && /timed out/i.test(msg)) {
                 setRememberError(
@@ -559,12 +642,16 @@ const accepted = await memwal.rememberAsync(
 )
 // namespace: "${namespace || 'default'}"
 
-// 2. poll signed GET /api/remember/{job_id} until terminal
-const result = await memwal.waitForRememberJob(
-  accepted.job_id,
-  { timeoutMs: 90_000 }
-)
-// → { id, blob_id, owner, namespace }`}
+// 2. poll signed GET /api/remember/{job_id} every 1.5s.
+// Each call surfaces the current state (pending →
+// running → uploaded → done). Use waitForRememberJob
+// instead if you only need the terminal result.
+while (true) {
+  const s = await memwal.getRememberStatus(accepted.job_id)
+  if (s.status === "done")   { return s }
+  if (s.status === "failed") { throw new Error(s.error) }
+  await sleep(1500)
+}`}
                     onRun={runRemember}
                     result={rememberResult}
                     resultLabel="memory saved (accepted → terminal)"
