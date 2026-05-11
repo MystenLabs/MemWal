@@ -122,3 +122,4 @@ railway-*.md
 
 # Personal/internal planning notes — never include in repo
 plans/
+.local-plans/
