@@ -20,6 +20,7 @@ import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
+import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -30,17 +31,14 @@ import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
 
-// SEAL key server object IDs (comma-separated via env var)
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
 
-if (SEAL_KEY_SERVERS.length === 0) {
-    console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
+if (SEAL_SERVER_CONFIGS.length === 0) {
+    console.error(
+        "[sidecar] WARNING: SEAL_SERVER_CONFIGS/SEAL_KEY_SERVERS env vars are empty and no network default exists — SEAL encrypt/decrypt will fail",
+    );
 }
-
-const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
 
 // Server Sui Private Keys for Walrus uploads
 const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
@@ -78,10 +76,7 @@ const suiClient = new SuiJsonRpcClient({
 
 const sealClient = new SealClient({
     suiClient: suiClient as any,
-    serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-        objectId: id,
-        weight: 1,
-    })),
+    serverConfigs: SEAL_SERVER_CONFIGS,
     verifyKeyServers: true,
 });
 

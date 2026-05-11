@@ -17,7 +17,6 @@
  * =============================================================================
  */
 import type { Express, Request, Response } from "express";
-import express from "express";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 
 import type { AuthResolution } from "./auth.js";

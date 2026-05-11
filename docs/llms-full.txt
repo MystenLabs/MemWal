@@ -424,7 +424,9 @@ Add to `~/.openclaw/openclaw.json`:
 | `DATABASE_URL` | PostgreSQL connection string. `pgvector` must already exist |
 | `MEMWAL_PACKAGE_ID` | Sui package ID |
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID |
-| `SEAL_KEY_SERVERS` | Comma-separated SEAL key server object IDs |
+| `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | SEAL server config for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers |
+
+If neither SEAL variable is set, the sidecar uses built-in independent key server defaults for `SUI_NETWORK`: two testnet servers on `testnet`, and Overclock + Studio Mirai on `mainnet`.
 
 ### Usually Required
 
