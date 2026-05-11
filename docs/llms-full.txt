@@ -426,7 +426,7 @@ Add to `~/.openclaw/openclaw.json`:
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID |
 | `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | SEAL server config for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers |
 
-If `SUI_NETWORK=testnet` and neither SEAL variable is set, the sidecar defaults to the Mysten testnet committee aggregator.
+If neither SEAL variable is set, the sidecar uses built-in independent key server defaults for `SUI_NETWORK`: two testnet servers on `testnet`, and Overclock + Studio Mirai on `mainnet`.
 
 ### Usually Required
 

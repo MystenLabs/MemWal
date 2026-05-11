@@ -8,14 +8,27 @@ export type SealServerConfig = {
 
 type Env = Record<string, string | undefined>;
 
-const MYSTEN_TESTNET_COMMITTEE_CONFIG: SealServerConfig = {
-    objectId: "0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98",
-    weight: 1,
-    aggregatorUrl: "https://seal-aggregator-testnet.mystenlabs.com",
-};
-
 const DEFAULT_SEAL_SERVER_CONFIGS: Record<string, SealServerConfig[]> = {
-    testnet: [MYSTEN_TESTNET_COMMITTEE_CONFIG],
+    mainnet: [
+        {
+            objectId: "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6",
+            weight: 1,
+        },
+        {
+            objectId: "0xe0eb52eba9261b96e895bbb4deca10dcd64fbc626a1133017adcd5131353fd10",
+            weight: 1,
+        },
+    ],
+    testnet: [
+        {
+            objectId: "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
+            weight: 1,
+        },
+        {
+            objectId: "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+            weight: 1,
+        },
+    ],
 };
 
 function requireObject(value: unknown, index: number): Record<string, unknown> {

@@ -76,4 +76,4 @@ Walrus and network fields:
 - `withMemWal` builds on top of `MemWal`, so it uses the same relayer-backed config shape.
 - `MemWalManual` now defaults to `mainnet` network settings unless you pass `suiNetwork: "testnet"`.
 - `sealServerConfigs` takes priority over `sealKeyServers`; `sealKeyServers` remains supported for legacy independent key server lists.
-- The built-in testnet SEAL default uses the Mysten committee aggregator. Mainnet committee config must be provided explicitly until official values are published.
+- Built-in SEAL defaults use independent key servers: two testnet servers on `testnet`, and Overclock + Studio Mirai on `mainnet`. Use `sealServerConfigs` for committee aggregator configs.
