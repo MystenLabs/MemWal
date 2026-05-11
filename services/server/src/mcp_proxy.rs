@@ -39,7 +39,16 @@ use crate::types::AppState;
 /// the sidecar. Anything else is dropped — we never proxy cookies, host, or
 /// any infra header that would confuse the sidecar.
 const FORWARD_HEADER_PREFIXES: &[&str] = &["x-memwal-"];
-const FORWARD_HEADER_EXACT: &[&str] = &["authorization", "content-type", "accept"];
+const FORWARD_HEADER_EXACT: &[&str] = &[
+    "authorization",
+    "content-type",
+    "accept",
+    // MCP 2025-06 streamable HTTP transport headers — the SDK on both
+    // sides reads these to route requests to the right session.
+    "mcp-session-id",
+    "mcp-protocol-version",
+    "last-event-id",
+];
 
 fn should_forward(name: &HeaderName) -> bool {
     let s = name.as_str().to_ascii_lowercase();
@@ -213,6 +222,118 @@ pub async fn messages_proxy(
         Err(err) => (
             StatusCode::BAD_GATEWAY,
             format!("MCP sidecar read failed: {}", err),
+        )
+            .into_response(),
+    }
+}
+
+/// `ANY /api/mcp` — Streamable HTTP transport (MCP 2025-06 spec).
+///
+/// Single endpoint that supersedes the SSE+POST split: one URL handles
+/// GET (open server→client SSE), POST (JSON-RPC with optional SSE upgrade),
+/// and DELETE (close session). The MailGate / Linear / Figma MCP servers
+/// all use this newer transport — clients just configure a single URL:
+///
+///     claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
+///
+/// We proxy verbatim to the sidecar's `/mcp` endpoint (whose SDK
+/// `StreamableHTTPServerTransport` does all the protocol heavy-lifting).
+/// `mcp-session-id` round-trips between client and sidecar; the
+/// authorization scheme stays Bearer-on-every-request (same ed25519 seed
+/// scheme as the stdio bridge — no OAuth dance required).
+pub async fn streamable_proxy(
+    State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let url = format!("{}/mcp", state.config.sidecar_url);
+
+    // Build the upstream request matching the inbound method. reqwest
+    // doesn't expose a generic builder that takes a Method directly, so
+    // we branch — only GET/POST/DELETE are meaningful for the transport.
+    let mut req = match method {
+        axum::http::Method::GET => state.http_client.get(&url),
+        axum::http::Method::POST => state.http_client.post(&url),
+        axum::http::Method::DELETE => state.http_client.delete(&url),
+        axum::http::Method::OPTIONS => {
+            // CORS preflight — answer here without hitting the sidecar.
+            return (StatusCode::NO_CONTENT, ()).into_response();
+        }
+        _ => {
+            return (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "MCP HTTP transport only supports GET, POST, DELETE",
+            )
+                .into_response();
+        }
+    };
+
+    // GET/DELETE may carry an empty body; only POST will have JSON-RPC
+    // envelopes. Streaming both ways is the simplest correct choice.
+    if !body.is_empty() {
+        req = req.body(body.to_vec());
+    }
+    req = req.headers(build_forwarded_headers(&headers));
+
+    // Same 24h request timeout as the SSE proxy — a streamable response
+    // can stay open well past the shared `http_client`'s default 30s
+    // (tool calls take 25-35s for walrus blob writes). See mcp_proxy.rs
+    // commit 8990a88 for the original SSE fix.
+    req = req.timeout(std::time::Duration::from_secs(86_400));
+
+    let upstream = match req.send().await {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!("mcp_proxy.streamable upstream connect failed: {}", err);
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("MCP sidecar unreachable: {}", err),
+            )
+                .into_response();
+        }
+    };
+
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Forward the headers the streamable transport relies on. Critically
+    // `mcp-session-id` — the SDK sets it on the response to first POST and
+    // expects subsequent requests to carry it back.
+    let mut resp = Response::builder().status(status);
+    for (name, value) in upstream.headers().iter() {
+        let lname = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lname.as_str(),
+            "content-type"
+                | "cache-control"
+                | "www-authenticate"
+                | "connection"
+                | "mcp-session-id"
+                | "mcp-protocol-version"
+        ) {
+            if let (Ok(n), Ok(v)) = (
+                HeaderName::from_bytes(name.as_str().as_bytes()),
+                HeaderValue::from_bytes(value.as_bytes()),
+            ) {
+                resp = resp.header(n, v);
+            }
+        }
+    }
+    resp = resp
+        .header("x-accel-buffering", "no")
+        .header("cache-control", "no-cache, no-transform");
+
+    // Stream both ways — the SDK may upgrade a POST response to SSE
+    // (`Content-Type: text/event-stream`) for long-running tool calls.
+    // `Body::from_stream` handles small JSON bodies and infinite SSE
+    // alike without buffering.
+    let body = Body::from_stream(upstream.bytes_stream());
+    match resp.body(body) {
+        Ok(r) => r,
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to build proxied response: {}", err),
         )
             .into_response(),
     }

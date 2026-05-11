@@ -465,7 +465,10 @@ function SuccessCard({
                 </p>
             </section>
 
-            <ClientConfigPanel relayer={relayer} />
+            <ClientConfigPanel
+                relayer={relayer}
+                accountId={payload.accountId}
+            />
         </>
     )
 }
@@ -543,14 +546,56 @@ function buildConfigSnippet(
     return JSON.stringify(cfg, null, 2)
 }
 
-function ClientConfigPanel({ relayer }: { relayer: string }) {
+/**
+ * HTTP transport snippet — uses the relayer's `/api/mcp` (Streamable HTTP
+ * MCP, 2025-06 spec). Drops the `npx` package install: client connects
+ * straight to the relayer URL, auth on every request via Bearer header.
+ *
+ * Bearer + accountId are placeholders here because the dashboard doesn't
+ * see the user's delegate seed (it's generated client-side in the bridge
+ * or, eventually, in a future browser-only consent flow). User pastes
+ * the actual values from `~/.memwal/credentials.json`.
+ */
+function buildHttpConfigSnippet(
+    preset: ClientPreset,
+    relayer: string,
+    accountId: string,
+): string {
+    const url = `${relayer.replace(/\/+$/, '')}/api/mcp`
+    const cfg = {
+        mcpServers: {
+            [preset.serverName]: {
+                url,
+                headers: {
+                    Authorization: 'Bearer <YOUR_DELEGATE_PRIVATE_KEY>',
+                    'x-memwal-account-id': accountId,
+                },
+            },
+        },
+    }
+    return JSON.stringify(cfg, null, 2)
+}
+
+type TransportMode = 'stdio' | 'http'
+
+function ClientConfigPanel({
+    relayer,
+    accountId,
+}: {
+    relayer: string
+    accountId: string
+}) {
     const [activeId, setActiveId] = useState<string>(CLIENT_PRESETS[0].id)
+    const [transport, setTransport] = useState<TransportMode>('stdio')
     const [copied, setCopied] = useState<string | null>(null)
     const flag = useMemo(() => relayerFlag(relayer), [relayer])
     const active = CLIENT_PRESETS.find((c) => c.id === activeId)!
     const snippet = useMemo(
-        () => buildConfigSnippet(active, flag.args),
-        [active, flag.args],
+        () =>
+            transport === 'stdio'
+                ? buildConfigSnippet(active, flag.args)
+                : buildHttpConfigSnippet(active, relayer, accountId),
+        [active, flag.args, transport, relayer, accountId],
     )
 
     const copyToClipboard = useCallback(async (text: string, key: string) => {
@@ -570,6 +615,29 @@ function ClientConfigPanel({ relayer }: { relayer: string }) {
                 Same delegate key works across every MCP client. Pick one,
                 paste the snippet into its config file, restart it.
             </p>
+
+            <div style={transportBarStyle}>
+                <button
+                    onClick={() => setTransport('stdio')}
+                    style={
+                        transport === 'stdio'
+                            ? transportActiveStyle
+                            : transportInactiveStyle
+                    }
+                >
+                    stdio + package <span style={transportHintStyle}>(recommended)</span>
+                </button>
+                <button
+                    onClick={() => setTransport('http')}
+                    style={
+                        transport === 'http'
+                            ? transportActiveStyle
+                            : transportInactiveStyle
+                    }
+                >
+                    http <span style={transportHintStyle}>(no install)</span>
+                </button>
+            </div>
 
             <div style={tabBarStyle}>
                 {CLIENT_PRESETS.map((c) => (
@@ -622,6 +690,18 @@ function ClientConfigPanel({ relayer }: { relayer: string }) {
                 <p style={envBadge}>
                     Targeting <code>{flag.envName}</code> environment. Drop the
                     flag once you're on production.
+                </p>
+            )}
+
+            {transport === 'http' && (
+                <p style={httpHintStyle}>
+                    <strong>Bearer token:</strong> open{' '}
+                    <code>~/.memwal/credentials.json</code> and copy the{' '}
+                    <code>delegatePrivateKey</code> value into the{' '}
+                    <code>&lt;YOUR_DELEGATE_PRIVATE_KEY&gt;</code>{' '}
+                    placeholder. Keep this value secret — anyone with it can
+                    read and write to your MemWal memory until you revoke
+                    the delegate key from the dashboard.
                 </p>
             )}
         </section>
@@ -780,6 +860,59 @@ const envBadge: React.CSSProperties = {
     borderRadius: 8,
     display: 'inline-block',
     fontWeight: 600,
+}
+
+const transportBarStyle: React.CSSProperties = {
+    display: 'flex',
+    gap: 8,
+    marginBottom: 14,
+    padding: 4,
+    border: '2px solid #000',
+    borderRadius: 12,
+    background: '#FAF8F5',
+    boxShadow: '2px 2px 0 #000',
+}
+
+const transportActiveStyle: React.CSSProperties = {
+    flex: 1,
+    padding: '8px 14px',
+    background: '#0f0f0f',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: 'pointer',
+}
+
+const transportInactiveStyle: React.CSSProperties = {
+    flex: 1,
+    padding: '8px 14px',
+    background: 'transparent',
+    color: '#525252',
+    border: 'none',
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+}
+
+const transportHintStyle: React.CSSProperties = {
+    fontSize: 11,
+    fontWeight: 500,
+    opacity: 0.8,
+    marginLeft: 4,
+}
+
+const httpHintStyle: React.CSSProperties = {
+    margin: '12px 0 0',
+    fontSize: 13,
+    lineHeight: 1.55,
+    color: '#3a3a3a',
+    background: 'rgba(240, 255, 160, 0.40)',
+    padding: '12px 14px',
+    border: '2px solid #000',
+    borderRadius: 8,
 }
 
 // ---------- styles (match Dashboard's neo-brutalism .card pattern) ----------

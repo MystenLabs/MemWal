@@ -17,7 +17,9 @@
  * =============================================================================
  */
 import type { Express, Request, Response } from "express";
+import { randomUUID } from "node:crypto";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import type { AuthResolution } from "./auth.js";
 import { McpAuthError, resolveAuth } from "./auth.js";
@@ -36,6 +38,19 @@ interface McpConnection {
  * so concurrent MCP clients (Claude Code + Claude.app + Cursor) that share the
  * same delegate key do not evict each other. */
 const sessionsById = new Map<string, McpConnection>();
+
+/**
+ * Streamable HTTP transport sessions, keyed by the `mcp-session-id` header.
+ * Separate from `sessionsById` (which is keyed by SSE transport ids) — the
+ * two namespaces never collide because they live on different routes
+ * (`/mcp/sse` vs `/mcp`).
+ */
+interface StreamableConnection {
+    sessionKey: string;
+    transport: StreamableHTTPServerTransport;
+    cleanup: () => void;
+}
+const streamableSessions = new Map<string, StreamableConnection>();
 
 function rpcError(res: Response, status: number, message: string): void {
     res.status(status).json({
@@ -161,6 +176,109 @@ async function handlePostMessage(req: Request, res: Response): Promise<void> {
     await conn.transport.handlePostMessage(req, res);
 }
 
+/**
+ * Streamable HTTP transport (MCP 2025-06). One endpoint, three methods:
+ *   - POST /mcp  →  client → server JSON-RPC + optional SSE upgrade for the response
+ *   - GET  /mcp  →  open server → client SSE stream (long-polling fallback)
+ *   - DELETE /mcp  →  end the named session
+ *
+ * The session lifecycle: the first POST without an `mcp-session-id` header
+ * triggers a fresh session (transport's `sessionIdGenerator` mints a UUID).
+ * Subsequent requests carry `mcp-session-id: <uuid>` so we route to the
+ * same transport instance. On DELETE, the transport closes and we evict.
+ */
+async function handleStreamableHttp(
+    req: Request,
+    res: Response,
+    relayerUrl: string
+): Promise<void> {
+    // 1) Auth — bearer + accountId same as SSE path. Cheap to re-run per
+    //    request; resolveAuth's on-chain lookup is cached by the SDK once
+    //    we mint the MemWal client per session.
+    let auth: AuthResolution;
+    try {
+        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
+    } catch (err) {
+        if (err instanceof McpAuthError) {
+            res.setHeader(
+                "www-authenticate",
+                'Bearer realm="memwal", error="invalid_token"'
+            );
+            return rpcError(res, err.status, err.message);
+        }
+        return rpcError(
+            res,
+            500,
+            err instanceof Error ? err.message : String(err)
+        );
+    }
+
+    // 2) Find or create the transport for this `mcp-session-id`. Missing
+    //    header on a POST = brand-new session (the SDK assigns one on the
+    //    response). Missing header on GET/DELETE = client error.
+    const sessionIdHeader = req.headers["mcp-session-id"];
+    const sessionId =
+        typeof sessionIdHeader === "string" ? sessionIdHeader : undefined;
+
+    let conn = sessionId ? streamableSessions.get(sessionId) : undefined;
+
+    if (!conn) {
+        if (req.method !== "POST") {
+            return rpcError(
+                res,
+                400,
+                "missing mcp-session-id — open a new session with an initial POST"
+            );
+        }
+
+        // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
+        // the first message-init response; we cache the connection only
+        // after we know the assigned id.
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newId: string) => {
+                let cleanedUp = false;
+                const cleanup = () => {
+                    if (cleanedUp) return;
+                    cleanedUp = true;
+                    streamableSessions.delete(newId);
+                    log.info("session.closed", {
+                        transport: "streamable",
+                        sessionKey: auth.sessionKey,
+                        transportId: newId,
+                    });
+                };
+                transport.onclose = cleanup;
+                streamableSessions.set(newId, {
+                    sessionKey: auth.sessionKey,
+                    transport,
+                    cleanup,
+                });
+                log.info("session.opened", {
+                    transport: "streamable",
+                    sessionKey: auth.sessionKey,
+                    accountId: auth.session.accountId,
+                    delegatePubKey: auth.session.delegatePubKeyHex,
+                    transportId: newId,
+                });
+            },
+        });
+
+        const server = createMcpServer(auth.session);
+        await server.connect(transport);
+
+        // The SDK's handleRequest takes the raw IncomingMessage. We
+        // intentionally do NOT pre-parse the body — express.json() is not
+        // mounted on this route so req still has the raw stream.
+        // The transport reads the body itself.
+        await transport.handleRequest(req, res);
+        return;
+    }
+
+    // Existing session — just hand off.
+    await conn.transport.handleRequest(req, res);
+}
+
 export interface MountMcpOptions {
     /** Relayer base URL that tool calls hit. Default: `http://localhost:3001`. */
     relayerUrl?: string;
@@ -212,8 +330,38 @@ export function mountMcpRoutes(
         }
     );
 
+    // Streamable HTTP transport (MCP 2025-06 spec) — single endpoint that
+    // supersedes the SSE+POST split. Auth on every request because the
+    // transport is stateless across HTTP requests; the bearer is cheap to
+    // re-validate (one Sui RPC lookup, cached in resolveAuth).
+    //
+    // The endpoint accepts GET (open SSE stream for server→client),
+    // POST (JSON-RPC envelopes both directions), and DELETE (close
+    // session). All three are routed through the same handler — the
+    // SDK's `transport.handleRequest()` figures out which based on
+    // req.method.
+    const streamableHandler = async (req: Request, res: Response) => {
+        try {
+            await handleStreamableHttp(req, res, relayerUrl);
+        } catch (err) {
+            log.error("mcp.streamable.error", {
+                err: err instanceof Error ? err.message : String(err),
+            });
+            if (!res.headersSent) {
+                rpcError(res, 500, err instanceof Error ? err.message : String(err));
+            }
+        }
+    };
+    app.get("/mcp", streamableHandler);
+    app.post("/mcp", streamableHandler);
+    app.delete("/mcp", streamableHandler);
+
     log.info("mcp.routes.mounted", {
-        routes: ["GET /mcp/sse", "POST /mcp/messages"],
+        routes: [
+            "GET /mcp/sse",
+            "POST /mcp/messages",
+            "GET|POST|DELETE /mcp (streamable HTTP)",
+        ],
         relayerUrl,
     });
 }

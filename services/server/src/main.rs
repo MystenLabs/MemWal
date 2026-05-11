@@ -420,6 +420,19 @@ async fn main() {
             "/api/mcp/messages",
             post(mcp_proxy::messages_proxy)
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        // Streamable HTTP transport (MCP 2025-06). Single URL that
+        // handles GET (open SSE), POST (JSON-RPC with optional SSE
+        // upgrade), and DELETE (close session). Lets users add the
+        // server via `claude mcp add --transport http memwal <URL>`
+        // without any package install.
+        .route(
+            "/api/mcp",
+            get(mcp_proxy::streamable_proxy)
+                .post(mcp_proxy::streamable_proxy)
+                .delete(mcp_proxy::streamable_proxy)
+                .options(mcp_proxy::streamable_proxy)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
     // Public routes
