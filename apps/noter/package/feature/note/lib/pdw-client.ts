@@ -58,14 +58,14 @@ export async function extractMemories(
   }
 }
 
-/** Remember a single text — server handles embed + encrypt + store. */
+/** Remember a single text and wait until it is stored. */
 export async function rememberText(
   text: string,
   key?: string | null,
   accountId?: string | null,
 ) {
   const memwal = getMemWalClient(key, accountId);
-  return memwal.remember(text);
+  return memwal.rememberAndWait(text);
 }
 
 /** Recall memories similar to a query — server handles search + decrypt. */

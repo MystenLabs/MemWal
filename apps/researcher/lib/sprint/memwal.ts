@@ -49,7 +49,7 @@ export async function rememberSprintReport({
   console.log(
     `[sprint:memwal] Storing sprint report (${fullText.length} chars)`
   );
-  const result = await memwal.remember(fullText);
+  const result = await memwal.rememberAndWait(fullText);
   console.log(`[sprint:memwal] Stored. blobId=${result.blob_id}`);
   return result;
 }

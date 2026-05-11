@@ -99,6 +99,6 @@ jobs:
                 general:
                   wallet_env: mainnet
                   walrus_context: mainnet
-                  walrus_package: 0xfa65cb2d62f4d39e60346fb7d501c12538ca2bbc646eaa37ece2aec5f897814e
+                  walrus_package: 0x98da433aa0139512c210597b1c5e3df6cd121d8d77f8652691bb66fadfc8aa1b
                   gas_budget: 500000000
             default_context: mainnet

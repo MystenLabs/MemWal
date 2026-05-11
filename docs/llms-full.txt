@@ -49,7 +49,8 @@ const memwal = MemWal.create({
 });
 
 await memwal.health();
-await memwal.remember("I live in Hanoi and prefer dark mode.");
+const job = await memwal.remember("I live in Hanoi and prefer dark mode.");
+await memwal.waitForRememberJob(job.job_id);
 
 const result = await memwal.recall("What do we know about this user?");
 console.log(result.results);
@@ -85,19 +86,19 @@ Config:
 | `serverUrl` | `string` | No | `http://localhost:8000` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
-### `remember(text, namespace?): Promise<RememberResult>`
+### `remember(text, namespace?): Promise<RememberAcceptedResult>`
 
-Store one memory through the relayer. The relayer handles embedding, SEAL encryption, Walrus upload, and vector indexing.
+Submit one memory through the relayer. The relayer returns after creating a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
 
 Returns:
 ```ts
 {
-  id: string;        // UUID for this entry
-  blob_id: string;   // Walrus blob ID
-  owner: string;     // Owner Sui address
-  namespace: string; // Namespace used
+  job_id: string; // Polling id
+  status: string; // Usually "running"
 }
 ```
+
+Use `rememberAndWait(text, namespace?, opts?)` or `waitForRememberJob(job_id, opts?)` to resolve the completed `{ id, job_id, blob_id, owner, namespace }` result.
 
 ### `recall(query, limit?, namespace?): Promise<RecallResult>`
 
@@ -119,20 +120,24 @@ Returns:
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 
-Extract memorable facts from text using an LLM, then store each fact as a separate memory.
+Extract memorable facts from text using an LLM, then return accepted background jobs for storing each fact.
 
 Returns:
 ```ts
 {
+  job_ids: string[];
   facts: Array<{
     text: string;     // Extracted fact
-    id: string;       // UUID
-    blob_id: string;  // Walrus blob ID
+    id: string;       // Same value as job_id
+    job_id: string;   // Polling id
   }>;
-  total: number;
+  fact_count: number;
+  status: string;     // Usually "pending"
   owner: string;
 }
 ```
+
+Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact job to finish.
 
 ### `restore(namespace, limit?): Promise<RestoreResult>`
 

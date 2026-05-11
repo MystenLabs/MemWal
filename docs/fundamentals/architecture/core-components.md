@@ -43,7 +43,8 @@ const memwal = MemWal.create({
   namespace: "my-app",
 });
 
-await memwal.remember("User prefers dark mode.");
+const job = await memwal.remember("User prefers dark mode.");
+await memwal.waitForRememberJob(job.job_id);
 ```
 
 ## Relayer
