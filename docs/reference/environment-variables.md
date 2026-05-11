@@ -52,6 +52,6 @@ These are not all enforced at boot, but most real deployments need them.
 - `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset.
 - If `SUI_NETWORK=testnet` and neither SEAL variable is set, the sidecar defaults to the official Mysten testnet committee config: `[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]`.
 - Mainnet committee mode is supported through `SEAL_SERVER_CONFIGS`, but do not hardcode a mainnet default until Mysten publishes the object ID and aggregator URL.
-- The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network and caps uploads at `5` epochs: effective defaults are `5` on `testnet` and `3` on `mainnet` unless the request explicitly passes a lower `epochs` value.
+- The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).
