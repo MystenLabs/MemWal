@@ -116,3 +116,6 @@ tmp-smashblob/
 
 # Railway sensitive docs
 railway-*.md
+
+# Per-developer MCP client config (user paths)
+.mcp.json
