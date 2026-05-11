@@ -92,6 +92,8 @@ interface McpCallbackPayload {
     packageId: string
     txDigest: string
     label: string
+    /** Echoes the state token the bridge issued in the query string. */
+    state: string
 }
 
 export default function ConnectMcp() {
@@ -105,6 +107,13 @@ export default function ConnectMcp() {
     const delegateAddress = params.get('delegateAddress') ?? ''
     const label = params.get('label') ?? 'MemWal MCP'
     const relayer = params.get('relayer') ?? 'https://relayer.memwal.ai'
+    /**
+     * Cryptographic state token from the MCP bridge. Must be echoed verbatim
+     * in the callback POST — the bridge constant-time compares it to defeat
+     * cross-origin CSRF (audit C2). Empty string if absent (older bridge);
+     * the bridge will then reject our callback with 400.
+     */
+    const state = params.get('state') ?? ''
 
     const [step, setStep] = useState<Step>('consent')
     const [errorMsg, setErrorMsg] = useState('')
@@ -120,9 +129,13 @@ export default function ConnectMcp() {
             portNum > 1024 &&
             portNum < 65536 &&
             /^[0-9a-fA-F]{64}$/.test(publicKey) &&
-            /^0x[0-9a-fA-F]{64}$/.test(delegateAddress)
+            /^0x[0-9a-fA-F]{64}$/.test(delegateAddress) &&
+            // State token is a 32-byte hex string emitted by the MCP bridge.
+            // Old bridges without state will fail this check — by design;
+            // forces a bridge upgrade so we never accept stateless callbacks.
+            /^[0-9a-f]{64}$/.test(state)
         )
-    }, [port, publicKey, delegateAddress])
+    }, [port, publicKey, delegateAddress, state])
 
     const postCallback = useCallback(
         async (payload: McpCallbackPayload) => {
@@ -203,6 +216,7 @@ export default function ConnectMcp() {
                 packageId: config.memwalPackageId,
                 txDigest: result.digest,
                 label,
+                state,
             }
             setCallbackPayload(payload)
             setStep('callback')

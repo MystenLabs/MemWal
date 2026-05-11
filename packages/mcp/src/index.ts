@@ -9,7 +9,7 @@
  *   5. On 401 (revoked key), the bridge wipes credentials before throwing
  *      — the next process spawn will re-trigger login.
  */
-import { clearCreds, credsPath, loadCreds, saveCreds } from "./auth.js";
+import { clearCreds, credsPath, loadCreds } from "./auth.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
@@ -114,15 +114,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
     let creds = loadCreds();
     if (creds && args.relayerUrl && creds.relayerUrl !== args.relayerUrl) {
-        // Caller wants a different relayer than what's saved. Don't trigger a
-        // fresh login (delegate key is environment-agnostic), just patch the
-        // URL on the fly. Persist so future runs match.
-        log.info("creds.relayer_override", {
+        // Caller wants a different relayer than what's saved. NEVER silently
+        // mutate the saved relayerUrl — a malicious config snippet (e.g.
+        // copy-pasted from a forum) carrying `--relayer https://attacker`
+        // would otherwise rewrite the saved creds so even subsequent runs
+        // without the flag ship the seed to the attacker (audit H4).
+        //
+        // In-memory override is fine for THIS process — the saved file is
+        // left untouched, so the next spawn falls back to the saved URL.
+        log.warn("creds.relayer_override.transient_only", {
             saved: creds.relayerUrl,
             override: args.relayerUrl,
         });
+        note(
+            `--relayer flag (${args.relayerUrl}) overrides saved relayer ` +
+                `(${creds.relayerUrl}) for THIS process only. The saved file ` +
+                `is not modified. To rotate the saved relayer, run ` +
+                `\`memwal-mcp login --logout\` then a fresh login.`
+        );
         creds = { ...creds, relayerUrl: args.relayerUrl };
-        saveCreds(creds);
     }
     const wasLoggedIn = !!creds;
     if (!creds) {

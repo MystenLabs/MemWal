@@ -16,6 +16,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { AddressInfo } from "node:net";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import open from "open";
 
 import type { MemWalCredentials } from "./auth.js";
@@ -48,6 +49,13 @@ interface CallbackPayload {
     accountId: string;
     walletAddress: string;
     packageId: string;
+    /**
+     * Cryptographic state token — must match the value we put in `connectUrl`.
+     * Without this, a malicious tab could POST forged credentials to our
+     * localhost listener before the legitimate browser tab does (cross-origin
+     * login-CSRF + DNS rebinding). See SECURITY.md / audit C2.
+     */
+    state: string;
     txDigest?: string;
     label?: string;
 }
@@ -62,8 +70,33 @@ function isCallback(obj: unknown): obj is CallbackPayload {
     return (
         isHexAddress(o.accountId) &&
         isHexAddress(o.walletAddress) &&
-        isHexAddress(o.packageId)
+        isHexAddress(o.packageId) &&
+        typeof o.state === "string" &&
+        // 32 random bytes → 64 hex chars. Constant width — anything else is wrong.
+        /^[0-9a-f]{64}$/.test(o.state)
     );
+}
+
+/**
+ * Constant-time comparison for the state token. `===` would still leak the
+ * common-prefix length via timing in theory; not a realistic remote attack
+ * on a localhost listener, but cheap defense in depth.
+ */
+function stateEquals(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    try {
+        return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Strip trailing slashes so `https://memwal.ai/` and `https://memwal.ai`
+ * compare equal. The `Origin` request header never carries a trailing slash.
+ */
+function normalizeOrigin(url: string): string {
+    return url.replace(/\/+$/, "");
 }
 
 const SUCCESS_HTML = `<!doctype html>
@@ -121,11 +154,24 @@ function readBody(req: IncomingMessage, maxBytes = 16 * 1024): Promise<string> {
 export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredentials> {
     const cfg = { ...DEFAULTS, ...opts };
     const keypair = await generateKeypair();
+    // Cryptographic single-use state token. Round-trip through the browser:
+    // we put it in `connectUrl`, the page echoes it back in the callback
+    // payload, and we constant-time-compare on receipt. Defeats cross-origin
+    // CSRF / DNS-rebinding attacks where a malicious tab races the legitimate
+    // browser to POST forged credentials at our localhost listener.
+    const stateToken = randomBytes(32).toString("hex");
+    // Expected `Origin` header value. The dashboard page that legitimately
+    // POSTs to `/callback` runs on `cfg.webUrl`. Any other Origin is rejected.
+    const expectedOrigin = normalizeOrigin(cfg.webUrl);
 
-    // 0 → OS picks a free port.
+    // 0 → OS picks a free port. Bind 127.0.0.1 only — NOT 0.0.0.0 — so the
+    // listener is unreachable from the LAN.
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
+    // Allow `127.0.0.1:PORT` and `localhost:PORT` as the Host header (defeats
+    // DNS rebinding to an attacker-controlled name that resolves to 127.0.0.1).
+    const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 
     // Build the dashboard URL. `webUrl` may or may not include a path
     // already — join carefully.
@@ -136,7 +182,8 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         `&publicKey=${encodeURIComponent(keypair.publicKeyHex)}` +
         `&delegateAddress=${encodeURIComponent(keypair.suiAddress)}` +
         `&label=${encodeURIComponent(cfg.label)}` +
-        `&relayer=${encodeURIComponent(cfg.relayerUrl)}`;
+        `&relayer=${encodeURIComponent(cfg.relayerUrl)}` +
+        `&state=${stateToken}`;
 
     note(`Opening browser to authorize this MCP client...`);
     note(`If your browser doesn't open, visit: ${connectUrl}`);
@@ -156,13 +203,26 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         void timer;
 
         server.on("request", async (req: IncomingMessage, res: ServerResponse) => {
-            // CORS — let the dashboard JS POST to localhost.
-            res.setHeader("access-control-allow-origin", "*");
+            // CORS — only the dashboard origin we control may POST. `*` would
+            // let any web page on the internet talk to this localhost port.
+            res.setHeader("access-control-allow-origin", expectedOrigin);
             res.setHeader("access-control-allow-methods", "POST, OPTIONS");
             res.setHeader("access-control-allow-headers", "content-type");
+            res.setHeader("vary", "origin");
             if (req.method === "OPTIONS") {
                 res.writeHead(204);
                 res.end();
+                return;
+            }
+
+            // DNS-rebinding defense. A browser tricked into resolving
+            // `evil.example` → 127.0.0.1 would still send `Host: evil.example`
+            // — anything that isn't our literal loopback host is a forgery.
+            const hostHeader = (req.headers.host ?? "").toLowerCase();
+            if (!allowedHosts.has(hostHeader)) {
+                log.warn("login.callback_bad_host", { host: hostHeader });
+                res.writeHead(403, { "content-type": "text/plain" });
+                res.end("Forbidden");
                 return;
             }
 
@@ -173,12 +233,40 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                 return;
             }
 
+            // Origin check — only the dashboard page may submit the callback.
+            // `null` or missing Origin (e.g. curl, non-browser) is rejected
+            // because the entire flow is initiated by a browser tab.
+            const origin = req.headers.origin;
+            if (typeof origin !== "string" || normalizeOrigin(origin) !== expectedOrigin) {
+                log.warn("login.callback_bad_origin", { origin });
+                res.writeHead(403, { "content-type": "text/plain" });
+                res.end("Forbidden");
+                return;
+            }
+
+            // Content-Type assertion blocks simple-request smuggling: a CSRF
+            // attacker can POST `text/plain` cross-origin without preflight,
+            // but `application/json` triggers preflight which our restricted
+            // CORS allow-origin will reject.
+            const ct = (req.headers["content-type"] ?? "").toLowerCase();
+            if (!ct.startsWith("application/json")) {
+                res.writeHead(415, { "content-type": "text/plain" });
+                res.end("Content-Type must be application/json");
+                return;
+            }
+
             try {
                 const body = await readBody(req);
                 const parsed = JSON.parse(body);
                 if (!isCallback(parsed)) {
                     res.writeHead(400, { "content-type": "text/html" });
                     res.end(FAIL_HTML_TEMPLATE("Callback payload missing required fields."));
+                    return;
+                }
+                if (!stateEquals(parsed.state, stateToken)) {
+                    log.warn("login.callback_bad_state", {});
+                    res.writeHead(403, { "content-type": "text/html" });
+                    res.end(FAIL_HTML_TEMPLATE("Callback state mismatch — refusing to save."));
                     return;
                 }
 

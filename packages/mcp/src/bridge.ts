@@ -7,12 +7,15 @@
  * two together so the user only adds a `command + args` entry to their MCP
  * client config (no headers, no URL).
  *
- * On 401 from the relayer, we delete the local credentials file and
- * surface a clear error to the MCP client; the next process spawn will
- * trigger the login flow afresh.
+ * On 401 from the relayer, we surface a clear error to the MCP client but
+ * leave the local credentials file untouched. A naive `clearCreds()` here
+ * was a creds-wipe DoS: anyone able to coerce a 401 response (transient WAF
+ * rule, future http_proxy MITM, local malware racing the relayer port on
+ * `--local`) would have wiped the user's saved seed without consent.
+ * Re-auth requires an explicit `memwal-mcp login` from the user.
  */
 import type { MemWalCredentials } from "./auth.js";
-import { clearCreds } from "./auth.js";
+import { credsPath } from "./auth.js";
 import { log, note } from "./logger.js";
 
 interface RpcMessage {
@@ -54,11 +57,20 @@ async function openSseStream(
     if (resp.status === 401) {
         controller.abort();
         log.warn("bridge.unauthorized", { url });
-        clearCreds();
+        // DO NOT wipe creds here. A 401 from the relayer is *evidence* of
+        // a problem but not *proof* the saved seed is the cause. Possible
+        // sources: revoked delegate key (genuine), transient WAF / rate
+        // limit (false positive), http_proxy interposed somewhere on the
+        // path, or — on `--local` — local malware racing the relayer port.
+        // Auto-wiping the seed turns any one of those into a permanent
+        // outage that forces re-login. Force-fail loud instead; the user
+        // runs `memwal-mcp login` if they want to actually rotate.
         throw new Error(
             "MemWal relayer rejected credentials (HTTP 401). " +
-                "Delegate key may have been revoked from the dashboard. " +
-                "Re-run the MCP client to start a fresh login flow."
+                "Delegate key may have been revoked, the relayer may be " +
+                "rate-limiting, or a proxy may be interposed. Saved " +
+                `credentials at ${credsPath()} were NOT modified. ` +
+                "Run `memwal-mcp login` if you need to rotate the key."
         );
     }
     if (!resp.ok || !resp.body) {
