@@ -20,7 +20,7 @@
 
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { SealClient } from "@mysten/seal";
-import { getSealServerConfigsFromEnv } from "./seal-config.ts";
+import { getSealServerConfigsFromEnv } from "./seal-config.js";
 
 // Network config from env vars
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";

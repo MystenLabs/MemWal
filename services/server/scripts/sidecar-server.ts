@@ -19,7 +19,7 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
-import { getSealServerConfigsFromEnv } from "./seal-config.ts";
+import { getSealServerConfigsFromEnv } from "./seal-config.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)

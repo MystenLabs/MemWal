@@ -29,7 +29,7 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
-import { getSealServerConfigsFromEnv } from "./seal-config.ts";
+import { getSealServerConfigsFromEnv } from "./seal-config.js";
 
 // Network config from env vars
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
