@@ -101,7 +101,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SIDECAR_URL` defaults to `http://localhost:9000`
 - `SUI_NETWORK` defaults to `mainnet`
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
-- The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
+- The sidecar Walrus upload route defaults storage `epochs` by network and caps uploads at `5` epochs: effective defaults are `5` on `testnet` and `3` on `mainnet` unless the request passes a lower `epochs` value.
 - `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 
 ### Server Keys
