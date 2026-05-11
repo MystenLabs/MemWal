@@ -119,3 +119,6 @@ railway-*.md
 
 # Per-developer MCP client config (user paths)
 .mcp.json
+
+# Personal/internal planning notes — never include in repo
+plans/
