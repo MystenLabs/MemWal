@@ -20,13 +20,12 @@
 
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { SealClient } from "@mysten/seal";
+import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 
 // Network config from env vars
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
 
 // ============================================================
 // Parse CLI arguments
@@ -89,17 +88,14 @@ async function main() {
 
     const sealClient = new SealClient({
         suiClient: suiClient as any,
-        serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-            objectId: id,
-            weight: 1,
-        })),
+        serverConfigs: SEAL_SERVER_CONFIGS,
         verifyKeyServers: true,
     });
 
-    // Encrypt with threshold 1 (need 1 of N key servers to decrypt)
+    // The default threshold is capped to configured server weight.
     // The SEAL SDK uses packageId + id to derive the encryption key
     const result = await sealClient.encrypt({
-        threshold: 1,
+        threshold: SEAL_THRESHOLD,
         packageId,
         id: owner,
         data: new Uint8Array(data),
