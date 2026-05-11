@@ -15,7 +15,7 @@
         "@noble/ed25519": "2.3.0",
         "express": "5.1.0",
         "tsx": "4.19.0",
-        "zod": "4.4.3"
+        "zod": "^3.25.0"
     },
     "devDependencies": {
         "@types/express": "5.0.0",
