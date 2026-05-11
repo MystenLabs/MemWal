@@ -105,7 +105,7 @@ function parseLegacyKeyServers(value: string | undefined): SealServerConfig[] {
 }
 
 function getDefaultSealServerConfigs(network: string | undefined): SealServerConfig[] {
-    return DEFAULT_SEAL_SERVER_CONFIGS[network || ""] ?? [];
+    return DEFAULT_SEAL_SERVER_CONFIGS[network || "mainnet"] ?? [];
 }
 
 export function getSealServerConfigsFromEnv(env: Env = process.env): SealServerConfig[] {
@@ -120,4 +120,28 @@ export function getSealServerConfigsFromEnv(env: Env = process.env): SealServerC
     }
 
     return getDefaultSealServerConfigs(env.SUI_NETWORK);
+}
+
+export function getSealThresholdFromEnv(
+    configs: SealServerConfig[],
+    env: Env = process.env,
+): number {
+    const totalWeight = configs.reduce((sum, config) => sum + config.weight, 0);
+    const defaultThreshold = totalWeight > 0 ? Math.min(2, totalWeight) : 2;
+    const rawThreshold = env.SEAL_THRESHOLD?.trim();
+
+    if (!rawThreshold) {
+        return defaultThreshold;
+    }
+
+    const threshold = Number(rawThreshold);
+    if (!Number.isInteger(threshold) || threshold < 1) {
+        throw new Error("SEAL_THRESHOLD must be a positive integer");
+    }
+
+    if (totalWeight > 0 && threshold > totalWeight) {
+        throw new Error("SEAL_THRESHOLD must be less than or equal to total configured SEAL server weight");
+    }
+
+    return threshold;
 }
