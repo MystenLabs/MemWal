@@ -235,11 +235,48 @@ export default function Playground() {
         setRememberLoading(true)
         setRememberResult(null)
         setRememberError(null)
+        const t0 = Date.now()
         try {
-            const data = await memwal.remember(rememberText)
-            setRememberResult(JSON.stringify(data, null, 2))
+            // Stage 1 — fire-and-accept. The relayer returns 202 with
+            // {job_id, status: "running"} as soon as the work is enqueued.
+            // Show this in the UI so the user can see the async-job pattern
+            // (the value prop the playground is demonstrating) before the
+            // polling stage replaces it.
+            const accepted = await memwal.rememberAsync(rememberText)
+            setRememberResult(
+                `// 1. accepted (HTTP 202) at T+${Date.now() - t0}ms\n` +
+                    JSON.stringify(accepted, null, 2) +
+                    `\n\n// 2. polling for terminal state (max 90s)...`
+            )
+
+            // Stage 2 — poll until terminal (done | failed | timeout).
+            // waitForRememberJob does signed GET /api/remember/{job_id}
+            // every ~1.5s with backoff, returns the final RememberResult
+            // on `done` or throws on `failed`/timeout.
+            const final = await memwal.waitForRememberJob(accepted.job_id, {
+                timeoutMs: 90_000,
+            })
+            setRememberResult(
+                `// 1. accepted (HTTP 202)\n` +
+                    JSON.stringify(accepted, null, 2) +
+                    `\n\n// 2. terminal state at T+${((Date.now() - t0) / 1000).toFixed(1)}s\n` +
+                    JSON.stringify(final, null, 2)
+            )
         } catch (err: unknown) {
-            setRememberError(err instanceof Error ? err.message : String(err))
+            const msg = err instanceof Error ? err.message : String(err)
+            // SDK timeout error includes job_id — surface it so the user can
+            // check the status manually via curl or hit Run again.
+            const jobId = (err as { jobId?: string } | null)?.jobId
+            if (jobId && /timed out/i.test(msg)) {
+                setRememberError(
+                    `${msg}\n\n` +
+                        `The job is still running on the server — re-run this ` +
+                        `step or query \`GET /api/remember/${jobId}\` ` +
+                        `directly to check its state.`
+                )
+            } else {
+                setRememberError(msg)
+            }
         } finally {
             setRememberLoading(false)
         }
@@ -516,14 +553,21 @@ const data = await memwal.health()
                     number={2}
                     title="remember"
                     description="accept a memory job → embed → encrypt → Walrus"
-                    code={`const result = await memwal.remember(
+                    code={`// 1. enqueue — returns 202 with { job_id, status: "running" }
+const accepted = await memwal.rememberAsync(
   "${rememberText.slice(0, 60)}..."
 )
 // namespace: "${namespace || 'default'}"
-// → { job_id, status }`}
+
+// 2. poll signed GET /api/remember/{job_id} until terminal
+const result = await memwal.waitForRememberJob(
+  accepted.job_id,
+  { timeoutMs: 90_000 }
+)
+// → { id, blob_id, owner, namespace }`}
                     onRun={runRemember}
                     result={rememberResult}
-                    resultLabel="memory job accepted"
+                    resultLabel="memory saved (accepted → terminal)"
                     error={rememberError}
                     loading={rememberLoading}
                 >
