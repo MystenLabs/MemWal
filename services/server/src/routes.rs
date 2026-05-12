@@ -1324,6 +1324,85 @@ pub async fn analyze(
     rate_limit::charge_explicit_weight(&state, &auth, reserved_additional_weight, "/api/analyze")
         .await?;
 
+    // ── Benchmark-mode bypass: synchronous ingestion ──────────────────────
+    //
+    // The production path below is async (encrypt → enqueue WalletJob →
+    // worker uploads to Walrus → insert_vector → SDK polls job_id). The
+    // benchmark harness expects `POST /api/analyze` to return when the
+    // memories are stored and searchable, the way the SDK's synchronous
+    // analyze contract worked before ENG-1406. In benchmark mode we honour
+    // that: per fact, embed → engine.store_blob(plaintext bytes) (the
+    // PlaintextEngine writes the `plaintext` column — no SEAL, no Walrus,
+    // no Sui transaction, no job row), in parallel across facts. The
+    // response carries the real stored ids and status "completed".
+    //
+    // Production behaviour is untouched — this branch only runs when
+    // BENCHMARK_MODE is on (which is off by default and not for production).
+    if state.config.benchmark_mode {
+        // Quota check on plaintext byte length (benchmark mode has no
+        // ciphertext — plaintext is the closest analog).
+        let total_plaintext_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+        rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
+
+        let store_tasks: Vec<_> = facts
+            .iter()
+            .map(|fact_text| {
+                let state = Arc::clone(&state);
+                let owner = owner.clone();
+                let namespace = namespace.clone();
+                let agent_pk = auth.public_key.clone();
+                let fact_text = fact_text.clone();
+                async move {
+                    let vector =
+                        generate_embedding(&state.http_client, &state.config, &fact_text).await?;
+                    let mref = state
+                        .engine
+                        .store_blob(
+                            &owner,
+                            &namespace,
+                            fact_text.as_bytes(),
+                            &vector,
+                            Some(&agent_pk),
+                        )
+                        .await?;
+                    Ok::<_, AppError>(AnalyzeAcceptedFact {
+                        text: fact_text,
+                        id: mref.id.clone(),
+                        job_id: mref.id,
+                    })
+                }
+            })
+            .collect();
+
+        let store_results = collect_bounded_results(store_tasks, ANALYZE_CONCURRENCY).await;
+        let mut stored_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(store_results.len());
+        for r in store_results {
+            stored_facts.push(r?);
+        }
+
+        let fact_count = stored_facts.len();
+        let job_ids: Vec<String> = stored_facts.iter().map(|f| f.id.clone()).collect();
+        tracing::info!(
+            "analyze (benchmark mode) complete: {} facts stored synchronously owner={} ns={}",
+            fact_count,
+            owner,
+            namespace
+        );
+
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(AnalyzeAcceptedResponse {
+                job_ids,
+                facts: stored_facts,
+                fact_count,
+                // "completed" (not "pending") — the memories are stored and
+                // searchable by the time this response is sent.
+                status: "completed".to_string(),
+                owner: owner.clone(),
+            }),
+        ));
+    }
+
     // Step 2: embed + SEAL encrypt all facts concurrently (no wallet needed yet).
     // This is the fast part (~300-500ms), done in the request handler so:
     //   - No plaintext stored in job payload
