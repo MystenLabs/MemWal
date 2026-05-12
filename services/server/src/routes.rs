@@ -2106,82 +2106,30 @@ pub async fn ask(
         .search_similar(&query_vector, owner, namespace, limit)
         .await?;
 
-    // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
-    // delegate key, then to the server's own key.
-    let credential =
-        seal::SealCredential::from_auth_or_fallback(&auth, state.config.sui_private_key.as_deref())
-            .ok_or_else(|| {
-                AppError::Internal(
-            "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)"
-                .into(),
-        )
-            })?;
-
-    // Download + SEAL decrypt all memories concurrently
-    let db = &state.db;
-    let tasks: Vec<_> = hits
-        .iter()
-        .map(|hit| {
-            let walrus_client = &state.walrus_client;
-            let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
-            let blob_id = hit.blob_id.clone();
-            let distance = hit.distance;
-            let credential = credential.clone();
-            let package_id = state.config.package_id.clone();
-            let account_id = auth.account_id.clone();
-            let owner_for_cleanup = owner.clone();
-            async move {
-                let encrypted_data = match walrus::download_blob(walrus_client, &blob_id).await {
-                    Ok(data) => data,
-                    Err(AppError::BlobNotFound(msg)) => {
-                        // Blob expired on Walrus — clean up from DB reactively
-                        tracing::warn!("Blob expired, cleaning up: {}", msg);
-                        cleanup_expired_blob(db, &blob_id, &owner_for_cleanup).await;
-                        return None;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Download failed for {}: {}", blob_id, e);
-                        return None;
-                    }
-                };
-                match seal::seal_decrypt(
-                    http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
-                    &encrypted_data,
-                    &credential,
-                    &package_id,
-                    &account_id,
-                )
-                .await
-                {
-                    Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some(RecallResult {
-                            blob_id,
-                            text,
-                            distance,
-                        }),
-                        Err(e) => {
-                            tracing::warn!("Invalid UTF-8: {}", e);
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
-                        None
-                    }
-                }
-            }
-        })
-        .collect();
-
-    let memories: Vec<RecallResult> = futures::future::join_all(tasks)
+    // Hydrate the hits through the storage engine, concurrently — same
+    // blob cache -> Walrus download -> SEAL decrypt -> UTF-8 path as
+    // recall, with reactive cleanup on Walrus 404. The engine derives the
+    // SEAL credential from `auth`; per-blob errors are logged inside it.
+    let fetch_tasks = hits.into_iter().map(|hit| {
+        let auth = &auth;
+        let engine = &state.engine;
+        async move { engine.fetch_one(owner, &hit.blob_id, hit.distance, auth).await }
+    });
+    let memories: Vec<RecallResult> = futures::future::join_all(fetch_tasks)
         .await
         .into_iter()
-        .flatten()
-        .collect();
+        // fetch_one returns Ok(None) for blobs that are gone / failed to
+        // decrypt; surface only the AppError (sidecar down, etc.).
+        .filter_map(|r| match r {
+            Ok(Some(m)) => Some(Ok(RecallResult {
+                blob_id: m.blob_id,
+                text: m.text,
+                distance: m.distance,
+            })),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
 
     let memories_used = memories.len();
     tracing::info!("ask: {} memories found for context", memories_used);
