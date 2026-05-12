@@ -186,12 +186,22 @@ export class MemWal {
      * resolves at the terminal state and hides progress.
      */
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
-        return this.signedRequest<RememberJobStatus>(
+        const status = await this.signedRequest<RememberStatusResponse>(
             "GET",
             `/api/remember/${jobId}`,
             {},
             [200, 404],
         );
+
+        if (!("status" in status)) {
+            return {
+                job_id: jobId,
+                status: "not_found",
+                error: status.error ?? `remember job not found: ${jobId}`,
+            };
+        }
+
+        return status;
     }
 
     /**
