@@ -140,7 +140,7 @@ export default function ConnectMcp() {
     const postCallback = useCallback(
         async (payload: McpCallbackPayload) => {
             try {
-                const res = await fetch(`http://localhost:${port}/callback`, {
+                const res = await fetch(`http://127.0.0.1:${port}/callback`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -234,6 +234,7 @@ export default function ConnectMcp() {
         publicKey,
         delegateAddress,
         label,
+        state,
         postCallback,
     ])
 
@@ -249,12 +250,14 @@ export default function ConnectMcp() {
 
     return (
         <div style={pageStyle}>
-            <header style={headerStyle}>
-                <img src={memwalLogo} alt="MemWal" style={{ height: 32 }} />
-                <span style={{ fontSize: 18, fontWeight: 600 }}>
-                    Connect MCP client
-                </span>
-            </header>
+            <nav className="lp-nav">
+                <div className="lp-nav-inner">
+                    <Link to="/" className="lp-nav-brand" style={mcpNavBrandStyle}>
+                        <img src={memwalLogo} alt="MemWal" height="28" />
+                        <span style={mcpNavTitleStyle}>Connect MCP client</span>
+                    </Link>
+                </div>
+            </nav>
 
             <main style={mainStyle}>
                 {!paramsValid && (
@@ -304,7 +307,6 @@ export default function ConnectMcp() {
                         payload={callbackPayload}
                         callbackDelivered={callbackDelivered}
                         port={port}
-                        relayer={relayer}
                     />
                 )}
 
@@ -370,11 +372,6 @@ function ConsentCard({
                 <span style={{ fontWeight: 700 }}>{label}</span> wants access to
                 your MemWal memory
             </h1>
-            <p style={subtleStyle}>
-                Approve this request to register a delegate key on chain. The
-                MCP client will then be able to read and write memories on your
-                behalf, until you revoke it from the dashboard.
-            </p>
 
             <h3 style={h3Style}>Permissions requested</h3>
             <ul style={ulStyle}>
@@ -417,519 +414,63 @@ function SuccessCard({
     payload,
     callbackDelivered,
     port,
-    relayer,
 }: {
     payload: McpCallbackPayload
     callbackDelivered: boolean | null
     port: string
-    relayer: string
 }) {
     return (
-        <>
-            <section style={cardStyle}>
-                <h1 style={h1Style}>
-                    <span style={{ color: '#16a34a' }}>✓</span> MCP client connected
-                </h1>
-                <p>Delegate key is now registered on chain.</p>
-                {callbackDelivered === true && (
-                    <p style={subtleStyle}>
-                        Credentials handed off to your MCP client. You can close
-                        this tab — it's safe.
-                    </p>
-                )}
-                {callbackDelivered === false && (
-                    <>
-                        <p style={{ color: '#dc2626' }}>
-                            The MCP listener at{' '}
-                            <code>http://localhost:{port}/callback</code> didn't
-                            respond. The on-chain registration succeeded but your
-                            MCP client process may have died. Restart it and try
-                            again — the delegate key is already valid.
-                        </p>
-                    </>
-                )}
-                <dl style={dlStyle}>
-                    <dt>Account</dt>
-                    <dd>
-                        <code>{payload.accountId}</code>
-                    </dd>
-                    <dt>Tx digest</dt>
-                    <dd>
-                        <code>{payload.txDigest}</code>
-                    </dd>
-                </dl>
-                <p>
-                    <Link to="/dashboard" style={primaryButton}>
-                        Go to dashboard
-                    </Link>
+        <section style={cardStyle}>
+            <h1 style={h1Style}>
+                <span style={{ color: '#16a34a' }}>✓</span> MCP client connected
+            </h1>
+            {callbackDelivered === true && (
+                <p style={subtleStyle}>
+                    Credentials were handed off to your MCP client. You can close
+                    this tab safely.
                 </p>
-            </section>
-
-            <ClientConfigPanel
-                relayer={relayer}
-                accountId={payload.accountId}
-            />
-        </>
-    )
-}
-
-/**
- * Maps a relayer URL to the matching CLI flag for `@memwal/mcp`. Keeps the
- * generated config snippets clean (e.g. `--dev` instead of pasting the full
- * URL) so the user can mentally separate the package name from the env.
- */
-function relayerFlag(relayer: string): { args: string[]; envName: string } {
-    const u = relayer.replace(/\/+$/, '')
-    if (u === 'https://relayer.memwal.ai') return { args: [], envName: 'prod' }
-    if (u === 'https://relayer.dev.memwal.ai')
-        return { args: ['--dev'], envName: 'dev' }
-    if (u === 'https://relayer.staging.memwal.ai')
-        return { args: ['--staging'], envName: 'staging' }
-    if (u === 'http://127.0.0.1:3005' || u === 'http://localhost:3005')
-        return { args: ['--local'], envName: 'local' }
-    return { args: ['--relayer', u], envName: 'custom' }
-}
-
-interface ClientPreset {
-    id: string
-    label: string
-    configPath: string
-    restartHint: string
-    serverName: string
-}
-
-const CLIENT_PRESETS: ClientPreset[] = [
-    {
-        id: 'cursor',
-        label: 'Cursor',
-        configPath: '~/.cursor/mcp.json',
-        restartHint: 'Cmd+Shift+P → "Developer: Reload Window"',
-        serverName: 'memwal',
-    },
-    {
-        id: 'claude-desktop',
-        label: 'Claude Desktop',
-        configPath:
-            '~/Library/Application Support/Claude/claude_desktop_config.json',
-        restartHint: 'Quit Claude Desktop, then reopen it.',
-        serverName: 'memwal',
-    },
-    {
-        id: 'claude-code',
-        label: 'Claude Code',
-        configPath: '<project>/.mcp.json',
-        restartHint: 'Restart `claude` in the project directory.',
-        serverName: 'memwal',
-    },
-    {
-        id: 'antigravity',
-        label: 'Antigravity',
-        configPath: '~/.antigravity/mcp.json',
-        restartHint: 'Reload Antigravity from the command palette.',
-        serverName: 'memwal',
-    },
-]
-
-function buildConfigSnippet(
-    preset: ClientPreset,
-    flagArgs: string[],
-): string {
-    const args = ['-y', '@memwal/mcp', ...flagArgs]
-    const cfg = {
-        mcpServers: {
-            [preset.serverName]: {
-                command: 'npx',
-                args,
-            },
-        },
-    }
-    return JSON.stringify(cfg, null, 2)
-}
-
-/**
- * HTTP transport snippet — uses the relayer's `/api/mcp` (Streamable HTTP
- * MCP, 2025-06 spec). Drops the `npx` package install: client connects
- * straight to the relayer URL, auth on every request via Bearer header.
- *
- * Bearer + accountId are placeholders here because the dashboard doesn't
- * see the user's delegate seed (it's generated client-side in the bridge
- * or, eventually, in a future browser-only consent flow). User pastes
- * the actual values from `~/.memwal/credentials.json`.
- */
-function buildHttpConfigSnippet(
-    preset: ClientPreset,
-    relayer: string,
-    accountId: string,
-): string {
-    const url = `${relayer.replace(/\/+$/, '')}/api/mcp`
-    const cfg = {
-        mcpServers: {
-            [preset.serverName]: {
-                url,
-                headers: {
-                    Authorization: 'Bearer <YOUR_DELEGATE_PRIVATE_KEY>',
-                    'x-memwal-account-id': accountId,
-                },
-            },
-        },
-    }
-    return JSON.stringify(cfg, null, 2)
-}
-
-type TransportMode = 'stdio' | 'http'
-
-function ClientConfigPanel({
-    relayer,
-    accountId,
-}: {
-    relayer: string
-    accountId: string
-}) {
-    const [activeId, setActiveId] = useState<string>(CLIENT_PRESETS[0].id)
-    const [transport, setTransport] = useState<TransportMode>('stdio')
-    const [copied, setCopied] = useState<string | null>(null)
-    const flag = useMemo(() => relayerFlag(relayer), [relayer])
-    const active = CLIENT_PRESETS.find((c) => c.id === activeId)!
-    const snippet = useMemo(
-        () =>
-            transport === 'stdio'
-                ? buildConfigSnippet(active, flag.args)
-                : buildHttpConfigSnippet(active, relayer, accountId),
-        [active, flag.args, transport, relayer, accountId],
-    )
-
-    const copyToClipboard = useCallback(async (text: string, key: string) => {
-        try {
-            await navigator.clipboard.writeText(text)
-            setCopied(key)
-            setTimeout(() => setCopied((c) => (c === key ? null : c)), 1800)
-        } catch {
-            /* clipboard blocked — user has to copy manually */
-        }
-    }, [])
-
-    return (
-        <section style={panelStyle}>
-            <h2 style={panelTitle}>connect more ai clients</h2>
-            <p style={panelSubtle}>
-                Same delegate key works across every MCP client. Pick one,
-                paste the snippet into its config file, restart it.
+            )}
+            {callbackDelivered === false && (
+                <p style={{ color: '#dc2626' }}>
+                    The on-chain registration succeeded, but the local MCP login
+                    listener at <code>http://127.0.0.1:{port}/callback</code>{' '}
+                    did not accept the callback. Restart the MCP login command and
+                    try again so credentials can be saved locally.
+                </p>
+            )}
+            <dl style={dlStyle}>
+                <dt>Account</dt>
+                <dd>
+                    <code>{payload.accountId}</code>
+                </dd>
+            </dl>
+            <p>
+                <Link to="/dashboard" style={primaryButton}>
+                    Go to dashboard
+                </Link>
             </p>
-
-            <div style={transportBarStyle}>
-                <button
-                    onClick={() => setTransport('stdio')}
-                    style={
-                        transport === 'stdio'
-                            ? transportActiveStyle
-                            : transportInactiveStyle
-                    }
-                >
-                    stdio + package <span style={transportHintStyle}>(recommended)</span>
-                </button>
-                <button
-                    onClick={() => setTransport('http')}
-                    style={
-                        transport === 'http'
-                            ? transportActiveStyle
-                            : transportInactiveStyle
-                    }
-                >
-                    http <span style={transportHintStyle}>(no install)</span>
-                </button>
-            </div>
-
-            <div style={tabBarStyle}>
-                {CLIENT_PRESETS.map((c) => (
-                    <button
-                        key={c.id}
-                        onClick={() => setActiveId(c.id)}
-                        style={c.id === activeId ? tabActiveStyle : tabStyle}
-                    >
-                        {c.label}
-                    </button>
-                ))}
-            </div>
-
-            <div style={configRowStyle}>
-                <span style={configLabelStyle}>config file</span>
-                <div style={configPathRowStyle}>
-                    <code style={configPathStyle}>{active.configPath}</code>
-                    <button
-                        style={copyChipStyle}
-                        onClick={() =>
-                            copyToClipboard(
-                                active.configPath,
-                                `${active.id}-path`,
-                            )
-                        }
-                    >
-                        {copied === `${active.id}-path` ? '✓' : 'copy'}
-                    </button>
-                </div>
-            </div>
-
-            <span style={configLabelStyle}>snippet</span>
-            <pre style={snippetStyle}>{snippet}</pre>
-
-            <div style={actionRowStyle}>
-                <button
-                    style={copyBigStyle}
-                    onClick={() => copyToClipboard(snippet, `${active.id}-json`)}
-                >
-                    {copied === `${active.id}-json`
-                        ? '✓ copied'
-                        : 'copy snippet'}
-                </button>
-                <p style={restartHintStyle}>
-                    <strong>then:</strong> {active.restartHint}
-                </p>
-            </div>
-
-            {flag.envName !== 'prod' && (
-                <p style={envBadge}>
-                    Targeting <code>{flag.envName}</code> environment. Drop the
-                    flag once you're on production.
-                </p>
-            )}
-
-            {transport === 'http' && (
-                <p style={httpHintStyle}>
-                    <strong>Bearer token:</strong> open{' '}
-                    <code>~/.memwal/credentials.json</code> and copy the{' '}
-                    <code>delegatePrivateKey</code> value into the{' '}
-                    <code>&lt;YOUR_DELEGATE_PRIVATE_KEY&gt;</code>{' '}
-                    placeholder. Keep this value secret — anyone with it can
-                    read and write to your MemWal memory until you revoke
-                    the delegate key from the dashboard.
-                </p>
-            )}
         </section>
     )
 }
 
-// ---------- ClientConfigPanel styles (match SuccessCard / Dashboard) ----------
-
-const panelStyle: React.CSSProperties = {
-    // Same shell as cardStyle for visual consistency.
-    background: '#fff',
-    border: '2px solid #000',
-    borderRadius: 12,
-    padding: 28,
-    boxShadow: '4px 4px 0 #000',
-}
-
-const panelTitle: React.CSSProperties = {
-    margin: '0 0 8px',
-    fontSize: 20,
-    fontWeight: 800,
-    textTransform: 'lowercase' as const,
-    letterSpacing: -0.3,
-}
-
-const panelSubtle: React.CSSProperties = {
-    margin: '6px 0 18px',
-    fontSize: 14,
-    lineHeight: 1.55,
-    color: '#3a3a3a',
-}
-
-const tabBarStyle: React.CSSProperties = {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 20,
-}
-
-const tabStyle: React.CSSProperties = {
-    padding: '8px 14px',
-    background: '#fff',
-    border: '2px solid #000',
-    borderRadius: 999,
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-    boxShadow: '2px 2px 0 #000',
-}
-
-const tabActiveStyle: React.CSSProperties = {
-    ...tabStyle,
-    background: '#CAB1FF',
-}
-
-// Two-row layout so long paths (Claude Desktop ~80 chars) can wrap freely
-// without crowding the copy chip. Was a flex row → text got truncated.
-const configRowStyle: React.CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-    marginBottom: 16,
-}
-
-const configLabelStyle: React.CSSProperties = {
-    fontSize: 11,
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.6,
-    color: '#525252',
-    fontWeight: 700,
-}
-
-const configPathRowStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'stretch',
-    gap: 8,
-}
-
-const configPathStyle: React.CSSProperties = {
-    flex: 1,
-    fontFamily: 'JetBrains Mono, Fira Code, monospace',
-    fontSize: 12.5,
-    lineHeight: 1.5,
-    background: 'rgba(202, 177, 255, 0.30)',
-    padding: '8px 12px',
-    borderRadius: 8,
-    border: '2px solid #000',
-    wordBreak: 'break-all' as const,
-    overflowWrap: 'anywhere' as const,
-    whiteSpace: 'normal' as const,
-    display: 'flex',
-    alignItems: 'center',
-}
-
-const copyChipStyle: React.CSSProperties = {
-    padding: '6px 14px',
-    fontSize: 12,
-    fontWeight: 700,
-    background: '#fff',
-    border: '2px solid #000',
-    borderRadius: 8,
-    cursor: 'pointer',
-    boxShadow: '2px 2px 0 #000',
-    flexShrink: 0,
-    alignSelf: 'center',
-}
-
-const snippetStyle: React.CSSProperties = {
-    background: '#0f0f0f',
-    color: '#f7f7f5',
-    border: '2px solid #000',
-    borderRadius: 10,
-    padding: 16,
-    fontFamily: 'JetBrains Mono, Fira Code, monospace',
-    fontSize: 12.5,
-    lineHeight: 1.55,
-    overflow: 'auto',
-    margin: '0 0 14px',
-    boxShadow: '3px 3px 0 #000',
-    whiteSpace: 'pre-wrap' as const,
-    wordBreak: 'break-all' as const,
-}
-
-const actionRowStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    flexWrap: 'wrap',
-    marginBottom: 14,
-}
-
-const copyBigStyle: React.CSSProperties = {
-    padding: '10px 22px',
-    background: '#F0FFA0',
-    border: '2px solid #000',
-    borderRadius: 999,
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: 'pointer',
-    boxShadow: '3px 3px 0 #000',
-}
-
-const restartHintStyle: React.CSSProperties = {
-    fontSize: 13,
-    color: '#525252',
-    margin: 0,
-}
-
-const envBadge: React.CSSProperties = {
-    margin: '12px 0 0',
-    fontSize: 12,
-    color: '#7c2d12',
-    background: '#fef3c7',
-    padding: '8px 12px',
-    border: '2px solid #000',
-    borderRadius: 8,
-    display: 'inline-block',
-    fontWeight: 600,
-}
-
-const transportBarStyle: React.CSSProperties = {
-    display: 'flex',
-    gap: 8,
-    marginBottom: 14,
-    padding: 4,
-    border: '2px solid #000',
-    borderRadius: 12,
-    background: '#FAF8F5',
-    boxShadow: '2px 2px 0 #000',
-}
-
-const transportActiveStyle: React.CSSProperties = {
-    flex: 1,
-    padding: '8px 14px',
-    background: '#0f0f0f',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 8,
-    fontSize: 13,
-    fontWeight: 700,
-    cursor: 'pointer',
-}
-
-const transportInactiveStyle: React.CSSProperties = {
-    flex: 1,
-    padding: '8px 14px',
-    background: 'transparent',
-    color: '#525252',
-    border: 'none',
-    borderRadius: 8,
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-}
-
-const transportHintStyle: React.CSSProperties = {
-    fontSize: 11,
-    fontWeight: 500,
-    opacity: 0.8,
-    marginLeft: 4,
-}
-
-const httpHintStyle: React.CSSProperties = {
-    margin: '12px 0 0',
-    fontSize: 13,
-    lineHeight: 1.55,
-    color: '#3a3a3a',
-    background: 'rgba(240, 255, 160, 0.40)',
-    padding: '12px 14px',
-    border: '2px solid #000',
-    borderRadius: 8,
-}
-
 // ---------- styles (match Dashboard's neo-brutalism .card pattern) ----------
+
+const mcpNavBrandStyle: React.CSSProperties = {
+    gap: 12,
+}
+
+const mcpNavTitleStyle: React.CSSProperties = {
+    fontSize: '1rem',
+    fontWeight: 700,
+    color: '#000',
+    lineHeight: 1,
+    transform: 'translateY(8px)',
+}
 
 const pageStyle: React.CSSProperties = {
     minHeight: '100vh',
     background: '#FAF8F5', // same as --color-tusk used by .card / body
     color: '#1a1a1a',
-}
-
-const headerStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    padding: '16px 24px',
-    borderBottom: '2px solid #000',
-    background: '#fff',
 }
 
 const mainStyle: React.CSSProperties = {
@@ -987,13 +528,16 @@ const subtleStyle: React.CSSProperties = {
 }
 
 const primaryButton: React.CSSProperties = {
-    display: 'inline-block',
-    padding: '12px 24px',
-    background: '#000',
-    color: '#fff',
-    borderRadius: 999,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '12px 26px',
+    background: '#E8FF75',
+    color: '#000',
+    borderRadius: 12,
     border: '2px solid #000',
-    fontSize: 14,
+    fontSize: '0.94rem',
     fontWeight: 700,
     cursor: 'pointer',
     textDecoration: 'none',

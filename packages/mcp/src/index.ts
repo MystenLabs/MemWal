@@ -26,6 +26,7 @@ interface ParsedArgs {
     forceLogin: boolean;
     relayerUrl?: string;
     webUrl?: string;
+    label?: string;
 }
 
 /** Per-environment URL shortcuts. `--dev`/`--staging`/`--local` set both
@@ -34,7 +35,7 @@ const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
     prod: { relayer: "https://relayer.memwal.ai", web: "https://memwal.ai" },
     dev: { relayer: "https://relayer.dev.memwal.ai", web: "https://dev.memwal.ai" },
     staging: { relayer: "https://relayer.staging.memwal.ai", web: "https://staging.memwal.ai" },
-    local: { relayer: "http://127.0.0.1:3005", web: "http://localhost:5174" },
+    local: { relayer: "http://127.0.0.1:8000", web: "http://localhost:5173" },
 };
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -73,10 +74,14 @@ function parseArgs(argv: string[]): ParsedArgs {
             case "--web":
                 out.webUrl = next();
                 break;
+            case "--label":
+                out.label = next();
+                break;
             default:
                 // Allow `--relayer=URL` and `--web-url=URL` forms too.
                 if (a?.startsWith("--relayer=")) out.relayerUrl = a.split("=", 2)[1];
                 else if (a?.startsWith("--web-url=")) out.webUrl = a.split("=", 2)[1];
+                else if (a?.startsWith("--label=")) out.label = a.split("=", 2)[1];
                 // Unknown flag: ignore silently.
                 break;
         }
@@ -110,7 +115,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // it to the actual client's `clientInfo.name` ("Cursor", "Claude",
     // "Antigravity", ...) after the first MCP `initialize` request. User
     // can rename anytime from the dashboard.
-    const label = "MCP Client";
+    const label = args.label ?? process.env.MEMWAL_CLIENT_LABEL ?? "MCP Client";
 
     let creds = loadCreds();
     if (creds && args.relayerUrl && creds.relayerUrl !== args.relayerUrl) {
@@ -231,7 +236,7 @@ function printHelp(): void {
         '    "mcpServers": {',
         '      "memwal": {',
         '        "command": "npx",',
-        '        "args": ["-y", "@memwal/mcp"]',
+        '        "args": ["-y", "@mysten-incubation/memwal-mcp"]',
         "      }",
         "    }",
         "  }",
@@ -242,7 +247,7 @@ function printHelp(): void {
         '      "memwal": {',
         '        "command": "npx",',
         '        "args": [',
-        '          "-y", "@memwal/mcp",',
+        '          "-y", "@mysten-incubation/memwal-mcp",',
         '          "--relayer", "https://relayer.dev.memwal.ai"',
         "        ]",
         "      }",

@@ -129,8 +129,8 @@ fn spawn_prepare_remember_job(
             // summarized first. Summarization runs sequentially before the
             // embed/encrypt fan-out because the summary is the embedder's
             // input — encrypt still uses the original `text`.
-            let needs_summary = text.len() > SUMMARIZE_THRESHOLD_BYTES
-                && state.config.openai_api_key.is_some();
+            let needs_summary =
+                text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
             let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
                 let summary =
                     summarize_for_embedding(&state.http_client, &state.config, &text).await?;
@@ -575,10 +575,9 @@ async fn summarize_with_prompt(
         )));
     }
 
-    let api_resp: ChatCompletionResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse summarization response: {}", e)))?;
+    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse summarization response: {}", e))
+    })?;
 
     let summary = api_resp
         .choices
@@ -587,7 +586,9 @@ async fn summarize_with_prompt(
         .unwrap_or_default();
 
     if summary.is_empty() {
-        return Err(AppError::Internal("Summarization returned empty result".into()));
+        return Err(AppError::Internal(
+            "Summarization returned empty result".into(),
+        ));
     }
 
     Ok(summary)
@@ -1894,7 +1895,9 @@ mod tests {
         let chunks = split_text_chunks(&text, SUMMARIZE_CHUNK_BYTES);
 
         assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
         assert_eq!(chunks.concat(), text);
     }
 
@@ -1947,33 +1950,30 @@ mod tests {
     #[tokio::test]
     async fn summarize_for_embedding_bounds_each_llm_request() {
         let seen_input_lengths = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
-        let app = axum::Router::new()
-            .route(
-                "/chat/completions",
-                axum::routing::post({
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post({
+                let seen_input_lengths = Arc::clone(&seen_input_lengths);
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
                     let seen_input_lengths = Arc::clone(&seen_input_lengths);
-                    move |axum::Json(body): axum::Json<serde_json::Value>| {
-                        let seen_input_lengths = Arc::clone(&seen_input_lengths);
-                        async move {
-                            let input_len = body["messages"][1]["content"]
-                                .as_str()
-                                .expect("user message content")
-                                .len();
-                            seen_input_lengths.lock().unwrap().push(input_len);
-                            axum::Json(serde_json::json!({
-                                "choices": [{
-                                    "message": {
-                                        "content": "mock summary"
-                                    }
-                                }]
-                            }))
-                        }
+                    async move {
+                        let input_len = body["messages"][1]["content"]
+                            .as_str()
+                            .expect("user message content")
+                            .len();
+                        seen_input_lengths.lock().unwrap().push(input_len);
+                        axum::Json(serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "content": "mock summary"
+                                }
+                            }]
+                        }))
                     }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -1990,9 +1990,7 @@ mod tests {
         assert_eq!(summary, "mock summary");
         let seen = seen_input_lengths.lock().unwrap();
         assert!(seen.len() > 1);
-        assert!(seen
-            .iter()
-            .all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
+        assert!(seen.iter().all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
         assert!(seen.iter().all(|len| *len < MAX_REMEMBER_TEXT_BYTES / 4));
     }
 

@@ -328,9 +328,11 @@ async function handleStreamableHttp(
     // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
     // the first message-init response; we cache the connection only
     // after we know the assigned id.
+    let initialized = false;
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newId: string) => {
+            initialized = true;
             let cleanedUp = false;
             const cleanup = () => {
                 if (cleanedUp) return;
@@ -373,6 +375,14 @@ async function handleStreamableHttp(
         // mounted on this route so req still has the raw stream.
         // The transport reads the body itself.
         await transport.handleRequest(req, res);
+        if (!initialized) {
+            releaseSlot();
+            await transport.close().catch((err) => {
+                log.warn("mcp.streamable_uninitialized_close_failed", {
+                    err: err instanceof Error ? err.message : String(err),
+                });
+            });
+        }
     } catch (err) {
         releaseSlot();
         throw err;
@@ -468,17 +478,27 @@ export function mountMcpRoutes(
 
 /** Active session count for /healthz observability. */
 export function getMcpSessionCount(): number {
-    return sessionsById.size;
+    return sessionsById.size + streamableSessions.size;
 }
 
 /** Gracefully close all active MCP transports during sidecar shutdown. */
 export async function shutdownMcpSessions(): Promise<void> {
-    log.info("mcp.shutting_down", { active_sessions: sessionsById.size });
+    log.info("mcp.shutting_down", { active_sessions: getMcpSessionCount() });
     for (const conn of sessionsById.values()) {
         try {
             await conn.transport.close();
         } catch (err) {
             log.warn("mcp.session.close_failed", {
+                sessionKey: conn.sessionKey,
+                err: err instanceof Error ? err.message : String(err),
+            });
+        }
+    }
+    for (const conn of streamableSessions.values()) {
+        try {
+            await conn.transport.close();
+        } catch (err) {
+            log.warn("mcp.streamable_session.close_failed", {
                 sessionKey: conn.sessionKey,
                 err: err instanceof Error ? err.message : String(err),
             });

@@ -90,9 +90,12 @@ async fn main() {
     let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
+    let mcp_relayer_url = std::env::var("MEMWAL_RELAYER_URL")
+        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
     let mut sidecar_child = tokio::process::Command::new("npx")
         .args(["tsx", "sidecar-server.ts"])
         .current_dir(&scripts_dir)
+        .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()

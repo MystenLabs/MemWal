@@ -94,6 +94,8 @@ async function openSseStream(
     let buf = "";
     let endpointResolved = false;
     let endpointPath = "";
+    let streamEnded = false;
+    let streamError: string | null = null;
     const events: RpcMessage[] = [];
     type Waker = () => void;
     let queueResolver: Waker | null = null;
@@ -149,6 +151,7 @@ async function openSseStream(
         } catch (err) {
             if (!controller.signal.aborted) {
                 const msg = err instanceof Error ? err.message : String(err);
+                streamError = msg;
                 // `terminated` is undici's keep-alive idle drop — happens on
                 // long-idle SSE in manual tests. The MCP client wrapping us
                 // (Cursor / Claude Desktop) will re-spawn the process if it
@@ -160,6 +163,7 @@ async function openSseStream(
                 }
             }
         } finally {
+            streamEnded = true;
             // Wake any waiter so they see EOF.
             wake();
         }
@@ -167,6 +171,12 @@ async function openSseStream(
 
     // Wait for the `endpoint` event (or first message) before returning.
     while (!endpointResolved) {
+        if (streamEnded) {
+            controller.abort();
+            throw new Error(
+                `MemWal relayer SSE handshake ended before endpoint event${streamError ? `: ${streamError}` : ""}`
+            );
+        }
         await new Promise<void>((r) => (queueResolver = r));
     }
 
@@ -174,6 +184,7 @@ async function openSseStream(
         async next(): Promise<IteratorResult<RpcMessage>> {
             while (events.length === 0) {
                 if (controller.signal.aborted) return { value: undefined as never, done: true };
+                if (streamEnded) return { value: undefined as never, done: true };
                 await new Promise<void>((r) => (queueResolver = r));
             }
             return { value: events.shift()!, done: false };

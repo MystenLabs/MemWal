@@ -1,12 +1,12 @@
 {
-    "name": "@memwal/mcp",
+    "name": "@mysten-incubation/memwal-mcp",
     "version": "0.0.1",
     "description": "MemWal MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the MemWal relayer. Handles browser-based wallet login on first run.",
     "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "bin": {
-        "memwal-mcp": "./dist/bin/memwal-mcp.js"
+        "memwal-mcp": "dist/bin/memwal-mcp.js"
     },
     "exports": {
         ".": {
