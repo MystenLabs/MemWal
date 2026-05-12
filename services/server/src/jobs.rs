@@ -16,10 +16,11 @@ use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 use base64::Engine as _;
 use futures::stream::{self, StreamExt as _};
+use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AppState, BULK_UPLOAD_CONCURRENCY};
+use crate::types::{AppState, BLOB_CACHE_KEY_PREFIX, BULK_UPLOAD_CONCURRENCY};
 use crate::walrus::SetMetadataBatchEntry;
 
 // ============================================================
@@ -72,6 +73,35 @@ pub enum WalletOperation {
 
 fn default_epochs() -> u32 {
     50
+}
+
+pub(crate) async fn warm_blob_cache_after_upload(
+    state: &AppState,
+    blob_id: &str,
+    ciphertext: &[u8],
+) {
+    let ttl_secs = state.blob_cache_ttl.as_secs();
+    if ttl_secs == 0 || state.blob_cache_max_bytes == 0 {
+        return;
+    }
+
+    if ciphertext.len() > state.blob_cache_max_bytes {
+        tracing::info!(
+            "blob cache warm skipped for {}: {} bytes exceeds max {}",
+            blob_id,
+            ciphertext.len(),
+            state.blob_cache_max_bytes
+        );
+        return;
+    }
+
+    let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
+    let mut redis = state.redis.clone();
+    let result: redis::RedisResult<()> =
+        redis.set_ex(cache_key, ciphertext.to_vec(), ttl_secs).await;
+    if let Err(e) = result {
+        tracing::warn!("blob cache warm failed for {}: {}", blob_id, e);
+    }
 }
 
 /// A wallet-pinned job. `wallet_index` determines which per-wallet worker
@@ -361,6 +391,8 @@ async fn execute_upload_and_transfer(
     };
     let blob_id = upload.blob_id.clone();
 
+    warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
+
     if let Some(ref jid) = remember_job_id {
         let _ = sqlx::query(
             "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, updated_at = NOW() WHERE id = $2",
@@ -556,6 +588,8 @@ pub async fn execute_remember(
         Err(e) => fail!(format!("walrus upload failed: {}", e)),
     };
     let blob_id = upload.blob_id.clone();
+
+    warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
 
     // ── Step 4: insert_vector ────────────────────────────────────
     let blob_size = encrypted.len() as i64;
@@ -779,6 +813,8 @@ pub async fn execute_bulk_remember(
                 .bind(&item.job_id)
                 .execute(state.db.pool())
                 .await;
+
+                warm_blob_cache_after_upload(&state, &upload.blob_id, &encrypted).await;
 
                 Ok(UploadOk {
                     job_id: item.job_id,
