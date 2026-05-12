@@ -1406,6 +1406,68 @@ pub async fn recall_manual(
     }))
 }
 
+/// POST /api/forget
+///
+/// Soft-delete every memory in `owner`'s `namespace`. Used by the
+/// benchmark harness for inter-run cleanup; also a general admin op.
+/// Mode-blind — works the same in production and benchmark mode (in
+/// benchmark mode this also removes the plaintext rows). Owner-scoped:
+/// only the caller's own rows are deleted.
+pub async fn forget(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<ForgetRequest>,
+) -> Result<Json<ForgetResponse>, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+    tracing::info!("forget: owner={} ns={}", owner, namespace);
+
+    let deleted = state.db.delete_by_namespace(owner, namespace).await?;
+
+    tracing::info!(
+        "forget complete: deleted {} entries for owner={} ns={}",
+        deleted,
+        owner,
+        namespace
+    );
+
+    Ok(Json(ForgetResponse {
+        deleted,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
+}
+
+/// POST /api/stats
+///
+/// Return memory count + stored bytes for `owner`'s `namespace`. Used by
+/// the benchmark harness to verify ingestion. Mode-blind. Owner-scoped.
+pub async fn stats(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<StatsRequest>,
+) -> Result<Json<StatsResponse>, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    let (memory_count, storage_bytes) = state.db.namespace_stats(owner, namespace).await?;
+
+    tracing::info!(
+        "stats: owner={} ns={} count={} bytes={}",
+        owner,
+        namespace,
+        memory_count,
+        storage_bytes
+    );
+
+    Ok(Json(StatsResponse {
+        memory_count,
+        storage_bytes,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
+}
+
 /// POST /api/analyze
 ///
 /// AI fact extraction flow:

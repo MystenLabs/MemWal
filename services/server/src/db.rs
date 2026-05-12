@@ -252,8 +252,28 @@ impl VectorDb {
         Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
     }
 
+    /// Count + total stored bytes for a given owner + namespace.
+    /// Used by `POST /api/stats` for harness verification. Returns
+    /// `(memory_count, storage_bytes)`; both 0 if the namespace is empty.
+    pub async fn namespace_stats(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<(i64, i64), AppError> {
+        let row: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*)::BIGINT, COALESCE(SUM(blob_size_bytes)::BIGINT, 0)
+             FROM vector_entries WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get namespace stats: {}", e)))?;
+
+        Ok(row)
+    }
+
     /// Delete all vector entries for a given owner + namespace
-    #[allow(dead_code)]
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
             .bind(owner)

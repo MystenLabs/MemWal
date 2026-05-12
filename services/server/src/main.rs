@@ -454,6 +454,10 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        // ENG-1747: admin/harness endpoints — namespace delete + stats.
+        // Mode-blind; owner-scoped via AuthInfo.
+        .route("/api/forget", post(routes::forget))
+        .route("/api/stats", post(routes::stats))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(

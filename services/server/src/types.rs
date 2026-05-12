@@ -536,6 +536,37 @@ pub struct RestoreResponse {
     pub owner: String,
 }
 
+/// POST /api/forget — soft-delete every memory in a namespace.
+/// Used by the benchmark harness for inter-run cleanup. Mode-blind.
+#[derive(Debug, Deserialize)]
+pub struct ForgetRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForgetResponse {
+    pub deleted: u64,
+    pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/stats — count + stored bytes for a namespace.
+/// Used by the benchmark harness for verification. Mode-blind.
+#[derive(Debug, Deserialize)]
+pub struct StatsRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    pub memory_count: i64,
+    pub storage_bytes: i64,
+    pub namespace: String,
+    pub owner: String,
+}
+
 /// Health check
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
