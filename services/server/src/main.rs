@@ -32,6 +32,7 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
+use services::{Embedder, Extractor, LlmExtractor, OpenAiEmbedder};
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -281,6 +282,15 @@ async fn main() {
         ))
     };
 
+    // Service-layer capabilities — shared (Arc<dyn …>) so alternative
+    // implementations can be swapped at startup. Both wrap the same
+    // http_client + config; behaviour is identical to the inline
+    // generate_embedding / extract_facts_llm they replace.
+    let embedder: Arc<dyn Embedder> =
+        Arc::new(OpenAiEmbedder::new(http_client.clone(), Arc::clone(&config)));
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -289,6 +299,8 @@ async fn main() {
         walrus_client,
         key_pool,
         engine,
+        embedder,
+        extractor,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),

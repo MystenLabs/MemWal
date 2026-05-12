@@ -5,6 +5,7 @@ use crate::db::VectorDb;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
+use crate::services::{Embedder, Extractor};
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
@@ -45,6 +46,13 @@ pub struct AppState {
     /// `PlaintextEngine` in benchmark mode. Selected once at startup
     /// from `Config::benchmark_mode`. Handlers / job workers are mode-blind.
     pub engine: Arc<dyn MemoryEngine>,
+    /// Embedding service — `OpenAiEmbedder` (text-embedding-3-small, with
+    /// a deterministic mock fallback when no API key). Used by `analyze`,
+    /// `remember` (per fact / summary), and `recall` (the query embedding).
+    pub embedder: Arc<dyn Embedder>,
+    /// LLM fact-extraction service — `LlmExtractor` (gpt-4o-mini). Used by
+    /// `analyze`.
+    pub extractor: Arc<dyn Extractor>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
