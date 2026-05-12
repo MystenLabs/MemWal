@@ -19,8 +19,8 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
+use crate::storage::walrus::SetMetadataBatchEntry;
 use crate::types::{AppState, BLOB_CACHE_KEY_PREFIX};
-use crate::walrus::SetMetadataBatchEntry;
 
 // ============================================================
 // WalletJob — unified job type for all wallet-signing operations
@@ -288,7 +288,7 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    crate::walrus::set_metadata_batch(
+    crate::storage::walrus::set_metadata_batch(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -377,7 +377,7 @@ async fn execute_upload_and_transfer(
     );
 
     // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
-    let upload_result = crate::walrus::upload_blob(
+    let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -638,7 +638,7 @@ pub async fn execute_remember(
     };
 
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
-    let upload_result = crate::walrus::upload_blob(
+    let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),

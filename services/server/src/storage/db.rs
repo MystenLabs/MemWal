@@ -18,38 +18,38 @@ impl VectorDb {
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
         // Run migrations
-        let migration_001 = include_str!("../migrations/001_init.sql");
+        let migration_001 = include_str!("../../migrations/001_init.sql");
         sqlx::raw_sql(migration_001)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
 
-        let migration_002 = include_str!("../migrations/002_add_namespace.sql");
+        let migration_002 = include_str!("../../migrations/002_add_namespace.sql");
         sqlx::raw_sql(migration_002)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
 
-        let migration_003 = include_str!("../migrations/003_rate_limiter.sql");
+        let migration_003 = include_str!("../../migrations/003_rate_limiter.sql");
         sqlx::raw_sql(migration_003)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
-        let migration_004 = include_str!("../migrations/004_delegate_key_cache_expires.sql");
+        let migration_004 = include_str!("../../migrations/004_delegate_key_cache_expires.sql");
         sqlx::raw_sql(migration_004)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
 
-        let migration_005 = include_str!("../migrations/005_remember_jobs.sql");
+        let migration_005 = include_str!("../../migrations/005_remember_jobs.sql");
         sqlx::raw_sql(migration_005)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
 
         // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
-        let migration_006 = include_str!("../migrations/006_bulk_remember.sql");
+        let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
         sqlx::raw_sql(migration_006)
             .execute(&pool)
             .await
@@ -59,7 +59,7 @@ impl VectorDb {
         // queue. Equivocation locks are no longer a practical concern on Sui
         // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
         // wallet + retry handling is sufficient.
-        let migration_007 = include_str!("../migrations/007_collapse_wallet_queues.sql");
+        let migration_007 = include_str!("../../migrations/007_collapse_wallet_queues.sql");
         sqlx::raw_sql(migration_007)
             .execute(&pool)
             .await
@@ -69,7 +69,7 @@ impl VectorDb {
         // (PlaintextEngine). NULL for all production rows — additive.
         // Renumbered from 007 → 008 during rebase onto dev to avoid collision
         // with MEM-35's 007_collapse_wallet_queues.sql.
-        let migration_008 = include_str!("../migrations/008_benchmark_plaintext.sql");
+        let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
         sqlx::raw_sql(migration_008)
             .execute(&pool)
             .await

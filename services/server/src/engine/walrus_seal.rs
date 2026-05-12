@@ -25,10 +25,10 @@ use redis::AsyncCommands;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::db::VectorDb;
-use crate::seal::{self, DecryptOutcome, SealCredential};
+use crate::storage::db::VectorDb;
+use crate::storage::seal::{self, DecryptOutcome, SealCredential};
+use crate::storage::walrus;
 use crate::types::{AppError, AuthInfo, Config, KeyPool};
-use crate::walrus;
 
 use super::{HydratedMemory, MemoryEngine, MemoryRef};
 

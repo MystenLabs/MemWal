@@ -1,15 +1,12 @@
 mod auth;
-mod db;
 mod engine;
 mod jobs;
 mod mcp_proxy;
 mod rate_limit;
 mod routes;
-mod seal;
 mod services;
-mod sui;
+mod storage;
 mod types;
-mod walrus;
 
 use axum::http::{header, HeaderValue, Method};
 use axum::{
@@ -26,8 +23,8 @@ use tower_http::trace::TraceLayer;
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 
-use db::VectorDb;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
+use storage::db::VectorDb;
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,

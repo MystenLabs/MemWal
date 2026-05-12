@@ -11,13 +11,12 @@ use std::sync::Arc;
 
 use apalis::prelude::Storage as _;
 
-use crate::db::VectorDb;
 use crate::jobs::{BulkRememberItem, WalletJob, WalletOperation};
 use crate::rate_limit;
-use crate::seal;
 use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::storage::db::VectorDb;
+use crate::storage::{seal, walrus};
 use crate::types::*;
-use crate::walrus;
 
 /// Enqueue a WalletJob to the single shared Apalis queue.
 ///
@@ -152,7 +151,7 @@ fn spawn_prepare_remember_job(
             };
 
             let embed_fut = state.embedder.embed(&embed_input);
-            let encrypt_fut = crate::seal::seal_encrypt(
+            let encrypt_fut = crate::storage::seal::seal_encrypt(
                 &state.http_client,
                 &state.config.sidecar_url,
                 state.config.sidecar_secret.as_deref(),
@@ -251,7 +250,7 @@ fn spawn_prepare_bulk_remember_job(
                         };
 
                         let embed_fut = state.embedder.embed(&embed_input);
-                        let encrypt_fut = crate::seal::seal_encrypt(
+                        let encrypt_fut = crate::storage::seal::seal_encrypt(
                             &state.http_client,
                             &state.config.sidecar_url,
                             state.config.sidecar_secret.as_deref(),
@@ -1352,7 +1351,7 @@ pub async fn analyze(
             let fact_text = fact_text.clone();
             async move {
                 let embed_fut = state.embedder.embed(&fact_text);
-                let encrypt_fut = crate::seal::seal_encrypt(
+                let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),

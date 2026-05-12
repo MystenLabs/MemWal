@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::db::VectorDb;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
 use crate::services::{Embedder, Extractor};
+use crate::storage::db::VectorDb;
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;

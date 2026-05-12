@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::db::VectorDb;
+use crate::storage::db::VectorDb;
 use crate::types::{AppError, AuthInfo};
 
 use super::{HydratedMemory, MemoryEngine, MemoryRef};
