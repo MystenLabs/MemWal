@@ -6,6 +6,7 @@ mod mcp_proxy;
 mod rate_limit;
 mod routes;
 mod seal;
+mod services;
 mod sui;
 mod types;
 mod walrus;
