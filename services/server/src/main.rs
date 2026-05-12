@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod engine;
 mod jobs;
 mod mcp_proxy;
 mod rate_limit;
