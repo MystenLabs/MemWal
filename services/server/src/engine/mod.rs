@@ -8,7 +8,7 @@
 //!   download → SEAL decrypt (batched for `recall`), with reactive
 //!   cleanup on Walrus 404s / permanent decrypt failures.
 //! - [`plaintext::PlaintextEngine`] — benchmark mode. Stores the bytes
-//!   directly in a Postgres `plaintext` column (added by migration 007),
+//!   directly in a Postgres `plaintext` column (added by migration 008),
 //!   bypassing Walrus and SEAL entirely. **Not for production** — it
 //!   defeats SEAL's confidentiality guarantee. Gated behind
 //!   `Config::benchmark_mode`, off by default.

@@ -65,6 +65,16 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
 
+        // ENG-1747: nullable `plaintext` column for benchmark-mode storage
+        // (PlaintextEngine). NULL for all production rows — additive.
+        // Renumbered from 007 → 008 during rebase onto dev to avoid collision
+        // with MEM-35's 007_collapse_wallet_queues.sql.
+        let migration_008 = include_str!("../migrations/008_benchmark_plaintext.sql");
+        sqlx::raw_sql(migration_008)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -117,6 +127,76 @@ impl VectorDb {
             blob_size_bytes
         );
         Ok(())
+    }
+
+    /// Insert a vector entry with its plaintext (benchmark mode only —
+    /// PlaintextEngine). Production rows never use this; they go through
+    /// `insert_vector` and leave the `plaintext` column NULL.
+    ///
+    /// BENCHMARK MODE IS NOT FOR PRODUCTION USE — storing plaintext
+    /// memories defeats SEAL's confidentiality guarantee.
+    pub async fn insert_vector_plaintext(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        vector: &[f32],
+        plaintext: &str,
+        blob_size_bytes: i64,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(vector.to_vec());
+
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                namespace = EXCLUDED.namespace,
+                blob_id = EXCLUDED.blob_id,
+                embedding = EXCLUDED.embedding,
+                blob_size_bytes = EXCLUDED.blob_size_bytes,
+                plaintext = EXCLUDED.plaintext",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(embedding)
+        .bind(blob_size_bytes)
+        .bind(plaintext)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)))?;
+
+        tracing::debug!(
+            "inserted plaintext vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
+            id,
+            blob_id,
+            owner,
+            namespace,
+            blob_size_bytes
+        );
+        Ok(())
+    }
+
+    /// Fetch the plaintext for a benchmark-mode row by its synthetic
+    /// blob_id. Returns `Ok(None)` if the row doesn't exist; `Ok(Some(""))`
+    /// vs `Ok(None)` distinguishes "empty plaintext" from "no row".
+    /// Returns `Ok(None)` when the row exists but `plaintext` is NULL (a
+    /// production row in a benchmark DB — shouldn't happen, handled gracefully).
+    pub async fn fetch_plaintext_by_blob_id(
+        &self,
+        blob_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT plaintext FROM vector_entries WHERE blob_id = $1 LIMIT 1")
+                .bind(blob_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
+
+        Ok(row.and_then(|(plaintext,)| plaintext))
     }
 
     /// Search for similar vectors using pgvector cosine distance (<=>)
