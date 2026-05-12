@@ -25,8 +25,44 @@ import type { AuthResolution } from "./auth.js";
 import { McpAuthError, resolveAuth } from "./auth.js";
 import { createLogger } from "./logger.js";
 import { createMcpServer } from "./server.js";
+import { McpRateLimiter, clientIpFromRequest } from "./rateLimit.js";
 
 const log = createLogger("mcp");
+
+// Global limiter — caps concurrent MCP sessions per source IP and total. The
+// limiter MUST run BEFORE resolveAuth() so a flood of forged bearers cannot
+// hold long-lived SSE / streamable transports.
+//
+// Lazy-initialized: constructed on first use so the limits reflect the
+// process.env state at request time (ESM hoists `import` above any top-level
+// `process.env.X = ...` assignments in callers — eager init at module load
+// would freeze the limits to whatever env existed when this module was
+// first evaluated).
+let _rateLimiter: McpRateLimiter | null = null;
+function rateLimiter(): McpRateLimiter {
+    if (_rateLimiter === null) {
+        _rateLimiter = new McpRateLimiter();
+    }
+    return _rateLimiter;
+}
+
+function rateLimitDeny(
+    res: Response,
+    reason: NonNullable<ReturnType<McpRateLimiter["acquire"]>["reason"]>,
+    retryAfterSeconds: number | undefined
+): void {
+    if (retryAfterSeconds && retryAfterSeconds > 0) {
+        res.setHeader("retry-after", String(retryAfterSeconds));
+    }
+    res.status(429).json({
+        jsonrpc: "2.0",
+        error: {
+            code: -32000,
+            message: `MCP rate limit: ${reason}. Try again in ${retryAfterSeconds ?? 30}s.`,
+        },
+        id: null,
+    });
+}
 
 interface McpConnection {
     sessionKey: string;
@@ -77,10 +113,27 @@ async function handleSse(
     res: Response,
     relayerUrl: string
 ): Promise<void> {
+    // Rate limit BEFORE resolveAuth — see comment on `rateLimiter` above.
+    // resolveAuth only checks header shape, so we must cap concurrent SSE
+    // sessions before allocating a transport / heartbeat / proxy stream.
+    const limiter = rateLimiter();
+    const ip = clientIpFromRequest(req);
+    const slot = limiter.acquire(ip);
+    if (!slot.ok) {
+        log.warn("session.rate_limited", {
+            transport: "sse",
+            ip,
+            reason: slot.reason,
+        });
+        return rateLimitDeny(res, slot.reason!, slot.retryAfterSeconds);
+    }
+    const releaseSlot = limiter.releaseFn(ip);
+
     let auth: AuthResolution;
     try {
         auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
     } catch (err) {
+        releaseSlot();
         if (err instanceof McpAuthError) {
             res.setHeader(
                 "www-authenticate",
@@ -137,6 +190,7 @@ async function handleSse(
         cleanedUp = true;
         clearInterval(heartbeat);
         sessionsById.delete(transport.sessionId);
+        releaseSlot();
         log.info("session.closed", {
             sessionKey: auth.sessionKey,
             transportId: transport.sessionId,
@@ -220,63 +274,109 @@ async function handleStreamableHttp(
     const sessionId =
         typeof sessionIdHeader === "string" ? sessionIdHeader : undefined;
 
-    let conn = sessionId ? streamableSessions.get(sessionId) : undefined;
+    const conn = sessionId ? streamableSessions.get(sessionId) : undefined;
 
-    if (!conn) {
-        if (req.method !== "POST") {
+    if (conn) {
+        // Bind the session id to the bearer/account that opened it. Without
+        // this check, anyone who learns the `mcp-session-id` UUID can drive
+        // an existing transport under their own (or random) credentials.
+        // The session key embeds {accountId, delegatePubKey}, so a
+        // mismatch means a different caller is trying to reuse the session.
+        if (conn.sessionKey !== auth.sessionKey) {
+            log.warn("session.auth_mismatch", {
+                transport: "streamable",
+                transportId: sessionId,
+                expected: conn.sessionKey,
+                got: auth.sessionKey,
+            });
             return rpcError(
                 res,
-                400,
-                "missing mcp-session-id — open a new session with an initial POST"
+                403,
+                "mcp-session-id does not match authenticated caller"
             );
         }
+        await conn.transport.handleRequest(req, res);
+        return;
+    }
 
-        // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
-        // the first message-init response; we cache the connection only
-        // after we know the assigned id.
-        const transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => randomUUID(),
-            onsessioninitialized: (newId: string) => {
-                let cleanedUp = false;
-                const cleanup = () => {
-                    if (cleanedUp) return;
-                    cleanedUp = true;
-                    streamableSessions.delete(newId);
-                    log.info("session.closed", {
-                        transport: "streamable",
-                        sessionKey: auth.sessionKey,
-                        transportId: newId,
-                    });
-                };
-                transport.onclose = cleanup;
-                streamableSessions.set(newId, {
-                    sessionKey: auth.sessionKey,
-                    transport,
-                    cleanup,
-                });
-                log.info("session.opened", {
+    if (req.method !== "POST") {
+        return rpcError(
+            res,
+            400,
+            "missing mcp-session-id — open a new session with an initial POST"
+        );
+    }
+
+    // New session — apply the same per-IP cap the SSE path uses BEFORE we
+    // allocate a transport. Acquired here (after auth so logs are useful)
+    // because we now know we will create a session, but BEFORE
+    // `transport.handleRequest` so we don't kick off an upgrade we can't
+    // sustain.
+    const limiter = rateLimiter();
+    const ip = clientIpFromRequest(req);
+    const slot = limiter.acquire(ip);
+    if (!slot.ok) {
+        log.warn("session.rate_limited", {
+            transport: "streamable",
+            ip,
+            reason: slot.reason,
+        });
+        return rateLimitDeny(res, slot.reason!, slot.retryAfterSeconds);
+    }
+    const releaseSlot = limiter.releaseFn(ip);
+
+    // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
+    // the first message-init response; we cache the connection only
+    // after we know the assigned id.
+    const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newId: string) => {
+            let cleanedUp = false;
+            const cleanup = () => {
+                if (cleanedUp) return;
+                cleanedUp = true;
+                streamableSessions.delete(newId);
+                releaseSlot();
+                log.info("session.closed", {
                     transport: "streamable",
                     sessionKey: auth.sessionKey,
-                    accountId: auth.session.accountId,
-                    delegatePubKey: auth.session.delegatePubKeyHex,
                     transportId: newId,
                 });
-            },
-        });
+            };
+            transport.onclose = cleanup;
+            streamableSessions.set(newId, {
+                sessionKey: auth.sessionKey,
+                transport,
+                cleanup,
+            });
+            log.info("session.opened", {
+                transport: "streamable",
+                sessionKey: auth.sessionKey,
+                accountId: auth.session.accountId,
+                delegatePubKey: auth.session.delegatePubKeyHex,
+                transportId: newId,
+            });
+        },
+    });
 
-        const server = createMcpServer(auth.session);
+    // Belt-and-braces release: `releaseSlot` is one-shot, so wiring it to
+    // every plausible terminal path is safe. `onsessioninitialized` overrides
+    // `transport.onclose` with `cleanup` (which also calls releaseSlot), and
+    // the catch below handles handleRequest throwing before init completes.
+    transport.onclose = releaseSlot;
+
+    const server = createMcpServer(auth.session);
+    try {
         await server.connect(transport);
-
         // The SDK's handleRequest takes the raw IncomingMessage. We
         // intentionally do NOT pre-parse the body — express.json() is not
         // mounted on this route so req still has the raw stream.
         // The transport reads the body itself.
         await transport.handleRequest(req, res);
-        return;
+    } catch (err) {
+        releaseSlot();
+        throw err;
     }
-
-    // Existing session — just hand off.
-    await conn.transport.handleRequest(req, res);
 }
 
 export interface MountMcpOptions {

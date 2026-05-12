@@ -24,11 +24,12 @@
 //! it in `sidecar-server.ts`).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -71,12 +72,48 @@ fn build_forwarded_headers(inbound: &HeaderMap) -> reqwest::header::HeaderMap {
     out
 }
 
+/// Inject the real client IP into the upstream request as `x-forwarded-for`
+/// so the sidecar's per-IP MCP rate limiter buckets per actual caller and
+/// not per loopback. We honor an inbound `x-forwarded-for` (if the relayer
+/// itself is behind a real proxy / load balancer) by appending the relayer's
+/// observed peer address; otherwise we set the header to that peer alone.
+fn inject_forwarded_for(
+    headers: &mut reqwest::header::HeaderMap,
+    inbound: &HeaderMap,
+    peer: SocketAddr,
+) {
+    let peer_ip = peer.ip().to_string();
+    let value = match inbound
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(existing) => format!("{}, {}", existing, peer_ip),
+        None => peer_ip,
+    };
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&value) {
+        out_set(headers, "x-forwarded-for", v);
+    }
+}
+
+fn out_set(
+    headers: &mut reqwest::header::HeaderMap,
+    name: &'static str,
+    value: reqwest::header::HeaderValue,
+) {
+    if let Ok(n) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+        headers.insert(n, value);
+    }
+}
+
 /// `GET /api/mcp/sse` — open the SSE stream to the sidecar and stream the
 /// response body back to the client without buffering. The sidecar emits an
 /// `event: endpoint` line carrying `/api/mcp/messages?sessionId=…`; the
 /// client posts subsequent JSON-RPC envelopes to that URL.
 pub async fn sse_proxy(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
     let url = format!("{}/mcp/sse", state.config.sidecar_url);
@@ -87,11 +124,13 @@ pub async fn sse_proxy(
     // sees `terminated`. Override with a 24h ceiling so the stream stays
     // open until the client itself closes it. `read_timeout` keeps a
     // per-chunk watchdog (heartbeats fire every 3s, so 60s is plenty).
+    let mut forwarded = build_forwarded_headers(&headers);
+    inject_forwarded_for(&mut forwarded, &headers, peer);
     let req = state
         .http_client
         .get(&url)
         .timeout(std::time::Duration::from_secs(86_400))
-        .headers(build_forwarded_headers(&headers));
+        .headers(forwarded);
 
     let upstream = match req.send().await {
         Ok(r) => r,
@@ -150,6 +189,7 @@ pub async fn sse_proxy(
 /// to the sidecar's matching session.
 pub async fn messages_proxy(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -179,10 +219,12 @@ pub async fn messages_proxy(
         state.config.sidecar_url, session_id
     );
 
+    let mut forwarded = build_forwarded_headers(&headers);
+    inject_forwarded_for(&mut forwarded, &headers, peer);
     let upstream = state
         .http_client
         .post(&url)
-        .headers(build_forwarded_headers(&headers))
+        .headers(forwarded)
         .body(body.to_vec())
         .send()
         .await;
@@ -243,6 +285,7 @@ pub async fn messages_proxy(
 /// scheme as the stdio bridge — no OAuth dance required).
 pub async fn streamable_proxy(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     method: axum::http::Method,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -274,7 +317,9 @@ pub async fn streamable_proxy(
     if !body.is_empty() {
         req = req.body(body.to_vec());
     }
-    req = req.headers(build_forwarded_headers(&headers));
+    let mut forwarded = build_forwarded_headers(&headers);
+    inject_forwarded_for(&mut forwarded, &headers, peer);
+    req = req.headers(forwarded);
 
     // Same 24h request timeout as the SSE proxy — a streamable response
     // can stay open well past the shared `http_client`'s default 30s
@@ -336,5 +381,124 @@ pub async fn streamable_proxy(
             format!("failed to build proxied response: {}", err),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderName as AxumHeaderName;
+
+    fn axum_headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                AxumHeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    fn xff(headers: &reqwest::header::HeaderMap) -> Option<String> {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn should_forward_allows_authorization_and_mcp_headers() {
+        for h in [
+            "authorization",
+            "content-type",
+            "accept",
+            "mcp-session-id",
+            "mcp-protocol-version",
+            "last-event-id",
+            "x-memwal-account-id",
+            "x-memwal-namespace",
+        ] {
+            let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
+            assert!(should_forward(&name), "should forward {h}");
+        }
+    }
+
+    #[test]
+    fn should_forward_blocks_cookies_and_host_and_arbitrary_headers() {
+        for h in ["cookie", "host", "x-real-ip", "user-agent", "referer"] {
+            let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
+            assert!(!should_forward(&name), "must not forward {h}");
+        }
+    }
+
+    #[test]
+    fn inject_forwarded_for_sets_peer_when_inbound_missing() {
+        let mut out = reqwest::header::HeaderMap::new();
+        let inbound = axum_headers(&[]);
+        let peer: SocketAddr = "203.0.113.7:54321".parse().unwrap();
+
+        inject_forwarded_for(&mut out, &inbound, peer);
+
+        assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
+    }
+
+    #[test]
+    fn inject_forwarded_for_appends_peer_to_existing_chain() {
+        let mut out = reqwest::header::HeaderMap::new();
+        let inbound = axum_headers(&[("x-forwarded-for", "198.51.100.4, 10.0.0.1")]);
+        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+
+        inject_forwarded_for(&mut out, &inbound, peer);
+
+        assert_eq!(
+            xff(&out).as_deref(),
+            Some("198.51.100.4, 10.0.0.1, 127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn inject_forwarded_for_treats_whitespace_only_inbound_as_missing() {
+        let mut out = reqwest::header::HeaderMap::new();
+        let inbound = axum_headers(&[("x-forwarded-for", "   ")]);
+        let peer: SocketAddr = "203.0.113.7:1".parse().unwrap();
+
+        inject_forwarded_for(&mut out, &inbound, peer);
+
+        assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
+    }
+
+    #[test]
+    fn inject_forwarded_for_handles_ipv6_peer() {
+        let mut out = reqwest::header::HeaderMap::new();
+        let inbound = axum_headers(&[]);
+        let peer: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+
+        inject_forwarded_for(&mut out, &inbound, peer);
+
+        assert_eq!(xff(&out).as_deref(), Some("2001:db8::1"));
+    }
+
+    #[test]
+    fn build_forwarded_headers_drops_cookies_keeps_authorization() {
+        let inbound = axum_headers(&[
+            ("authorization", "Bearer abc"),
+            ("cookie", "session=evil"),
+            ("x-memwal-account-id", "0xdeadbeef"),
+            ("host", "evil.example"),
+        ]);
+
+        let out = build_forwarded_headers(&inbound);
+
+        assert_eq!(
+            out.get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer abc")
+        );
+        assert_eq!(
+            out.get("x-memwal-account-id").and_then(|v| v.to_str().ok()),
+            Some("0xdeadbeef")
+        );
+        assert!(out.get("cookie").is_none(), "cookie must not be forwarded");
+        assert!(out.get("host").is_none(), "host must not be forwarded");
     }
 }

@@ -4,7 +4,8 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "sidecar": "tsx sidecar-server.ts"
+        "sidecar": "tsx sidecar-server.ts",
+        "test": "node --test --import tsx './mcp/__tests__/*.test.ts'"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
