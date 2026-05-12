@@ -276,6 +276,7 @@ async fn main() {
             Arc::clone(&config),
             redis.clone(),
             blob_cache_ttl,
+            blob_cache_max_bytes,
         ))
     };
 

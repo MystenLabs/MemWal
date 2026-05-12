@@ -53,6 +53,11 @@ pub struct WalrusSealEngine {
     redis: redis::aio::MultiplexedConnection,
     /// ENG-1405 blob ciphertext cache TTL. Zero disables write-back.
     blob_cache_ttl: Duration,
+    /// MEM-37 max ciphertext size kept in the Redis cache. Reads ignore
+    /// entries larger than this (they get evicted via TTL eventually);
+    /// writes skip blobs larger than this. Zero disables the cache
+    /// entirely (read and write).
+    blob_cache_max_bytes: usize,
 }
 
 impl WalrusSealEngine {
@@ -64,6 +69,7 @@ impl WalrusSealEngine {
         config: Arc<Config>,
         redis: redis::aio::MultiplexedConnection,
         blob_cache_ttl: Duration,
+        blob_cache_max_bytes: usize,
     ) -> Self {
         Self {
             db,
@@ -73,6 +79,7 @@ impl WalrusSealEngine {
             config,
             redis,
             blob_cache_ttl,
+            blob_cache_max_bytes,
         }
     }
 
@@ -111,12 +118,32 @@ impl WalrusSealEngine {
     }
 
     /// Try the Redis blob cache. Returns `Some(ciphertext)` on hit;
-    /// `None` on miss or any cache error (cache is best-effort).
+    /// `None` on miss, oversized entry (MEM-37 cap), or any cache error
+    /// (cache is best-effort). Disabled entirely when
+    /// `blob_cache_max_bytes` is zero.
     async fn cache_get(&self, blob_id: &str) -> Option<Vec<u8>> {
+        if self.blob_cache_max_bytes == 0 {
+            return None;
+        }
         let mut redis = self.redis.clone();
         let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
         match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
-            Ok(Some(ciphertext)) => Some(ciphertext),
+            Ok(Some(ciphertext)) => {
+                if ciphertext.len() <= self.blob_cache_max_bytes {
+                    Some(ciphertext)
+                } else {
+                    // MEM-37: ignore entries larger than the configured cap.
+                    // The entry will be evicted by TTL eventually; we don't
+                    // delete it here to keep `cache_get` read-only.
+                    tracing::info!(
+                        "blob cache ignored for {}: {} bytes exceeds max {}",
+                        blob_id,
+                        ciphertext.len(),
+                        self.blob_cache_max_bytes
+                    );
+                    None
+                }
+            }
             Ok(None) => None,
             Err(e) => {
                 tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
@@ -126,10 +153,21 @@ impl WalrusSealEngine {
     }
 
     /// Write a freshly-downloaded ciphertext into the Redis cache.
-    /// No-op when `blob_cache_ttl` is zero. Best-effort.
+    /// No-op when `blob_cache_ttl` is zero, `blob_cache_max_bytes` is
+    /// zero, or the ciphertext exceeds the size cap (MEM-37). Best-effort.
     async fn cache_put(&self, blob_id: &str, ciphertext: &[u8]) {
         let ttl_secs = self.blob_cache_ttl.as_secs();
-        if ttl_secs == 0 {
+        if ttl_secs == 0 || self.blob_cache_max_bytes == 0 {
+            return;
+        }
+        if ciphertext.len() > self.blob_cache_max_bytes {
+            // MEM-37: skip blobs above the size cap to bound Redis memory.
+            tracing::info!(
+                "blob cache skip for {}: {} bytes exceeds max {}",
+                blob_id,
+                ciphertext.len(),
+                self.blob_cache_max_bytes
+            );
             return;
         }
         let mut redis = self.redis.clone();

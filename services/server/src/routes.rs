@@ -1008,18 +1008,6 @@ pub async fn recall(
         namespace
     );
 
-    // ENG-1697: Prefer the client-built SessionKey (x-seal-session); fall
-    // back to the legacy x-delegate-key; finally fall back to the server's
-    // own key for background operation.
-    let credential =
-        seal::SealCredential::from_auth_or_fallback(&auth, state.config.sui_private_key.as_deref())
-            .ok_or_else(|| {
-                AppError::Internal(
-            "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)"
-                .into(),
-        )
-            })?;
-
     let t0 = std::time::Instant::now();
     let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
@@ -1033,6 +1021,7 @@ pub async fn recall(
         .search_similar(&query_vector, owner, namespace, limit)
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
+    let hit_count = hits.len();
 
     if hits.is_empty() {
         tracing::info!(
@@ -1046,224 +1035,48 @@ pub async fn recall(
         }));
     }
 
-    struct FetchedBlob {
-        blob_id: String,
-        distance: f64,
-        ciphertext: Vec<u8>,
-        was_cached: bool,
-    }
-
+    // Hydrate the hits through the storage engine: blob cache -> Walrus
+    // download -> batched SEAL decrypt -> UTF-8, with reactive cleanup on
+    // Walrus 404 / permanent decrypt failure. The engine owns the
+    // cache/decrypt-batch internals and derives the SEAL credential from
+    // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
-    let db = &state.db;
-    let blob_cache_enabled = state.blob_cache_ttl.as_secs() > 0 && state.blob_cache_max_bytes > 0;
-    let blob_cache_max_bytes = state.blob_cache_max_bytes;
-    let download_tasks: Vec<_> = hits
-        .iter()
-        .map(|hit| {
-            let walrus_client = &state.walrus_client;
-            let blob_id = hit.blob_id.clone();
-            let distance = hit.distance;
-            let owner_for_cleanup = owner.clone();
-            let mut redis = state.redis.clone();
+    let hit_refs: Vec<(String, f64)> = hits
+        .into_iter()
+        .map(|h| (h.blob_id, h.distance))
+        .collect();
+    let (hydrated, dropped_count) = state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
+    let fetch_ms = t2.elapsed().as_millis();
 
-            async move {
-                let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
-                if blob_cache_enabled {
-                    match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
-                        Ok(Some(ciphertext)) => {
-                            if ciphertext.len() <= blob_cache_max_bytes {
-                                return Some(FetchedBlob {
-                                    blob_id,
-                                    distance,
-                                    ciphertext,
-                                    was_cached: true,
-                                });
-                            }
-                            tracing::info!(
-                                "blob cache ignored for {}: {} bytes exceeds max {}",
-                                blob_id,
-                                ciphertext.len(),
-                                blob_cache_max_bytes
-                            );
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
-                        }
-                    }
-                }
-
-                match walrus::download_blob(walrus_client, &blob_id).await {
-                    Ok(ciphertext) => Some(FetchedBlob {
-                        blob_id,
-                        distance,
-                        ciphertext,
-                        was_cached: false,
-                    }),
-                    Err(AppError::BlobNotFound(msg)) => {
-                        tracing::warn!("Blob expired, cleaning up: {}", msg);
-                        cleanup_expired_blob(db, &blob_id, &owner_for_cleanup).await;
-                        None
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to download blob {}: {}", blob_id, e);
-                        None
-                    }
-                }
-            }
+    let results: Vec<RecallResult> = hydrated
+        .into_iter()
+        .map(|m| RecallResult {
+            blob_id: m.blob_id,
+            text: m.text,
+            distance: m.distance,
         })
         .collect();
-
-    let fetched_results = futures::future::join_all(download_tasks).await;
-    let walrus_ms = t2.elapsed().as_millis();
-
-    let mut fetched_blobs = Vec::new();
-    let mut walrus_fails = 0usize;
-    let mut cache_hits = 0usize;
-    let mut cache_misses = 0usize;
-    for result in fetched_results {
-        match result {
-            Some(fetched) => {
-                if fetched.was_cached {
-                    cache_hits += 1;
-                } else {
-                    cache_misses += 1;
-                }
-                fetched_blobs.push(fetched);
-            }
-            None => walrus_fails += 1,
-        }
-    }
-    tracing::info!(
-        "recall[walrus_fetch]: {}ms -> {} ok ({} cached, {} cold), {} failed",
-        walrus_ms,
-        fetched_blobs.len(),
-        cache_hits,
-        cache_misses,
-        walrus_fails
-    );
-
-    let blob_cache_ttl_secs = state.blob_cache_ttl.as_secs();
-    if blob_cache_ttl_secs > 0 && state.blob_cache_max_bytes > 0 {
-        let mut redis = state.redis.clone();
-        for fetched in &fetched_blobs {
-            if fetched.was_cached {
-                continue;
-            }
-            if fetched.ciphertext.len() > state.blob_cache_max_bytes {
-                tracing::info!(
-                    "blob cache skip for {}: {} bytes exceeds max {}",
-                    fetched.blob_id,
-                    fetched.ciphertext.len(),
-                    state.blob_cache_max_bytes
-                );
-                continue;
-            }
-            let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, fetched.blob_id);
-            let result: redis::RedisResult<()> = redis
-                .set_ex(&cache_key, fetched.ciphertext.clone(), blob_cache_ttl_secs)
-                .await;
-            if let Err(e) = result {
-                tracing::warn!("blob cache set failed for {}: {}", fetched.blob_id, e);
-            }
-        }
-    }
-
-    const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
-
-    let batch_input: Vec<(String, Vec<u8>)> = fetched_blobs
-        .iter()
-        .map(|fetched| (fetched.blob_id.clone(), fetched.ciphertext.clone()))
-        .collect();
-    let t3 = std::time::Instant::now();
-    let mut decrypted = Vec::with_capacity(batch_input.len());
-    for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
-        match seal::seal_decrypt_batch(
-            &state.http_client,
-            &state.config.sidecar_url,
-            state.config.sidecar_secret.as_deref(),
-            chunk,
-            &credential,
-            &state.config.package_id,
-            &auth.account_id,
-        )
-        .await
-        {
-            Ok(outcomes) => decrypted.extend(outcomes),
-            Err(e) => {
-                tracing::warn!(
-                    "recall: seal_decrypt_batch failed for {} blobs: {}",
-                    chunk.len(),
-                    e
-                );
-                decrypted.extend((0..chunk.len()).map(|_| crate::seal::DecryptOutcome::Missing));
-            }
-        }
-    }
-    let seal_ms = t3.elapsed().as_millis();
-
-    let mut results = Vec::new();
-    let mut seal_fails = 0usize;
-    for (fetched, outcome) in fetched_blobs.iter().zip(decrypted) {
-        match outcome {
-            crate::seal::DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
-                Ok(text) => results.push(RecallResult {
-                    blob_id: fetched.blob_id.clone(),
-                    text,
-                    distance: fetched.distance,
-                }),
-                Err(e) => {
-                    tracing::warn!(
-                        "Invalid UTF-8 in decrypted data for blob {}: {}",
-                        fetched.blob_id,
-                        e
-                    );
-                    seal_fails += 1;
-                }
-            },
-            crate::seal::DecryptOutcome::Failed { error, permanent } => {
-                if permanent {
-                    tracing::warn!(
-                        "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
-                        fetched.blob_id,
-                        error
-                    );
-                    cleanup_expired_blob(db, &fetched.blob_id, owner).await;
-                } else {
-                    tracing::warn!(
-                        "SEAL decrypt transient failure for blob {}: {}",
-                        fetched.blob_id,
-                        error
-                    );
-                }
-                seal_fails += 1;
-            }
-            crate::seal::DecryptOutcome::Missing => seal_fails += 1,
-        }
-    }
-
     let total = results.len();
-    // LOW-7: Surface the count of silently-dropped entries (download / decrypt /
-    // UTF-8 failures) so clients can distinguish "no matches" from "matches we
-    // couldn't return". Per-item errors are already logged with the blob_id
-    // inside each task — we only add the aggregate count here.
-    let dropped_count = walrus_fails + seal_fails;
+
+    // LOW-7: Surface the count of silently-dropped entries (download /
+    // decrypt / UTF-8 failures) so clients can distinguish "no matches"
+    // from "matches we couldn't return". Per-item errors are logged with
+    // the blob_id inside the engine.
     if dropped_count > 0 {
         tracing::warn!(
             "recall: {} of {} matches dropped due to download/decrypt errors (owner={})",
             dropped_count,
-            hits.len(),
+            hit_count,
             owner
         );
     }
     tracing::info!(
-        "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms total={}ms",
+        "recall complete: {} results for owner={} embed={}ms vsearch={}ms fetch={}ms total={}ms",
         total,
         owner,
         embed_ms,
         vsearch_ms,
-        walrus_ms,
-        seal_ms,
+        fetch_ms,
         t0.elapsed().as_millis()
     );
 
