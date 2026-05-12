@@ -18,25 +18,19 @@ use crate::seal;
 use crate::types::*;
 use crate::walrus;
 
-/// Enqueue a WalletJob to the correct per-wallet Apalis queue.
+/// Enqueue a WalletJob to the single shared Apalis queue.
 ///
-/// `wallet_index` must match the index used (or to be used) for the Walrus
-/// upload so that upload and set-metadata+transfer always sign with the
-/// same key. Returns the wallet_index for caller tracking.
+/// `wallet_index` is retained in the payload for audit/legacy parity but no
+/// longer drives queue routing — all jobs flow through one queue and the
+/// Apalis worker handles `WALLET_JOB_CONCURRENCY` requests in parallel.
+/// See MEM-35: multi-wallet was an equivocation workaround that's no longer
+/// needed on current Sui.
 pub async fn enqueue_wallet_job(
     state: &AppState,
     wallet_index: usize,
     operation: WalletOperation,
 ) -> Result<usize, AppError> {
-    let storages = &state.wallet_storages;
-    if wallet_index >= storages.len() {
-        return Err(AppError::Internal(format!(
-            "wallet_index {} out of range (pool size={})",
-            wallet_index,
-            storages.len()
-        )));
-    }
-    let mut storage = storages[wallet_index].clone();
+    let mut storage = state.wallet_storage.clone();
     storage
         .push(WalletJob {
             wallet_index,

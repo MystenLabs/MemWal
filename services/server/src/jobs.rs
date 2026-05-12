@@ -181,18 +181,18 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
 
 /// Apalis worker handler for WalletJob.
 ///
-/// The worker is pinned to a specific `wallet_index` via `Data<(Arc<AppState>, usize)>`.
-/// Every operation inside uses that fixed index — never round-robin.
+/// Multiple concurrent invocations of this handler share the single signing
+/// wallet (Apalis `WALLET_JOB_CONCURRENCY` controls fan-out, default 8). The
+/// `wallet_index` field in the job payload is retained for audit only —
+/// routing dimension was removed per MEM-35.
 pub async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
 ) -> Result<(), WalletJobError> {
     let state: &AppState = &ctx;
-    // The wallet_index stored in the job is authoritative.
-    // The worker queue name is just for routing; actual signing uses job.wallet_index.
     let wallet_index = job.wallet_index;
 
-    match job.operation {
+    let result = match job.operation {
         WalletOperation::UploadAndTransfer {
             encrypted_b64,
             vector,
@@ -235,7 +235,20 @@ pub async fn execute_wallet_job(
             )
             .await
         }
+    };
+
+    // Observability hook: surface permanent failures (Move abort / object
+    // lock) as a structured warn-level log. Operators alert on these.
+    if let Err(WalletJobError::Permanent(ref msg)) = result {
+        tracing::warn!(
+            target: "wallet_job.permanent",
+            "permanent failure for wallet_index={} (will mark Dead): {}",
+            wallet_index,
+            msg
+        );
     }
+
+    result
 }
 
 // ────────────────────────────────────────────────────────────
@@ -266,7 +279,17 @@ async fn execute_set_metadata_and_transfer(
     )
     .await
     .map(|_| ())
-    .map_err(|e| WalletJobError::Internal(e.to_string()))
+    .map_err(|e| {
+        let msg = e.to_string();
+        let classified = WalletJobError::classify_sidecar_error(&msg);
+        if classified.is_permanent() {
+            tracing::error!(
+                "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
+                msg
+            );
+        }
+        classified
+    })
 }
 
 // ────────────────────────────────────────────────────────────
@@ -296,10 +319,12 @@ async fn execute_upload_and_transfer(
         .await;
     }
 
-    // Helper: mark failed and return Err
+    // Helper: mark failed and return Err. Classifies sidecar errors so Apalis
+    // can mark deterministic failures (Move abort, object lock) Dead without
+    // burning retries.
     let fail = |msg: String| -> WalletJobError {
         tracing::error!("[wallet-job:upload] {}", msg);
-        WalletJobError::Internal(msg)
+        WalletJobError::classify_sidecar_error(&msg)
     };
 
     // ── Decode encrypted bytes ─────────────────────────────────
@@ -422,15 +447,59 @@ async fn execute_upload_and_transfer(
 // WalletJobError
 // ============================================================
 
+/// Failure classification for `WalletJob` handlers.
+///
+/// Apalis re-queues with exponential backoff on `Transient`. `Permanent`
+/// errors are returned as-is so the job is marked Dead immediately and we
+/// don't burn retry budget on inputs that can never succeed.
+///
+/// Mapping rules (enforced at the point of error origination):
+/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - `ObjectLockedAtVersion(_)` → `Permanent` (per-Sui-2026 behavior, locks
+///   should be rare; if one surfaces, alert ops via `wallet_job.permanent`
+///   tracing target rather than burning retries)
+/// - `InsufficientGas` / `ObjectNotFound` /
+///   `ObjectVersionUnavailableForConsumption` → `Transient` (refill wallet,
+///   refresh local state, retry)
+/// - Network 429 / 5xx / timeout → `Transient`
 #[derive(Debug)]
 pub enum WalletJobError {
-    Internal(String),
+    /// Transient failure — Apalis should retry with backoff.
+    Transient(String),
+    /// Permanent failure — Apalis should mark Dead immediately (no retry).
+    Permanent(String),
+}
+
+impl WalletJobError {
+    /// True if the error is `Permanent` — caller should NOT retry.
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, WalletJobError::Permanent(_))
+    }
+
+    /// Heuristic classification from the sidecar's error string. The sidecar
+    /// surfaces Sui execution errors verbatim (Move abort codes, lock errors).
+    /// Until the sidecar emits structured error codes, we match on substrings.
+    pub fn classify_sidecar_error(msg: &str) -> Self {
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("objectlocked")
+            || lower.contains("object_locked")
+            || lower.contains("object is locked")
+            || lower.contains("locked at version")
+        {
+            return WalletJobError::Permanent(msg.to_string());
+        }
+        if lower.contains("moveabort") || lower.contains("move abort") {
+            return WalletJobError::Permanent(msg.to_string());
+        }
+        WalletJobError::Transient(msg.to_string())
+    }
 }
 
 impl std::fmt::Display for WalletJobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WalletJobError::Internal(msg) => write!(f, "wallet job error: {}", msg),
+            WalletJobError::Transient(msg) => write!(f, "wallet job error (transient): {}", msg),
+            WalletJobError::Permanent(msg) => write!(f, "wallet job error (permanent): {}", msg),
         }
     }
 }
@@ -907,4 +976,63 @@ pub async fn execute_bulk_remember(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WalletJobError;
+
+    #[test]
+    fn classify_object_lock_as_permanent() {
+        let cases = [
+            "ObjectLockedAtVersion { object_id: 0xabc, version: 42 }",
+            "object is locked at version 17",
+            "ObjectLocked: 0x1234",
+        ];
+        for msg in cases {
+            assert!(
+                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected permanent for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_move_abort_as_permanent() {
+        for msg in [
+            "MoveAbort(MoveLocation { module: ... }, 1)",
+            "Move abort at code 7",
+        ] {
+            assert!(
+                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected permanent for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_network_errors_as_transient() {
+        for msg in [
+            "sidecar timeout",
+            "503 service unavailable",
+            "ECONNRESET",
+            "insufficient gas",
+        ] {
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected transient for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn display_includes_classification_tag() {
+        let perm = WalletJobError::Permanent("locked".to_string());
+        let trans = WalletJobError::Transient("network".to_string());
+        assert!(perm.to_string().contains("permanent"));
+        assert!(trans.to_string().contains("transient"));
+    }
 }

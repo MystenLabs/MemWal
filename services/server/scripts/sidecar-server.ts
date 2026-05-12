@@ -145,7 +145,40 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
+
+// MEM-35: in-memory counters surfaced via /metrics/wallet.
+// Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
+// locks coin objects on equivocation, so the original multi-wallet routing
+// is unnecessary. We collapsed to a single wallet; the per-signer mutex
+// below still serializes concurrent submissions because Enoki sponsored
+// transactions and SDK default gas-coin selection both race on a single
+// wallet — separate concerns from equivocation locking.
+//
+// `walletLockErrorsTotal` should stay at 0 under load and is the canary
+// for re-evaluating the simplification if the Sui guarantee changes.
+const sidecarMetrics = {
+    walletSubmittedTotal: 0,
+    walletLockErrorsTotal: 0,
+    walletPermanentFailuresTotal: 0,
+};
+
+// Per-signer FIFO serialization. Originally added to side-step Sui coin-
+// object equivocation locks. Per MEM-35 testing on testnet (2026-05-12):
+// equivocation locks are no longer an issue (Will Bradley's callout
+// confirmed empirically — `walletLockErrorsTotal: 0` across all tests).
+// We keep the mutex because of TWO other concurrent-tx hazards that the
+// mutex incidentally also fixes:
+//   1. Enoki sponsor returns time-bounded signatures; concurrent requests
+//      from the same sender race and earlier ones expire ("Sponsored
+//      transaction has expired") before submission.
+//   2. SDK default gas-coin picker selects the same coin for concurrent
+//      transactions; whichever lands second sees a stale ObjectRef and
+//      errors with "No valid gas coins found for the transaction."
+// Removing this mutex caused a ~75% failure rate at concurrency=4 in
+// testnet validation. Apalis retries recover, but the latency cost is
+// large. The mutex is cheap (one Map<address, Promise<void>>).
 const signerUploadQueues = new Map<string, Promise<void>>();
+
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
 
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
@@ -256,10 +289,16 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
 }
 
 /**
- * Queue tasks by signer to avoid coin-object lock conflicts when multiple
- * Walrus uploads are triggered concurrently for the same signing key.
+ * Acquire the per-signer FIFO mutex for the duration of `task`.
+ *
+ * Sub-100-line workaround for two concurrent-tx hazards that surface when
+ * multiple Walrus uploads run on the same signing wallet (see comment
+ * above `signerUploadQueues` for the full rationale).
  */
-async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promise<T>): Promise<T> {
+async function runExclusiveBySigner<T>(
+    signerAddress: string,
+    task: () => Promise<T>,
+): Promise<T> {
     const previous = signerUploadQueues.get(signerAddress) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -273,10 +312,35 @@ async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promis
         return await task();
     } finally {
         release();
-        // Cleanup queue map entry once this task is done and no newer task replaced it.
         if (signerUploadQueues.get(signerAddress) === queued) {
             signerUploadQueues.delete(signerAddress);
         }
+    }
+}
+
+/**
+ * Submit a Sui transaction via the Enoki sponsor path (or direct sign as
+ * fallback). Wraps `executeWithEnokiSponsor` with metrics + lock-error
+ * detection for the validation canary.
+ */
+async function submitWalletTransaction(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+): Promise<string> {
+    try {
+        const digest = await executeWithEnokiSponsor(tx, signer, allowedAddresses);
+        sidecarMetrics.walletSubmittedTotal += 1;
+        return digest;
+    } catch (err: any) {
+        const msg = err?.message || String(err);
+        if (/objectlocked|locked at version|object is locked/i.test(msg)) {
+            sidecarMetrics.walletLockErrorsTotal += 1;
+            console.error(`[wallet] coin-object lock error: ${msg}`);
+        } else if (/moveabort|move abort/i.test(msg)) {
+            sidecarMetrics.walletPermanentFailuresTotal += 1;
+        }
+        throw err;
     }
 }
 
@@ -311,6 +375,24 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
+});
+
+// Wallet-execution metrics (MEM-35 observability). Placed before auth so
+// operators / scrapers don't need a token.
+//
+// `walletLockErrorsTotal` is the canary for the simplification: it should
+// stay at 0 because Sui no longer permanently locks coin objects on
+// equivocation. If it ever climbs, the original multi-wallet rationale
+// would need re-evaluating.
+//
+// Values are integer counters that monotonically increase; clients compute
+// deltas.
+app.get("/metrics/wallet", (_req: Request, res: Response) => {
+    res.json({
+        ...sidecarMetrics,
+        enokiEnabled: !!enokiApiKey,
+        suiNetwork: SUI_NETWORK,
+    });
 });
 
 // Shared-secret authentication — protects all routes registered after this point.
@@ -618,61 +700,65 @@ async function setMetadataAndTransferBlobs(
     }
 
     const signerAddress = signer.toSuiAddress();
-    return runExclusiveBySigner(signerAddress, async () => {
-        const metaTx = new Transaction();
-        const blobArgs = [];
+    const metaTx = new Transaction();
+    const blobArgs = [];
 
-        for (const blob of blobs) {
-            const blobArg = metaTx.object(blob.blobObjectId);
-            blobArgs.push(blobArg);
+    for (const blob of blobs) {
+        const blobArg = metaTx.object(blob.blobObjectId);
+        blobArgs.push(blobArg);
 
+        metaTx.moveCall({
+            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_namespace"),
+                metaTx.pure.string(blob.namespace || "default"),
+            ],
+            typeArguments: [],
+        });
+
+        metaTx.moveCall({
+            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_owner"),
+                metaTx.pure.string(owner),
+            ],
+            typeArguments: [],
+        });
+
+        if (packageId) {
             metaTx.moveCall({
                 target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
                 arguments: [
                     blobArg,
-                    metaTx.pure.string("memwal_namespace"),
-                    metaTx.pure.string(blob.namespace || "default"),
+                    metaTx.pure.string("memwal_package_id"),
+                    metaTx.pure.string(packageId),
                 ],
                 typeArguments: [],
             });
-
-            metaTx.moveCall({
-                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                arguments: [
-                    blobArg,
-                    metaTx.pure.string("memwal_owner"),
-                    metaTx.pure.string(owner),
-                ],
-                typeArguments: [],
-            });
-
-            if (packageId) {
-                metaTx.moveCall({
-                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_package_id"),
-                        metaTx.pure.string(packageId),
-                    ],
-                    typeArguments: [],
-                });
-            }
-
-            if (agentId) {
-                metaTx.moveCall({
-                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_agent_id"),
-                        metaTx.pure.string(agentId),
-                    ],
-                    typeArguments: [],
-                });
-            }
         }
 
-        metaTx.transferObjects(blobArgs, owner);
-        const digest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
+        if (agentId) {
+            metaTx.moveCall({
+                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_agent_id"),
+                    metaTx.pure.string(agentId),
+                ],
+                typeArguments: [],
+            });
+        }
+    }
+
+    metaTx.transferObjects(blobArgs, owner);
+    return runExclusiveBySigner(signerAddress, async () => {
+        const digest = await submitWalletTransaction(
+            metaTx,
+            signer,
+            dedupeAddresses([signerAddress, owner]),
+        );
         await suiClient.waitForTransaction({ digest });
         return digest;
     });
@@ -720,10 +806,14 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
         const signerAddress = signer.toSuiAddress();
-        const blob = await runExclusiveBySigner(signerAddress, async () => {
-            const blobData = new Uint8Array(Buffer.from(data, "base64"));
+        const blobData = new Uint8Array(Buffer.from(data, "base64"));
 
-            // writeBlobFlow (stateful: encode → register → upload → certify)
+        // writeBlobFlow (stateful: encode → register → upload → certify).
+        // Serialized per-signer to avoid Enoki sponsor race / SDK gas-coin
+        // contention on concurrent uploads (MEM-35: Sui no longer locks
+        // objects, but Enoki + gas selection still race — see comment above
+        // signerUploadQueues).
+        const blob = await runExclusiveBySigner(signerAddress, async () => {
             const flow = walrusClient.writeBlobFlow({ blob: blobData });
             await flow.encode();
 
@@ -746,14 +836,17 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             patchGasCoinIntents(registerTx);
             const tipRecipient = await getUploadRelayTipAddress();
             const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
-            const registerDigest = await executeWithEnokiSponsor(registerTx, signer, registerAllowedAddresses);
+            const registerDigest = await submitWalletTransaction(
+                registerTx,
+                signer,
+                registerAllowedAddresses,
+            );
             await suiClient.waitForTransaction({ digest: registerDigest });
 
             await flow.upload({ digest: registerDigest });
 
             const certifyTx = flow.certify();
-            // Wait until certify tx is confirmed before returning this upload.
-            const certifyDigest = await executeWithEnokiSponsor(certifyTx, signer);
+            const certifyDigest = await submitWalletTransaction(certifyTx, signer);
             await suiClient.waitForTransaction({ digest: certifyDigest });
 
             return flow.getBlob();
