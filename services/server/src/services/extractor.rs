@@ -225,4 +225,20 @@ mod tests {
         assert_eq!(parsed.raw_count, 0);
         assert!(parsed.facts.is_empty());
     }
+
+    #[test]
+    fn parse_extracted_facts_none_mixed_with_facts() {
+        // If the LLM returns "NONE" on one line and a fact on another, keep only the fact.
+        let parsed = parse_extracted_facts("NONE\nUser likes pizza\nNONE");
+        assert_eq!(parsed.raw_count, 1);
+        assert_eq!(parsed.facts, vec!["User likes pizza".to_string()]);
+    }
+
+    #[test]
+    fn parse_extracted_facts_strips_whitespace() {
+        let parsed = parse_extracted_facts("  Fact A  \n\tFact B\t\n");
+        assert_eq!(parsed.raw_count, 2);
+        assert_eq!(parsed.facts[0], "Fact A");
+        assert_eq!(parsed.facts[1], "Fact B");
+    }
 }
