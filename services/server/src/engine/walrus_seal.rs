@@ -181,16 +181,18 @@ impl WalrusSealEngine {
     }
 
     /// Fetch a blob's ciphertext: cache → Walrus (+ cache write-back).
-    /// Returns `Ok(None)` if the blob is gone (Walrus 404 → reactive
-    /// cleanup) or any other download error.
-    async fn fetch_ciphertext(&self, blob_id: &str, owner: &str) -> Option<Vec<u8>> {
+    /// Returns `Some((ciphertext, was_cached))` — `was_cached` is `true` on
+    /// a Redis hit, `false` on a cold fetch from Walrus. Returns `None` if
+    /// the blob is gone (Walrus 404 → reactive cleanup) or any other
+    /// download error.
+    async fn fetch_ciphertext(&self, blob_id: &str, owner: &str) -> Option<(Vec<u8>, bool)> {
         if let Some(ciphertext) = self.cache_get(blob_id).await {
-            return Some(ciphertext);
+            return Some((ciphertext, true));
         }
         match walrus::download_blob(&self.walrus_client, blob_id).await {
             Ok(ciphertext) => {
                 self.cache_put(blob_id, &ciphertext).await;
-                Some(ciphertext)
+                Some((ciphertext, false))
             }
             Err(AppError::BlobNotFound(msg)) => {
                 tracing::warn!("Blob expired, cleaning up: {}", msg);
@@ -279,9 +281,10 @@ impl MemoryEngine for WalrusSealEngine {
     ) -> Result<Option<HydratedMemory>, AppError> {
         let credential = self.credential(auth)?;
 
-        // Step 1: cache → Walrus.
+        // Step 1: cache → Walrus. (fetch_one doesn't aggregate cache stats —
+        // a single blob's hit/miss isn't worth a log line; the span carries it.)
         let ciphertext = match self.fetch_ciphertext(blob_id, owner).await {
-            Some(c) => c,
+            Some((c, _was_cached)) => c,
             None => return Ok(None),
         };
 
@@ -346,6 +349,7 @@ impl MemoryEngine for WalrusSealEngine {
             blob_id: String,
             distance: f64,
             ciphertext: Vec<u8>,
+            was_cached: bool,
         }
         let fetch_tasks = hits.iter().map(|(blob_id, distance)| {
             let blob_id = blob_id.clone();
@@ -353,10 +357,11 @@ impl MemoryEngine for WalrusSealEngine {
             async move {
                 self.fetch_ciphertext(&blob_id, owner)
                     .await
-                    .map(|ciphertext| Fetched {
+                    .map(|(ciphertext, was_cached)| Fetched {
                         blob_id,
                         distance,
                         ciphertext,
+                        was_cached,
                     })
             }
         });
@@ -365,7 +370,17 @@ impl MemoryEngine for WalrusSealEngine {
             .into_iter()
             .flatten()
             .collect();
+        let cache_hits = fetched.iter().filter(|f| f.was_cached).count();
+        let cache_misses = fetched.len() - cache_hits;
         let download_drops = hits.len() - fetched.len();
+        tracing::info!(
+            "engine.fetch_batch: {} hits -> {} fetched ({} cached, {} cold), {} dropped (download)",
+            hits.len(),
+            fetched.len(),
+            cache_hits,
+            cache_misses,
+            download_drops
+        );
 
         // Step 2: batch-decrypt the ciphertexts in chunks.
         let batch_input: Vec<(String, Vec<u8>)> = fetched
@@ -434,6 +449,15 @@ impl MemoryEngine for WalrusSealEngine {
                 DecryptOutcome::Missing => decrypt_drops += 1,
             }
         }
+
+        tracing::info!(
+            "engine.fetch_batch: decrypted {} of {} fetched ({} dropped: {} download, {} decrypt)",
+            results.len(),
+            fetched.len(),
+            download_drops + decrypt_drops,
+            download_drops,
+            decrypt_drops
+        );
 
         Ok((results, download_drops + decrypt_drops))
     }
