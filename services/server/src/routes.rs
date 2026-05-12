@@ -1205,9 +1205,12 @@ pub async fn recall_manual(
 
 /// POST /api/forget
 ///
-/// Soft-delete every memory in `owner`'s `namespace`. Used by the
-/// benchmark harness for inter-run cleanup; also a general admin op.
-/// Mode-blind — works the same in production and benchmark mode (in
+/// Delete the vector index rows for every memory in `owner`'s
+/// `namespace` (a hard `DELETE` on `vector_entries` — the underlying
+/// Walrus blobs persist, since Walrus has no delete; the memories just
+/// stop being retrievable and stop counting toward storage quota). Used
+/// by the benchmark harness for inter-run cleanup; also a general admin
+/// op. Mode-blind — works the same in production and benchmark mode (in
 /// benchmark mode this also removes the plaintext rows). Owner-scoped:
 /// only the caller's own rows are deleted.
 pub async fn forget(
@@ -1334,7 +1337,7 @@ pub async fn analyze(
     // that: per fact, embed → engine.store_blob(plaintext bytes) (the
     // PlaintextEngine writes the `plaintext` column — no SEAL, no Walrus,
     // no Sui transaction, no job row), in parallel across facts. The
-    // response carries the real stored ids and status "completed".
+    // response carries the real stored ids and status "done".
     //
     // Production behaviour is untouched — this branch only runs when
     // BENCHMARK_MODE is on (which is off by default and not for production).
@@ -1395,9 +1398,12 @@ pub async fn analyze(
                 job_ids,
                 facts: stored_facts,
                 fact_count,
-                // "completed" (not "pending") — the memories are stored and
-                // searchable by the time this response is sent.
-                status: "completed".to_string(),
+                // "done" (not "pending") — the memories are stored and
+                // searchable by the time this response is sent. "done"
+                // matches the existing remember_jobs status vocabulary
+                // ("done" = stored, blob_id known), rather than coining a
+                // new term for the benchmark-only case.
+                status: "done".to_string(),
                 owner: owner.clone(),
             }),
         ));

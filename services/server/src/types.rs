@@ -539,8 +539,9 @@ pub struct RestoreResponse {
     pub owner: String,
 }
 
-/// POST /api/forget — soft-delete every memory in a namespace.
-/// Used by the benchmark harness for inter-run cleanup. Mode-blind.
+/// POST /api/forget — delete the vector index rows for a namespace
+/// (hard DELETE on vector_entries; Walrus blobs persist). Used by the
+/// benchmark harness for inter-run cleanup. Mode-blind, owner-scoped.
 #[derive(Debug, Deserialize)]
 pub struct ForgetRequest {
     #[serde(default = "default_namespace")]

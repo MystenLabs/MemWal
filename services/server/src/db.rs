@@ -273,7 +273,11 @@ impl VectorDb {
         Ok(row)
     }
 
-    /// Delete all vector entries for a given owner + namespace
+    /// Hard-delete all vector index rows for a given owner + namespace.
+    /// (Walrus blobs themselves persist — Walrus has no delete; this only
+    /// removes the local `vector_entries` rows, so the memories stop being
+    /// retrievable and stop counting toward storage quota.) Reachable via
+    /// `POST /api/forget` — authed, owner-scoped.
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
             .bind(owner)
