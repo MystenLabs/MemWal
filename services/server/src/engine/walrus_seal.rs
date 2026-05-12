@@ -1,49 +1,396 @@
 //! Production `MemoryEngine`: Walrus upload + SEAL decrypt + Postgres index.
 //!
-//! Implementation lands in the next commit. This file currently holds
-//! only the type so `engine/mod.rs` compiles as a standalone addition.
+//! Holds the *one* copy of the storage choreography that is currently
+//! inlined across `routes.rs` (`recall`, `ask`, `remember_manual`) and
+//! `jobs.rs` (the `RememberJob` / `BulkRememberJob` workers):
+//!
+//! - **store_blob**: pick a Sui key (round-robin pool) → `walrus::upload_blob`
+//!   the prepared ciphertext → `db.insert_vector`.
+//! - **fetch_one**: Redis blob-cache lookup → on miss, `walrus::download_blob`
+//!   + cache write-back → `seal::seal_decrypt` → UTF-8. Reactive cleanup of
+//!   the index row (scoped to `owner`) on Walrus 404 / permanent decrypt
+//!   failure. Returns `Ok(None)` for "gone", not an error.
+//! - **fetch_batch**: per-id cache lookup, then `seal::seal_decrypt_batch`
+//!   the cache-cold blobs in chunks of 25; same cleanup-on-404 semantics;
+//!   returns `(hydrated, dropped_count)` so callers can tell "no matches"
+//!   from "matches we couldn't return".
+//!
+//! The SEAL credential is derived from `&AuthInfo` here (prefer the
+//! exported SessionKey, fall back to the legacy delegate key, then to
+//! the server fallback key) — the same resolution `routes.rs` does
+//! today via `seal::SealCredential::from_auth_or_fallback`.
 
 use async_trait::async_trait;
+use redis::AsyncCommands;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::types::{AppError, AuthInfo};
+use crate::db::VectorDb;
+use crate::seal::{self, DecryptOutcome, SealCredential};
+use crate::types::{AppError, AuthInfo, Config, KeyPool};
+use crate::walrus;
 
 use super::{HydratedMemory, MemoryEngine, MemoryRef};
 
+/// Redis key prefix for the Walrus blob ciphertext cache (ENG-1405).
+const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
+/// SEAL decrypt-batch chunk size (matches the inlined `recall` value).
+const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
+/// Epoch lifetime requested for blobs uploaded via the manual / job paths.
+const STORE_BLOB_EPOCHS: u64 = 50;
+
 /// Production engine — uploads prepared ciphertext to Walrus, indexes
 /// the row in Postgres, serves reads through the Redis blob cache.
+///
+/// Deps are held via `Arc<>` / cheap `Clone` so the engine shares
+/// ownership with `AppState` rather than duplicating connections.
 pub struct WalrusSealEngine {
-    // Dependencies wired in the implementation commit.
+    db: Arc<VectorDb>,
+    http_client: reqwest::Client,
+    walrus_client: Arc<walrus_rs::WalrusClient>,
+    key_pool: Arc<KeyPool>,
+    config: Arc<Config>,
+    redis: redis::aio::MultiplexedConnection,
+    /// ENG-1405 blob ciphertext cache TTL. Zero disables write-back.
+    blob_cache_ttl: Duration,
+}
+
+impl WalrusSealEngine {
+    pub fn new(
+        db: Arc<VectorDb>,
+        http_client: reqwest::Client,
+        walrus_client: Arc<walrus_rs::WalrusClient>,
+        key_pool: Arc<KeyPool>,
+        config: Arc<Config>,
+        redis: redis::aio::MultiplexedConnection,
+        blob_cache_ttl: Duration,
+    ) -> Self {
+        Self {
+            db,
+            http_client,
+            walrus_client,
+            key_pool,
+            config,
+            redis,
+            blob_cache_ttl,
+        }
+    }
+
+    /// Resolve the SEAL credential the way `routes.rs` does: exported
+    /// SessionKey > legacy delegate key > server fallback private key.
+    fn credential(&self, auth: &AuthInfo) -> Result<SealCredential, AppError> {
+        SealCredential::from_auth_or_fallback(auth, self.config.sui_private_key.as_deref())
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)"
+                        .into(),
+                )
+            })
+    }
+
+    /// Reactively delete an expired blob's index row. Best-effort —
+    /// errors logged, not propagated. Scoped to `owner` (LOW-10) so a
+    /// blob discovered via one user's recall can't delete another's row.
+    async fn cleanup_expired_blob(&self, blob_id: &str, owner: &str) {
+        match self.db.delete_by_blob_id(blob_id, owner).await {
+            Ok(rows) => {
+                if rows > 0 {
+                    tracing::info!(
+                        "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
+                        rows, blob_id, owner
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "reactive cleanup failed for blob_id={} owner={}: {}",
+                    blob_id, owner, e
+                );
+            }
+        }
+    }
+
+    /// Try the Redis blob cache. Returns `Some(ciphertext)` on hit;
+    /// `None` on miss or any cache error (cache is best-effort).
+    async fn cache_get(&self, blob_id: &str) -> Option<Vec<u8>> {
+        let mut redis = self.redis.clone();
+        let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
+        match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
+            Ok(Some(ciphertext)) => Some(ciphertext),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                None
+            }
+        }
+    }
+
+    /// Write a freshly-downloaded ciphertext into the Redis cache.
+    /// No-op when `blob_cache_ttl` is zero. Best-effort.
+    async fn cache_put(&self, blob_id: &str, ciphertext: &[u8]) {
+        let ttl_secs = self.blob_cache_ttl.as_secs();
+        if ttl_secs == 0 {
+            return;
+        }
+        let mut redis = self.redis.clone();
+        let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
+        let result: redis::RedisResult<()> = redis
+            .set_ex(&cache_key, ciphertext.to_vec(), ttl_secs)
+            .await;
+        if let Err(e) = result {
+            tracing::warn!("blob cache set failed for {}: {}", blob_id, e);
+        }
+    }
+
+    /// Fetch a blob's ciphertext: cache → Walrus (+ cache write-back).
+    /// Returns `Ok(None)` if the blob is gone (Walrus 404 → reactive
+    /// cleanup) or any other download error.
+    async fn fetch_ciphertext(&self, blob_id: &str, owner: &str) -> Option<Vec<u8>> {
+        if let Some(ciphertext) = self.cache_get(blob_id).await {
+            return Some(ciphertext);
+        }
+        match walrus::download_blob(&self.walrus_client, blob_id).await {
+            Ok(ciphertext) => {
+                self.cache_put(blob_id, &ciphertext).await;
+                Some(ciphertext)
+            }
+            Err(AppError::BlobNotFound(msg)) => {
+                tracing::warn!("Blob expired, cleaning up: {}", msg);
+                self.cleanup_expired_blob(blob_id, owner).await;
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to download blob {}: {}", blob_id, e);
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl MemoryEngine for WalrusSealEngine {
+    #[tracing::instrument(
+        name = "engine.walrus_seal.store_blob",
+        skip_all,
+        fields(owner = %owner, namespace = %namespace, bytes = bytes.len())
+    )]
     async fn store_blob(
         &self,
-        _owner: &str,
-        _namespace: &str,
-        _bytes: &[u8],
-        _vector: &[f32],
-        _agent_public_key: Option<&str>,
+        owner: &str,
+        namespace: &str,
+        bytes: &[u8],
+        vector: &[f32],
+        agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError> {
-        todo!("WalrusSealEngine::store_blob — implemented in the next commit")
+        // Pick the next Sui key slot (round-robin) so concurrent stores
+        // don't serialise on one signer.
+        let key_index = self.key_pool.next_index().ok_or_else(|| {
+            AppError::Internal(
+                "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                    .into(),
+            )
+        })?;
+
+        // Upload the prepared ciphertext to Walrus via the relay sidecar
+        // (pool key pays gas). `defer_transfer = false` — the blob is
+        // transferred to `owner` immediately, same as the inlined
+        // `remember_manual` path.
+        let upload = walrus::upload_blob(
+            &self.http_client,
+            &self.config.sidecar_url,
+            self.config.sidecar_secret.as_deref(),
+            bytes,
+            STORE_BLOB_EPOCHS,
+            owner,
+            key_index,
+            namespace,
+            &self.config.package_id,
+            agent_public_key,
+        )
+        .await?;
+        let blob_id = upload.blob_id;
+        tracing::info!("engine.store_blob: walrus upload ok blob_id={}", blob_id);
+
+        // Index the row. Quota accounting uses the ciphertext byte length.
+        let id = uuid::Uuid::new_v4().to_string();
+        let blob_size = bytes.len() as i64;
+        self.db
+            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size)
+            .await?;
+
+        Ok(MemoryRef { id, blob_id })
     }
 
+    #[tracing::instrument(
+        name = "engine.walrus_seal.fetch_one",
+        skip_all,
+        fields(blob_id = %blob_id)
+    )]
     async fn fetch_one(
         &self,
-        _owner: &str,
-        _blob_id: &str,
-        _distance: f64,
-        _auth: &AuthInfo,
+        owner: &str,
+        blob_id: &str,
+        distance: f64,
+        auth: &AuthInfo,
     ) -> Result<Option<HydratedMemory>, AppError> {
-        todo!("WalrusSealEngine::fetch_one — implemented in the next commit")
+        let credential = self.credential(auth)?;
+
+        // Step 1: cache → Walrus.
+        let ciphertext = match self.fetch_ciphertext(blob_id, owner).await {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        // Step 2: SEAL decrypt via sidecar.
+        let plaintext_bytes = match seal::seal_decrypt(
+            &self.http_client,
+            &self.config.sidecar_url,
+            self.config.sidecar_secret.as_deref(),
+            &ciphertext,
+            &credential,
+            &self.config.package_id,
+            &auth.account_id,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // `seal_decrypt` (single) doesn't classify permanence the
+                // way `seal_decrypt_batch` does; mirror the inlined `ask`
+                // behaviour — log, drop, no cleanup on a single failure.
+                tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                return Ok(None);
+            }
+        };
+
+        // Step 3: UTF-8.
+        let text = match String::from_utf8(plaintext_bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("Invalid UTF-8 in decrypted data for blob {}: {}", blob_id, e);
+                return Ok(None);
+            }
+        };
+
+        Ok(Some(HydratedMemory {
+            blob_id: blob_id.to_string(),
+            text,
+            distance,
+        }))
     }
 
+    #[tracing::instrument(
+        name = "engine.walrus_seal.fetch_batch",
+        skip_all,
+        fields(hits = hits.len())
+    )]
     async fn fetch_batch(
         &self,
-        _owner: &str,
-        _hits: &[(String, f64)],
-        _auth: &AuthInfo,
+        owner: &str,
+        hits: &[(String, f64)],
+        auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize), AppError> {
-        todo!("WalrusSealEngine::fetch_batch — implemented in the next commit")
+        if hits.is_empty() {
+            return Ok((vec![], 0));
+        }
+        let credential = self.credential(auth)?;
+
+        // Step 1: fetch all ciphertexts concurrently (cache → Walrus,
+        // with cache write-back on cold hits). Blobs that 404 / error
+        // drop out here (and get reactive cleanup inside `fetch_ciphertext`).
+        struct Fetched {
+            blob_id: String,
+            distance: f64,
+            ciphertext: Vec<u8>,
+        }
+        let fetch_tasks = hits.iter().map(|(blob_id, distance)| {
+            let blob_id = blob_id.clone();
+            let distance = *distance;
+            async move {
+                self.fetch_ciphertext(&blob_id, owner)
+                    .await
+                    .map(|ciphertext| Fetched {
+                        blob_id,
+                        distance,
+                        ciphertext,
+                    })
+            }
+        });
+        let fetched: Vec<Fetched> = futures::future::join_all(fetch_tasks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        let download_drops = hits.len() - fetched.len();
+
+        // Step 2: batch-decrypt the ciphertexts in chunks.
+        let batch_input: Vec<(String, Vec<u8>)> = fetched
+            .iter()
+            .map(|f| (f.blob_id.clone(), f.ciphertext.clone()))
+            .collect();
+        let mut decrypted: Vec<DecryptOutcome> = Vec::with_capacity(batch_input.len());
+        for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
+            match seal::seal_decrypt_batch(
+                &self.http_client,
+                &self.config.sidecar_url,
+                self.config.sidecar_secret.as_deref(),
+                chunk,
+                &credential,
+                &self.config.package_id,
+                &auth.account_id,
+            )
+            .await
+            {
+                Ok(outcomes) => decrypted.extend(outcomes),
+                Err(e) => {
+                    tracing::warn!(
+                        "engine.fetch_batch: seal_decrypt_batch failed for {} blobs: {}",
+                        chunk.len(),
+                        e
+                    );
+                    decrypted.extend((0..chunk.len()).map(|_| DecryptOutcome::Missing));
+                }
+            }
+        }
+
+        // Step 3: assemble results; permanent decrypt failures trigger cleanup.
+        let mut results = Vec::new();
+        let mut decrypt_drops = 0usize;
+        for (f, outcome) in fetched.iter().zip(decrypted) {
+            match outcome {
+                DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
+                    Ok(text) => results.push(HydratedMemory {
+                        blob_id: f.blob_id.clone(),
+                        text,
+                        distance: f.distance,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Invalid UTF-8 in decrypted data for blob {}: {}",
+                            f.blob_id, e
+                        );
+                        decrypt_drops += 1;
+                    }
+                },
+                DecryptOutcome::Failed { error, permanent } => {
+                    if permanent {
+                        tracing::warn!(
+                            "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
+                            f.blob_id, error
+                        );
+                        self.cleanup_expired_blob(&f.blob_id, owner).await;
+                    } else {
+                        tracing::warn!(
+                            "SEAL decrypt transient failure for blob {}: {}",
+                            f.blob_id, error
+                        );
+                    }
+                    decrypt_drops += 1;
+                }
+                DecryptOutcome::Missing => decrypt_drops += 1,
+            }
+        }
+
+        Ok((results, download_drops + decrypt_drops))
     }
 }
