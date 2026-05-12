@@ -1122,41 +1122,25 @@ pub async fn remember_manual(
         .decode(&body.encrypted_data)
         .map_err(|e| AppError::BadRequest(format!("encrypted_data is not valid base64: {}", e)))?;
 
-    // Check storage quota before upload
+    // Check storage quota before upload (quota enforcement stays here —
+    // the engine owns persistence, not policy).
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
-    // Upload encrypted bytes to Walrus via sidecar (pool key pays gas)
-    let key_index = state.key_pool.next_index().ok_or_else(|| {
-        AppError::Internal(
-            "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)".into(),
+    // Persist via the storage engine: Walrus upload (pool key pays gas,
+    // epochs=50, immediate transfer to owner) -> Postgres index row.
+    // Same logic as before, now in engine/walrus_seal.rs::store_blob.
+    let mref = state
+        .engine
+        .store_blob(
+            owner,
+            namespace,
+            &encrypted_bytes,
+            &body.vector,
+            Some(&auth.public_key),
         )
-    })?;
-
-    let upload = walrus::upload_blob(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        &encrypted_bytes,
-        50,
-        owner,
-        key_index,
-        namespace,
-        &state.config.package_id,
-        Some(&auth.public_key),
-    )
-    .await?;
-
-    let blob_id = upload.blob_id;
-    tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
-    crate::jobs::warm_blob_cache_after_upload(&state, &blob_id, &encrypted_bytes).await;
-
-    // Store {vector, blobId, namespace} in Vector DB
-    let blob_size = encrypted_bytes.len() as i64;
-    let id = uuid::Uuid::new_v4().to_string();
-    state
-        .db
-        .insert_vector(&id, owner, namespace, &blob_id, &body.vector, blob_size)
         .await?;
+    let id = mref.id;
+    let blob_id = mref.blob_id;
 
     tracing::info!(
         "remember_manual complete: id={}, blob_id={}, ns={}",

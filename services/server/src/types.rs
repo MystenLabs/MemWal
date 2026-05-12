@@ -65,9 +65,12 @@ pub struct AppState {
     pub bulk_job_storage: BulkRememberJobStorage,
     /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
     /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
+    /// (Also cloned into `WalrusSealEngine` at construction so the engine
+    /// shares the same TTL when serving recall.)
     pub blob_cache_ttl: std::time::Duration,
     /// MEM-37: Maximum SEAL ciphertext bytes to cache in Redis.
     /// Zero disables blob ciphertext reads and writes in Redis.
+    /// (Also cloned into `WalrusSealEngine` for size-capped cache writes.)
     pub blob_cache_max_bytes: usize,
     /// ENG-1405: Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,

@@ -249,6 +249,12 @@ impl MemoryEngine for WalrusSealEngine {
         let blob_id = upload.blob_id;
         tracing::info!("engine.store_blob: walrus upload ok blob_id={}", blob_id);
 
+        // MEM-37: warm the Redis blob cache with the just-uploaded ciphertext
+        // so the first recall of this blob hits the cache instead of round-
+        // tripping Walrus. Best-effort — skipped when the cache is disabled
+        // or the blob exceeds `blob_cache_max_bytes`.
+        self.cache_put(&blob_id, bytes).await;
+
         // Index the row. Quota accounting uses the ciphertext byte length.
         let id = uuid::Uuid::new_v4().to_string();
         let blob_size = bytes.len() as i64;
