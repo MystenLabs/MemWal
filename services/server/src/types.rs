@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::db::VectorDb;
+use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
 
@@ -28,12 +30,21 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Shared application state passed to all routes and middleware
 pub struct AppState {
-    pub db: VectorDb,
-    pub config: Config,
+    /// `Arc` so the `MemoryEngine` impl can share the same handle rather
+    /// than duplicating the pool.
+    pub db: Arc<VectorDb>,
+    /// `Arc` so the engine + handlers share one immutable config.
+    pub config: Arc<Config>,
     pub http_client: reqwest::Client,
-    pub walrus_client: walrus_rs::WalrusClient,
-    /// Round-robin pool of Sui private keys for parallel Walrus uploads
-    pub key_pool: KeyPool,
+    /// `Arc` so the engine shares the Walrus client handle.
+    pub walrus_client: Arc<walrus_rs::WalrusClient>,
+    /// Round-robin pool of Sui private keys for parallel Walrus uploads.
+    /// `Arc` so the engine's `store_blob` can draw from the same pool.
+    pub key_pool: Arc<KeyPool>,
+    /// Persistence abstraction — `WalrusSealEngine` in production,
+    /// `PlaintextEngine` in benchmark mode. Selected once at startup
+    /// from `Config::benchmark_mode`. Handlers / job workers are mode-blind.
+    pub engine: Arc<dyn MemoryEngine>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -147,6 +158,11 @@ pub struct Config {
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
+    /// ENG-1747: when true, select `PlaintextEngine` instead of
+    /// `WalrusSealEngine` — memories are stored as plaintext in Postgres,
+    /// bypassing SEAL + Walrus. **Not for production.** Off by default;
+    /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
+    pub benchmark_mode: bool,
 }
 
 impl Config {
@@ -201,6 +217,9 @@ impl Config {
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
+            benchmark_mode: std::env::var("BENCHMARK_MODE")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false),
         }
     }
 }
@@ -522,6 +541,10 @@ pub struct RestoreResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// "production" or "benchmark" — lets benchmark harness runs verify
+    /// at startup that they're hitting a benchmark-mode server before
+    /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
+    pub mode: String,
 }
 
 /// GET /config response (ENG-1697).

@@ -1739,10 +1739,15 @@ where
 }
 
 /// GET /health
-pub async fn health() -> Json<HealthResponse> {
+pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        mode: if state.config.benchmark_mode {
+            "benchmark".to_string()
+        } else {
+            "production".to_string()
+        },
     })
 }
 
@@ -1959,6 +1964,7 @@ mod tests {
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
+            benchmark_mode: false,
         }
     }
 
