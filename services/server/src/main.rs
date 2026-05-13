@@ -30,7 +30,8 @@ use jobs::{
     WalletJobStorage,
 };
 use types::{
-    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_TTL_SECS, DEFAULT_EMBEDDING_CACHE_TTL_SECS,
+    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
+    DEFAULT_EMBEDDING_CACHE_TTL_SECS,
 };
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -150,19 +151,31 @@ async fn main() {
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
-    // Create N per-wallet queues (one per pool key) for WalletJob.
-    // Each queue name is "wallet-{i}" and has a single dedicated worker.
+    // Single Apalis queue for all WalletJob signing operations.
+    //
+    // Was previously a Vec of per-wallet queues to avoid Sui coin-object
+    // equivocation locks. Per Will Bradley (Mysten, 2026-05-12 Slack callout):
+    // Sui no longer permanently locks coin objects on equivocation, so a single
+    // wallet + concurrent workers + retry handling is sufficient. Multi-wallet
+    // is only justified for raw throughput, which is not a bottleneck for
+    // background Walrus uploads.
+    const WALLET_QUEUE_NAME: &str = "wallet_jobs";
+    let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
+        apalis_pool.clone(),
+        apalis_sql::Config::new(WALLET_QUEUE_NAME),
+    );
     let pool_size = config.sui_private_keys.len();
-    let mut wallet_storages: Vec<WalletJobStorage> = Vec::with_capacity(pool_size.max(1));
-    for i in 0..pool_size.max(1) {
-        let config_name = format!("wallet-{}", i);
-        let storage: WalletJobStorage = PostgresStorage::new_with_config(
-            apalis_pool.clone(),
-            apalis_sql::Config::new(&config_name),
+    if pool_size > 1 {
+        tracing::warn!(
+            "  SERVER_SUI_PRIVATE_KEYS has {} entries; only the first is used. \
+             Multi-wallet routing was retired — see plans/simplify-walrus-wallet-queues/.",
+            pool_size,
         );
-        wallet_storages.push(storage);
     }
-    tracing::info!("  Apalis: job queue ready (table=apalis_jobs)");
+    tracing::info!(
+        "  Apalis: job queue ready (table=apalis_jobs, queue={})",
+        WALLET_QUEUE_NAME
+    );
 
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
     let walrus_client =
@@ -170,19 +183,18 @@ async fn main() {
             .expect("Failed to initialize Walrus client (invalid URL?)");
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
-    // Log upload key pool status
+    // Log upload key status
     let pool_size = config.sui_private_keys.len();
     if pool_size > 0 {
         tracing::info!(
-            "  Walrus upload: {} key(s) in pool (parallel uploads up to {}x)",
+            "  Walrus upload: {} key(s) configured; using first key for wallet jobs",
             pool_size,
-            pool_size
         );
     } else {
         tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
     }
 
-    // Build key pool for parallel Walrus uploads
+    // Build wallet key holder
     let key_pool = KeyPool::new(config.sui_private_keys.clone());
 
     // Initialize Redis for rate limiting
@@ -196,14 +208,20 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_BLOB_CACHE_TTL_SECS);
+    let blob_cache_max_bytes = std::env::var("BLOB_CACHE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_MAX_BYTES);
     let embedding_cache_ttl_secs = std::env::var("EMBEDDING_CACHE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_EMBEDDING_CACHE_TTL_SECS);
     tracing::info!(
-        "  blob cache: redis ttl={}s (BLOB_CACHE_TTL_SECS={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
+        "  blob cache: redis ttl={}s max={} bytes (BLOB_CACHE_TTL_SECS={}, BLOB_CACHE_MAX_BYTES={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
         blob_cache_ttl_secs,
+        blob_cache_max_bytes,
         blob_cache_ttl_secs,
+        blob_cache_max_bytes,
         embedding_cache_ttl_secs,
         embedding_cache_ttl_secs
     );
@@ -214,6 +232,9 @@ async fn main() {
         tracing::warn!(
             "  blob cache: BLOB_CACHE_TTL_SECS=0 disables cache hits and forces Walrus revalidation"
         );
+    }
+    if blob_cache_max_bytes == 0 {
+        tracing::warn!("  blob cache: BLOB_CACHE_MAX_BYTES=0 disables blob cache reads and writes");
     }
     if embedding_cache_ttl.is_zero() {
         tracing::warn!(
@@ -231,9 +252,10 @@ async fn main() {
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
-        wallet_storages: wallet_storages.clone(),
+        wallet_storage: wallet_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
         blob_cache_ttl,
+        blob_cache_max_bytes,
         embedding_cache_ttl,
     });
 
@@ -300,30 +322,39 @@ async fn main() {
         tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
     }
 
-    // Workers 3..N: Per-wallet WalletJob workers (one per pool key).
-    // Each worker is pinned to wallet_index i and processes jobs from queue "wallet-{i}".
-    // This guarantees upload and set-metadata+transfer always use the same signing key.
-    for (i, storage) in wallet_storages.into_iter().enumerate() {
+    // Worker 4: WalletJob — single worker, single queue.
+    //
+    // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
+    // dispatched simultaneously against the same wallet; transient Sui/RPC
+    // conflicts are classified by `WalletJobError` and retried by Apalis.
+    let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    {
         let worker_state = state.clone();
-        let queue_name = format!("wallet-{}", i);
-        let queue_label = queue_name.clone();
+        let storage = wallet_storage.clone();
         tokio::spawn(async move {
             loop {
-                let worker = WorkerBuilder::new(&queue_name)
+                let worker = WorkerBuilder::new("wallet_jobs")
                     .data(worker_state.clone())
                     .backend(storage.clone())
                     .build_fn(execute_wallet_job);
 
                 #[allow(deprecated)]
-                if let Err(e) = Monitor::new().register_with_count(1, worker).run().await {
-                    tracing::error!("Apalis wallet worker {} exited: {}", queue_label, e);
+                if let Err(e) = Monitor::new()
+                    .register_with_count(wallet_concurrency, worker)
+                    .run()
+                    .await
+                {
+                    tracing::error!("Apalis wallet worker exited: {}", e);
                 }
                 tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
             }
         });
         tracing::info!(
-            "  Apalis: wallet worker '{}' spawned (serial)",
-            format!("wallet-{}", i)
+            "  Apalis: worker 'wallet_jobs' spawned (concurrency={})",
+            wallet_concurrency
         );
     }
 

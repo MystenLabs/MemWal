@@ -18,25 +18,19 @@ use crate::seal;
 use crate::types::*;
 use crate::walrus;
 
-/// Enqueue a WalletJob to the correct per-wallet Apalis queue.
+/// Enqueue a WalletJob to the single shared Apalis queue.
 ///
-/// `wallet_index` must match the index used (or to be used) for the Walrus
-/// upload so that upload and set-metadata+transfer always sign with the
-/// same key. Returns the wallet_index for caller tracking.
+/// `wallet_index` is retained in the payload for audit/legacy parity but no
+/// longer drives queue routing — all jobs flow through one queue and the
+/// Apalis worker handles `WALLET_JOB_CONCURRENCY` requests in parallel.
+/// See MEM-35: multi-wallet was an equivocation workaround that's no longer
+/// needed on current Sui.
 pub async fn enqueue_wallet_job(
     state: &AppState,
     wallet_index: usize,
     operation: WalletOperation,
 ) -> Result<usize, AppError> {
-    let storages = &state.wallet_storages;
-    if wallet_index >= storages.len() {
-        return Err(AppError::Internal(format!(
-            "wallet_index {} out of range (pool size={})",
-            wallet_index,
-            storages.len()
-        )));
-    }
-    let mut storage = storages[wallet_index].clone();
+    let mut storage = state.wallet_storage.clone();
     storage
         .push(WalletJob {
             wallet_index,
@@ -829,8 +823,9 @@ pub async fn remember_status(
 /// POST /api/remember/bulk  (ENG-1408)
 ///
 /// Accepts up to MAX_BULK_ITEMS memories and returns HTTP 202 after creating
-/// status rows. Embed/encrypt runs in the background; the bulk worker batches
-/// metadata+transfer by wallet after deferred Walrus uploads.
+/// status rows. Embed/encrypt runs in the background; the bulk worker fans
+/// prepared items into the shared wallet queue so each item uses the same
+/// retry/error-classification path as single-memory uploads.
 pub async fn remember_bulk(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -1051,8 +1046,6 @@ pub async fn recall(
         }));
     }
 
-    const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
-
     struct FetchedBlob {
         blob_id: String,
         distance: f64,
@@ -1062,6 +1055,8 @@ pub async fn recall(
 
     let t2 = std::time::Instant::now();
     let db = &state.db;
+    let blob_cache_enabled = state.blob_cache_ttl.as_secs() > 0 && state.blob_cache_max_bytes > 0;
+    let blob_cache_max_bytes = state.blob_cache_max_bytes;
     let download_tasks: Vec<_> = hits
         .iter()
         .map(|hit| {
@@ -1073,18 +1068,28 @@ pub async fn recall(
 
             async move {
                 let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
-                match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
-                    Ok(Some(ciphertext)) => {
-                        return Some(FetchedBlob {
-                            blob_id,
-                            distance,
-                            ciphertext,
-                            was_cached: true,
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                if blob_cache_enabled {
+                    match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
+                        Ok(Some(ciphertext)) => {
+                            if ciphertext.len() <= blob_cache_max_bytes {
+                                return Some(FetchedBlob {
+                                    blob_id,
+                                    distance,
+                                    ciphertext,
+                                    was_cached: true,
+                                });
+                            }
+                            tracing::info!(
+                                "blob cache ignored for {}: {} bytes exceeds max {}",
+                                blob_id,
+                                ciphertext.len(),
+                                blob_cache_max_bytes
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                        }
                     }
                 }
 
@@ -1139,10 +1144,19 @@ pub async fn recall(
     );
 
     let blob_cache_ttl_secs = state.blob_cache_ttl.as_secs();
-    if blob_cache_ttl_secs > 0 {
+    if blob_cache_ttl_secs > 0 && state.blob_cache_max_bytes > 0 {
         let mut redis = state.redis.clone();
         for fetched in &fetched_blobs {
             if fetched.was_cached {
+                continue;
+            }
+            if fetched.ciphertext.len() > state.blob_cache_max_bytes {
+                tracing::info!(
+                    "blob cache skip for {}: {} bytes exceeds max {}",
+                    fetched.blob_id,
+                    fetched.ciphertext.len(),
+                    state.blob_cache_max_bytes
+                );
                 continue;
             }
             let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, fetched.blob_id);
@@ -1321,6 +1335,7 @@ pub async fn remember_manual(
 
     let blob_id = upload.blob_id;
     tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
+    crate::jobs::warm_blob_cache_after_upload(&state, &blob_id, &encrypted_bytes).await;
 
     // Store {vector, blobId, namespace} in Vector DB
     let blob_size = encrypted_bytes.len() as i64;

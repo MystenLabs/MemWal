@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::db::VectorDb;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
@@ -11,11 +10,14 @@ pub const MAX_BULK_ITEMS: usize = 20;
 /// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
 
-/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
-pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
+/// Redis key prefix for Walrus ciphertext cache entries.
+pub const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 
 /// Default max age for Redis-cached Walrus ciphertext before revalidating via Walrus.
-pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 5 * 60;
+pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Default maximum ciphertext size stored in Redis.
+pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
@@ -41,60 +43,72 @@ pub struct AppState {
     /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
-    /// Per-wallet Apalis storages — wallet_storages[i] maps to pool key[i].
-    /// New code should enqueue WalletJob here instead of using
-    /// MetaTransferJob/RememberJob directly.
-    pub wallet_storages: Vec<WalletJobStorage>,
+    /// Single Apalis storage for WalletJob. Routing dimension was previously a
+    /// Vec<WalletJobStorage> keyed by wallet_index; that existed to side-step
+    /// Sui coin-object equivocation locks. Per Will Bradley (Mysten, 2026-05-12
+    /// Slack callout): Sui no longer permanently locks coin objects on
+    /// equivocation, so one wallet + concurrent workers + retry handler is
+    /// sufficient. See `plans/simplify-walrus-wallet-queues/reports/` for context.
+    pub wallet_storage: WalletJobStorage,
     /// ENG-1408: Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
     /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
     /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
     pub blob_cache_ttl: std::time::Duration,
+    /// MEM-37: Maximum SEAL ciphertext bytes to cache in Redis.
+    /// Zero disables blob ciphertext reads and writes in Redis.
+    pub blob_cache_max_bytes: usize,
     /// ENG-1405: Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
 }
 
 // ============================================================
-// Key Pool (round-robin selection for parallel uploads)
+// Key Pool — single-wallet wrapper
 // ============================================================
 
-/// A thread-safe round-robin pool of Sui private keys.
-/// Each call to `next()` returns the next key in the pool,
-/// allowing concurrent uploads to use different signer addresses.
+/// Wallet key holder. Historically a round-robin pool of N keys used to
+/// horizontally side-step Sui coin-object equivocation locks. Per Will Bradley
+/// (Mysten, 2026-05-12): coin-object locking is no longer a practical concern
+/// on Sui, so a single key with concurrent workers + retry handling is
+/// sufficient. `next_index()` always returns `Some(0)` when a key is
+/// configured (the API is kept so callers can still distinguish "no keys"
+/// from "key available").
 pub struct KeyPool {
     keys: Vec<String>,
-    counter: AtomicUsize,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<String>) -> Self {
-        Self {
-            keys,
-            counter: AtomicUsize::new(0),
-        }
+        // Only the first key is used. Additional keys (if any) are ignored —
+        // surfaced via a warning at boot in main.rs.
+        Self { keys }
     }
 
-    /// Returns the next key in round-robin order, or `None` if the pool is empty.
+    /// Returns the first configured key, or `None` if no keys are configured.
     #[allow(dead_code)]
     pub fn next(&self) -> Option<&str> {
-        if self.keys.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
-        Some(&self.keys[idx])
+        self.keys.first().map(|s| s.as_str())
     }
 
-    /// Returns the pool index for the next key in round-robin order.
+    /// Returns `Some(0)` when a key is configured, `None` otherwise.
+    /// `wallet_index` is retained in job payloads for audit / sidecar parity
+    /// but no longer drives queue routing.
     pub fn next_index(&self) -> Option<usize> {
         if self.keys.is_empty() {
-            return None;
+            None
+        } else {
+            Some(0)
         }
-        Some(self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len())
     }
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.keys.len()
     }
 }
 
@@ -679,6 +693,13 @@ mod tests {
     // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
 
     #[test]
+    fn blob_cache_defaults_match_mem_37_policy() {
+        assert_eq!(BLOB_CACHE_KEY_PREFIX, "memwal:blob:v1:");
+        assert_eq!(DEFAULT_BLOB_CACHE_TTL_SECS, 14 * 24 * 60 * 60);
+        assert_eq!(DEFAULT_BLOB_CACHE_MAX_BYTES, 512 * 1024);
+    }
+
+    #[test]
     fn auth_info_debug_redacts_delegate_key() {
         let auth = AuthInfo {
             public_key: "aabbccdd".to_string(),
@@ -812,16 +833,15 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
     }
 
-    // ── KeyPool: round-robin selection ───────────────────────────────────
+    // ── KeyPool: single-wallet selection ─────────────────────────────────
 
     #[test]
-    fn key_pool_round_robin() {
+    fn key_pool_returns_first_key() {
         let pool = KeyPool::new(vec!["key_a".into(), "key_b".into(), "key_c".into()]);
 
         assert_eq!(pool.next(), Some("key_a"));
-        assert_eq!(pool.next(), Some("key_b"));
-        assert_eq!(pool.next(), Some("key_c"));
-        assert_eq!(pool.next(), Some("key_a")); // wraps around
+        assert_eq!(pool.next(), Some("key_a"));
+        assert_eq!(pool.next(), Some("key_a"));
     }
 
     #[test]
@@ -841,10 +861,10 @@ mod tests {
     }
 
     #[test]
-    fn key_pool_next_index_wraps() {
+    fn key_pool_next_index_always_zero() {
         let pool = KeyPool::new(vec!["a".into(), "b".into()]);
         assert_eq!(pool.next_index(), Some(0));
-        assert_eq!(pool.next_index(), Some(1));
+        assert_eq!(pool.next_index(), Some(0));
         assert_eq!(pool.next_index(), Some(0));
     }
 
