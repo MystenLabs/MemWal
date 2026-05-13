@@ -8,16 +8,21 @@
  * minimal MCP server that:
  *
  *   - Responds to `initialize` so the client sees a healthy server.
- *   - Advertises the 4 real MemWal tools in `tools/list` so the agent
- *     knows what's available.
- *   - Returns an `isError: true` envelope on any `tools/call` with a
- *     friendly login instruction inline in the chat.
+ *   - Advertises the 4 real MemWal tools + a 5th `memwal_login` tool in
+ *     `tools/list` so the agent knows what's available.
+ *   - On `tools/call memwal_login`: invokes the browser-based wallet login
+ *     flow inline so the user never has to leave their MCP client. Eliminates
+ *     the previous "run a separate `npx ... login` command then restart" UX.
+ *   - On any other `tools/call`: returns `isError: true` with a friendly
+ *     instruction telling the agent to call `memwal_login` first (or run
+ *     the CLI command as a fallback).
  *
- * This is a Phase B (current) compromise — Phase B.5 will replace it with
- * the MCP OAuth flow so the client's host drives the browser dance and
- * retries the tool call automatically (no client restart needed).
+ * Note: HTTP transport (`/api/mcp`) gets a separate native OAuth flow per
+ * MCP spec 2025-06 — see ENG-1750. The two paths cover different surfaces
+ * and coexist.
  */
 import { log } from "./logger.js";
+import { loginFlow } from "./login.js";
 
 interface RpcMessage {
     jsonrpc: "2.0";
@@ -86,23 +91,42 @@ const TOOL_DEFINITIONS = [
             additionalProperties: false,
         },
     },
+    {
+        name: "memwal_login",
+        description:
+            "Sign this MCP client into your MemWal account by opening a browser. Run once when the agent reports MemWal is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+    },
 ];
+
+/** Maximum time we'll keep the login HTTP listener bound after the user
+ * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
+ * sign, MetaMask review — so we give 5 min before the port closes. */
+const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
+
+/** How long to wait for the local listener to bind + emit its URL before we
+ * give up and return an error. Should be near-instant; 5s is paranoia. */
+const URL_READY_TIMEOUT_MS = 5_000;
 
 const LOGIN_INSTRUCTION = [
     "❌ MemWal isn't signed in yet.",
     "",
-    "To connect this MCP client to your MemWal memory, run **once** in a terminal:",
+    "**Easiest fix — call the `memwal_login` tool from this client.** It opens a browser,",
+    "you approve the wallet sign-in, and on the next tool call this server picks up the",
+    "credentials automatically. No terminal command, no client restart.",
+    "",
+    "Fallback (if your client cannot call `memwal_login`, or you prefer a CLI):",
     "",
     "    npx -y @mysten-incubation/memwal-mcp login",
     "",
-    "(or `npx -y @mysten-incubation/memwal-mcp login --local` / `--dev` to point at a non-prod env)",
+    "(or `npx -y @mysten-incubation/memwal-mcp login --local` / `--dev` for a non-prod env)",
     "",
-    "A browser tab will open — click **Connect Sui Wallet** and approve the on-chain ",
-    "`add_delegate_key` transaction. The flow takes about 30 seconds.",
-    "",
-    "After login completes, restart this MCP client so it picks up the new credentials ",
-    "at `~/.memwal/credentials.json`. You won't need to do this again unless you revoke ",
-    "the delegate key from the dashboard.",
+    "Either path opens a browser tab — click **Connect Sui Wallet** and approve the on-chain",
+    "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
 ].join("\n");
 
 function writeStdoutMessage(msg: RpcMessage): void {
@@ -127,11 +151,163 @@ function readStdinLines(onLine: (line: string) => void): Promise<void> {
     });
 }
 
+/** Config passed in by the entry point (`index.ts`) so the login flow uses
+ * the same web/relayer URLs as the rest of the CLI (e.g. `--dev` →
+ * dashboard at `https://dev.memwal.ai`, not the prod default). */
+export interface AuthRequiredConfig {
+    relayerUrl: string;
+    webUrl: string;
+    label: string;
+}
+
+/** Send a `notifications/message` (MCP logging notification). Some clients
+ * surface these inline (Cursor); others swallow them (Claude Code as of
+ * 2026-05). We rely primarily on the tool result for the URL — this is a
+ * secondary surface for clients that show it. */
+function sendLogMessage(level: "info" | "warning" | "error", text: string): void {
+    writeStdoutMessage({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: {
+            level,
+            logger: "memwal-mcp",
+            data: text,
+        },
+    });
+}
+
+/**
+ * Start the browser-based login flow and return the click-able URL
+ * IMMEDIATELY in the tool result (do NOT block waiting for the user to
+ * approve). Reasons:
+ *
+ *   - MCP clients enforce a tool-call timeout (~60s in Claude Code/Codex).
+ *     The user's wallet flow can easily exceed it (hardware wallet review,
+ *     Enoki sponsor lag, browser tab not focused).
+ *   - The agent paraphrases timeout errors and may strip the URL when
+ *     reporting to the user, leaving them stuck.
+ *   - `notifications/message` is filtered out by some clients.
+ *
+ * The login HTTP listener stays alive for LOGIN_BG_TIMEOUT_MS in the
+ * background. Once the user clicks the link and approves the wallet, the
+ * callback writes credentials to ~/.memwal/credentials.json. The user then
+ * issues any other memwal_* tool to verify — which now succeeds because
+ * the bridge picks up the saved creds on its next call.
+ */
+async function handleLoginToolCall(
+    config: AuthRequiredConfig,
+    _progressToken: unknown,
+): Promise<{ text: string; isError: boolean }> {
+    let connectUrl: string | null = null;
+
+    // Promise that resolves with the URL as soon as the listener is bound.
+    const urlReady = new Promise<string>((resolve) => {
+        // Fire loginFlow but DO NOT await — it runs in the background.
+        // openBrowser: false because (a) child-process spawning a browser is
+        // unreliable across MCP clients, and (b) macOS `open <url>` often
+        // foregrounds an existing memwal.ai tab instead of navigating to
+        // the full /connect/mcp?... URL — so user lands on the homepage,
+        // not the consent screen. The agent surfaces the clickable URL
+        // from the tool result instead.
+        loginFlow({
+            relayerUrl: config.relayerUrl,
+            webUrl: config.webUrl,
+            label: config.label,
+            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            openBrowser: false,
+            onUrl: (url) => {
+                connectUrl = url;
+                resolve(url);
+                // Also push to log notification — clients that surface these
+                // (Cursor) get a second visible copy of the URL.
+                sendLogMessage("info", `MemWal MCP login URL: ${url}`);
+            },
+        })
+            .then((creds) => {
+                log.info("memwal_login.bg.success", {
+                    accountId: creds.accountId,
+                    delegateAddress: creds.delegateAddress,
+                });
+            })
+            .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                log.warn("memwal_login.bg.failed", { msg });
+            });
+    });
+
+    // Race the URL-ready against a short timeout. The listener bind is
+    // synchronous-ish (single port allocation); 5s is a hard cap for a
+    // pathologically slow machine or unrelated bug.
+    const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(
+            () => reject(new Error("Listener never started")),
+            URL_READY_TIMEOUT_MS,
+        ).unref?.() as never,
+    );
+
+    let url: string;
+    try {
+        url = await Promise.race([urlReady, timeoutPromise]);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("memwal_login.tool.url_not_ready", { msg });
+        return {
+            isError: true,
+            text: [
+                `❌ Failed to start MemWal login: ${msg}`,
+                "",
+                "Try the CLI fallback:",
+                "",
+                "    npx -y @mysten-incubation/memwal-mcp login",
+            ].join("\n"),
+        };
+    }
+
+    log.info("memwal_login.tool.url_ready", { url });
+    // The URL is included MULTIPLE times in different formats so agents
+    // that try to summarize the result can't strip all of them. Some MCP
+    // clients (Claude Code) paraphrase tool output aggressively — by
+    // repeating the URL in plain, code-block, and markdown-link form, at
+    // least one survives the agent's response template.
+    return {
+        isError: false,
+        text: [
+            `## ⚠️ ACTION REQUIRED: User must click this URL to sign in`,
+            ``,
+            `**URL:** ${url}`,
+            ``,
+            `\`\`\``,
+            url,
+            `\`\`\``,
+            ``,
+            `[Click here to open MemWal sign-in](${url})`,
+            ``,
+            `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
+            `The user CANNOT proceed without seeing the exact URL. Surface it verbatim`,
+            `in your reply, then explain the steps:`,
+            ``,
+            `1. Open the URL in any browser (it may have already opened automatically)`,
+            `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
+            `3. Once "Connected" appears in the browser, the assistant should retry the original request — the other memwal_* tools will then have credentials at \`~/.memwal/credentials.json\``,
+            ``,
+            `_The login link stays valid for 5 minutes. If it expires, call \`memwal_login\` again to get a fresh URL._`,
+        ].join("\n"),
+    };
+}
+
 /**
  * Run the auth-required stdio MCP server. Returns when stdin closes.
+ *
+ * The `config` parameter carries the same `relayerUrl` / `webUrl` / `label`
+ * that the rest of the CLI resolved (e.g. `--dev` → dev URLs). Without it,
+ * `memwal_login` would fall back to prod defaults and open the wrong
+ * dashboard.
  */
-export async function runAuthRequiredServer(): Promise<void> {
-    log.info("auth_required_server.started", {});
+export async function runAuthRequiredServer(config: AuthRequiredConfig): Promise<void> {
+    log.info("auth_required_server.started", {
+        webUrl: config.webUrl,
+        relayerUrl: config.relayerUrl,
+    });
 
     await readStdinLines((line) => {
         let req: RpcMessage;
@@ -172,6 +348,33 @@ export async function runAuthRequiredServer(): Promise<void> {
         }
 
         if (method === "tools/call") {
+            const params = (req.params ?? {}) as {
+                name?: string;
+                arguments?: unknown;
+                _meta?: { progressToken?: unknown };
+            };
+            const toolName = params.name;
+            const progressToken = params._meta?.progressToken;
+
+            if (toolName === "memwal_login") {
+                // Returns near-instantly with the click-able URL. The
+                // listener stays alive in the background — see
+                // handleLoginToolCall for the rationale on not blocking.
+                void handleLoginToolCall(config, progressToken).then((result) => {
+                    writeStdoutMessage({
+                        jsonrpc: "2.0",
+                        id,
+                        result: {
+                            content: [{ type: "text", text: result.text }],
+                            isError: result.isError,
+                        },
+                    });
+                });
+                return;
+            }
+
+            // Any other tool — fall through to the generic LOGIN_INSTRUCTION
+            // error so the agent knows it must call memwal_login first.
             writeStdoutMessage({
                 jsonrpc: "2.0",
                 id,

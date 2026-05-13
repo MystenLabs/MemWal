@@ -156,8 +156,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             // automatically — no client restart required.
             log.warn("creds.missing_at_spawn.serving_auth_required", {
                 credsPath: credsPath(),
+                relayerUrl,
+                webUrl,
             });
-            await runAuthRequiredServer();
+            // Pass the resolved URLs through so `memwal_login` (called as a
+            // tool from the MCP client) opens the correct dashboard. Before
+            // this fix `--dev` was silently dropped here and the flow always
+            // routed to prod (https://memwal.ai).
+            await runAuthRequiredServer({ relayerUrl, webUrl, label });
             return;
         }
         // TTY = manual invocation. Block on the browser flow as before.
@@ -195,7 +201,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
 
-    await runBridge(creds);
+    await runBridge(creds, { relayerUrl, webUrl, label });
 }
 
 function printHelp(): void {

@@ -3,6 +3,9 @@
     "version": "0.0.1",
     "description": "MemWal MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the MemWal relayer. Handles browser-based wallet login on first run.",
     "type": "module",
+    "engines": {
+        "node": ">=20.0.0"
+    },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "bin": {
@@ -21,10 +24,10 @@
         "start": "node ./dist/bin/memwal-mcp.js"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.29.0",
-        "@noble/ed25519": "^2.3.0",
-        "@noble/hashes": "^2.0.0",
-        "open": "^10.1.0"
+        "@modelcontextprotocol/sdk": "1.29.0",
+        "@noble/ed25519": "2.3.0",
+        "@noble/hashes": "2.0.0",
+        "open": "10.1.0"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",

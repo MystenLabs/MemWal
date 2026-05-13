@@ -35,9 +35,17 @@ export interface LoginOptions {
     timeoutMs?: number;
     /** Open the URL ourselves vs print it (`false` is useful in headless CI). */
     openBrowser?: boolean;
+    /**
+     * Fired exactly once with the fully-built `connectUrl` as soon as the
+     * localhost listener is ready. Lets callers surface the URL through their
+     * own channel (e.g. an MCP `notifications/progress` so the agent shows it
+     * inline) in case `open()` fails or runs in a context where the user
+     * can't see the spawned browser tab.
+     */
+    onUrl?: (connectUrl: string) => void;
 }
 
-const DEFAULTS: Required<Omit<LoginOptions, "label">> & { label: string } = {
+const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: string } = {
     webUrl: process.env.MEMWAL_WEB_URL ?? "https://memwal.ai",
     relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
     label: process.env.MEMWAL_CLIENT_LABEL ?? "MemWal MCP",
@@ -188,6 +196,14 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     note(`Opening browser to authorize this MCP client...`);
     note(`If your browser doesn't open, visit: ${connectUrl}`);
     log.info("login.start", { port, publicKey: keypair.publicKeyHex, label: cfg.label });
+    // Surface the URL to programmatic callers (e.g. MCP tool wrapper) so it
+    // can be shown inline in the chat — `note` only writes to stderr which
+    // MCP clients usually don't surface.
+    try {
+        cfg.onUrl?.(connectUrl);
+    } catch {
+        /* caller errors don't break the flow */
+    }
 
     let creds: MemWalCredentials | null = null;
     let error: Error | null = null;
