@@ -43,6 +43,10 @@ These are not all enforced at boot, but most real deployments need them.
 | `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
+| `MEMWAL_RELAYER_URL` | `http://127.0.0.1:$PORT` | Relayer URL passed from the Rust server to the sidecar for MCP tool calls |
+| `MCP_MAX_TOTAL_SESSIONS` | `1000` | Maximum active MCP sessions across SSE and Streamable HTTP transports |
+| `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |
+| `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Maximum new MCP sessions opened by one source IP per minute |
 
 ## Notes
 
@@ -57,3 +61,4 @@ These are not all enforced at boot, but most real deployments need them.
 - The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).
+- `MEMWAL_RELAYER_URL` is only needed when the sidecar should call a different relayer URL than the Rust server's local port. The Rust server sets it automatically to `http://127.0.0.1:$PORT` for the managed sidecar when it starts.

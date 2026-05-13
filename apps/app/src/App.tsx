@@ -24,6 +24,7 @@ import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
+import ConnectMcp from './pages/ConnectMcp'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -212,6 +213,7 @@ function AppContent() {
         !currentAccount ? <Navigate to="/" replace /> :
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       } />
+      <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

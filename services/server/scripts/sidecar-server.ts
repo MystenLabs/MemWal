@@ -19,6 +19,7 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
+import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 
 // ============================================================
@@ -326,6 +327,16 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
+});
+
+// MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
+// middleware: MCP traffic is forwarded by the Rust relayer with the end-user's
+// own delegate-key Bearer token in `Authorization`, NOT the sidecar's shared
+// secret. The MCP layer does its own auth (parse delegate key + account id
+// from request headers). These routes are reachable only from the relayer
+// over localhost — same trust boundary as the rest of the sidecar.
+mountMcpRoutes(app, {
+    relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",
 });
 
 // Wallet-execution metrics (MEM-35 observability). Placed before auth so
@@ -1178,7 +1189,7 @@ app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
 const HOST = process.env.SIDECAR_HOST || "127.0.0.1";
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
     console.log(JSON.stringify({
         event: "sidecar_ready",
         host: HOST,
@@ -1186,3 +1197,28 @@ app.listen(PORT, HOST, () => {
         pid: process.pid,
     }));
 });
+
+// Graceful shutdown — close MCP transports first so SSE clients disconnect
+// cleanly, then close the HTTP server.
+async function gracefulShutdown(signal: string): Promise<void> {
+    console.log(JSON.stringify({ event: "sidecar_shutdown_begin", signal }));
+    try {
+        await shutdownMcpSessions();
+    } catch (err: any) {
+        console.error(`[sidecar] mcp shutdown error: ${err?.message || err}`);
+    }
+    server.close((err) => {
+        if (err) {
+            console.error(`[sidecar] http close error: ${err.message}`);
+            process.exit(1);
+        }
+        console.log(JSON.stringify({ event: "sidecar_shutdown_complete" }));
+        process.exit(0);
+    });
+    setTimeout(() => {
+        console.error("[sidecar] forced exit after 5s");
+        process.exit(1);
+    }, 5_000).unref();
+}
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

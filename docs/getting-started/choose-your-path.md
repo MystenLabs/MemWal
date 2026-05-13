@@ -52,3 +52,12 @@ Go to: [AI Integration](/sdk/usage/with-memwal)
 Use this when you need full control over the trust boundary - your infrastructure, your credentials, no third party sees your data.
 
 Go to: [Self-Hosting](/relayer/self-hosting)
+
+## 6. MCP Clients
+
+Use MemWal's MCP server when you want Cursor, Claude Desktop, Claude Code, Antigravity, or another MCP-aware agent to save and recall memory during tool use.
+
+- connect directly to the hosted relayer with Streamable HTTP at `/api/mcp`
+- or run the local stdio package with `npx -y @mysten-incubation/memwal-mcp`
+
+Go to: [MCP](/mcp/overview)

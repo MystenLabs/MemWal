@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod jobs;
+mod mcp_proxy;
 mod rate_limit;
 mod routes;
 mod seal;
@@ -90,9 +91,12 @@ async fn main() {
     let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
+    let mcp_relayer_url = std::env::var("MEMWAL_RELAYER_URL")
+        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
     let mut sidecar_child = tokio::process::Command::new("npx")
         .args(["tsx", "sidecar-server.ts"])
         .current_dir(&scripts_dir)
+        .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -439,6 +443,32 @@ async fn main() {
             rate_limit::sponsor_rate_limit_middleware,
         ));
 
+    // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
+    // No signed-request auth here: MCP clients ship a single Bearer at SSE
+    // open and the sidecar parses it as the Ed25519 delegate key. Body limit
+    // is generous on the POST route (JSON-RPC envelopes can carry analyze
+    // text up to a few hundred KiB) and irrelevant on the GET SSE route.
+    let mcp_routes = Router::new()
+        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
+        .route(
+            "/api/mcp/messages",
+            post(mcp_proxy::messages_proxy)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        // Streamable HTTP transport (MCP 2025-06). Single URL that
+        // handles GET (open SSE), POST (JSON-RPC with optional SSE
+        // upgrade), and DELETE (close session). Lets users add the
+        // server via `claude mcp add --transport http memwal <URL>`
+        // without any package install.
+        .route(
+            "/api/mcp",
+            get(mcp_proxy::streamable_proxy)
+                .post(mcp_proxy::streamable_proxy)
+                .delete(mcp_proxy::streamable_proxy)
+                .options(mcp_proxy::streamable_proxy)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        );
+
     // Public routes
     // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -454,7 +484,8 @@ async fn main() {
             "/config",
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
-        .merge(sponsor_routes);
+        .merge(sponsor_routes)
+        .merge(mcp_routes);
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
@@ -493,6 +524,9 @@ async fn main() {
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
                     // ENG-1697: SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
+                    // MCP headers — caller's MemWalAccount id + optional default namespace.
+                    "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
+                    "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
                 ])
         }
     };
