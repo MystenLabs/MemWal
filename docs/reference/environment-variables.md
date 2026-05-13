@@ -34,6 +34,8 @@ These are not all enforced at boot, but most real deployments need them.
 | `SUI_RPC_URL` | network default | Override the Sui fullnode URL |
 | `WALRUS_PUBLISHER_URL` | Walrus mainnet publisher | Override upload endpoint |
 | `WALRUS_AGGREGATOR_URL` | Walrus mainnet aggregator | Override download endpoint |
+| `BLOB_CACHE_TTL_SECS` | `1209600` | Redis TTL for cached SEAL ciphertext by `blob_id`. `0` disables blob cache use |
+| `BLOB_CACHE_MAX_BYTES` | `524288` | Maximum SEAL ciphertext bytes cached in Redis. Larger blobs stay Walrus-only; `0` disables blob cache use |
 | `SERVER_SUI_PRIVATE_KEYS` | none | Comma-separated upload key pool. Takes priority over `SERVER_SUI_PRIVATE_KEY` for uploads |
 | `MEMWAL_ACCOUNT_ID` | none | Optional account ID in server config |
 | `WALRUS_PACKAGE_ID` | network default | Override the Walrus on-chain package used by the sidecar |

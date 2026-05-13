@@ -123,8 +123,8 @@ fn spawn_prepare_remember_job(
             // summarized first. Summarization runs sequentially before the
             // embed/encrypt fan-out because the summary is the embedder's
             // input — encrypt still uses the original `text`.
-            let needs_summary = text.len() > SUMMARIZE_THRESHOLD_BYTES
-                && state.config.openai_api_key.is_some();
+            let needs_summary =
+                text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
             let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
                 let summary =
                     summarize_for_embedding(&state.http_client, &state.config, &text).await?;
@@ -569,10 +569,9 @@ async fn summarize_with_prompt(
         )));
     }
 
-    let api_resp: ChatCompletionResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse summarization response: {}", e)))?;
+    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse summarization response: {}", e))
+    })?;
 
     let summary = api_resp
         .choices
@@ -581,7 +580,9 @@ async fn summarize_with_prompt(
         .unwrap_or_default();
 
     if summary.is_empty() {
-        return Err(AppError::Internal("Summarization returned empty result".into()));
+        return Err(AppError::Internal(
+            "Summarization returned empty result".into(),
+        ));
     }
 
     Ok(summary)
@@ -1044,8 +1045,6 @@ pub async fn recall(
         }));
     }
 
-    const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
-
     struct FetchedBlob {
         blob_id: String,
         distance: f64,
@@ -1055,6 +1054,8 @@ pub async fn recall(
 
     let t2 = std::time::Instant::now();
     let db = &state.db;
+    let blob_cache_enabled = state.blob_cache_ttl.as_secs() > 0 && state.blob_cache_max_bytes > 0;
+    let blob_cache_max_bytes = state.blob_cache_max_bytes;
     let download_tasks: Vec<_> = hits
         .iter()
         .map(|hit| {
@@ -1066,18 +1067,28 @@ pub async fn recall(
 
             async move {
                 let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
-                match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
-                    Ok(Some(ciphertext)) => {
-                        return Some(FetchedBlob {
-                            blob_id,
-                            distance,
-                            ciphertext,
-                            was_cached: true,
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                if blob_cache_enabled {
+                    match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
+                        Ok(Some(ciphertext)) => {
+                            if ciphertext.len() <= blob_cache_max_bytes {
+                                return Some(FetchedBlob {
+                                    blob_id,
+                                    distance,
+                                    ciphertext,
+                                    was_cached: true,
+                                });
+                            }
+                            tracing::info!(
+                                "blob cache ignored for {}: {} bytes exceeds max {}",
+                                blob_id,
+                                ciphertext.len(),
+                                blob_cache_max_bytes
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("blob cache get failed for {}: {}", blob_id, e);
+                        }
                     }
                 }
 
@@ -1132,10 +1143,19 @@ pub async fn recall(
     );
 
     let blob_cache_ttl_secs = state.blob_cache_ttl.as_secs();
-    if blob_cache_ttl_secs > 0 {
+    if blob_cache_ttl_secs > 0 && state.blob_cache_max_bytes > 0 {
         let mut redis = state.redis.clone();
         for fetched in &fetched_blobs {
             if fetched.was_cached {
+                continue;
+            }
+            if fetched.ciphertext.len() > state.blob_cache_max_bytes {
+                tracing::info!(
+                    "blob cache skip for {}: {} bytes exceeds max {}",
+                    fetched.blob_id,
+                    fetched.ciphertext.len(),
+                    state.blob_cache_max_bytes
+                );
                 continue;
             }
             let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, fetched.blob_id);
@@ -1314,6 +1334,7 @@ pub async fn remember_manual(
 
     let blob_id = upload.blob_id;
     tracing::info!("remember_manual: walrus upload ok blob_id={}", blob_id);
+    crate::jobs::warm_blob_cache_after_upload(&state, &blob_id, &encrypted_bytes).await;
 
     // Store {vector, blobId, namespace} in Vector DB
     let blob_size = encrypted_bytes.len() as i64;
@@ -1888,7 +1909,9 @@ mod tests {
         let chunks = split_text_chunks(&text, SUMMARIZE_CHUNK_BYTES);
 
         assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
         assert_eq!(chunks.concat(), text);
     }
 
@@ -1941,33 +1964,30 @@ mod tests {
     #[tokio::test]
     async fn summarize_for_embedding_bounds_each_llm_request() {
         let seen_input_lengths = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
-        let app = axum::Router::new()
-            .route(
-                "/chat/completions",
-                axum::routing::post({
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post({
+                let seen_input_lengths = Arc::clone(&seen_input_lengths);
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
                     let seen_input_lengths = Arc::clone(&seen_input_lengths);
-                    move |axum::Json(body): axum::Json<serde_json::Value>| {
-                        let seen_input_lengths = Arc::clone(&seen_input_lengths);
-                        async move {
-                            let input_len = body["messages"][1]["content"]
-                                .as_str()
-                                .expect("user message content")
-                                .len();
-                            seen_input_lengths.lock().unwrap().push(input_len);
-                            axum::Json(serde_json::json!({
-                                "choices": [{
-                                    "message": {
-                                        "content": "mock summary"
-                                    }
-                                }]
-                            }))
-                        }
+                    async move {
+                        let input_len = body["messages"][1]["content"]
+                            .as_str()
+                            .expect("user message content")
+                            .len();
+                        seen_input_lengths.lock().unwrap().push(input_len);
+                        axum::Json(serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "content": "mock summary"
+                                }
+                            }]
+                        }))
                     }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -1984,9 +2004,7 @@ mod tests {
         assert_eq!(summary, "mock summary");
         let seen = seen_input_lengths.lock().unwrap();
         assert!(seen.len() > 1);
-        assert!(seen
-            .iter()
-            .all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
+        assert!(seen.iter().all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
         assert!(seen.iter().all(|len| *len < MAX_REMEMBER_TEXT_BYTES / 4));
     }
 
