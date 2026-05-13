@@ -1,0 +1,59 @@
+{
+    "name": "@mysten-incubation/memwal-mcp",
+    "version": "0.0.1",
+    "description": "MemWal MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the MemWal relayer. Handles browser-based wallet login on first run.",
+    "type": "module",
+    "engines": {
+        "node": ">=20.0.0"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "bin": {
+        "memwal-mcp": "dist/bin/memwal-mcp.js"
+    },
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc --watch",
+        "typecheck": "tsc --noEmit",
+        "start": "node ./dist/bin/memwal-mcp.js"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "1.29.0",
+        "@noble/ed25519": "2.3.0",
+        "@noble/hashes": "2.0.0",
+        "open": "10.1.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "typescript": "^5.5.0"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "keywords": [
+        "ai",
+        "mcp",
+        "model-context-protocol",
+        "memwal",
+        "memory",
+        "claude",
+        "cursor"
+    ],
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/MystenLabs/MemWal.git",
+        "directory": "packages/mcp"
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    }
+}

@@ -105,6 +105,17 @@
         ]
       },
       {
+        "tab": "MCP",
+        "groups": [
+          {
+            "group": "Model Context Protocol",
+            "pages": [
+              "mcp/overview"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Contract",
         "groups": [
           {

@@ -183,7 +183,8 @@ Whether this client uses a connected wallet signer (vs. raw keypair).
 ### Config notes
 
 - `suiNetwork` defaults to `mainnet`
-- `sealKeyServers` lets the client override the built-in SEAL key server object IDs
+- `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
+- `sealKeyServers` remains supported as a legacy independent key server object ID override
 - All `@mysten/*` peer dependencies are loaded dynamically — only needed if you use `MemWalManual`
 
 ## `withMemWal`
