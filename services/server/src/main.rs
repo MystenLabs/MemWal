@@ -168,7 +168,10 @@ async fn main() {
             pool_size,
         );
     }
-    tracing::info!("  Apalis: job queue ready (table=apalis_jobs, queue={})", WALLET_QUEUE_NAME);
+    tracing::info!(
+        "  Apalis: job queue ready (table=apalis_jobs, queue={})",
+        WALLET_QUEUE_NAME
+    );
 
     // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
     let walrus_client =

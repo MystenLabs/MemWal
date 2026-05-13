@@ -122,38 +122,6 @@ pub async fn upload_blob(
     .await
 }
 
-/// Upload an encrypted blob but leave the certified Blob object owned by the
-/// server wallet. Bulk remember uses this so one later PTB can transfer many
-/// blobs together.
-#[allow(clippy::too_many_arguments)]
-pub async fn upload_blob_deferred(
-    client: &reqwest::Client,
-    sidecar_url: &str,
-    sidecar_secret: Option<&str>,
-    data: &[u8],
-    epochs: u64,
-    owner_address: &str,
-    key_index: usize,
-    namespace: &str,
-    package_id: &str,
-    agent_id: Option<&str>,
-) -> Result<UploadResult, AppError> {
-    upload_blob_inner(
-        client,
-        sidecar_url,
-        sidecar_secret,
-        data,
-        epochs,
-        owner_address,
-        key_index,
-        namespace,
-        package_id,
-        agent_id,
-        true,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn upload_blob_inner(
     client: &reqwest::Client,
@@ -184,12 +152,11 @@ async fn upload_blob_inner(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req.timeout(SIDECAR_WALRUS_TIMEOUT).send().await.map_err(|e| {
-        AppError::Internal(format!(
-            "Sidecar walrus/upload request failed: {}",
-            e
-        ))
-    })?;
+    let resp = req
+        .timeout(SIDECAR_WALRUS_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("Sidecar walrus/upload request failed: {}", e)))?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -256,12 +223,16 @@ pub async fn set_metadata_batch(
         req = req.header("authorization", format!("Bearer {}", secret));
     }
 
-    let resp = req.timeout(SIDECAR_WALRUS_TIMEOUT).send().await.map_err(|e| {
-        AppError::Internal(format!(
-            "Sidecar walrus/set-metadata-batch request failed: {}",
-            e
-        ))
-    })?;
+    let resp = req
+        .timeout(SIDECAR_WALRUS_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Sidecar walrus/set-metadata-batch request failed: {}",
+                e
+            ))
+        })?;
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {

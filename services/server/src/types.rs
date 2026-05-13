@@ -10,9 +10,6 @@ pub const MAX_BULK_ITEMS: usize = 20;
 /// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
 
-/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
-pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
-
 /// Redis key prefix for Walrus ciphertext cache entries.
 pub const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 

@@ -795,7 +795,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const certifyDigest = await submitWalletTransaction(certifyTx, signer);
         await suiClient.waitForTransaction({ digest: certifyDigest });
 
-        const blob = flow.getBlob();
+        const blob = await flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
 
@@ -837,8 +837,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/upload] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -884,8 +885,9 @@ app.post("/walrus/set-metadata-batch", express.json({ limit: "1mb" }), async (re
         res.json({ transferred: normalized.length, digest });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/set-metadata-batch] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -914,8 +916,9 @@ app.post("/walrus/set-metadata", express.json({ limit: "128kb" }), async (req, r
         res.json({ transferred: 1, digest });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/set-metadata] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 

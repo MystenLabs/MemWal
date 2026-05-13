@@ -823,8 +823,9 @@ pub async fn remember_status(
 /// POST /api/remember/bulk  (ENG-1408)
 ///
 /// Accepts up to MAX_BULK_ITEMS memories and returns HTTP 202 after creating
-/// status rows. Embed/encrypt runs in the background; the bulk worker batches
-/// metadata+transfer by wallet after deferred Walrus uploads.
+/// status rows. Embed/encrypt runs in the background; the bulk worker fans
+/// prepared items into the shared wallet queue so each item uses the same
+/// retry/error-classification path as single-memory uploads.
 pub async fn remember_bulk(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
