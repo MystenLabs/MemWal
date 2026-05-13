@@ -30,6 +30,7 @@ import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-con
 // ============================================================
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+const SUI_RPC_URL = process.env.SUI_RPC_URL || getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
 const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
@@ -70,7 +71,7 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
 const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 3;
 
 const suiClient = new SuiJsonRpcClient({
-    url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+    url: SUI_RPC_URL,
     network: SUI_NETWORK,
 });
 
