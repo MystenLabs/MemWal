@@ -55,6 +55,16 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
+        // MEM-35: collapse per-wallet Apalis queues to a single `wallet_jobs`
+        // queue. Equivocation locks are no longer a practical concern on Sui
+        // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
+        // wallet + retry handling is sufficient.
+        let migration_007 = include_str!("../migrations/007_collapse_wallet_queues.sql");
+        sqlx::raw_sql(migration_007)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
