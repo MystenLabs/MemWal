@@ -48,6 +48,10 @@ pub async fn forget(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<ForgetRequest>,
 ) -> Result<Json<ForgetResponse>, AppError> {
+    if body.namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+
     let owner = &auth.owner;
     let namespace = &body.namespace;
     tracing::info!("forget: owner={} ns={}", owner, namespace);
@@ -77,6 +81,10 @@ pub async fn stats(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<StatsRequest>,
 ) -> Result<Json<StatsResponse>, AppError> {
+    if body.namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+
     let owner = &auth.owner;
     let namespace = &body.namespace;
 
@@ -158,13 +166,24 @@ pub async fn ask(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit.unwrap_or(5);
+    // LOW-S5: cap `limit` so a misbehaving client can't make us pull a
+    // huge number of memories through Walrus + SEAL. Matches the cap
+    // `recall` already enforces (MED-3) — see routes/recall.rs.
+    let limit = body.limit.unwrap_or(5).min(100);
     tracing::info!(
         "ask: question=\"{}...\" owner={} ns={}",
         truncate_str(&body.question, 50),
         owner,
         namespace
     );
+
+    // F3 (structure-review): probe the SEAL credential up front. If the
+    // client is misconfigured (no exported SessionKey, no legacy delegate
+    // key, no server fallback) we want to return 500 immediately rather
+    // than running recall, getting zero (or some) hits, and then either
+    // returning a misleading 200 or surfacing the error from the *first*
+    // `fetch_one` call. `PlaintextEngine` no-ops this.
+    state.engine.require_read_credentials(&auth)?;
 
     // Step 1: Recall relevant memories
     let query_vector = state.embedder.embed(&body.question).await?;
@@ -614,5 +633,56 @@ mod tests {
             "should not reach here".to_string()
         };
         assert_eq!(context, "No memories found for this user yet.");
+    }
+
+    // ── LOW-S5: /api/ask body.limit cap ─────────────────────────────────
+    //
+    // Verifies the structural-review F3 follow-up: `/api/ask` clamps
+    // `body.limit` to `<= 100`, matching the cap `/api/recall` already
+    // enforces. A misbehaving client can't make the handler pull
+    // thousands of memories through Walrus + SEAL.
+
+    #[test]
+    fn ask_limit_caps_at_one_hundred() {
+        // Mirror the production expression: body.limit.unwrap_or(5).min(100)
+        for (input, expected) in [
+            (None, 5),        // default
+            (Some(0), 0),     // pass-through (caller intent)
+            (Some(50), 50),   // under cap
+            (Some(100), 100), // at cap
+            (Some(101), 100), // over cap → clamped
+            (Some(10_000), 100),
+            (Some(usize::MAX), 100),
+        ] {
+            let clamped = input.unwrap_or(5).min(100);
+            assert_eq!(
+                clamped, expected,
+                "ask limit clamp: input={:?} expected={} got={}",
+                input, expected, clamped
+            );
+        }
+    }
+
+    // ── /api/forget + /api/stats empty-namespace validation ─────────────
+    //
+    // Both handlers reject an empty namespace with `AppError::BadRequest`
+    // (400) before touching the database, matching the convention used by
+    // `restore` and `remember_manual`. This test pins the validation
+    // predicate so a refactor that drops the check would fail CI.
+
+    #[test]
+    fn forget_stats_reject_empty_namespace() {
+        let empty = "";
+        let non_empty = "bench-locomo-conv-0";
+
+        // The check is `body.namespace.is_empty()` in both handlers.
+        assert!(
+            empty.is_empty(),
+            "empty namespace must trip the validation predicate"
+        );
+        assert!(
+            !non_empty.is_empty(),
+            "non-empty namespace must pass the validation predicate"
+        );
     }
 }

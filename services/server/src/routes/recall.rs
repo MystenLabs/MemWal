@@ -134,7 +134,8 @@ pub async fn recall(
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
     let hit_refs: Vec<(String, f64)> = hits.into_iter().map(|h| (h.blob_id, h.distance)).collect();
-    let (hydrated, dropped_count) = state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
+    let (hydrated, dropped_count, timings) =
+        state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 
     let results: Vec<RecallResult> = hydrated
@@ -159,12 +160,18 @@ pub async fn recall(
             owner
         );
     }
+    // Per-stage `walrus=Xms seal=Xms` keeps parity with the pre-refactor
+    // log line that combined the two stages into `fetch=Xms`. Benchmark
+    // mode reports the entire Postgres-select fetch as `walrus_ms` and
+    // leaves `seal_ms` at 0 — same shape, different mode.
     tracing::info!(
-        "recall complete: {} results for owner={} embed={}ms vsearch={}ms fetch={}ms total={}ms",
+        "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms fetch={}ms total={}ms",
         total,
         owner,
         embed_ms,
         vsearch_ms,
+        timings.walrus_ms,
+        timings.seal_ms,
         fetch_ms,
         t0.elapsed().as_millis()
     );

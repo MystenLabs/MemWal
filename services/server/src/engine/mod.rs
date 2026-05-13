@@ -70,6 +70,22 @@ pub struct HydratedMemory {
     pub distance: f64,
 }
 
+/// Per-stage timing breakdown returned by `fetch_batch` so the recall
+/// handler can log `walrus=Xms seal=Xms` per QE's pre-merge feedback
+/// (the pre-refactor `recall complete:` line split these out and we
+/// regressed to a combined `fetch=Xms`).
+///
+/// `walrus_ms` covers cache-lookup + Walrus download for cache-cold
+/// blobs; `seal_ms` covers the batched SEAL decrypt. Benchmark mode
+/// (`PlaintextEngine`) reports the whole fetch as `walrus_ms` and
+/// leaves `seal_ms` at zero — there is no SEAL step, but keeping the
+/// shape constant means the handler log line format doesn't fork.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FetchTimings {
+    pub walrus_ms: u128,
+    pub seal_ms: u128,
+}
+
 /// Persistence abstraction. Two implementations live in this module
 /// (`WalrusSealEngine`, `PlaintextEngine`). Mode is chosen at startup.
 #[async_trait]
@@ -116,19 +132,37 @@ pub trait MemoryEngine: Send + Sync {
     /// Resolve many search hits to plaintext, batching the SEAL decrypt
     /// of cache-cold blobs (production: chunks of `seal_decrypt_batch`).
     ///
-    /// Returns `(hydrated, dropped_count)` where `dropped_count` is the
-    /// number of hits that couldn't be returned (download failure,
+    /// Returns `(hydrated, dropped_count, timings)` where `dropped_count`
+    /// is the number of hits that couldn't be returned (download failure,
     /// permanent decrypt failure, invalid UTF-8) — surfaced to the
     /// client so "no matches" is distinguishable from "matches we
     /// couldn't return". Reactive cleanup on Walrus 404s / permanent
-    /// decrypt failures, scoped to `owner`.
+    /// decrypt failures, scoped to `owner`. `timings` carries the
+    /// `walrus_ms` / `seal_ms` split so the recall handler can log a
+    /// per-stage breakdown (QE feedback — pre-refactor recall had this
+    /// granularity).
     ///
     /// Used by `recall`. Benchmark: per-id `plaintext` lookups, no
-    /// batching needed.
+    /// batching needed; reports the whole fetch as `walrus_ms`.
     async fn fetch_batch(
         &self,
         owner: &str,
         hits: &[(String, f64)],
         auth: &AuthInfo,
-    ) -> Result<(Vec<HydratedMemory>, usize), AppError>;
+    ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError>;
+
+    /// Eagerly validate that `auth` resolves to a usable read credential
+    /// (SEAL SessionKey, legacy delegate key, or server fallback key) so
+    /// the handler can fail fast on credential-misconfiguration *before*
+    /// running recall. Default impl is a no-op so engines that don't need
+    /// credentials (`PlaintextEngine`) can ignore it.
+    ///
+    /// `WalrusSealEngine` returns `AppError::Internal("SEAL credential
+    /// required (...)")` if no usable credential is available. The
+    /// `/api/ask` handler calls this up front (F3 from the structure
+    /// review) so a zero-hit query with a misconfigured client still
+    /// produces a 500 rather than a confusing 200 with empty memories.
+    fn require_read_credentials(&self, _auth: &AuthInfo) -> Result<(), AppError> {
+        Ok(())
+    }
 }

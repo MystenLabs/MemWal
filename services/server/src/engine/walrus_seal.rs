@@ -30,7 +30,7 @@ use crate::storage::seal::{self, DecryptOutcome, SealCredential};
 use crate::storage::walrus;
 use crate::types::{AppError, AuthInfo, Config, KeyPool};
 
-use super::{HydratedMemory, MemoryEngine, MemoryRef};
+use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 
 /// Redis key prefix for the Walrus blob ciphertext cache (ENG-1405).
 const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
@@ -131,19 +131,20 @@ impl WalrusSealEngine {
         let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
         match redis.get::<_, Option<Vec<u8>>>(&cache_key).await {
             Ok(Some(ciphertext)) => {
-                if ciphertext.len() <= self.blob_cache_max_bytes {
-                    Some(ciphertext)
-                } else {
-                    // MEM-37: ignore entries larger than the configured cap.
-                    // The entry will be evicted by TTL eventually; we don't
-                    // delete it here to keep `cache_get` read-only.
-                    tracing::info!(
-                        "blob cache ignored for {}: {} bytes exceeds max {}",
-                        blob_id,
-                        ciphertext.len(),
-                        self.blob_cache_max_bytes
-                    );
-                    None
+                match read_decision(ciphertext.len(), self.blob_cache_max_bytes) {
+                    CacheReadDecision::Serve => Some(ciphertext),
+                    CacheReadDecision::IgnoreOversize => {
+                        // MEM-37: ignore entries larger than the configured cap.
+                        // The entry will be evicted by TTL eventually; we don't
+                        // delete it here to keep `cache_get` read-only.
+                        tracing::info!(
+                            "blob cache ignored for {}: {} bytes exceeds max {}",
+                            blob_id,
+                            ciphertext.len(),
+                            self.blob_cache_max_bytes
+                        );
+                        None
+                    }
                 }
             }
             Ok(None) => None,
@@ -159,18 +160,19 @@ impl WalrusSealEngine {
     /// zero, or the ciphertext exceeds the size cap (MEM-37). Best-effort.
     async fn cache_put(&self, blob_id: &str, ciphertext: &[u8]) {
         let ttl_secs = self.blob_cache_ttl.as_secs();
-        if ttl_secs == 0 || self.blob_cache_max_bytes == 0 {
-            return;
-        }
-        if ciphertext.len() > self.blob_cache_max_bytes {
-            // MEM-37: skip blobs above the size cap to bound Redis memory.
-            tracing::info!(
-                "blob cache skip for {}: {} bytes exceeds max {}",
-                blob_id,
-                ciphertext.len(),
-                self.blob_cache_max_bytes
-            );
-            return;
+        match write_decision(ciphertext.len(), self.blob_cache_max_bytes, ttl_secs) {
+            CacheWriteDecision::Skip => return,
+            CacheWriteDecision::SkipOversize => {
+                // MEM-37: skip blobs above the size cap to bound Redis memory.
+                tracing::info!(
+                    "blob cache skip for {}: {} bytes exceeds max {}",
+                    blob_id,
+                    ciphertext.len(),
+                    self.blob_cache_max_bytes
+                );
+                return;
+            }
+            CacheWriteDecision::Write => {}
         }
         let mut redis = self.redis.clone();
         let cache_key = format!("{}{}", BLOB_CACHE_KEY_PREFIX, blob_id);
@@ -269,6 +271,17 @@ impl MemoryEngine for WalrusSealEngine {
         Ok(MemoryRef { id, blob_id })
     }
 
+    /// F3 (structure-review): eagerly resolve a SEAL credential so
+    /// `/api/ask` can fail fast on credential misconfiguration before
+    /// running recall. Returns the same error `fetch_one` / `fetch_batch`
+    /// would surface when they try to decrypt — keeps behaviour
+    /// equivalent to dev's pre-refactor `/api/ask`, where the credential
+    /// check happened up front regardless of how many hits recall
+    /// produced.
+    fn require_read_credentials(&self, auth: &AuthInfo) -> Result<(), AppError> {
+        self.credential(auth).map(|_| ())
+    }
+
     #[tracing::instrument(
         name = "engine.walrus_seal.fetch_one",
         skip_all,
@@ -342,9 +355,9 @@ impl MemoryEngine for WalrusSealEngine {
         owner: &str,
         hits: &[(String, f64)],
         auth: &AuthInfo,
-    ) -> Result<(Vec<HydratedMemory>, usize), AppError> {
+    ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
         if hits.is_empty() {
-            return Ok((vec![], 0));
+            return Ok((vec![], 0, FetchTimings::default()));
         }
         let credential = self.credential(auth)?;
 
@@ -357,6 +370,7 @@ impl MemoryEngine for WalrusSealEngine {
             ciphertext: Vec<u8>,
             was_cached: bool,
         }
+        let walrus_start = std::time::Instant::now();
         let fetch_tasks = hits.iter().map(|(blob_id, distance)| {
             let blob_id = blob_id.clone();
             let distance = *distance;
@@ -376,6 +390,7 @@ impl MemoryEngine for WalrusSealEngine {
             .into_iter()
             .flatten()
             .collect();
+        let walrus_ms = walrus_start.elapsed().as_millis();
         let cache_hits = fetched.iter().filter(|f| f.was_cached).count();
         let cache_misses = fetched.len() - cache_hits;
         let download_drops = hits.len() - fetched.len();
@@ -389,6 +404,7 @@ impl MemoryEngine for WalrusSealEngine {
         );
 
         // Step 2: batch-decrypt the ciphertexts in chunks.
+        let seal_start = std::time::Instant::now();
         let batch_input: Vec<(String, Vec<u8>)> = fetched
             .iter()
             .map(|f| (f.blob_id.clone(), f.ciphertext.clone()))
@@ -417,6 +433,7 @@ impl MemoryEngine for WalrusSealEngine {
                 }
             }
         }
+        let seal_ms = seal_start.elapsed().as_millis();
 
         // Step 3: assemble results; permanent decrypt failures trigger cleanup.
         let mut results = Vec::new();
@@ -460,14 +477,178 @@ impl MemoryEngine for WalrusSealEngine {
         }
 
         tracing::info!(
-            "engine.fetch_batch: decrypted {} of {} fetched ({} dropped: {} download, {} decrypt)",
+            "engine.fetch_batch: decrypted {} of {} fetched ({} dropped: {} download, {} decrypt) walrus={}ms seal={}ms",
             results.len(),
             fetched.len(),
             download_drops + decrypt_drops,
             download_drops,
-            decrypt_drops
+            decrypt_drops,
+            walrus_ms,
+            seal_ms,
         );
 
-        Ok((results, download_drops + decrypt_drops))
+        Ok((
+            results,
+            download_drops + decrypt_drops,
+            FetchTimings { walrus_ms, seal_ms },
+        ))
+    }
+}
+
+// ============================================================
+// Pure cache-policy helpers (MEM-37 size cap, ENG-1405 TTL)
+// ============================================================
+
+/// What `cache_get` should do with a Redis hit, given the configured
+/// size cap. Extracted so the policy is unit-testable without a Redis
+/// fixture — the IO-bound branches (Redis error, miss) stay in
+/// `cache_get` itself.
+#[derive(Debug, PartialEq, Eq)]
+enum CacheReadDecision {
+    /// Entry is within the cap — serve it.
+    Serve,
+    /// Entry exceeds the cap — ignore (MEM-37 policy: don't delete,
+    /// let TTL evict).
+    IgnoreOversize,
+}
+
+fn read_decision(ciphertext_len: usize, max_bytes: usize) -> CacheReadDecision {
+    if ciphertext_len <= max_bytes {
+        CacheReadDecision::Serve
+    } else {
+        CacheReadDecision::IgnoreOversize
+    }
+}
+
+/// What `cache_put` should do with a freshly-downloaded ciphertext,
+/// given the configured TTL + size cap.
+#[derive(Debug, PartialEq, Eq)]
+enum CacheWriteDecision {
+    /// Either TTL or max-bytes is zero — cache is disabled, no write.
+    Skip,
+    /// Ciphertext exceeds the size cap — skip the write (MEM-37).
+    SkipOversize,
+    /// Within policy — go ahead and write with the configured TTL.
+    Write,
+}
+
+fn write_decision(ciphertext_len: usize, max_bytes: usize, ttl_secs: u64) -> CacheWriteDecision {
+    if ttl_secs == 0 || max_bytes == 0 {
+        CacheWriteDecision::Skip
+    } else if ciphertext_len > max_bytes {
+        CacheWriteDecision::SkipOversize
+    } else {
+        CacheWriteDecision::Write
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_decision, write_decision, CacheReadDecision, CacheWriteDecision};
+
+    // ── MEM-37 read-side cap ──────────────────────────────────────────────
+
+    #[test]
+    fn read_decision_serves_entries_at_or_below_cap() {
+        assert_eq!(
+            read_decision(100, 512),
+            CacheReadDecision::Serve,
+            "100 bytes under 512 cap should be served"
+        );
+        assert_eq!(
+            read_decision(512, 512),
+            CacheReadDecision::Serve,
+            "exactly at cap should be served (boundary)"
+        );
+        assert_eq!(
+            read_decision(0, 512),
+            CacheReadDecision::Serve,
+            "empty entry under cap should be served"
+        );
+    }
+
+    #[test]
+    fn read_decision_ignores_oversize_entries() {
+        assert_eq!(
+            read_decision(513, 512),
+            CacheReadDecision::IgnoreOversize,
+            "one byte over cap should be ignored"
+        );
+        assert_eq!(
+            read_decision(usize::MAX, 512),
+            CacheReadDecision::IgnoreOversize,
+            "wildly oversized entry should be ignored without crashing"
+        );
+    }
+
+    // ── MEM-37 write-side cap + ENG-1405 TTL ──────────────────────────────
+
+    #[test]
+    fn write_decision_skips_when_ttl_zero() {
+        // ENG-1405: TTL=0 disables write-back entirely.
+        assert_eq!(
+            write_decision(100, 512, 0),
+            CacheWriteDecision::Skip,
+            "TTL=0 should disable cache writes"
+        );
+    }
+
+    #[test]
+    fn write_decision_skips_when_max_bytes_zero() {
+        // MEM-37: max=0 disables cache writes.
+        assert_eq!(
+            write_decision(100, 0, 600),
+            CacheWriteDecision::Skip,
+            "max_bytes=0 should disable cache writes"
+        );
+    }
+
+    #[test]
+    fn write_decision_skips_when_both_disabled() {
+        assert_eq!(
+            write_decision(100, 0, 0),
+            CacheWriteDecision::Skip,
+            "both TTL and max disabled should skip"
+        );
+    }
+
+    #[test]
+    fn write_decision_writes_within_cap() {
+        assert_eq!(
+            write_decision(100, 512, 600),
+            CacheWriteDecision::Write,
+            "in-cap ciphertext should be written"
+        );
+        assert_eq!(
+            write_decision(512, 512, 600),
+            CacheWriteDecision::Write,
+            "exactly at cap should be written (boundary)"
+        );
+    }
+
+    #[test]
+    fn write_decision_skips_oversize() {
+        assert_eq!(
+            write_decision(513, 512, 600),
+            CacheWriteDecision::SkipOversize,
+            "one byte over cap should be skipped"
+        );
+        assert_eq!(
+            write_decision(1024 * 1024, 512, 600),
+            CacheWriteDecision::SkipOversize,
+            "1 MiB ciphertext under 512 B cap should be skipped"
+        );
+    }
+
+    #[test]
+    fn write_decision_disabled_beats_oversize() {
+        // If the cache is disabled, the oversize check never fires —
+        // Skip is the right answer even when the entry would also be
+        // oversize. Documents the precedence in `cache_put`.
+        assert_eq!(
+            write_decision(1024 * 1024, 0, 600),
+            CacheWriteDecision::Skip,
+            "max=0 should skip via Skip, not SkipOversize"
+        );
     }
 }

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::storage::db::VectorDb;
 use crate::types::{AppError, AuthInfo};
 
-use super::{HydratedMemory, MemoryEngine, MemoryRef};
+use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 
 /// Benchmark engine — stores plaintext directly in Postgres. No Walrus,
 /// no SEAL, no Sui keys; only the DB handle.
@@ -38,12 +38,15 @@ impl PlaintextEngine {
     /// `HydratedMemory`. Shared by `fetch_one` and `fetch_batch`.
     /// Returns `Ok(None)` for a missing row or a NULL plaintext (a
     /// production row leaked into a benchmark DB — logged, handled).
+    /// LOW-S1 / MED-1: scoped to `owner` so cross-tenant lookups by
+    /// blob_id return None even if the row exists for a different owner.
     async fn hydrate(
         &self,
+        owner: &str,
         blob_id: &str,
         distance: f64,
     ) -> Result<Option<HydratedMemory>, AppError> {
-        match self.db.fetch_plaintext_by_blob_id(blob_id).await {
+        match self.db.fetch_plaintext_by_blob_id(blob_id, owner).await {
             Ok(Some(text)) => Ok(Some(HydratedMemory {
                 blob_id: blob_id.to_string(),
                 text,
@@ -102,37 +105,51 @@ impl MemoryEngine for PlaintextEngine {
     #[tracing::instrument(
         name = "engine.plaintext.fetch_one",
         skip_all,
-        fields(blob_id = %blob_id)
+        fields(owner = %owner, blob_id = %blob_id)
     )]
     async fn fetch_one(
         &self,
-        _owner: &str,
+        owner: &str,
         blob_id: &str,
         distance: f64,
         _auth: &AuthInfo,
     ) -> Result<Option<HydratedMemory>, AppError> {
-        self.hydrate(blob_id, distance).await
+        self.hydrate(owner, blob_id, distance).await
     }
 
     #[tracing::instrument(
         name = "engine.plaintext.fetch_batch",
         skip_all,
-        fields(hits = hits.len())
+        fields(owner = %owner, hits = hits.len())
     )]
     async fn fetch_batch(
         &self,
-        _owner: &str,
+        owner: &str,
         hits: &[(String, f64)],
         _auth: &AuthInfo,
-    ) -> Result<(Vec<HydratedMemory>, usize), AppError> {
+    ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
+        let t0 = std::time::Instant::now();
         let mut results = Vec::with_capacity(hits.len());
         let mut dropped = 0usize;
         for (blob_id, distance) in hits {
-            match self.hydrate(blob_id, *distance).await? {
+            match self.hydrate(owner, blob_id, *distance).await? {
                 Some(m) => results.push(m),
                 None => dropped += 1,
             }
         }
-        Ok((results, dropped))
+        // Benchmark mode bypasses Walrus + SEAL entirely; the whole
+        // fetch is a Postgres SELECT. Report the elapsed time as
+        // `walrus_ms` for caller convenience (handler logs `walrus=Xms
+        // seal=Xms`) and leave `seal_ms` at zero. The intent is to keep
+        // the recall log line format identical across modes.
+        let walrus_ms = t0.elapsed().as_millis();
+        Ok((
+            results,
+            dropped,
+            FetchTimings {
+                walrus_ms,
+                seal_ms: 0,
+            },
+        ))
     }
 }

@@ -185,16 +185,24 @@ impl VectorDb {
     /// vs `Ok(None)` distinguishes "empty plaintext" from "no row".
     /// Returns `Ok(None)` when the row exists but `plaintext` is NULL (a
     /// production row in a benchmark DB — shouldn't happen, handled gracefully).
+    ///
+    /// LOW-S1 / MED-1: scoped to `owner` so a recall hit on one user's
+    /// blob can't surface another user's plaintext. The upstream
+    /// `search_similar` already filters by owner; this is defence-in-depth
+    /// against a bug there.
     pub async fn fetch_plaintext_by_blob_id(
         &self,
         blob_id: &str,
+        owner: &str,
     ) -> Result<Option<String>, AppError> {
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT plaintext FROM vector_entries WHERE blob_id = $1 LIMIT 1")
-                .bind(blob_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT plaintext FROM vector_entries WHERE blob_id = $1 AND owner = $2 LIMIT 1",
+        )
+        .bind(blob_id)
+        .bind(owner)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
 
         Ok(row.and_then(|(plaintext,)| plaintext))
     }
