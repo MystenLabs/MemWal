@@ -24,12 +24,12 @@ use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
-use storage::db::VectorDb;
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
 use services::{Embedder, Extractor, LlmExtractor, OpenAiEmbedder};
+use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -283,8 +283,10 @@ async fn main() {
     // implementations can be swapped at startup. Both wrap the same
     // http_client + config; behaviour is identical to the inline
     // generate_embedding / extract_facts_llm they replace.
-    let embedder: Arc<dyn Embedder> =
-        Arc::new(OpenAiEmbedder::new(http_client.clone(), Arc::clone(&config)));
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
+        http_client.clone(),
+        Arc::clone(&config),
+    ));
     let extractor: Arc<dyn Extractor> =
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
 
@@ -505,8 +507,7 @@ async fn main() {
         .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
         .route(
             "/api/mcp/messages",
-            post(mcp_proxy::messages_proxy)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         // Streamable HTTP transport (MCP 2025-06). Single URL that
         // handles GET (open SSE), POST (JSON-RPC with optional SSE

@@ -79,8 +79,9 @@ impl MemoryEngine for PlaintextEngine {
     ) -> Result<MemoryRef, AppError> {
         // In benchmark mode the "prepared bytes" are plaintext UTF-8 —
         // the handler/client skipped SEAL encrypt. Treat them as such.
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|e| AppError::BadRequest(format!("benchmark store_blob: bytes not UTF-8: {}", e)))?;
+        let text = String::from_utf8(bytes.to_vec()).map_err(|e| {
+            AppError::BadRequest(format!("benchmark store_blob: bytes not UTF-8: {}", e))
+        })?;
 
         // Synthetic UUID — used both as the row id and the blob_id handle
         // handlers see. No real Walrus blob is ever uploaded.

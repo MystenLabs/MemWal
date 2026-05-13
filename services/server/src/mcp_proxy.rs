@@ -197,11 +197,7 @@ pub async fn messages_proxy(
     let session_id = match params.get("sessionId") {
         Some(s) if !s.is_empty() => s.clone(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "Missing sessionId query parameter",
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, "Missing sessionId query parameter").into_response();
         }
     };
 

@@ -108,8 +108,8 @@ fn spawn_prepare_remember_job(
             // summarized first. Summarization runs sequentially before the
             // embed/encrypt fan-out because the summary is the embedder's
             // input — encrypt still uses the original `text`.
-            let needs_summary = text.len() > SUMMARIZE_THRESHOLD_BYTES
-                && state.config.openai_api_key.is_some();
+            let needs_summary =
+                text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
             let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
                 let summary =
                     summarize_for_embedding(&state.http_client, &state.config, &text).await?;
@@ -416,10 +416,9 @@ async fn summarize_with_prompt(
         )));
     }
 
-    let api_resp: ChatCompletionResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse summarization response: {}", e)))?;
+    let api_resp: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse summarization response: {}", e))
+    })?;
 
     let summary = api_resp
         .choices
@@ -428,7 +427,9 @@ async fn summarize_with_prompt(
         .unwrap_or_default();
 
     if summary.is_empty() {
-        return Err(AppError::Internal("Summarization returned empty result".into()));
+        return Err(AppError::Internal(
+            "Summarization returned empty result".into(),
+        ));
     }
 
     Ok(summary)
@@ -898,8 +899,9 @@ pub async fn remember_manual(
 #[cfg(test)]
 mod tests {
     use super::{
-        batch_summary_inputs, build_bulk_status_results, split_text_chunks, summarize_for_embedding,
-        MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
+        batch_summary_inputs, build_bulk_status_results, split_text_chunks,
+        summarize_for_embedding, MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES,
+        SUMMARIZE_CHUNK_BYTES,
     };
     use std::sync::Arc;
 
@@ -968,7 +970,9 @@ mod tests {
         let chunks = split_text_chunks(&text, SUMMARIZE_CHUNK_BYTES);
 
         assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= SUMMARIZE_CHUNK_BYTES));
         assert_eq!(chunks.concat(), text);
     }
 
@@ -1045,9 +1049,7 @@ mod tests {
                 }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();

@@ -41,25 +41,19 @@ use apalis::prelude::Storage as _;
 // Wallet-job enqueue (used by remember + analyze)
 // ============================================================
 
-/// Enqueue a WalletJob to the correct per-wallet Apalis queue.
+/// Enqueue a WalletJob to the (now single) Apalis queue.
 ///
-/// `wallet_index` must match the index used (or to be used) for the Walrus
-/// upload so that upload and set-metadata+transfer always sign with the
-/// same key. Returns the wallet_index for caller tracking.
+/// `wallet_index` is preserved in the job payload for audit / sidecar parity
+/// but no longer drives queue routing — MEM-35 collapsed the per-wallet
+/// queues into a single `wallet_jobs` queue (see plans/simplify-walrus-
+/// wallet-queues/ + KeyPool::next_index). Returns the wallet_index for
+/// caller tracking.
 pub async fn enqueue_wallet_job(
     state: &AppState,
     wallet_index: usize,
     operation: WalletOperation,
 ) -> Result<usize, AppError> {
-    let storages = &state.wallet_storages;
-    if wallet_index >= storages.len() {
-        return Err(AppError::Internal(format!(
-            "wallet_index {} out of range (pool size={})",
-            wallet_index,
-            storages.len()
-        )));
-    }
-    let mut storage = storages[wallet_index].clone();
+    let mut storage = state.wallet_storage.clone();
     storage
         .push(WalletJob {
             wallet_index,

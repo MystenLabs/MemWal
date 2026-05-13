@@ -133,10 +133,7 @@ pub async fn recall(
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
-    let hit_refs: Vec<(String, f64)> = hits
-        .into_iter()
-        .map(|h| (h.blob_id, h.distance))
-        .collect();
+    let hit_refs: Vec<(String, f64)> = hits.into_iter().map(|h| (h.blob_id, h.distance)).collect();
     let (hydrated, dropped_count) = state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 

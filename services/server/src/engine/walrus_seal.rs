@@ -111,7 +111,9 @@ impl WalrusSealEngine {
             Err(e) => {
                 tracing::error!(
                     "reactive cleanup failed for blob_id={} owner={}: {}",
-                    blob_id, owner, e
+                    blob_id,
+                    owner,
+                    e
                 );
             }
         }
@@ -314,7 +316,11 @@ impl MemoryEngine for WalrusSealEngine {
         let text = match String::from_utf8(plaintext_bytes) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!("Invalid UTF-8 in decrypted data for blob {}: {}", blob_id, e);
+                tracing::warn!(
+                    "Invalid UTF-8 in decrypted data for blob {}: {}",
+                    blob_id,
+                    e
+                );
                 return Ok(None);
             }
         };
@@ -426,7 +432,8 @@ impl MemoryEngine for WalrusSealEngine {
                     Err(e) => {
                         tracing::warn!(
                             "Invalid UTF-8 in decrypted data for blob {}: {}",
-                            f.blob_id, e
+                            f.blob_id,
+                            e
                         );
                         decrypt_drops += 1;
                     }
@@ -435,13 +442,15 @@ impl MemoryEngine for WalrusSealEngine {
                     if permanent {
                         tracing::warn!(
                             "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
-                            f.blob_id, error
+                            f.blob_id,
+                            error
                         );
                         self.cleanup_expired_blob(&f.blob_id, owner).await;
                     } else {
                         tracing::warn!(
                             "SEAL decrypt transient failure for blob {}: {}",
-                            f.blob_id, error
+                            f.blob_id,
+                            error
                         );
                     }
                     decrypt_drops += 1;

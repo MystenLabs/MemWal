@@ -180,7 +180,11 @@ pub async fn ask(
     let fetch_tasks = hits.into_iter().map(|hit| {
         let auth = &auth;
         let engine = &state.engine;
-        async move { engine.fetch_one(owner, &hit.blob_id, hit.distance, auth).await }
+        async move {
+            engine
+                .fetch_one(owner, &hit.blob_id, hit.distance, auth)
+                .await
+        }
     });
     let memories: Vec<RecallResult> = futures::future::join_all(fetch_tasks)
         .await
