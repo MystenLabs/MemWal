@@ -14,6 +14,7 @@ deployment.
   - Runs `cargo check`.
   - Typechecks `bench-recall-latency.ts`.
   - Runs a `--help` smoke check for the recall benchmark CLI.
+  - Builds the k6 relayer bundle from `services/server/scripts/k6/relayer.ts`.
   - Does not need secrets and does not call Sui, Walrus, SEAL, or OpenAI.
 
 - `.github/workflows/benchmark-live.yml`
@@ -84,3 +85,19 @@ cd services/server/scripts
   --remember-text "benchmark memory" \
   --query "benchmark memory"
 ```
+
+k6 smoke against staging:
+
+```bash
+cd services/server/scripts
+npm run k6:build
+
+BENCH_SERVER_URL=https://relayer.staging.memwal.ai \
+BENCH_ACCOUNT_ID="$BENCH_ACCOUNT_ID" \
+BENCH_DELEGATE_KEY="$BENCH_DELEGATE_KEY" \
+MEMWAL_NAMESPACE=benchmark \
+K6_PROFILE=smoke \
+k6 run dist/k6/relayer.js
+```
+
+For load, stress, and spike profiles, see [k6 Stress Tests](/relayer/k6-stress-tests).

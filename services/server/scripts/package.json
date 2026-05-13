@@ -5,7 +5,13 @@
     "type": "module",
     "scripts": {
         "sidecar": "tsx sidecar-server.ts",
-        "test": "node --test --import tsx './mcp/__tests__/*.test.ts'"
+        "test": "node --test --import tsx './mcp/__tests__/*.test.ts'",
+        "k6:build": "esbuild k6/relayer.ts --bundle --platform=browser --format=esm --target=es2020 --external:k6 --external:k6/* --outfile=dist/k6/relayer.js",
+        "k6:health": "npm run k6:build && K6_PROFILE=health k6 run dist/k6/relayer.js",
+        "k6:smoke": "npm run k6:build && K6_PROFILE=smoke k6 run dist/k6/relayer.js",
+        "k6:load": "npm run k6:build && K6_PROFILE=load k6 run dist/k6/relayer.js",
+        "k6:stress": "npm run k6:build && K6_PROFILE=stress k6 run dist/k6/relayer.js",
+        "k6:spike": "npm run k6:build && K6_PROFILE=spike k6 run dist/k6/relayer.js"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
@@ -13,13 +19,16 @@
         "@mysten/seal": "1.1.0",
         "@mysten/sui": "2.5.0",
         "@mysten/walrus": "1.0.3",
-        "@noble/ed25519": "2.3.0",
+        "@noble/ed25519": "^3.1.0",
         "express": "5.1.0",
         "tsx": "4.21.0",
         "zod": "^3.25.0"
     },
     "devDependencies": {
+        "@noble/hashes": "^2.2.0",
         "@types/express": "5.0.0",
+        "bech32": "^2.0.0",
+        "esbuild": "^0.28.0",
         "typescript": "5.6.3"
     }
 }

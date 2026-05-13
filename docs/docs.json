@@ -99,7 +99,8 @@
               "relayer/overview",
               "relayer/public-relayer",
               "relayer/self-hosting",
-              "relayer/api-reference"
+              "relayer/api-reference",
+              "relayer/k6-stress-tests"
             ]
           }
         ]
