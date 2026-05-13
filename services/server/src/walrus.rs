@@ -1,5 +1,8 @@
 use crate::types::{AppError, SidecarError};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use std::time::Duration;
+
+const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Result of a Walrus blob upload
 pub struct UploadResult {
@@ -181,9 +184,9 @@ async fn upload_blob_inner(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req.send().await.map_err(|e| {
+    let resp = req.timeout(SIDECAR_WALRUS_TIMEOUT).send().await.map_err(|e| {
         AppError::Internal(format!(
-            "Sidecar walrus/upload request failed: {}. Is the sidecar running?",
+            "Sidecar walrus/upload request failed: {}",
             e
         ))
     })?;
@@ -253,7 +256,7 @@ pub async fn set_metadata_batch(
         req = req.header("authorization", format!("Bearer {}", secret));
     }
 
-    let resp = req.send().await.map_err(|e| {
+    let resp = req.timeout(SIDECAR_WALRUS_TIMEOUT).send().await.map_err(|e| {
         AppError::Internal(format!(
             "Sidecar walrus/set-metadata-batch request failed: {}",
             e

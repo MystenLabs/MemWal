@@ -7,10 +7,11 @@
 -- handling at the Apalis layer (Transient/Permanent classification) is
 -- sufficient.
 --
--- Pending rows from old per-wallet queues need their `job_type` (Apalis
+-- Retryable rows from old per-wallet queues need their `job_type` (Apalis
 -- namespace = queue name) rewritten so the new single worker can pick them up.
--- Non-Pending rows (Done / Dead / Killed) keep their old name as historical
--- record — they will never be polled again.
+-- Terminal rows (Done / Killed) keep their old name as historical record.
+-- Running rows may be re-enqueued after an interrupted deploy, so migrate them
+-- too instead of stranding them on a queue with no worker.
 --
 -- The DO block guards against the case where this migration is applied
 -- before the Apalis `setup()` runs and the `apalis.jobs` table doesn't exist
@@ -21,6 +22,6 @@ BEGIN
     IF to_regclass('apalis.jobs') IS NOT NULL THEN
         UPDATE apalis.jobs
         SET job_type = 'wallet_jobs'
-        WHERE job_type LIKE 'wallet-%' AND status = 'Pending';
+        WHERE job_type LIKE 'wallet-%' AND status IN ('Pending', 'Failed', 'Running');
     END IF;
 END $$;

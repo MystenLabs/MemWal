@@ -149,10 +149,8 @@ type EnokiExecuteResponse = { digest: string };
 // MEM-35: in-memory counters surfaced via /metrics/wallet.
 // Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
 // locks coin objects on equivocation, so the original multi-wallet routing
-// is unnecessary. We collapsed to a single wallet; the per-signer mutex
-// below still serializes concurrent submissions because Enoki sponsored
-// transactions and SDK default gas-coin selection both race on a single
-// wallet — separate concerns from equivocation locking.
+// is unnecessary. We use a single wallet concurrently and rely on Apalis
+// retries for transient Sui/RPC/coin-selection races.
 //
 // `walletLockErrorsTotal` should stay at 0 under load and is the canary
 // for re-evaluating the simplification if the Sui guarantee changes.
@@ -161,23 +159,6 @@ const sidecarMetrics = {
     walletLockErrorsTotal: 0,
     walletPermanentFailuresTotal: 0,
 };
-
-// Per-signer FIFO serialization. Originally added to side-step Sui coin-
-// object equivocation locks. Per MEM-35 testing on testnet (2026-05-12):
-// equivocation locks are no longer an issue (Will Bradley's callout
-// confirmed empirically — `walletLockErrorsTotal: 0` across all tests).
-// We keep the mutex because of TWO other concurrent-tx hazards that the
-// mutex incidentally also fixes:
-//   1. Enoki sponsor returns time-bounded signatures; concurrent requests
-//      from the same sender race and earlier ones expire ("Sponsored
-//      transaction has expired") before submission.
-//   2. SDK default gas-coin picker selects the same coin for concurrent
-//      transactions; whichever lands second sees a stale ObjectRef and
-//      errors with "No valid gas coins found for the transaction."
-// Removing this mutex caused a ~75% failure rate at concurrency=4 in
-// testnet validation. Apalis retries recover, but the latency cost is
-// large. The mutex is cheap (one Map<address, Promise<void>>).
-const signerUploadQueues = new Map<string, Promise<void>>();
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
 
@@ -285,36 +266,6 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
             transaction: tx,
         });
         return direct.digest;
-    }
-}
-
-/**
- * Acquire the per-signer FIFO mutex for the duration of `task`.
- *
- * Sub-100-line workaround for two concurrent-tx hazards that surface when
- * multiple Walrus uploads run on the same signing wallet (see comment
- * above `signerUploadQueues` for the full rationale).
- */
-async function runExclusiveBySigner<T>(
-    signerAddress: string,
-    task: () => Promise<T>,
-): Promise<T> {
-    const previous = signerUploadQueues.get(signerAddress) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-    const queued = previous.then(() => current);
-    signerUploadQueues.set(signerAddress, queued);
-
-    await previous;
-    try {
-        return await task();
-    } finally {
-        release();
-        if (signerUploadQueues.get(signerAddress) === queued) {
-            signerUploadQueues.delete(signerAddress);
-        }
     }
 }
 
@@ -753,15 +704,13 @@ async function setMetadataAndTransferBlobs(
     }
 
     metaTx.transferObjects(blobArgs, owner);
-    return runExclusiveBySigner(signerAddress, async () => {
-        const digest = await submitWalletTransaction(
-            metaTx,
-            signer,
-            dedupeAddresses([signerAddress, owner]),
-        );
-        await suiClient.waitForTransaction({ digest });
-        return digest;
-    });
+    const digest = await submitWalletTransaction(
+        metaTx,
+        signer,
+        dedupeAddresses([signerAddress, owner]),
+    );
+    await suiClient.waitForTransaction({ digest });
+    return digest;
 }
 
 // HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
@@ -808,49 +757,45 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const signerAddress = signer.toSuiAddress();
         const blobData = new Uint8Array(Buffer.from(data, "base64"));
 
-        // writeBlobFlow (stateful: encode → register → upload → certify).
-        // Serialized per-signer to avoid Enoki sponsor race / SDK gas-coin
-        // contention on concurrent uploads (MEM-35: Sui no longer locks
-        // objects, but Enoki + gas selection still race — see comment above
-        // signerUploadQueues).
-        const blob = await runExclusiveBySigner(signerAddress, async () => {
-            const flow = walrusClient.writeBlobFlow({ blob: blobData });
-            await flow.encode();
+        // writeBlobFlow is intentionally not serialized by signer. Current Sui
+        // no longer permanently locks coin objects for concurrent submissions;
+        // transient gas/RPC races are retried by the Apalis wallet job layer.
+        const flow = walrusClient.writeBlobFlow({ blob: blobData });
+        await flow.encode();
 
-            const registerTx = flow.register({
-                epochs,
-                // Server owns the blob initially (needed for certify step)
-                owner: signerAddress,
-                deletable: true,
-                // Store namespace + owner as on-chain metadata (queryable for restore)
-                attributes: {
-                    ...(namespace ? { memwal_namespace: namespace } : {}),
-                    ...(owner ? { memwal_owner: owner } : {}),
-                    ...(packageId ? { memwal_package_id: packageId } : {}),
-                },
-            });
-
-            // Patch: convert GasCoin intents → sender's SUI coins.
-            // Enoki rejects GasCoin as tx argument, but relay requires the tip.
-            // After patching, signer pays tip from own SUI; Enoki sponsors gas.
-            patchGasCoinIntents(registerTx);
-            const tipRecipient = await getUploadRelayTipAddress();
-            const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
-            const registerDigest = await submitWalletTransaction(
-                registerTx,
-                signer,
-                registerAllowedAddresses,
-            );
-            await suiClient.waitForTransaction({ digest: registerDigest });
-
-            await flow.upload({ digest: registerDigest });
-
-            const certifyTx = flow.certify();
-            const certifyDigest = await submitWalletTransaction(certifyTx, signer);
-            await suiClient.waitForTransaction({ digest: certifyDigest });
-
-            return flow.getBlob();
+        const registerTx = flow.register({
+            epochs,
+            // Server owns the blob initially (needed for certify step)
+            owner: signerAddress,
+            deletable: true,
+            // Store namespace + owner as on-chain metadata (queryable for restore)
+            attributes: {
+                ...(namespace ? { memwal_namespace: namespace } : {}),
+                ...(owner ? { memwal_owner: owner } : {}),
+                ...(packageId ? { memwal_package_id: packageId } : {}),
+            },
         });
+
+        // Patch: convert GasCoin intents → sender's SUI coins.
+        // Enoki rejects GasCoin as tx argument, but relay requires the tip.
+        // After patching, signer pays tip from own SUI; Enoki sponsors gas.
+        patchGasCoinIntents(registerTx);
+        const tipRecipient = await getUploadRelayTipAddress();
+        const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
+        const registerDigest = await submitWalletTransaction(
+            registerTx,
+            signer,
+            registerAllowedAddresses,
+        );
+        await suiClient.waitForTransaction({ digest: registerDigest });
+
+        await flow.upload({ digest: registerDigest });
+
+        const certifyTx = flow.certify();
+        const certifyDigest = await submitWalletTransaction(certifyTx, signer);
+        await suiClient.waitForTransaction({ digest: certifyDigest });
+
+        const blob = flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
 

@@ -176,19 +176,18 @@ async fn main() {
             .expect("Failed to initialize Walrus client (invalid URL?)");
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
-    // Log upload key pool status
+    // Log upload key status
     let pool_size = config.sui_private_keys.len();
     if pool_size > 0 {
         tracing::info!(
-            "  Walrus upload: {} key(s) in pool (parallel uploads up to {}x)",
+            "  Walrus upload: {} key(s) configured; using first key for wallet jobs",
             pool_size,
-            pool_size
         );
     } else {
         tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
     }
 
-    // Build key pool for parallel Walrus uploads
+    // Build wallet key holder
     let key_pool = KeyPool::new(config.sui_private_keys.clone());
 
     // Initialize Redis for rate limiting
@@ -319,12 +318,8 @@ async fn main() {
     // Worker 4: WalletJob — single worker, single queue.
     //
     // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
-    // dispatched simultaneously; the sidecar's per-signer mutex serializes
-    // them at the signing boundary (see sidecar-server.ts → signerUploadQueues
-    // for rationale: Enoki sponsor race + SDK gas-coin contention, NOT
-    // equivocation locking — that one is solved). Apalis-level retry
-    // (Transient vs Permanent classified in `WalletJobError`) handles
-    // transient RPC / Sui errors.
+    // dispatched simultaneously against the same wallet; transient Sui/RPC
+    // conflicts are classified by `WalletJobError` and retried by Apalis.
     let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())

@@ -1,15 +1,16 @@
-/// Per-wallet Apalis job queue.
+/// Wallet signing job queue.
 ///
 /// Every operation that requires a Sui wallet signature is modelled as a
-/// `WalletJob` and routed to the queue that is **pinned to that wallet index**.
+/// `WalletJob` jobs are signed by the configured server wallet.
 /// This guarantees that:
-///   - upload → metadata+transfer always use the SAME key (no wrong-signer retries)
-///   - each wallet queue processes jobs serially (no coin-object lock conflicts)
+///   - upload → metadata+transfer use the same key for a given job
+///   - signing operations can run concurrently on the same wallet
 ///   - jobs survive server restarts (persisted in Postgres via Apalis)
 ///
 /// Retry policy: up to MAX_ATTEMPTS attempts with exponential back-off.
-/// Failed jobs are visible in the `apalis_jobs` table (status = 'Dead').
+/// Failed jobs are visible in the `apalis_jobs` table.
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 
 use apalis::prelude::*;
@@ -218,7 +219,7 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
 pub async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
-) -> Result<(), WalletJobError> {
+) -> Result<(), Error> {
     let state: &AppState = &ctx;
     let wallet_index = job.wallet_index;
 
@@ -267,18 +268,17 @@ pub async fn execute_wallet_job(
         }
     };
 
-    // Observability hook: surface permanent failures (Move abort / object
-    // lock) as a structured warn-level log. Operators alert on these.
-    if let Err(WalletJobError::Permanent(ref msg)) = result {
-        tracing::warn!(
-            target: "wallet_job.permanent",
-            "permanent failure for wallet_index={} (will mark Dead): {}",
-            wallet_index,
-            msg
-        );
-    }
-
-    result
+    result.map_err(|err| {
+        if let WalletJobError::Permanent(ref msg) = err {
+            tracing::warn!(
+                target: "wallet_job.permanent",
+                "permanent failure for wallet_index={} (will mark Dead): {}",
+                wallet_index,
+                msg
+            );
+        }
+        err.into_apalis_error()
+    })
 }
 
 // ────────────────────────────────────────────────────────────
@@ -524,6 +524,14 @@ impl WalletJobError {
             return WalletJobError::Permanent(msg.to_string());
         }
         WalletJobError::Transient(msg.to_string())
+    }
+
+    pub fn into_apalis_error(self) -> Error {
+        let error = io::Error::other(self.to_string());
+        match self {
+            WalletJobError::Transient(_) => Error::Failed(Arc::new(Box::new(error))),
+            WalletJobError::Permanent(_) => Error::Abort(Arc::new(Box::new(error))),
+        }
     }
 }
 
@@ -1070,5 +1078,17 @@ mod tests {
         let trans = WalletJobError::Transient("network".to_string());
         assert!(perm.to_string().contains("permanent"));
         assert!(trans.to_string().contains("transient"));
+    }
+
+    #[test]
+    fn permanent_errors_abort_apalis_retries() {
+        let error = WalletJobError::Permanent("move abort".to_string()).into_apalis_error();
+        assert!(matches!(error, apalis::prelude::Error::Abort(_)));
+    }
+
+    #[test]
+    fn transient_errors_remain_retryable() {
+        let error = WalletJobError::Transient("timeout".to_string()).into_apalis_error();
+        assert!(matches!(error, apalis::prelude::Error::Failed(_)));
     }
 }
