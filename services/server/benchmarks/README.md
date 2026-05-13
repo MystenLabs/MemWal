@@ -193,9 +193,22 @@ Variance across runs is ~±2-3 points due to judge non-determinism. Retrieval it
 
 ## Troubleshooting
 
+### 426 Upgrade Required
+- The client's request signing is out of date with the server's auth scheme
+  (`services/server/src/auth.rs`). `client.py::_sign_request` must send an
+  `x-nonce` header (UUIDv4) and sign the 6-field canonical message
+  `{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}`. If you see
+  426 on every request, the harness predates the MED-1 nonce / LOW-23
+  account-id-in-message changes — update `_sign_request` to match `auth.rs` and
+  `packages/sdk/src/memwal.ts`.
+
 ### 401 Unauthorized
 - Delegate key not registered on-chain for the account_id — use the app or SDK to register
 - Account ID mismatch — double-check `x-account-id` matches the account where the key is registered
+- Auth is mode-blind: even in `BENCHMARK_MODE`, every `/api/*` request must
+  pass Ed25519 verification AND resolve to a real on-chain `MemWalAccount`
+  whose `delegate_keys` contains the request key — so the server still needs a
+  reachable `SUI_RPC_URL`.
 
 ### 429 Too Many Requests
 - Rate limits too low — add the `RATE_LIMIT_*` overrides in `services/server/.env`

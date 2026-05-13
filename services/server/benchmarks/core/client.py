@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -64,10 +65,22 @@ class MemWalClient:
     # ------------------------------------------------------------------
 
     def _sign_request(self, method: str, path: str, body_bytes: bytes) -> dict:
-        """Build auth headers matching MemWal's Ed25519 verification."""
+        """Build auth headers matching MemWal's Ed25519 verification.
+
+        Canonical message (must match services/server/src/auth.rs and
+        packages/sdk/src/memwal.ts):
+            "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+        Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
+
+        `nonce` is a fresh UUIDv4 per call (MED-1 replay protection — the server
+        records it in Redis with a 600s TTL and rejects a re-seen nonce). Since
+        `_post` re-signs on every retry attempt, each retry naturally gets a new
+        nonce, so a retried request is not flagged as a replay.
+        """
         body_hash = hashlib.sha256(body_bytes).hexdigest()
         timestamp = str(int(time.time()))
-        message = f"{timestamp}.{method}.{path}.{body_hash}"
+        nonce = str(uuid.uuid4())
+        message = f"{timestamp}.{method}.{path}.{body_hash}.{nonce}.{self.account_id}"
 
         signed = self._signing_key.sign(message.encode(), encoder=RawEncoder)
 
@@ -76,6 +89,7 @@ class MemWalClient:
             "x-public-key": self._public_key_hex,
             "x-signature": signed.signature.hex(),
             "x-timestamp": timestamp,
+            "x-nonce": nonce,
             "x-account-id": self.account_id,
         }
 
@@ -145,8 +159,8 @@ class MemWalClient:
         2. Embeds each fact
         3. Stores the memory (benchmark mode: plaintext in Postgres,
            synchronously — the response carries the stored ids and
-           status "completed"; production: SEAL-encrypt + Walrus upload,
-           via an async job).
+           status "done"; production: SEAL-encrypt + Walrus upload, via an
+           async job, status "pending").
         """
         data = self._post("/api/analyze", {
             "text": text,
@@ -156,8 +170,8 @@ class MemWalClient:
         # - Synchronous (reference branch): {facts, total, owner}
         # - Async / benchmark-mode (dev + ENG-1747): {facts, fact_count,
         #   job_ids, status, owner} — "total" doesn't exist, "fact_count"
-        #   is the count. In benchmark mode status == "completed" and the
-        #   memories are already stored when this returns.
+        #   is the count. In benchmark mode status == "done" and the
+        #   memories are already stored and searchable when this returns.
         facts = data.get("facts", [])
         total = data.get("total", data.get("fact_count", len(facts)))
         return AnalyzeResult(facts=facts, total=total)
@@ -176,6 +190,17 @@ class MemWalClient:
 
         Scoring weights are per-request parameters. The same stored memories
         can be recalled with different weight configurations without re-ingestion.
+
+        NOTE: the current dev / ENG-1747 server's `RecallRequest` is
+        `{query, limit, namespace}` only — it does NOT yet implement composite
+        scoring, so `scoring_weights` / `memory_types` / `min_importance` sent
+        below are silently ignored (no `deny_unknown_fields`), and recall is
+        pure cosine similarity. Consequence: a `compare` run across presets
+        (`baseline` / `default` / `importance_heavy` / `recency_heavy`) will
+        show ~identical recall numbers on this server — the only variation is
+        LLM-judge non-determinism. The fields are kept so the harness works
+        unchanged against a future server that adds the typed-memory /
+        composite-scoring upgrade.
         """
         body: dict = {
             "query": query,
@@ -216,11 +241,13 @@ class MemWalClient:
 
     def forget_namespace(self, namespace: str, limit: int = 1000) -> dict:
         """
-        Soft-delete all memories in a namespace.
-        Used for benchmark cleanup.
+        Delete all memory index rows in a namespace (hard DELETE on
+        vector_entries; in benchmark mode this also removes the plaintext
+        rows). Owner-scoped, mode-blind. Used for benchmark inter-run cleanup.
+
+        The server's `ForgetRequest` is `{namespace}` only — `limit` is kept
+        in the signature for call-site compatibility but is not sent (the
+        endpoint always clears the whole namespace).
         """
-        return self._post("/api/forget", {
-            "query": "*",
-            "namespace": namespace,
-            "limit": limit,
-        })
+        del limit  # not part of the server's ForgetRequest
+        return self._post("/api/forget", {"namespace": namespace})
