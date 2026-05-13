@@ -14,8 +14,14 @@ pub const BULK_EMBED_CONCURRENCY: usize = 5;
 /// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
 pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
 
+/// Redis key prefix for Walrus ciphertext cache entries.
+pub const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
+
 /// Default max age for Redis-cached Walrus ciphertext before revalidating via Walrus.
-pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 5 * 60;
+pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Default maximum ciphertext size stored in Redis.
+pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
@@ -50,6 +56,9 @@ pub struct AppState {
     /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
     /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
     pub blob_cache_ttl: std::time::Duration,
+    /// MEM-37: Maximum SEAL ciphertext bytes to cache in Redis.
+    /// Zero disables blob ciphertext reads and writes in Redis.
+    pub blob_cache_max_bytes: usize,
     /// ENG-1405: Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
 }
@@ -677,6 +686,13 @@ mod tests {
     use super::*;
 
     // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
+
+    #[test]
+    fn blob_cache_defaults_match_mem_37_policy() {
+        assert_eq!(BLOB_CACHE_KEY_PREFIX, "memwal:blob:v1:");
+        assert_eq!(DEFAULT_BLOB_CACHE_TTL_SECS, 14 * 24 * 60 * 60);
+        assert_eq!(DEFAULT_BLOB_CACHE_MAX_BYTES, 512 * 1024);
+    }
 
     #[test]
     fn auth_info_debug_redacts_delegate_key() {

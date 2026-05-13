@@ -29,7 +29,8 @@ use jobs::{
     WalletJobStorage,
 };
 use types::{
-    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_TTL_SECS, DEFAULT_EMBEDDING_CACHE_TTL_SECS,
+    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
+    DEFAULT_EMBEDDING_CACHE_TTL_SECS,
 };
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -192,14 +193,20 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_BLOB_CACHE_TTL_SECS);
+    let blob_cache_max_bytes = std::env::var("BLOB_CACHE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BLOB_CACHE_MAX_BYTES);
     let embedding_cache_ttl_secs = std::env::var("EMBEDDING_CACHE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_EMBEDDING_CACHE_TTL_SECS);
     tracing::info!(
-        "  blob cache: redis ttl={}s (BLOB_CACHE_TTL_SECS={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
+        "  blob cache: redis ttl={}s max={} bytes (BLOB_CACHE_TTL_SECS={}, BLOB_CACHE_MAX_BYTES={}); embedding cache: redis ttl={}s (EMBEDDING_CACHE_TTL_SECS={})",
         blob_cache_ttl_secs,
+        blob_cache_max_bytes,
         blob_cache_ttl_secs,
+        blob_cache_max_bytes,
         embedding_cache_ttl_secs,
         embedding_cache_ttl_secs
     );
@@ -210,6 +217,9 @@ async fn main() {
         tracing::warn!(
             "  blob cache: BLOB_CACHE_TTL_SECS=0 disables cache hits and forces Walrus revalidation"
         );
+    }
+    if blob_cache_max_bytes == 0 {
+        tracing::warn!("  blob cache: BLOB_CACHE_MAX_BYTES=0 disables blob cache reads and writes");
     }
     if embedding_cache_ttl.is_zero() {
         tracing::warn!(
@@ -230,6 +240,7 @@ async fn main() {
         wallet_storages: wallet_storages.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
         blob_cache_ttl,
+        blob_cache_max_bytes,
         embedding_cache_ttl,
     });
 
