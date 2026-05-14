@@ -111,7 +111,7 @@ sequenceDiagram
 1. The relayer queries on-chain Walrus blob objects owned by the user, filtered by namespace metadata
 2. It compares against the local database to find which blobs are already indexed
 3. Only missing blobs are downloaded, decrypted, re-embedded, and re-indexed
-4. The restore supports a configurable `limit` (default: 50) to control how many blobs are processed per call
+4. The restore supports a configurable `limit` (default: 10) to control how many blobs are processed per call
 
 Restore is incremental and idempotent — you can call it multiple times safely.
 

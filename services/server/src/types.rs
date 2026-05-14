@@ -527,13 +527,13 @@ pub struct AskResponse {
 /// POST /api/restore
 /// Restore a namespace: download blobs from Walrus, decrypt, re-embed, re-index
 fn default_restore_limit() -> usize {
-    50
+    10
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RestoreRequest {
     pub namespace: String,
-    /// Max blobs to restore (default: 50)
+    /// Max blobs to restore (default: 10)
     #[serde(default = "default_restore_limit")]
     pub limit: usize,
 }
