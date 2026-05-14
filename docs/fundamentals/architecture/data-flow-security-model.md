@@ -35,10 +35,12 @@ You have options depending on your trust requirements:
 |--------|------------|----------------------|
 | **Managed relayer** | You trust Walrus Foundation | Plaintext content, embeddings, decrypted results |
 | **Self-hosted relayer** | You trust your own infra | Same as above, but under your control |
+| **TEE-isolated relayer** (community, high-assurance) | End users verify the attested enclave, not the operator | Plaintext visible only inside the attested enclave — operator cannot observe |
 | **Manual client flow** | Minimal trust | Only encrypted payloads and pre-computed vectors — never plaintext |
 
 - **Use the managed relayer** — convenient for getting started and prototyping. You trust Walrus Foundation to operate it responsibly.
 - **Self-host your own relayer** — you control the infrastructure, so the trust boundary is entirely yours. No third party sees your data.
+- **High-assurance mode — run the relayer inside a TEE (community-contributed)** — for operators self-hosting the relayer who want to *prove* to their end users that the relayer is behaving exactly as the attested image specifies — no silent operator tampering, no key exfiltration. The [`nautilus-memwal-relayer`](https://github.com/Ashwin-3cS/nautilus-memwal-relayer) template runs the MemWal relayer inside an AWS Nitro Enclave. The enclave generates an ephemeral signing key bound to its attestation document; every API response is signed by that key. End users verify the full chain: attestation → enclave public key → response signature, shifting trust from the operator to the attested enclave image. Strong TEE evidence, reproducible builds, signed responses — without giving up self-hosting.
 - **Manual client flow** — use `MemWalManual` to handle encryption and embedding entirely on the client side. The relayer only sees encrypted payloads and vectors, never plaintext. This is recommended for Web3-native users who want full control over their data and are comfortable managing keys, signing, and SEAL operations directly.
 
 ## What lives where
