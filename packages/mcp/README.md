@@ -2,7 +2,7 @@
 
 MemWal MCP is a stdio Model Context Protocol server for MemWal. It lets MCP clients such as Cursor, Claude Desktop, Antigravity, and Claude Code connect to the MemWal relayer without manually configuring remote headers or auth tokens.
 
-On first use, the CLI opens a browser-based wallet login flow and stores local credentials at `~/.memwal/credentials.json`.
+On first use, the package advertises a `memwal_login` tool to the MCP client. The agent can call it inline — no separate CLI command needed. The tool opens a browser-based wallet login flow and stores local credentials at `~/.memwal/credentials.json`. A matching `memwal_logout` tool clears the saved credentials.
 
 ## Quick Start
 

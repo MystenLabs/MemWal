@@ -8,7 +8,9 @@ Use MCP when you want tools like Cursor, Claude Desktop, Claude Code, or Antigra
 
 ## Tools
 
-The MCP server exposes four tools:
+The MCP server exposes six tools — four memory tools that round-trip to the relayer, and two session tools served locally by the stdio package.
+
+**Memory tools** (forwarded to the relayer):
 
 | Tool | Purpose |
 | --- | --- |
@@ -16,6 +18,15 @@ The MCP server exposes four tools:
 | `memwal_recall` | Search saved memories by query |
 | `memwal_analyze` | Extract and save durable facts from longer text |
 | `memwal_restore` | Re-index memories from onchain Walrus blob records |
+
+**Session tools** (handled locally by `@mysten-incubation/memwal-mcp`):
+
+| Tool | Purpose |
+| --- | --- |
+| `memwal_login` | Open the browser, approve the wallet, and write credentials to `~/.memwal/credentials.json`. Use for first-time sign-in or to switch accounts. |
+| `memwal_logout` | Remove the saved credentials from this machine. The on-chain delegate key is not revoked — visit the dashboard to remove it from the account. |
+
+The two session tools mean a user can sign in from inside their MCP client (Cursor, Claude Desktop, Claude Code, Antigravity, …) without leaving the chat to run a separate CLI command.
 
 ## Transport Options
 
@@ -42,13 +53,13 @@ The MCP bearer token is the delegate private key created for the MCP client. Tre
 
 Use this when your MCP client supports HTTP transport.
 
-First run the local login flow once so MemWal can register a delegate key and write credentials to `~/.memwal/credentials.json`:
+The HTTP transport authenticates every request with a bearer token (the delegate private key) and account ID. To get those values, run the stdio package once to generate them:
 
 ```bash
 npx -y @mysten-incubation/memwal-mcp login
 ```
 
-Then copy `delegatePrivateKey` into the bearer token placeholder and `accountId` into `x-memwal-account-id`:
+This opens the dashboard, registers a delegate key, and writes credentials to `~/.memwal/credentials.json`. Copy `delegatePrivateKey` into the bearer token placeholder and `accountId` into `x-memwal-account-id`:
 
 ```json
 {
@@ -76,7 +87,7 @@ If your client cannot attach headers from the command, add the headers in the ge
 
 ## stdio Package Setup
 
-Use this when your MCP client supports command-based MCP servers.
+Use this when your MCP client supports command-based MCP servers. Add the entry to your client config:
 
 ```json
 {
@@ -89,26 +100,51 @@ Use this when your MCP client supports command-based MCP servers.
 }
 ```
 
-To authorize the package manually, run:
+**First run.** When `~/.memwal/credentials.json` is missing, the package starts in a sign-in-required mode and advertises a `memwal_login` tool to the client. Ask your agent to call `memwal_login` — it returns a one-time URL. Open the URL, approve the connection in your Sui wallet, and the next `memwal_*` call works without restarting the client.
+
+The login URL stays valid for **5 minutes**. If it expires, ask the agent to call `memwal_login` again to get a fresh one.
+
+**Manual fallback.** You can also pre-authorize from the terminal:
 
 ```bash
 npx -y @mysten-incubation/memwal-mcp login
 ```
 
-The login flow opens the MemWal dashboard, asks you to connect your Sui wallet, and registers a delegate key on chain. After login, MCP clients can use the saved credentials without prompting again.
+**Switching accounts or signing out.** Ask the agent to call `memwal_logout` (clears local credentials) followed by `memwal_login`. The CLI equivalent is:
 
-## Environments
+```bash
+npx -y @mysten-incubation/memwal-mcp --logout
+```
 
-The stdio package accepts environment shortcuts:
+After login, MCP clients can use the saved credentials without prompting again.
 
-| Flag | Relayer |
-| --- | --- |
-| `--prod` | `https://relayer.memwal.ai` |
-| `--dev` | `https://relayer.dev.memwal.ai` |
-| `--staging` | `https://relayer.staging.memwal.ai` |
-| `--local` | `http://127.0.0.1:8000` |
+## CLI Flags and Environment Variables
 
-You can also pass explicit URLs:
+The stdio package reads flags from `args` in the client config. Environment variables work too — flags win when both are set.
+
+| CLI flag | Environment variable | Description |
+| --- | --- | --- |
+| `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
+| `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
+| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the MemWal dashboard. |
+| `--login` | — | Force a re-login even when credentials already exist. |
+| `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
+| `--help`, `-h` | — | Print usage and exit. |
+
+Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
+
+## Environment Presets
+
+The stdio package accepts environment shortcuts that set both the relayer and the dashboard URL in one flag:
+
+| Flag | Relayer | Dashboard |
+| --- | --- | --- |
+| `--prod` | `https://relayer.memwal.ai` | `https://memwal.ai` |
+| `--dev` | `https://relayer.dev.memwal.ai` | `https://dev.memwal.ai` |
+| `--staging` | `https://relayer.staging.memwal.ai` | `https://staging.memwal.ai` |
+| `--local` | `http://127.0.0.1:8000` | `http://localhost:5173` |
+
+Explicit `--relayer` and `--web-url` override the preset. You can also pass explicit URLs without a preset:
 
 ```json
 {
@@ -144,4 +180,13 @@ Self-hosted relayers expose the same public MCP routes:
 
 The Rust relayer starts the TypeScript sidecar automatically and forwards MCP traffic to the sidecar over loopback. The sidecar resolves MCP bearer credentials into normal MemWal SDK sessions, so tool calls still use the same relayer, SEAL, Walrus, and pgvector paths as SDK calls.
 
-See [Environment Variables](/reference/environment-variables) for MCP-specific sidecar and session-capacity settings.
+The MCP session limits that operators most often need to tune:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SIDECAR_URL` | `http://localhost:9000` | Loopback endpoint the Rust relayer uses to reach the sidecar. |
+| `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP. |
+| `MCP_MAX_SESSIONS_PER_IP` | `16` | Cap on concurrent sessions from one source IP. |
+| `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute. |
+
+See [Environment Variables](/reference/environment-variables) for the full list, including SEAL and Walrus settings.
