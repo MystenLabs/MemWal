@@ -49,7 +49,7 @@ for (const memory of result.results) {
 }
 
 // Same relayer restore endpoint
-await manual.restore("chatbot-prod", 50);
+await manual.restore("chatbot-prod", 10);
 
 // Check if using a connected wallet signer
 console.log(manual.isWalletMode);
@@ -93,7 +93,8 @@ const manual = MemWalManual.create({
 ## Config Notes
 
 - `suiNetwork` defaults to `mainnet`
-- `sealKeyServers` lets the client override the built-in SEAL key server object IDs
+- `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
+- `sealKeyServers` remains supported as a legacy independent key server object ID override
 - Walrus publisher, aggregator, and upload relay defaults follow `suiNetwork`
 - `embeddingModel` defaults to `text-embedding-3-small` (or `openai/text-embedding-3-small` for OpenRouter)
 - `walrusEpochs` defaults to `50` (storage duration)

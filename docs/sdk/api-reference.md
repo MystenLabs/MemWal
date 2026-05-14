@@ -122,7 +122,7 @@ Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact j
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental — only re-indexes blobs that aren't already in the local database.
 
-- `limit` defaults to `50`
+- `limit` defaults to `10`
 
 **Returns:**
 
@@ -183,7 +183,8 @@ Whether this client uses a connected wallet signer (vs. raw keypair).
 ### Config notes
 
 - `suiNetwork` defaults to `mainnet`
-- `sealKeyServers` lets the client override the built-in SEAL key server object IDs
+- `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
+- `sealKeyServers` remains supported as a legacy independent key server object ID override
 - All `@mysten/*` peer dependencies are loaded dynamically — only needed if you use `MemWalManual`
 
 ## `withMemWal`

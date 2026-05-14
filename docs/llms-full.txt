@@ -143,7 +143,7 @@ Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact j
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental — only re-indexes blobs that aren't already in the local database.
 
-- `limit` defaults to `50`
+- `limit` defaults to `10`
 
 Returns:
 ```ts
@@ -424,7 +424,9 @@ Add to `~/.openclaw/openclaw.json`:
 | `DATABASE_URL` | PostgreSQL connection string. `pgvector` must already exist |
 | `MEMWAL_PACKAGE_ID` | Sui package ID |
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID |
-| `SEAL_KEY_SERVERS` | Comma-separated SEAL key server object IDs |
+| `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | SEAL server config for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers |
+
+If neither SEAL variable is set, the sidecar uses built-in independent key server defaults for `SUI_NETWORK`: two testnet servers on `testnet`, and Overclock + Studio Mirai on `mainnet`.
 
 ### Usually Required
 

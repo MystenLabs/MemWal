@@ -1,0 +1,36 @@
+# Published baselines for the LongMemEval benchmark.
+#
+# Structure:
+#   <system_name>:
+#     source: <paper or URL>
+#     version: <paper version or date>
+#     notes: <any caveats about the numbers>
+#     scores:
+#       <category>: <j_score 0-100>
+#       overall: <overall j_score> (optional)
+#
+# LongMemEval's published reference scores are overall-only (not broken down
+# by category in publicly available leaderboards at this point).
+
+Supermemory:
+  source: MemoryBench harness
+  version: 2025
+  notes: >
+    Reported by Supermemory on their MemoryBench leaderboard. Uses the
+    same LongMemEval oracle variant. Published as overall accuracy.
+  scores:
+    overall: 85.4
+
+Zep:
+  source: LongMemEval paper (arXiv:2410.10813)
+  version: 2024
+  notes: Reported in the LongMemEval paper's evaluation table.
+  scores:
+    overall: 63.8
+
+Mem0:
+  source: LongMemEval paper (arXiv:2410.10813)
+  version: 2024
+  notes: Reported in the LongMemEval paper's evaluation table.
+  scores:
+    overall: 49.0

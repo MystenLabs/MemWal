@@ -1,5 +1,17 @@
 # @mysten-incubation/memwal
 
+## 0.0.4
+
+### Added
+
+- Added `getRememberStatus(jobId)` so clients can poll and display the full async remember state machine.
+- Added `SealServerConfig` and `sealServerConfigs` for manual-mode SEAL committee aggregator configuration.
+
+### Changed
+
+- Manual mode now normalizes full SEAL server configs, validates optional API key pairs, and caps the default threshold to configured server weight.
+- Manual mode keeps testnet defaults on the legacy independent key servers for compatibility with hosted testnet relayer data.
+
 ## 0.0.3
 
 ### Changed

@@ -34,6 +34,7 @@ import type {
     RecallManualResult,
     RecallManualMemory,
     RestoreResult,
+    SealServerConfig,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
 
@@ -41,18 +42,80 @@ import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerEr
 // Constants
 // ============================================================
 
-// Default SEAL key server object IDs per network
-// Users can override via SEAL_KEY_SERVERS in their environment
-const DEFAULT_KEY_SERVERS: Record<string, string[]> = {
+type ResolvedSealServerConfig = Omit<SealServerConfig, "weight"> & { weight: number };
+
+// Default SEAL server configs per network.
+// Keep testnet on the legacy independent servers so Manual mode can decrypt
+// data written by the hosted testnet relayer. Committee aggregators remain
+// supported through explicit sealServerConfigs.
+const DEFAULT_SEAL_SERVER_CONFIGS: Record<string, ResolvedSealServerConfig[]> = {
     mainnet: [
-        "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open)
-        "0xe0eb52eba9261b96e895bbb4deca10dcd64fbc626a1133017adcd5131353fd10", // Studio Mirai (Open)
+        {
+            objectId: "0x145540d931f182fef76467dd8074c9839aea126852d90d18e1556fcbbd1208b6", // Overclock (Open)
+            weight: 1,
+        },
+        {
+            objectId: "0xe0eb52eba9261b96e895bbb4deca10dcd64fbc626a1133017adcd5131353fd10", // Studio Mirai (Open)
+            weight: 1,
+        },
     ],
     testnet: [
-        "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
-        "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+        {
+            objectId: "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
+            weight: 1,
+        },
+        {
+            objectId: "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+            weight: 1,
+        },
     ],
 };
+
+function normalizeSealServerConfigs(configs: SealServerConfig[]): ResolvedSealServerConfig[] {
+    return configs.map((config, index) => {
+        const objectId = config.objectId?.trim();
+        if (!objectId) {
+            throw new Error(`MemWalManual: sealServerConfigs[${index}].objectId is required`);
+        }
+
+        const weight = config.weight ?? 1;
+        if (!Number.isInteger(weight) || weight < 1) {
+            throw new Error(`MemWalManual: sealServerConfigs[${index}].weight must be a positive integer`);
+        }
+
+        const aggregatorUrl = config.aggregatorUrl?.trim();
+        const apiKeyName = config.apiKeyName?.trim();
+        const apiKey = config.apiKey?.trim();
+        if ((apiKeyName && !apiKey) || (!apiKeyName && apiKey)) {
+            throw new Error(
+                `MemWalManual: sealServerConfigs[${index}] must provide both apiKeyName and apiKey, or neither`,
+            );
+        }
+
+        return {
+            objectId,
+            weight,
+            ...(aggregatorUrl ? { aggregatorUrl } : {}),
+            ...(apiKeyName && apiKey ? { apiKeyName, apiKey } : {}),
+        };
+    });
+}
+
+function resolveSealServerConfigs(config: MemWalManualConfig, network: string): ResolvedSealServerConfig[] {
+    if (config.sealServerConfigs !== undefined) {
+        return normalizeSealServerConfigs(config.sealServerConfigs);
+    }
+
+    if (config.sealKeyServers !== undefined) {
+        return normalizeSealServerConfigs(config.sealKeyServers.map((objectId) => ({ objectId })));
+    }
+
+    return normalizeSealServerConfigs(DEFAULT_SEAL_SERVER_CONFIGS[network] ?? []);
+}
+
+function sealServerConfigTotalWeight(configs: ResolvedSealServerConfig[]): number {
+    return configs.reduce((sum, config) => sum + config.weight, 0);
+}
 
 // ============================================================
 // MemWalManual Client
@@ -200,28 +263,30 @@ export class MemWalManual {
             const { SealClient } = await import("@mysten/seal");
             const suiClient = await this.getSuiClient();
             const network = this.config.suiNetwork ?? "mainnet";
-            const keyServers = this.config.sealKeyServers ?? DEFAULT_KEY_SERVERS[network] ?? [];
-            if (keyServers.length === 0) {
+            const serverConfigs = resolveSealServerConfigs(this.config, network);
+            if (serverConfigs.length === 0) {
                 throw new Error(
                     `MemWalManual: no SEAL key servers configured for network "${network}". ` +
-                    "Please provide sealKeyServers in config or set SEAL_KEY_SERVERS env var."
+                    "Please provide sealServerConfigs or sealKeyServers in config."
                 );
             }
             this._sealClient = new SealClient({
                 suiClient,
-                serverConfigs: keyServers.map((id) => ({
-                    objectId: id,
-                    weight: 1,
-                })),
+                serverConfigs,
                 verifyKeyServers: true,
             });
         }
         return this._sealClient;
     }
 
-    /** MED-10: SEAL threshold — must match sidecar SEAL_THRESHOLD (default 2). */
+    /** MED-10: SEAL threshold — defaults to 2, capped to configured server weight. */
     private get sealThreshold(): number {
-        return this.config.sealThreshold ?? 2;
+        if (this.config.sealThreshold !== undefined) {
+            return this.config.sealThreshold;
+        }
+        const network = this.config.suiNetwork ?? "mainnet";
+        const totalWeight = sealServerConfigTotalWeight(resolveSealServerConfigs(this.config, network));
+        return totalWeight > 0 ? Math.min(2, totalWeight) : 2;
     }
 
     private async getWalrusClient() {
@@ -668,7 +733,7 @@ export class MemWalManual {
      * @param namespace - Namespace to restore
      * @returns RestoreResult with count of restored entries
      */
-    async restore(namespace: string, limit: number = 50): Promise<RestoreResult> {
+    async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
         return this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,

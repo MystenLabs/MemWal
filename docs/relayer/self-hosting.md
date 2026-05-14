@@ -78,7 +78,7 @@ curl http://localhost:8000/health
 - `MEMWAL_PACKAGE_ID`
 - `MEMWAL_REGISTRY_ID`
 - `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
-- `SEAL_KEY_SERVERS` — comma-separated list of SEAL key server object IDs
+- `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` — SEAL server config for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers.
 
 ### Recommended
 
@@ -102,6 +102,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SUI_NETWORK` defaults to `mainnet`
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
 - The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
+- `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 
 ### Server Keys
 
@@ -124,7 +125,15 @@ MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a
 MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
 ```
 
-For SEAL key server object IDs on testnet, see https://seal-docs.wal.app/Pricing.
+If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the sidecar uses built-in independent key server defaults for the selected `SUI_NETWORK`: two testnet servers on `testnet`, and Overclock + Studio Mirai on `mainnet`.
+
+Use `SEAL_SERVER_CONFIGS` for committee key servers because committee entries require an `aggregatorUrl`. For example, the Mysten testnet committee config is:
+
+```env
+SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]
+```
+
+`SEAL_KEY_SERVERS=0x...,0x...` remains supported for independent key server object IDs. Committee mode is supported through `SEAL_SERVER_CONFIGS` when you have the object ID and aggregator URL.
 
 Using official key server of SDK is recommended. 
 

@@ -12,6 +12,7 @@ export { MemWalManual } from "./manual.js";
 
 export type {
     MemWalManualConfig,
+    SealServerConfig,
     WalletSigner,
     RememberManualOptions,
     RememberManualResult,

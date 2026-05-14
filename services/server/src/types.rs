@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use crate::db::VectorDb;
+use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
+use crate::services::{Embedder, Extractor};
+use crate::storage::db::VectorDb;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
@@ -11,11 +14,14 @@ pub const MAX_BULK_ITEMS: usize = 20;
 /// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
 
-/// ENG-1408: Bounded concurrency for Walrus uploads inside one bulk job.
-pub const BULK_UPLOAD_CONCURRENCY: usize = 5;
+/// Redis key prefix for Walrus ciphertext cache entries.
+pub const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 
 /// Default max age for Redis-cached Walrus ciphertext before revalidating via Walrus.
-pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 5 * 60;
+pub const DEFAULT_BLOB_CACHE_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Default maximum ciphertext size stored in Redis.
+pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
@@ -26,12 +32,28 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Shared application state passed to all routes and middleware
 pub struct AppState {
-    pub db: VectorDb,
-    pub config: Config,
+    /// `Arc` so the `MemoryEngine` impl can share the same handle rather
+    /// than duplicating the pool.
+    pub db: Arc<VectorDb>,
+    /// `Arc` so the engine + handlers share one immutable config.
+    pub config: Arc<Config>,
     pub http_client: reqwest::Client,
-    pub walrus_client: walrus_rs::WalrusClient,
-    /// Round-robin pool of Sui private keys for parallel Walrus uploads
-    pub key_pool: KeyPool,
+    /// `Arc` so the engine shares the Walrus client handle.
+    pub walrus_client: Arc<walrus_rs::WalrusClient>,
+    /// Round-robin pool of Sui private keys for parallel Walrus uploads.
+    /// `Arc` so the engine's `store_blob` can draw from the same pool.
+    pub key_pool: Arc<KeyPool>,
+    /// Persistence abstraction — `WalrusSealEngine` in production,
+    /// `PlaintextEngine` in benchmark mode. Selected once at startup
+    /// from `Config::benchmark_mode`. Handlers / job workers are mode-blind.
+    pub engine: Arc<dyn MemoryEngine>,
+    /// Embedding service — `OpenAiEmbedder` (text-embedding-3-small, with
+    /// a deterministic mock fallback when no API key). Used by `analyze`,
+    /// `remember` (per fact / summary), and `recall` (the query embedding).
+    pub embedder: Arc<dyn Embedder>,
+    /// LLM fact-extraction service — `LlmExtractor` (gpt-4o-mini). Used by
+    /// `analyze`.
+    pub extractor: Arc<dyn Extractor>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -41,60 +63,74 @@ pub struct AppState {
     /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
-    /// Per-wallet Apalis storages — wallet_storages[i] maps to pool key[i].
-    /// New code should enqueue WalletJob here instead of using
-    /// MetaTransferJob/RememberJob directly.
-    pub wallet_storages: Vec<WalletJobStorage>,
+    /// Single Apalis storage for WalletJob. Routing dimension was previously a
+    /// Vec<WalletJobStorage> keyed by wallet_index; that existed to side-step
+    /// Sui coin-object equivocation locks. Per Will Bradley (Mysten, 2026-05-12
+    /// Slack callout): Sui no longer permanently locks coin objects on
+    /// equivocation, so one wallet + concurrent workers + retry handler is
+    /// sufficient. See `plans/simplify-walrus-wallet-queues/reports/` for context.
+    pub wallet_storage: WalletJobStorage,
     /// ENG-1408: Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
     /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
     /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
+    /// (Also cloned into `WalrusSealEngine` at construction so the engine
+    /// shares the same TTL when serving recall.)
     pub blob_cache_ttl: std::time::Duration,
+    /// MEM-37: Maximum SEAL ciphertext bytes to cache in Redis.
+    /// Zero disables blob ciphertext reads and writes in Redis.
+    /// (Also cloned into `WalrusSealEngine` for size-capped cache writes.)
+    pub blob_cache_max_bytes: usize,
     /// ENG-1405: Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
 }
 
 // ============================================================
-// Key Pool (round-robin selection for parallel uploads)
+// Key Pool — round-robin wallet selection
 // ============================================================
 
-/// A thread-safe round-robin pool of Sui private keys.
-/// Each call to `next()` returns the next key in the pool,
-/// allowing concurrent uploads to use different signer addresses.
+/// Wallet key holder for distributing Walrus uploads across configured server
+/// keys. Apalis retries call `next_index()` again at execution time, so a
+/// transient sponsor/RPC failure can move to the next wallet in the pool.
 pub struct KeyPool {
     keys: Vec<String>,
-    counter: AtomicUsize,
+    cursor: AtomicUsize,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<String>) -> Self {
         Self {
             keys,
-            counter: AtomicUsize::new(0),
+            cursor: AtomicUsize::new(0),
         }
     }
 
-    /// Returns the next key in round-robin order, or `None` if the pool is empty.
+    /// Returns the next configured key in round-robin order.
     #[allow(dead_code)]
     pub fn next(&self) -> Option<&str> {
-        if self.keys.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len();
-        Some(&self.keys[idx])
+        let idx = self.next_index()?;
+        self.keys.get(idx).map(|s| s.as_str())
     }
 
-    /// Returns the pool index for the next key in round-robin order.
+    /// Returns the next key index in round-robin order, or `None` if no keys
+    /// are configured.
     pub fn next_index(&self) -> Option<usize> {
-        if self.keys.is_empty() {
-            return None;
+        let len = self.keys.len();
+        if len == 0 {
+            None
+        } else {
+            Some(self.cursor.fetch_add(1, Ordering::Relaxed) % len)
         }
-        Some(self.counter.fetch_add(1, Ordering::Relaxed) % self.keys.len())
     }
 
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.keys.len()
     }
 }
 
@@ -133,6 +169,11 @@ pub struct Config {
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
+    /// ENG-1747: when true, select `PlaintextEngine` instead of
+    /// `WalrusSealEngine` — memories are stored as plaintext in Postgres,
+    /// bypassing SEAL + Walrus. **Not for production.** Off by default;
+    /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
+    pub benchmark_mode: bool,
 }
 
 impl Config {
@@ -187,6 +228,9 @@ impl Config {
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
+            benchmark_mode: std::env::var("BENCHMARK_MODE")
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false),
         }
     }
 }
@@ -483,13 +527,13 @@ pub struct AskResponse {
 /// POST /api/restore
 /// Restore a namespace: download blobs from Walrus, decrypt, re-embed, re-index
 fn default_restore_limit() -> usize {
-    50
+    10
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RestoreRequest {
     pub namespace: String,
-    /// Max blobs to restore (default: 50)
+    /// Max blobs to restore (default: 10)
     #[serde(default = "default_restore_limit")]
     pub limit: usize,
 }
@@ -503,11 +547,47 @@ pub struct RestoreResponse {
     pub owner: String,
 }
 
+/// POST /api/forget — delete the vector index rows for a namespace
+/// (hard DELETE on vector_entries; Walrus blobs persist). Used by the
+/// benchmark harness for inter-run cleanup. Mode-blind, owner-scoped.
+#[derive(Debug, Deserialize)]
+pub struct ForgetRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForgetResponse {
+    pub deleted: u64,
+    pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/stats — count + stored bytes for a namespace.
+/// Used by the benchmark harness for verification. Mode-blind.
+#[derive(Debug, Deserialize)]
+pub struct StatsRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatsResponse {
+    pub memory_count: i64,
+    pub storage_bytes: i64,
+    pub namespace: String,
+    pub owner: String,
+}
+
 /// Health check
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// "production" or "benchmark" — lets benchmark harness runs verify
+    /// at startup that they're hitting a benchmark-mode server before
+    /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
+    pub mode: String,
 }
 
 /// GET /config response (ENG-1697).
@@ -679,6 +759,13 @@ mod tests {
     // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
 
     #[test]
+    fn blob_cache_defaults_match_mem_37_policy() {
+        assert_eq!(BLOB_CACHE_KEY_PREFIX, "memwal:blob:v1:");
+        assert_eq!(DEFAULT_BLOB_CACHE_TTL_SECS, 14 * 24 * 60 * 60);
+        assert_eq!(DEFAULT_BLOB_CACHE_MAX_BYTES, 512 * 1024);
+    }
+
+    #[test]
     fn auth_info_debug_redacts_delegate_key() {
         let auth = AuthInfo {
             public_key: "aabbccdd".to_string(),
@@ -812,16 +899,16 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
     }
 
-    // ── KeyPool: round-robin selection ───────────────────────────────────
+    // ── KeyPool: round-robin selection ─────────────────────────────────
 
     #[test]
-    fn key_pool_round_robin() {
+    fn key_pool_returns_keys_round_robin() {
         let pool = KeyPool::new(vec!["key_a".into(), "key_b".into(), "key_c".into()]);
 
         assert_eq!(pool.next(), Some("key_a"));
         assert_eq!(pool.next(), Some("key_b"));
         assert_eq!(pool.next(), Some("key_c"));
-        assert_eq!(pool.next(), Some("key_a")); // wraps around
+        assert_eq!(pool.next(), Some("key_a"));
     }
 
     #[test]
@@ -841,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn key_pool_next_index_wraps() {
+    fn key_pool_next_index_round_robin() {
         let pool = KeyPool::new(vec!["a".into(), "b".into()]);
         assert_eq!(pool.next_index(), Some(0));
         assert_eq!(pool.next_index(), Some(1));

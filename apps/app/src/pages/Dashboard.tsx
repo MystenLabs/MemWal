@@ -391,9 +391,9 @@ const result = await generateText({
                 )}
 
                 {/* Action CTAs */}
-                <div style={{ display: 'flex', gap: 16, marginBottom: 24 }}>
+                <div className="dashboard-cta-row">
                     {delegateKey ? (
-                        <Link to="/playground" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                        <Link to="/playground" className="dashboard-cta">
                             <div>
                                 <div className="dashboard-cta-title">
                                     try interactive demo
@@ -405,7 +405,7 @@ const result = await generateText({
                             <div className="dashboard-cta-arrow">→</div>
                         </Link>
                     ) : hasMaxDelegateKeys ? (
-                        <div className="dashboard-cta" style={{ flex: 1, marginBottom: 0, cursor: 'default', opacity: 0.75 }}>
+                        <div className="dashboard-cta dashboard-cta--disabled">
                             <div>
                                 <div className="dashboard-cta-title">
                                     remove a key first
@@ -417,7 +417,7 @@ const result = await generateText({
                             <div className="dashboard-cta-arrow">↓</div>
                         </div>
                     ) : (
-                        <Link to="/setup" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                        <Link to="/setup" className="dashboard-cta">
                             <div>
                                 <div className="dashboard-cta-title">
                                     create delegate key
@@ -430,7 +430,7 @@ const result = await generateText({
                         </Link>
                     )}
                     {config.docsUrl && (
-                        <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" className="dashboard-cta" style={{ flex: 1, marginBottom: 0 }}>
+                        <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" className="dashboard-cta">
                             <div>
                                 <div className="dashboard-cta-title">
                                     documentation
@@ -532,7 +532,7 @@ const result = await generateText({
                                 all Ed25519 keys registered on your MemWalAccount
                             </div>
                         </div>
-                        <div style={{ display: 'flex', gap: 8 }}>
+                        <div className="card-header-actions">
                             <button
                                 className="btn btn-secondary btn-sm"
                                 onClick={fetchOnChainKeys}
