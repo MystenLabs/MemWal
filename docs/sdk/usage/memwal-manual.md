@@ -49,7 +49,7 @@ for (const memory of result.results) {
 }
 
 // Same relayer restore endpoint
-await manual.restore("chatbot-prod", 50);
+await manual.restore("chatbot-prod", 10);
 
 // Check if using a connected wallet signer
 console.log(manual.isWalletMode);

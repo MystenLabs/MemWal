@@ -49,7 +49,7 @@ Rebuild missing indexed entries for one namespace. Incremental, namespace-scoped
 repair PostgreSQL vector state from Walrus-backed memory.
 
 ```ts
-const result = await memwal.restore("chatbot-prod", 50);
+const result = await memwal.restore("chatbot-prod", 10);
 ```
 
 ## Lower-Level Methods

@@ -85,7 +85,7 @@ const TOOL_DEFINITIONS = [
             type: "object",
             properties: {
                 namespace: { type: "string", minLength: 1 },
-                limit: { type: "integer", minimum: 1, maximum: 500, default: 50 },
+                limit: { type: "integer", minimum: 1, maximum: 500, default: 10 },
             },
             required: ["namespace"],
             additionalProperties: false,

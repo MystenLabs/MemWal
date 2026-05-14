@@ -13,7 +13,7 @@ const RESTORE_INPUT = {
         .int()
         .min(1)
         .max(500)
-        .default(50)
+        .default(10)
         .describe("Max number of memories to re-index (1-500)."),
 } as const;
 

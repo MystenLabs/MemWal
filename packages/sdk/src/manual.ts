@@ -733,7 +733,7 @@ export class MemWalManual {
      * @param namespace - Namespace to restore
      * @returns RestoreResult with count of restored entries
      */
-    async restore(namespace: string, limit: number = 50): Promise<RestoreResult> {
+    async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
         return this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,

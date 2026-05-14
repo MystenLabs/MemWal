@@ -626,7 +626,7 @@ export class MemWal {
      * console.log(`Restored ${result.restored} memories`)
      * ```
      */
-    async restore(namespace: string, limit: number = 50): Promise<RestoreResult> {
+    async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
         return this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
