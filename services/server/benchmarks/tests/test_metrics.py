@@ -10,11 +10,8 @@ import math
 import sys
 from pathlib import Path
 
-import pytest
-
 from core.metrics import (
     compute_recall_at_k,
-    compute_precision_at_k,
     compute_mrr,
     compute_ndcg,
     compute_f1,

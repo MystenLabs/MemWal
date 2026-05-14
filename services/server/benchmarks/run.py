@@ -39,7 +39,7 @@ from core.types import (
 from core.client import MemWalClient
 from core.judge import LLMJudge
 from core.metrics import (
-    compute_recall_at_k, compute_mrr, compute_ndcg, compute_f1,
+    compute_recall_at_k, compute_mrr, compute_ndcg,
     aggregate_metrics, aggregate_by_category,
 )
 from core.report import generate_comparison_table, generate_report
@@ -461,7 +461,7 @@ def stage_compare(
         print(f"  Preset: {preset_name}")
         print(f"{'='*60}")
         weights = load_preset(preset_name)
-        artifact = stage_eval(
+        stage_eval(
             benchmark_name, client, judge, run_id,
             preset_name, weights, config, mode,
         )
