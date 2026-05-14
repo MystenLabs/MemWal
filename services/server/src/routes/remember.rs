@@ -389,7 +389,7 @@ async fn summarize_with_prompt(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&ChatCompletionRequest {
-            model: "openai/gpt-4o-mini".to_string(),
+            model: config.llm_model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),

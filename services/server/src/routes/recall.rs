@@ -22,11 +22,16 @@ use super::truncate_str;
 // ============================================================
 
 fn recall_embedding_cache_key(config: &Config, query: &str) -> String {
-    use crate::services::embedder::EMBEDDING_MODEL;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(config.openai_api_base.as_bytes());
+    // Use the effective embedding base + model so cache entries do not collide
+    // across providers when EMBEDDING_API_BASE / EMBEDDING_MODEL are overridden.
+    let base = config
+        .embedding_api_base
+        .as_deref()
+        .unwrap_or(&config.openai_api_base);
+    hasher.update(base.as_bytes());
     hasher.update(b"\0");
-    hasher.update(EMBEDDING_MODEL.as_bytes());
+    hasher.update(config.embedding_model.as_bytes());
     hasher.update(b"\0");
     hasher.update(query.as_bytes());
     format!("memwal:embedding:v1:{:x}", hasher.finalize())

@@ -65,6 +65,18 @@ async fn main() {
             .unwrap_or("(from client header)")
     );
     tracing::info!(
+        "  embedding model: {} (base: {})",
+        config.embedding_model,
+        config
+            .embedding_api_base
+            .as_deref()
+            .unwrap_or(&config.openai_api_base)
+    );
+    if let Some(dims) = config.embedding_dimensions {
+        tracing::info!("  embedding dimensions: {}", dims);
+    }
+    tracing::info!("  llm model: {}", config.llm_model);
+    tracing::info!(
         "  rate limit: burst={}/min, sustained={}/hr, per-key={}/min, quota={}MB/user",
         config.rate_limit.max_requests_per_minute,
         config.rate_limit.max_requests_per_hour,
@@ -138,6 +150,30 @@ async fn main() {
             .await
             .expect("Failed to connect to PostgreSQL"),
     );
+
+    // Warn if the schema embedding dimension doesn't match EMBEDDING_DIMENSIONS.
+    // Mixing dimensions in the same table breaks cosine similarity queries.
+    // To change dimensions: TRUNCATE vector_entries, then ALTER COLUMN
+    // embedding TYPE vector(<n>).
+    if let Some(configured_dims) = config.embedding_dimensions {
+        let row: Option<(i32,)> = sqlx::query_as(
+            "SELECT atttypmod FROM pg_attribute \
+             WHERE attrelid = 'vector_entries'::regclass AND attname = 'embedding'",
+        )
+        .fetch_optional(db.pool())
+        .await
+        .unwrap_or(None);
+        if let Some((schema_dims,)) = row {
+            if schema_dims > 0 && schema_dims as u32 != configured_dims {
+                tracing::warn!(
+                    "DIMENSION MISMATCH: schema has vector({}) but EMBEDDING_DIMENSIONS={}. \
+                     Recall will fail. Truncate vector_entries and run: \
+                     ALTER TABLE vector_entries ALTER COLUMN embedding TYPE vector({});",
+                    schema_dims, configured_dims, configured_dims
+                );
+            }
+        }
+    }
 
     // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
     // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.

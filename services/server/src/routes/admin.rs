@@ -267,7 +267,7 @@ pub async fn ask(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&ChatCompletionRequest {
-            model: "openai/gpt-4o-mini".to_string(),
+            model: state.config.llm_model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
