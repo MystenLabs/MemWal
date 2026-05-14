@@ -45,6 +45,7 @@ walrus_rs = "0.1"
 
 # Async utilities
 futures = "0.3"
+async-trait = "0.1"
 
 # Rate limiting (Redis-backed)
 redis = { version = "0.27", features = ["tokio-comp"] }

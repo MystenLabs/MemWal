@@ -1,0 +1,32 @@
+# Published baselines for the LOCOMO benchmark.
+#
+# Structure:
+#   <system_name>:
+#     source: <paper or URL>
+#     version: <paper version or date>
+#     notes: <any caveats about the numbers>
+#     scores:
+#       <category>: <j_score 0-100>
+#       overall: <overall j_score> (optional)
+#
+# Loaded by core/report.py to generate comparison tables.
+
+Mem0 Base:
+  source: arXiv:2504.19413 (Mem0 paper)
+  version: v2 (April 2025)
+  notes: LLM-as-Judge with GPT-4o, same methodology we use. J-score 0-100.
+  scores:
+    single_hop: 67.13
+    multi_hop: 51.15
+    temporal: 55.51
+    open_domain: 72.93
+
+Mem0 Graph:
+  source: arXiv:2504.19413 (Mem0 paper)
+  version: v2 (April 2025)
+  notes: Graph-augmented variant of Mem0 (Mem0^g). Same evaluation protocol.
+  scores:
+    single_hop: 65.71
+    multi_hop: 47.19
+    temporal: 58.13
+    open_domain: 75.71

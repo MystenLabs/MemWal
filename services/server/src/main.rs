@@ -1,13 +1,12 @@
 mod auth;
-mod db;
+mod engine;
 mod jobs;
 mod mcp_proxy;
 mod rate_limit;
 mod routes;
-mod seal;
-mod sui;
+mod services;
+mod storage;
 mod types;
-mod walrus;
 
 use axum::http::{header, HeaderValue, Method};
 use axum::{
@@ -24,11 +23,13 @@ use tower_http::trace::TraceLayer;
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 
-use db::VectorDb;
+use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
+use services::{Embedder, Extractor, LlmExtractor, OpenAiEmbedder};
+use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -130,10 +131,13 @@ async fn main() {
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
     }
 
-    // Initialize database (PostgreSQL + pgvector)
-    let db = VectorDb::new(&config.database_url)
-        .await
-        .expect("Failed to connect to PostgreSQL");
+    // Initialize database (PostgreSQL + pgvector).
+    // `Arc` so the MemoryEngine impl shares the same pool as the handlers.
+    let db = Arc::new(
+        VectorDb::new(&config.database_url)
+            .await
+            .expect("Failed to connect to PostgreSQL"),
+    );
 
     // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
     // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
@@ -177,10 +181,12 @@ async fn main() {
         WALLET_QUEUE_NAME
     );
 
-    // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs)
-    let walrus_client =
+    // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs).
+    // `Arc` so the MemoryEngine impl shares the same client handle.
+    let walrus_client = Arc::new(
         walrus_rs::WalrusClient::new(&config.walrus_aggregator_url, &config.walrus_publisher_url)
-            .expect("Failed to initialize Walrus client (invalid URL?)");
+            .expect("Failed to initialize Walrus client (invalid URL?)"),
+    );
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
     // Log upload key status
@@ -194,8 +200,11 @@ async fn main() {
         tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
     }
 
-    // Build wallet key holder
-    let key_pool = KeyPool::new(config.sui_private_keys.clone());
+    // Build wallet key holder.
+    // `Arc` so the MemoryEngine impl's store_blob draws from the same pool.
+    // Wraps dev's single-wallet KeyPool (MEM-35); the engine takes an Arc
+    // clone so handlers + the engine share one holder.
+    let key_pool = Arc::new(KeyPool::new(config.sui_private_keys.clone()));
 
     // Initialize Redis for rate limiting
     let redis = rate_limit::create_redis_client(&config.rate_limit.redis_url)
@@ -242,13 +251,55 @@ async fn main() {
         );
     }
 
+    // Wrap the immutable config so the MemoryEngine + handlers share it.
+    let config = Arc::new(config);
+
+    // Select the persistence engine. Production = WalrusSealEngine (SEAL
+    // encrypt happens in the handler/client; the engine uploads the
+    // ciphertext to Walrus and indexes the row, with the Redis blob
+    // cache + reactive cleanup on the read path). Benchmark =
+    // PlaintextEngine (plaintext straight to Postgres, no SEAL/Walrus).
+    // BENCHMARK_MODE is off by default and IS NOT FOR PRODUCTION USE.
+    let engine: Arc<dyn MemoryEngine> = if config.benchmark_mode {
+        tracing::warn!("⚠️  BENCHMARK_MODE=true — using PlaintextEngine.");
+        tracing::warn!("⚠️  Memories will be stored UNENCRYPTED in Postgres.");
+        tracing::warn!("⚠️  This is a benchmark-only mode. UNSAFE for production.");
+        Arc::new(PlaintextEngine::new(Arc::clone(&db)))
+    } else {
+        tracing::info!("  storage: WalrusSealEngine (production)");
+        Arc::new(WalrusSealEngine::new(
+            Arc::clone(&db),
+            http_client.clone(),
+            Arc::clone(&walrus_client),
+            Arc::clone(&key_pool),
+            Arc::clone(&config),
+            redis.clone(),
+            blob_cache_ttl,
+            blob_cache_max_bytes,
+        ))
+    };
+
+    // Service-layer capabilities — shared (Arc<dyn …>) so alternative
+    // implementations can be swapped at startup. Both wrap the same
+    // http_client + config; behaviour is identical to the inline
+    // generate_embedding / extract_facts_llm they replace.
+    let embedder: Arc<dyn Embedder> = Arc::new(OpenAiEmbedder::new(
+        http_client.clone(),
+        Arc::clone(&config),
+    ));
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
-        config: config.clone(),
+        config: Arc::clone(&config),
         http_client,
         walrus_client,
         key_pool,
+        engine,
+        embedder,
+        extractor,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
@@ -416,6 +467,10 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        // ENG-1747: admin/harness endpoints — namespace delete + stats.
+        // Mode-blind; owner-scoped via AuthInfo.
+        .route("/api/forget", post(routes::forget))
+        .route("/api/stats", post(routes::stats))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(
@@ -452,8 +507,7 @@ async fn main() {
         .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
         .route(
             "/api/mcp/messages",
-            post(mcp_proxy::messages_proxy)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         // Streamable HTTP transport (MCP 2025-06). Single URL that
         // handles GET (open SSE), POST (JSON-RPC with optional SSE

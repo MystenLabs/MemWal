@@ -9,7 +9,7 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
+use crate::storage::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing

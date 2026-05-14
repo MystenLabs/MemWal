@@ -1275,6 +1275,7 @@ version = "0.1.0"
 dependencies = [
  "apalis",
  "apalis-sql",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
