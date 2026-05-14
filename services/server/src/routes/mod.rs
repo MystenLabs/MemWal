@@ -41,13 +41,11 @@ use apalis::prelude::Storage as _;
 // Wallet-job enqueue (used by remember + analyze)
 // ============================================================
 
-/// Enqueue a WalletJob to the (now single) Apalis queue.
+/// Enqueue a WalletJob to the single Apalis wallet queue.
 ///
-/// `wallet_index` is preserved in the job payload for audit / sidecar parity
-/// but no longer drives queue routing — MEM-35 collapsed the per-wallet
-/// queues into a single `wallet_jobs` queue (see plans/simplify-walrus-
-/// wallet-queues/ + KeyPool::next_index). Returns the wallet_index for
-/// caller tracking.
+/// `wallet_index` is preserved in the job payload for audit/logging. Upload
+/// workers select a fresh round-robin key at execution time so Apalis retries
+/// can move to another wallet.
 pub async fn enqueue_wallet_job(
     state: &AppState,
     wallet_index: usize,

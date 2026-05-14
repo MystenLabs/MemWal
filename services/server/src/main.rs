@@ -155,27 +155,14 @@ async fn main() {
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
-    // Single Apalis queue for all WalletJob signing operations.
-    //
-    // Was previously a Vec of per-wallet queues to avoid Sui coin-object
-    // equivocation locks. Per Will Bradley (Mysten, 2026-05-12 Slack callout):
-    // Sui no longer permanently locks coin objects on equivocation, so a single
-    // wallet + concurrent workers + retry handling is sufficient. Multi-wallet
-    // is only justified for raw throughput, which is not a bottleneck for
-    // background Walrus uploads.
+    // Single Apalis queue for all WalletJob signing operations. Workers select
+    // a key from the configured pool when they execute an upload job, so
+    // retries can rotate away from a wallet whose sponsored tx expired.
     const WALLET_QUEUE_NAME: &str = "wallet_jobs";
     let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
         apalis_pool.clone(),
         apalis_sql::Config::new(WALLET_QUEUE_NAME),
     );
-    let pool_size = config.sui_private_keys.len();
-    if pool_size > 1 {
-        tracing::warn!(
-            "  SERVER_SUI_PRIVATE_KEYS has {} entries; only the first is used. \
-             Multi-wallet routing was retired — see plans/simplify-walrus-wallet-queues/.",
-            pool_size,
-        );
-    }
     tracing::info!(
         "  Apalis: job queue ready (table=apalis_jobs, queue={})",
         WALLET_QUEUE_NAME
@@ -193,7 +180,7 @@ async fn main() {
     let pool_size = config.sui_private_keys.len();
     if pool_size > 0 {
         tracing::info!(
-            "  Walrus upload: {} key(s) configured; using first key for wallet jobs",
+            "  Walrus upload: {} key(s) configured; using round-robin wallet jobs",
             pool_size,
         );
     } else {
@@ -202,7 +189,6 @@ async fn main() {
 
     // Build wallet key holder.
     // `Arc` so the MemoryEngine impl's store_blob draws from the same pool.
-    // Wraps dev's single-wallet KeyPool (MEM-35); the engine takes an Arc
     // clone so handlers + the engine share one holder.
     let key_pool = Arc::new(KeyPool::new(config.sui_private_keys.clone()));
 

@@ -1,10 +1,10 @@
 /// Wallet signing job queue.
 ///
 /// Every operation that requires a Sui wallet signature is modelled as a
-/// `WalletJob` jobs are signed by the configured server wallet.
+/// `WalletJob` jobs are signed by the configured server wallet pool.
 /// This guarantees that:
 ///   - upload → metadata+transfer use the same key for a given job
-///   - signing operations can run concurrently on the same wallet
+///   - signing operations can run concurrently across the configured wallets
 ///   - jobs survive server restarts (persisted in Postgres via Apalis)
 ///
 /// Retry policy: up to MAX_ATTEMPTS attempts with exponential back-off.
@@ -103,12 +103,13 @@ pub(crate) async fn warm_blob_cache_after_upload(
     }
 }
 
-/// A wallet job. `wallet_index` is retained for legacy/audit payloads; new
-/// jobs use `0` and all routing goes through the single shared wallet queue.
+/// A wallet job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletJob {
     /// Index into `config.sui_private_keys` used by the sidecar for signing.
-    /// New jobs use 0 after the single-wallet simplification.
+    /// For `UploadAndTransfer`, this is the enqueue-time assignment used for
+    /// logging only; the worker selects a fresh round-robin wallet at execution
+    /// time so retries can move to another wallet.
     pub wallet_index: usize,
     pub operation: WalletOperation,
 }
@@ -209,13 +210,13 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
 
 /// Apalis worker handler for WalletJob.
 ///
-/// Multiple concurrent invocations of this handler share the single signing
-/// wallet (Apalis `WALLET_JOB_CONCURRENCY` controls fan-out, default 8). The
-/// `wallet_index` field in the job payload is retained for audit only —
-/// routing dimension was removed per MEM-35.
+/// Multiple concurrent invocations of this handler share the `wallet_jobs`
+/// queue. Upload jobs select a fresh wallet index at execution time; legacy
+/// metadata-transfer jobs keep their pinned wallet because the blob object is
+/// owned by the wallet that registered/certified it.
 pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Result<(), Error> {
     let state: &AppState = &ctx;
-    let wallet_index = job.wallet_index;
+    let enqueued_wallet_index = job.wallet_index;
 
     let result = match job.operation {
         WalletOperation::UploadAndTransfer {
@@ -228,6 +229,20 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             remember_job_id,
             epochs,
         } => {
+            let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                WalletJobError::Permanent(
+                    "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                        .into(),
+                )
+                .into_apalis_error()
+            })?;
+            if wallet_index != enqueued_wallet_index {
+                tracing::info!(
+                    "[wallet-job:upload] reassigned wallet at execution: enqueued={} executing={}",
+                    enqueued_wallet_index,
+                    wallet_index,
+                );
+            }
             execute_upload_and_transfer(
                 state,
                 wallet_index,
@@ -251,7 +266,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
         } => {
             execute_set_metadata_and_transfer(
                 state,
-                wallet_index,
+                enqueued_wallet_index,
                 blob_object_id,
                 owner,
                 namespace,
@@ -267,7 +282,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             tracing::warn!(
                 target: "wallet_job.permanent",
                 "permanent failure for wallet_index={} (will mark Dead): {}",
-                wallet_index,
+                enqueued_wallet_index,
                 msg
             );
         }
@@ -480,8 +495,8 @@ async fn execute_upload_and_transfer(
 ///
 /// Mapping rules (enforced at the point of error origination):
 /// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
-/// - `ObjectLockedAtVersion(_)` → `Transient` (the single-wallet model relies
-///   on retrying any remaining concurrency/race failures)
+/// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
+///   wallet assignment)
 /// - `InsufficientGas` / `ObjectNotFound` /
 ///   `ObjectVersionUnavailableForConsumption` → `Transient` (refill wallet,
 ///   refresh local state, retry)
@@ -509,6 +524,9 @@ impl WalletJobError {
             || lower.contains("object_locked")
             || lower.contains("object is locked")
             || lower.contains("locked at version")
+            || lower.contains("sponsor failed")
+            || lower.contains("enoki api error")
+            || lower.contains("sponsored transaction has expired")
         {
             return WalletJobError::Transient(msg.to_string());
         }
@@ -713,7 +731,7 @@ pub struct BulkRememberItem {
     /// Pre-computed embedding vector (1536-dim).
     pub vector: Vec<f32>,
     pub namespace: String,
-    /// Wallet index assigned at enqueue time. New jobs use 0.
+    /// Wallet index assigned at enqueue time.
     pub wallet_index: usize,
 }
 
