@@ -85,6 +85,16 @@ curl http://localhost:8000/health
 - `OPENAI_API_KEY` — enables real embeddings (falls back to mock embeddings without it)
 - `OPENAI_API_BASE` — point to an OpenAI-compatible provider like OpenRouter
 
+### Embedding & LLM Provider (Optional)
+
+The embedding and LLM endpoints are pluggable. Anything left unset falls back to the corresponding `OPENAI_*` value.
+
+- `EMBEDDING_API_KEY` — separate key for the embedding provider (e.g. Jina, Cohere)
+- `EMBEDDING_API_BASE` — separate base URL for the embedding provider
+- `EMBEDDING_MODEL` — embedding model identifier (default `openai/text-embedding-3-small`)
+- `EMBEDDING_DIMENSIONS` — optional dimensions override, required for variable-dimension models like `jina-embeddings-v3`. Must match the schema dimension of `vector_entries.embedding`; the server logs a WARN at boot on mismatch.
+- `LLM_MODEL` — chat/completion model used by `/api/analyze`, `/api/ask`, and the summarize-before-embed step (default `openai/gpt-4o-mini`)
+
 ### Rate Limits & Storage (Optional)
 
 By default, the relayer enforces rate limits and storage quotas via Redis to prevent abuse. You can customize these limits:

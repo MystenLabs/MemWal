@@ -30,6 +30,11 @@ These are not all enforced at boot, but most real deployments need them.
 | `PORT` | `8000` | Relayer port |
 | `SIDECAR_URL` | `http://localhost:9000` | Sidecar HTTP endpoint |
 | `OPENAI_API_BASE` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
+| `EMBEDDING_API_KEY` | falls back to `OPENAI_API_KEY` | Separate API key for the embedding provider. Use this when embeddings and LLM completions live behind different providers (e.g. Jina embeddings + OpenAI chat) |
+| `EMBEDDING_API_BASE` | falls back to `OPENAI_API_BASE` | Separate base URL for the embedding provider |
+| `EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Embedding model identifier sent on `/embeddings` requests |
+| `EMBEDDING_DIMENSIONS` | model default | Optional `dimensions` override forwarded to the embedding provider. Required for variable-dimension models such as `jina-embeddings-v3`. Must match the schema dimension of `vector_entries.embedding` |
+| `LLM_MODEL` | `openai/gpt-4o-mini` | LLM model identifier used by `/api/analyze` fact extraction, `/api/ask`, and the summarize-before-embed step in `/api/remember` |
 | `SUI_NETWORK` | `mainnet` | Picks the fallback RPC URL and network-driven service defaults |
 | `SUI_RPC_URL` | network default | Override the Sui fullnode URL |
 | `WALRUS_PUBLISHER_URL` | Walrus mainnet publisher | Override upload endpoint |
@@ -54,7 +59,9 @@ These are not all enforced at boot, but most real deployments need them.
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas when sponsorship is missing, expired, or rejected.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
-- Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
+- `EMBEDDING_API_KEY` / `EMBEDDING_API_BASE` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` let you run the embedding side against a different provider (Jina, Cohere, etc.) without touching code. Anything unset falls back to the corresponding `OPENAI_*` value (or to the model default for `EMBEDDING_DIMENSIONS`). `LLM_MODEL` selects the chat/completion model independently.
+- When you switch embedding provider or dimension, the cached recall query embeddings invalidate automatically — the cache key includes the effective base URL and model name.
+- Without `OPENAI_API_KEY` (and `EMBEDDING_API_KEY`), the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
 - `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
 - `SEAL_SERVER_CONFIGS` is a JSON array of `{ objectId, weight, aggregatorUrl?, apiKeyName?, apiKey? }`. Committee key server configs require `aggregatorUrl`.
 - `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset.
