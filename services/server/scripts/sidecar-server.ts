@@ -139,7 +139,7 @@ const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "m
     | "testnet"
     | "devnet";
 const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
-    const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "true").trim().toLowerCase();
+    const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
 
@@ -219,6 +219,11 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
 
 async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, allowedAddresses?: string[]): Promise<string> {
     if (!enokiApiKey) {
+        if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
+            throw new Error("ENOKI_API_KEY is not configured and ENOKI_FALLBACK_TO_DIRECT_SIGN=false");
+        }
+
+        console.warn("[enoki-sponsor] ENOKI_API_KEY not configured, falling back to direct signing");
         const direct = await suiClient.signAndExecuteTransaction({
             signer,
             transaction: tx,

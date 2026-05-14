@@ -155,7 +155,7 @@ export default function LandingPage() {
                                 SDK Playground <span className="lp-arrow">↗</span>
                             </button>
                         ) : (
-                            <div className="lp-demo-dropdown" ref={loginRef}>
+                            <div className="lp-demo-dropdown lp-login-dropdown" ref={loginRef}>
                                 <button
                                     className="lp-nav-cta"
                                     onClick={() => setLoginOpen(o => !o)}
@@ -163,9 +163,10 @@ export default function LandingPage() {
                                     SDK Playground <span className="lp-arrow">↗</span>
                                 </button>
                                 {loginOpen && (
-                                    <div className="lp-demo-menu" style={{ minWidth: 240, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    <div className="lp-demo-menu lp-login-menu" style={{ minWidth: 240, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                                         {hasEnokiConfig && googleWallet && (
                                             <button
+                                                className="lp-login-provider-btn"
                                                 onClick={handleEnokiConnect}
                                                 style={{
                                                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,

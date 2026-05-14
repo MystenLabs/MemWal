@@ -6,6 +6,7 @@ use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
 use crate::services::{Embedder, Extractor};
 use crate::storage::db::VectorDb;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
@@ -85,41 +86,40 @@ pub struct AppState {
 }
 
 // ============================================================
-// Key Pool — single-wallet wrapper
+// Key Pool — round-robin wallet selection
 // ============================================================
 
-/// Wallet key holder. Historically a round-robin pool of N keys used to
-/// horizontally side-step Sui coin-object equivocation locks. Per Will Bradley
-/// (Mysten, 2026-05-12): coin-object locking is no longer a practical concern
-/// on Sui, so a single key with concurrent workers + retry handling is
-/// sufficient. `next_index()` always returns `Some(0)` when a key is
-/// configured (the API is kept so callers can still distinguish "no keys"
-/// from "key available").
+/// Wallet key holder for distributing Walrus uploads across configured server
+/// keys. Apalis retries call `next_index()` again at execution time, so a
+/// transient sponsor/RPC failure can move to the next wallet in the pool.
 pub struct KeyPool {
     keys: Vec<String>,
+    cursor: AtomicUsize,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<String>) -> Self {
-        // Only the first key is used. Additional keys (if any) are ignored —
-        // surfaced via a warning at boot in main.rs.
-        Self { keys }
+        Self {
+            keys,
+            cursor: AtomicUsize::new(0),
+        }
     }
 
-    /// Returns the first configured key, or `None` if no keys are configured.
+    /// Returns the next configured key in round-robin order.
     #[allow(dead_code)]
     pub fn next(&self) -> Option<&str> {
-        self.keys.first().map(|s| s.as_str())
+        let idx = self.next_index()?;
+        self.keys.get(idx).map(|s| s.as_str())
     }
 
-    /// Returns `Some(0)` when a key is configured, `None` otherwise.
-    /// `wallet_index` is retained in job payloads for audit / sidecar parity
-    /// but no longer drives queue routing.
+    /// Returns the next key index in round-robin order, or `None` if no keys
+    /// are configured.
     pub fn next_index(&self) -> Option<usize> {
-        if self.keys.is_empty() {
+        let len = self.keys.len();
+        if len == 0 {
             None
         } else {
-            Some(0)
+            Some(self.cursor.fetch_add(1, Ordering::Relaxed) % len)
         }
     }
 
@@ -899,14 +899,15 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
     }
 
-    // ── KeyPool: single-wallet selection ─────────────────────────────────
+    // ── KeyPool: round-robin selection ─────────────────────────────────
 
     #[test]
-    fn key_pool_returns_first_key() {
+    fn key_pool_returns_keys_round_robin() {
         let pool = KeyPool::new(vec!["key_a".into(), "key_b".into(), "key_c".into()]);
 
         assert_eq!(pool.next(), Some("key_a"));
-        assert_eq!(pool.next(), Some("key_a"));
+        assert_eq!(pool.next(), Some("key_b"));
+        assert_eq!(pool.next(), Some("key_c"));
         assert_eq!(pool.next(), Some("key_a"));
     }
 
@@ -927,10 +928,10 @@ mod tests {
     }
 
     #[test]
-    fn key_pool_next_index_always_zero() {
+    fn key_pool_next_index_round_robin() {
         let pool = KeyPool::new(vec!["a".into(), "b".into()]);
         assert_eq!(pool.next_index(), Some(0));
-        assert_eq!(pool.next_index(), Some(0));
+        assert_eq!(pool.next_index(), Some(1));
         assert_eq!(pool.next_index(), Some(0));
     }
 

@@ -86,6 +86,7 @@ body,
 
 body {
   background-image: none;
+  overflow-x: hidden;
 }
 
 h1, h2, h3 {
@@ -442,26 +443,37 @@ h1, h2, h3 {
 }
 
 .lp-nav-inner {
+  position: relative;
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 20px;
+  min-width: 0;
 }
 
 .lp-nav-brand {
   display: flex;
   align-items: center;
   text-decoration: none;
+  min-width: 0;
 }
 
 .lp-nav-brand img {
   height: 28px;
+  max-width: min(280px, 46vw);
 }
 
 .lp-nav-links {
   display: flex;
   align-items: center;
   gap: 32px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.lp-nav-links > :only-child {
+  grid-column: 1 / -1;
 }
 
 .lp-nav-links a:not(.lp-nav-cta) {
@@ -503,6 +515,13 @@ h1, h2, h3 {
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s;
   box-shadow: 3px 3px 0 #000000;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  line-height: 1.05;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .lp-nav-cta:hover {
@@ -524,6 +543,7 @@ h1, h2, h3 {
 .lp-demo-trigger {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
   background: none;
   border: 2px solid #000000;
@@ -780,6 +800,21 @@ h1, h2, h3 {
   width: 100%;
 }
 
+.lp-login-menu {
+  width: min(360px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+}
+
+.lp-login-provider-btn {
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.lp-login-provider-btn svg {
+  flex: 0 0 auto;
+}
+
 .lp-login-wallet-btn [class*="ConnectButton"],
 .lp-login-wallet-btn div {
   width: 100% !important;
@@ -814,6 +849,19 @@ h1, h2, h3 {
     padding: 0 24px;
   }
 
+  .lp-nav-inner {
+    gap: 16px;
+  }
+
+  .lp-nav-links {
+    gap: 14px;
+  }
+
+  .lp-nav-cta,
+  .lp-demo-trigger {
+    padding: 10px 14px;
+  }
+
   .lp-hero {
     padding: 0 24px;
   }
@@ -842,7 +890,78 @@ h1, h2, h3 {
   }
 }
 
+@media (max-width: 640px) {
+  .lp-nav {
+    height: auto;
+    min-height: 72px;
+    padding: 12px 18px;
+  }
+
+  .lp-nav-inner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .lp-nav-brand img {
+    max-width: 220px;
+  }
+
+  .lp-nav-links {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 12px;
+  }
+
+  .lp-demo-dropdown,
+  .lp-demo-trigger,
+  .lp-nav-links .lp-nav-cta {
+    width: 100%;
+  }
+
+  .lp-demo-menu {
+    left: 0;
+    right: auto;
+    width: min(280px, calc(100vw - 36px));
+  }
+
+  .lp-login-dropdown {
+    position: static;
+  }
+
+  .lp-login-menu {
+    left: 0;
+    right: 0;
+    width: 100% !important;
+    max-width: none;
+    min-width: 0 !important;
+  }
+}
+
 @media (max-width: 480px) {
+  .lp-nav {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .lp-nav-brand img {
+    max-width: 200px;
+  }
+
+  .lp-nav-links {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .lp-nav-cta,
+  .lp-demo-trigger {
+    min-height: 52px;
+    padding: 9px 10px;
+    font-size: 0.86rem;
+    white-space: normal;
+  }
+
   .lp-hero-copy h1 {
     font-size: 2rem;
   }
@@ -890,6 +1009,17 @@ h1, h2, h3 {
   font-size: 0.9rem;
 }
 
+.dashboard-cta-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.dashboard-cta-row > :only-child {
+  grid-column: 1 / -1;
+}
+
 .dashboard-cta {
   display: flex;
   align-items: center;
@@ -904,6 +1034,13 @@ h1, h2, h3 {
   box-shadow: var(--neo-shadow);
   cursor: pointer;
   transition: transform 0.1s ease, box-shadow 0.1s ease;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.dashboard-cta--disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 .dashboard-cta:hover {
@@ -920,12 +1057,14 @@ h1, h2, h3 {
   font-size: 1.15rem;
   font-weight: 800;
   color: #0d0e16;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-cta-subtitle {
   font-size: 0.88rem;
   font-weight: 500;
   color: #3a3b48;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-cta-arrow {
@@ -1006,6 +1145,14 @@ h1, h2, h3 {
   display: flex;
   gap: 8px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.card-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .key-display .btn-secondary {
@@ -1442,20 +1589,131 @@ h1, h2, h3 {
 @media (max-width: 640px) {
   .nav {
     padding: 0 14px;
+    height: auto;
+    min-height: 64px;
   }
 
   .nav-inner {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
     height: auto;
     min-height: 64px;
-    padding: 12px 0;
-    flex-wrap: wrap;
-    gap: 10px;
+    padding: 14px 0;
+    gap: 10px 14px;
+  }
+
+  .nav-brand {
+    min-width: 0;
+  }
+
+  .nav-brand img {
+    max-width: min(220px, 58vw);
   }
 
   .nav-user {
+    display: contents;
+  }
+
+  .nav-address {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+    max-width: 100%;
+  }
+
+  .nav-user .demo-nav-back {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .nav-user .demo-nav-back + .nav-address {
+    grid-row: 3;
+  }
+
+  .nav-user .lp-nav-cta {
+    grid-column: 2;
+    grid-row: 1;
+    min-height: 48px;
+    padding: 9px 16px;
+  }
+
+  .dashboard {
+    padding: 32px 18px;
+  }
+
+  .dashboard-header {
+    margin-bottom: 24px;
+  }
+
+  .dashboard-cta-row {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .dashboard-cta {
+    min-height: 116px;
+    padding: 18px 20px;
+  }
+
+  .dashboard-cta-title {
+    font-size: 1.05rem;
+  }
+
+  .card {
+    padding: 18px;
+  }
+
+  .card-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .card-header-actions {
     width: 100%;
-    justify-content: flex-start;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .card-header-actions .btn,
+  .card-header-actions .lp-nav-cta {
+    width: 100%;
+    min-height: 52px;
+  }
+
+  .key-display {
+    padding: 16px;
+  }
+
+  .key-display .key-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .key-display .key-actions .btn {
+    width: 100%;
+  }
+
+  .install-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    margin-bottom: 8px;
+    overflow: visible;
+  }
+
+  .install-tab,
+  .install-tab:last-child {
+    border: 2px solid #000000;
+    border-radius: 10px;
+    min-height: 54px;
+    padding: 10px 12px;
+  }
+
+  .install-tabs + .demo-code-block {
+    border-top-left-radius: 12px;
   }
 
   .dashboard-cta-arrow {
