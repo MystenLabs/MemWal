@@ -30,6 +30,7 @@ import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-con
 // ============================================================
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+const SUI_RPC_URL = process.env.SUI_RPC_URL || getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
 const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);

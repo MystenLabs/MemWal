@@ -7,6 +7,7 @@ on:
       - '.github/workflows/benchmark-live.yml'
       - '.github/workflows/benchmark-smoke.yml'
       - 'docs/relayer/benchmark-ci-setup.md'
+      - 'docs/relayer/k6-stress-tests.md'
   push:
     branches:
       - main
@@ -17,6 +18,7 @@ on:
       - '.github/workflows/benchmark-live.yml'
       - '.github/workflows/benchmark-smoke.yml'
       - 'docs/relayer/benchmark-ci-setup.md'
+      - 'docs/relayer/k6-stress-tests.md'
   workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
@@ -66,3 +68,7 @@ jobs:
         working-directory: services/server/scripts
         run: |
           ./node_modules/.bin/tsx bench-recall-latency.ts --help
+
+      - name: Build k6 relayer bundle
+        working-directory: services/server/scripts
+        run: npm run k6:build

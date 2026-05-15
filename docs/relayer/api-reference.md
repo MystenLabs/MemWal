@@ -20,19 +20,21 @@ All `/api/*` routes require signed headers. The SDK handles this automatically.
 | `x-public-key` | Hex-encoded Ed25519 public key (32 bytes) |
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) |
 | `x-timestamp` | Unix timestamp in seconds (5-minute validity window) |
+| `x-nonce` | UUID nonce, unique per request, used for replay protection |
+| `x-account-id` | MemWalAccount object ID; included in the signed message |
 
 ### Optional Headers
 
 | Header | Description |
 |--------|-------------|
-| `x-account-id` | MemWalAccount object ID hint — speeds up account resolution when not cached |
-| `x-delegate-key` | Delegate private key (hex) — used by the default SDK for SEAL decrypt flows |
+| `x-seal-session` | Client-built SEAL SessionKey for server-side decrypt flows |
+| `x-delegate-key` | Legacy delegate private key (hex or `suiprivkey`) fallback for SEAL decrypt flows |
 
 ### Signature Format
 
-The signed message is: `{timestamp}.{method}.{path}.{body_sha256}`
+The signed message is: `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
 
-The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
+The relayer verifies the Ed25519 signature, checks the nonce, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
 
 ## Public Routes
 
