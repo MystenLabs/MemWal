@@ -19,6 +19,8 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
+import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
+import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -29,17 +31,14 @@ import { WalrusClient } from "@mysten/walrus";
 
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
 
-// SEAL key server object IDs (comma-separated via env var)
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
 
-if (SEAL_KEY_SERVERS.length === 0) {
-    console.error("[sidecar] WARNING: SEAL_KEY_SERVERS env var is empty — SEAL encrypt/decrypt will fail");
+if (SEAL_SERVER_CONFIGS.length === 0) {
+    console.error(
+        "[sidecar] WARNING: SEAL_SERVER_CONFIGS/SEAL_KEY_SERVERS env vars are empty and no network default exists — SEAL encrypt/decrypt will fail",
+    );
 }
-
-const SEAL_THRESHOLD = parseInt(process.env.SEAL_THRESHOLD || "2", 10);
 
 // Server Sui Private Keys for Walrus uploads
 const SERVER_SUI_PRIVATE_KEYS = (process.env.SERVER_SUI_PRIVATE_KEYS || "")
@@ -69,18 +68,16 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
 );
 
 const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 3;
+const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 const suiClient = new SuiJsonRpcClient({
-    url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+    url: SUI_RPC_URL,
     network: SUI_NETWORK,
 });
 
 const sealClient = new SealClient({
     suiClient: suiClient as any,
-    serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-        objectId: id,
-        weight: 1,
-    })),
+    serverConfigs: SEAL_SERVER_CONFIGS,
     verifyKeyServers: true,
 });
 
@@ -143,14 +140,28 @@ const enokiNetwork = (process.env.ENOKI_NETWORK || process.env.SUI_NETWORK || "m
     | "testnet"
     | "devnet";
 const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
-    const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "true").trim().toLowerCase();
+    const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
 
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
-const signerUploadQueues = new Map<string, Promise<void>>();
+
+// MEM-35: in-memory counters surfaced via /metrics/wallet.
+// Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
+// locks coin objects on equivocation, so the original multi-wallet routing
+// is unnecessary. We use a single wallet concurrently and rely on Apalis
+// retries for transient Sui/RPC/coin-selection races.
+//
+// `walletLockErrorsTotal` should stay at 0 under load and is the canary
+// for re-evaluating the simplification if the Sui guarantee changes.
+const sidecarMetrics = {
+    walletSubmittedTotal: 0,
+    walletLockErrorsTotal: 0,
+    walletPermanentFailuresTotal: 0,
+};
+
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
 
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
@@ -209,6 +220,11 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
 
 async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, allowedAddresses?: string[]): Promise<string> {
     if (!enokiApiKey) {
+        if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
+            throw new Error("ENOKI_API_KEY is not configured and ENOKI_FALLBACK_TO_DIRECT_SIGN=false");
+        }
+
+        console.warn("[enoki-sponsor] ENOKI_API_KEY not configured, falling back to direct signing");
         const direct = await suiClient.signAndExecuteTransaction({
             signer,
             transaction: tx,
@@ -261,27 +277,28 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
 }
 
 /**
- * Queue tasks by signer to avoid coin-object lock conflicts when multiple
- * Walrus uploads are triggered concurrently for the same signing key.
+ * Submit a Sui transaction via the Enoki sponsor path (or direct sign as
+ * fallback). Wraps `executeWithEnokiSponsor` with metrics + lock-error
+ * detection for the validation canary.
  */
-async function runExclusiveBySigner<T>(signerAddress: string, task: () => Promise<T>): Promise<T> {
-    const previous = signerUploadQueues.get(signerAddress) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-    const queued = previous.then(() => current);
-    signerUploadQueues.set(signerAddress, queued);
-
-    await previous;
+async function submitWalletTransaction(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+): Promise<string> {
     try {
-        return await task();
-    } finally {
-        release();
-        // Cleanup queue map entry once this task is done and no newer task replaced it.
-        if (signerUploadQueues.get(signerAddress) === queued) {
-            signerUploadQueues.delete(signerAddress);
+        const digest = await executeWithEnokiSponsor(tx, signer, allowedAddresses);
+        sidecarMetrics.walletSubmittedTotal += 1;
+        return digest;
+    } catch (err: any) {
+        const msg = err?.message || String(err);
+        if (/objectlocked|locked at version|object is locked/i.test(msg)) {
+            sidecarMetrics.walletLockErrorsTotal += 1;
+            console.error(`[wallet] coin-object lock error: ${msg}`);
+        } else if (/moveabort|move abort/i.test(msg)) {
+            sidecarMetrics.walletPermanentFailuresTotal += 1;
         }
+        throw err;
     }
 }
 
@@ -316,6 +333,34 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
+});
+
+// MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
+// middleware: MCP traffic is forwarded by the Rust relayer with the end-user's
+// own delegate-key Bearer token in `Authorization`, NOT the sidecar's shared
+// secret. The MCP layer does its own auth (parse delegate key + account id
+// from request headers). These routes are reachable only from the relayer
+// over localhost — same trust boundary as the rest of the sidecar.
+mountMcpRoutes(app, {
+    relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",
+});
+
+// Wallet-execution metrics (MEM-35 observability). Placed before auth so
+// operators / scrapers don't need a token.
+//
+// `walletLockErrorsTotal` is the canary for the simplification: it should
+// stay at 0 because Sui no longer permanently locks coin objects on
+// equivocation. If it ever climbs, the original multi-wallet rationale
+// would need re-evaluating.
+//
+// Values are integer counters that monotonically increase; clients compute
+// deltas.
+app.get("/metrics/wallet", (_req: Request, res: Response) => {
+    res.json({
+        ...sidecarMetrics,
+        enokiEnabled: !!enokiApiKey,
+        suiNetwork: SUI_NETWORK,
+    });
 });
 
 // Shared-secret authentication — protects all routes registered after this point.
@@ -623,64 +668,66 @@ async function setMetadataAndTransferBlobs(
     }
 
     const signerAddress = signer.toSuiAddress();
-    return runExclusiveBySigner(signerAddress, async () => {
-        const metaTx = new Transaction();
-        const blobArgs = [];
+    const metaTx = new Transaction();
+    const blobArgs = [];
 
-        for (const blob of blobs) {
-            const blobArg = metaTx.object(blob.blobObjectId);
-            blobArgs.push(blobArg);
+    for (const blob of blobs) {
+        const blobArg = metaTx.object(blob.blobObjectId);
+        blobArgs.push(blobArg);
 
+        metaTx.moveCall({
+            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_namespace"),
+                metaTx.pure.string(blob.namespace || "default"),
+            ],
+            typeArguments: [],
+        });
+
+        metaTx.moveCall({
+            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+            arguments: [
+                blobArg,
+                metaTx.pure.string("memwal_owner"),
+                metaTx.pure.string(owner),
+            ],
+            typeArguments: [],
+        });
+
+        if (packageId) {
             metaTx.moveCall({
                 target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
                 arguments: [
                     blobArg,
-                    metaTx.pure.string("memwal_namespace"),
-                    metaTx.pure.string(blob.namespace || "default"),
+                    metaTx.pure.string("memwal_package_id"),
+                    metaTx.pure.string(packageId),
                 ],
                 typeArguments: [],
             });
-
-            metaTx.moveCall({
-                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                arguments: [
-                    blobArg,
-                    metaTx.pure.string("memwal_owner"),
-                    metaTx.pure.string(owner),
-                ],
-                typeArguments: [],
-            });
-
-            if (packageId) {
-                metaTx.moveCall({
-                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_package_id"),
-                        metaTx.pure.string(packageId),
-                    ],
-                    typeArguments: [],
-                });
-            }
-
-            if (agentId) {
-                metaTx.moveCall({
-                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-                    arguments: [
-                        blobArg,
-                        metaTx.pure.string("memwal_agent_id"),
-                        metaTx.pure.string(agentId),
-                    ],
-                    typeArguments: [],
-                });
-            }
         }
 
-        metaTx.transferObjects(blobArgs, owner);
-        const digest = await executeWithEnokiSponsor(metaTx, signer, dedupeAddresses([signerAddress, owner]));
-        await suiClient.waitForTransaction({ digest });
-        return digest;
-    });
+        if (agentId) {
+            metaTx.moveCall({
+                target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                arguments: [
+                    blobArg,
+                    metaTx.pure.string("memwal_agent_id"),
+                    metaTx.pure.string(agentId),
+                ],
+                typeArguments: [],
+            });
+        }
+    }
+
+    metaTx.transferObjects(blobArgs, owner);
+    const digest = await submitWalletTransaction(
+        metaTx,
+        signer,
+        dedupeAddresses([signerAddress, owner]),
+    );
+    await suiClient.waitForTransaction({ digest });
+    return digest;
 }
 
 // HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
@@ -725,44 +772,47 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
         const signerAddress = signer.toSuiAddress();
-        const blob = await runExclusiveBySigner(signerAddress, async () => {
-            const blobData = new Uint8Array(Buffer.from(data, "base64"));
+        const blobData = new Uint8Array(Buffer.from(data, "base64"));
 
-            // writeBlobFlow (stateful: encode → register → upload → certify)
-            const flow = walrusClient.writeBlobFlow({ blob: blobData });
-            await flow.encode();
+        // writeBlobFlow is intentionally not serialized by signer. Current Sui
+        // no longer permanently locks coin objects for concurrent submissions;
+        // transient gas/RPC races are retried by the Apalis wallet job layer.
+        const flow = walrusClient.writeBlobFlow({ blob: blobData });
+        await flow.encode();
 
-            const registerTx = flow.register({
-                epochs,
-                // Server owns the blob initially (needed for certify step)
-                owner: signerAddress,
-                deletable: true,
-                // Store namespace + owner as on-chain metadata (queryable for restore)
-                attributes: {
-                    ...(namespace ? { memwal_namespace: namespace } : {}),
-                    ...(owner ? { memwal_owner: owner } : {}),
-                    ...(packageId ? { memwal_package_id: packageId } : {}),
-                },
-            });
-
-            // Patch: convert GasCoin intents → sender's SUI coins.
-            // Enoki rejects GasCoin as tx argument, but relay requires the tip.
-            // After patching, signer pays tip from own SUI; Enoki sponsors gas.
-            patchGasCoinIntents(registerTx);
-            const tipRecipient = await getUploadRelayTipAddress();
-            const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
-            const registerDigest = await executeWithEnokiSponsor(registerTx, signer, registerAllowedAddresses);
-            await suiClient.waitForTransaction({ digest: registerDigest });
-
-            await flow.upload({ digest: registerDigest });
-
-            const certifyTx = flow.certify();
-            // Wait until certify tx is confirmed before returning this upload.
-            const certifyDigest = await executeWithEnokiSponsor(certifyTx, signer);
-            await suiClient.waitForTransaction({ digest: certifyDigest });
-
-            return flow.getBlob();
+        const registerTx = flow.register({
+            epochs,
+            // Server owns the blob initially (needed for certify step)
+            owner: signerAddress,
+            deletable: true,
+            // Store namespace + owner as on-chain metadata (queryable for restore)
+            attributes: {
+                ...(namespace ? { memwal_namespace: namespace } : {}),
+                ...(owner ? { memwal_owner: owner } : {}),
+                ...(packageId ? { memwal_package_id: packageId } : {}),
+            },
         });
+
+        // Patch: convert GasCoin intents → sender's SUI coins.
+        // Enoki rejects GasCoin as tx argument, but relay requires the tip.
+        // After patching, signer pays tip from own SUI; Enoki sponsors gas.
+        patchGasCoinIntents(registerTx);
+        const tipRecipient = await getUploadRelayTipAddress();
+        const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
+        const registerDigest = await submitWalletTransaction(
+            registerTx,
+            signer,
+            registerAllowedAddresses,
+        );
+        await suiClient.waitForTransaction({ digest: registerDigest });
+
+        await flow.upload({ digest: registerDigest });
+
+        const certifyTx = flow.certify();
+        const certifyDigest = await submitWalletTransaction(certifyTx, signer);
+        await suiClient.waitForTransaction({ digest: certifyDigest });
+
+        const blob = await flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
 
@@ -804,8 +854,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/upload] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -851,8 +902,9 @@ app.post("/walrus/set-metadata-batch", express.json({ limit: "1mb" }), async (re
         res.json({ transferred: normalized.length, digest });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/set-metadata-batch] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -881,8 +933,9 @@ app.post("/walrus/set-metadata", express.json({ limit: "128kb" }), async (req, r
         res.json({ transferred: 1, digest });
     } catch (err: any) {
         const traceId = randomUUID();
+        const message = err?.message || String(err);
         console.error(`[walrus/set-metadata] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -890,6 +943,214 @@ app.post("/walrus/set-metadata", express.json({ limit: "128kb" }), async (req, r
 // POST /walrus/query-blobs
 // Query user's Walrus Blob objects from Sui chain, filter by namespace
 // ============================================================
+
+/**
+ * Direct JSON-RPC helper for APIs that are not consistently exposed across
+ * @mysten/sui client minor versions used by this sidecar.
+ */
+async function suiRpc<T>(method: string, params: unknown[]): Promise<T> {
+    const resp = await fetch(SUI_RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: randomUUID(),
+            method,
+            params,
+        }),
+    });
+
+    const text = await resp.text();
+    let body: any;
+    try {
+        body = JSON.parse(text);
+    } catch {
+        throw new Error(`Sui RPC ${method} returned non-JSON (${resp.status}): ${text.slice(0, 200)}`);
+    }
+
+    if (!resp.ok || body.error) {
+        const message = body.error?.message || text || `HTTP ${resp.status}`;
+        throw new Error(`Sui RPC ${method} failed: ${message}`);
+    }
+
+    return body.result as T;
+}
+
+function isRetryableRpcError(err: any): boolean {
+    const msg = String(err?.message || err).toLowerCase();
+    return msg.includes("429")
+        || msg.includes("503")
+        || msg.includes("rate")
+        || msg.includes("too many")
+        || msg.includes("timeout")
+        || msg.includes("temporarily unavailable");
+}
+
+async function withRpcRetry<T>(
+    label: string,
+    fn: () => Promise<T>,
+    maxRetries = 4,
+): Promise<T> {
+    let lastErr: any;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (err: any) {
+            lastErr = err;
+            if (!isRetryableRpcError(err) || attempt === maxRetries - 1) throw err;
+            const baseDelayMs = 1_000 * Math.pow(2, attempt);
+            const jitterMs = Math.floor(Math.random() * Math.floor(baseDelayMs * 0.4));
+            const delayMs = Math.min(15_000, baseDelayMs + jitterMs);
+            console.warn(`[query-blobs] ${label} retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise(r => setTimeout(r, delayMs));
+        }
+    }
+    throw lastErr;
+}
+
+function blobIdFromRaw(rawBlobId: string | number | null | undefined): string | null {
+    if (!rawBlobId) return null;
+    let blobIdStr = String(rawBlobId);
+    if (/^\d+$/.test(blobIdStr) && blobIdStr.length > 20) {
+        try {
+            const bigInt = BigInt(blobIdStr);
+            const hex = bigInt.toString(16).padStart(64, "0");
+            const bytesBE = hex.match(/.{2}/g)!.map(b => parseInt(b, 16));
+            const bytesLE = new Uint8Array(bytesBE.reverse());
+            blobIdStr = Buffer.from(bytesLE).toString("base64url");
+        } catch {
+            // Keep as-is if conversion fails.
+        }
+    }
+    return blobIdStr;
+}
+
+function ownerMatchesRecipient(recipient: any, owner: string): boolean {
+    if (typeof recipient === "string") return recipient === owner;
+    if (!recipient || typeof recipient !== "object") return false;
+    return recipient.AddressOwner === owner
+        || recipient.ObjectOwner === owner
+        || recipient.SingleOwner === owner
+        || recipient.owner === owner;
+}
+
+function isWalrusBlobObjectType(objectType: any, blobType: string): boolean {
+    if (objectType === blobType) return true;
+    if (typeof objectType !== "string") return false;
+    const objectParts = objectType.split("::");
+    const blobParts = blobType.split("::");
+    return objectParts.length === 3
+        && blobParts.length === 3
+        && objectParts[1] === blobParts[1]
+        && objectParts[2] === blobParts[2]
+        && objectParts[0].toLowerCase().replace(/^0x0+/, "0x") === blobParts[0].toLowerCase().replace(/^0x0+/, "0x");
+}
+
+type RecentBlobCandidate = {
+    objectId: string;
+    timestampMs: string | null;
+};
+
+type RawBlobObj = {
+    objectId: string;
+    rawBlobId: string | number | null;
+    timestampMs?: string | null;
+};
+
+/**
+ * Query newest transactions that transferred Walrus Blob objects to the owner.
+ * This avoids scanning every Blob object in the wallet before namespace
+ * filtering. We still verify object content/metadata after collecting
+ * candidates.
+ */
+async function queryRecentBlobObjectCandidates(
+    owner: string,
+    blobType: string,
+    desiredMatches: number,
+): Promise<RecentBlobCandidate[]> {
+    const candidateCap = Math.max(1, Math.min(desiredMatches * 5, 100));
+    const txPageSize = 50;
+    const candidates: RecentBlobCandidate[] = [];
+    const seen = new Set<string>();
+    let cursor: any = null;
+
+    while (candidates.length < candidateCap) {
+        const result = await withRpcRetry<any>(
+            "queryTransactionBlocks",
+            () => suiRpc("suix_queryTransactionBlocks", [
+                {
+                    filter: { ToAddress: owner },
+                    options: {
+                        showObjectChanges: true,
+                        showEffects: false,
+                        showInput: false,
+                    },
+                },
+                cursor,
+                txPageSize,
+                true,
+            ]),
+        );
+
+        const txs = Array.isArray(result?.data) ? result.data : [];
+        if (txs.length === 0) break;
+
+        for (const tx of txs) {
+            const timestampMs = typeof tx.timestampMs === "string" ? tx.timestampMs : null;
+            const objectChanges = Array.isArray(tx.objectChanges) ? tx.objectChanges : [];
+            for (const change of objectChanges) {
+                if (!isWalrusBlobObjectType(change?.objectType, blobType)) continue;
+                if (change?.type !== "transferred" && change?.type !== "created" && change?.type !== "mutated") continue;
+                const belongsToOwner = ownerMatchesRecipient(change.recipient, owner)
+                    || ownerMatchesRecipient(change.owner, owner);
+                if (!belongsToOwner) continue;
+                const objectId = change.objectId;
+                if (typeof objectId !== "string" || seen.has(objectId)) continue;
+                seen.add(objectId);
+                candidates.push({ objectId, timestampMs });
+                if (candidates.length >= candidateCap) break;
+            }
+            if (candidates.length >= candidateCap) break;
+        }
+
+        if (!result?.hasNextPage || !result?.nextCursor) break;
+        cursor = result.nextCursor;
+    }
+
+    return candidates;
+}
+
+async function fetchRawBlobObjects(candidates: RecentBlobCandidate[]): Promise<RawBlobObj[]> {
+    if (candidates.length === 0) return [];
+
+    const timestampByObject = new Map(candidates.map(c => [c.objectId, c.timestampMs ?? null]));
+    const results: any[] = [];
+    for (let i = 0; i < candidates.length; i += 50) {
+        const objectIds = candidates.slice(i, i + 50).map(c => c.objectId);
+        const batch = await withRpcRetry<any[]>(
+            "multiGetObjects",
+            () => suiRpc("sui_multiGetObjects", [
+                objectIds,
+                {
+                    showContent: true,
+                    showType: true,
+                },
+            ]),
+        );
+        results.push(...(Array.isArray(batch) ? batch : []));
+    }
+
+    return results
+        .map((obj: any) => {
+            const objectId = obj?.data?.objectId;
+            const content = obj?.data?.content;
+            if (typeof objectId !== "string" || !content || content.dataType !== "moveObject") return null;
+            const fields = content.fields;
+            const rawBlobId = fields?.blob_id ?? fields?.blobId ?? null;
+            return { objectId, rawBlobId, timestampMs: timestampByObject.get(objectId) ?? null };
+        })
+        .filter((obj: RawBlobObj | null): obj is RawBlobObj => obj !== null);
+}
 
 /**
  * Fetch a dynamic field with retry + exponential backoff on 429 rate limit errors.
@@ -908,11 +1169,10 @@ async function getDynamicFieldWithRetry(
             });
         } catch (err: any) {
             lastErr = err;
-            const msg = String(err?.message || err);
-            // Retry on 429 (rate limit) or 503 (service unavailable)
-            const isRetryable = msg.includes("429") || msg.includes("503") || msg.includes("rate");
-            if (!isRetryable || attempt === maxRetries - 1) throw err;
-            const delayMs = 250 * Math.pow(2, attempt); // 250ms, 500ms, 1000ms, 2000ms
+            if (!isRetryableRpcError(err) || attempt === maxRetries - 1) throw err;
+            const baseDelayMs = 1_000 * Math.pow(2, attempt);
+            const jitterMs = Math.floor(Math.random() * Math.floor(baseDelayMs * 0.4));
+            const delayMs = Math.min(15_000, baseDelayMs + jitterMs);
             console.warn(`[query-blobs] getDynamicField 429/503 for ${parentId}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
             await new Promise(r => setTimeout(r, delayMs));
         }
@@ -947,42 +1207,53 @@ async function mapConcurrent<T, R>(
 
 app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
     try {
-        const { owner, namespace, packageId } = req.body;
+        const { owner, namespace, packageId, limit } = req.body;
         if (!owner) {
             return res.status(400).json({ error: "Missing required field: owner" });
         }
+        const desiredMatches = Math.max(1, Math.min(Number(limit) || 0, 500));
+        const useRecentTxPath = Number.isFinite(Number(limit)) && Number(limit) > 0;
 
         // Walrus Blob type (derived from env-driven WALRUS_PACKAGE_ID)
         const WALRUS_BLOB_TYPE = `${WALRUS_PACKAGE_ID}::blob::Blob`;
 
-        // Step 1: Collect all raw blob objects (paginated, each page = 1 RPC call)
-        type RawBlobObj = { objectId: string; rawBlobId: string | number | null };
-        const rawObjs: RawBlobObj[] = [];
-        let cursor: string | null | undefined = undefined;
-        let hasMore = true;
+        // Step 1: Collect raw blob objects. Restore passes `limit`, so prefer
+        // newest transfer transactions and cap candidates at 100 instead of
+        // scanning every Walrus Blob object owned by the wallet.
+        let rawObjs: RawBlobObj[] = [];
+        if (useRecentTxPath) {
+            const candidates = await queryRecentBlobObjectCandidates(owner, WALRUS_BLOB_TYPE, desiredMatches);
+            rawObjs = await fetchRawBlobObjects(candidates);
+            console.log(
+                `[query-blobs] found ${rawObjs.length}/${candidates.length} recent raw blob candidates for owner=${owner} ` +
+                `(target=${desiredMatches}, candidateCap=${Math.min(desiredMatches * 5, 100)})`,
+            );
+        } else {
+            let cursor: string | null | undefined = undefined;
+            let hasMore = true;
 
-        while (hasMore) {
-            const result = await suiClient.getOwnedObjects({
-                owner,
-                filter: { StructType: WALRUS_BLOB_TYPE },
-                options: { showContent: true },
-                cursor: cursor ?? undefined,
-                limit: 50,
-            });
+            while (hasMore) {
+                const result = await suiClient.getOwnedObjects({
+                    owner,
+                    filter: { StructType: WALRUS_BLOB_TYPE },
+                    options: { showContent: true },
+                    cursor: cursor ?? undefined,
+                    limit: 50,
+                });
 
-            for (const obj of result.data) {
-                if (!obj.data?.content || obj.data.content.dataType !== "moveObject") continue;
-                const fields = (obj.data.content as any).fields;
-                if (!fields) continue;
-                const rawBlobId = fields.blob_id ?? fields.blobId ?? null;
-                rawObjs.push({ objectId: obj.data.objectId, rawBlobId });
+                for (const obj of result.data) {
+                    if (!obj.data?.content || obj.data.content.dataType !== "moveObject") continue;
+                    const fields = (obj.data.content as any).fields;
+                    if (!fields) continue;
+                    const rawBlobId = fields.blob_id ?? fields.blobId ?? null;
+                    rawObjs.push({ objectId: obj.data.objectId, rawBlobId });
+                }
+
+                hasMore = result.hasNextPage;
+                cursor = result.nextCursor;
             }
-
-            hasMore = result.hasNextPage;
-            cursor = result.nextCursor;
+            console.log(`[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner}`);
         }
-
-        console.log(`[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner}`);
 
         // Step 2: Fetch metadata for each blob with bounded concurrency (5 at a time)
         // to avoid overwhelming Sui RPC and hitting 429 rate limits.
@@ -1000,7 +1271,8 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
             blobAgentId: string;
         };
 
-        const metas: BlobMeta[] = await mapConcurrent(rawObjs, 5, async (obj) => {
+        const metadataConcurrency = useRecentTxPath ? 2 : 5;
+        const metas: BlobMeta[] = await mapConcurrent(rawObjs, metadataConcurrency, async (obj) => {
             let blobNamespace = "default";
             let blobOwner = "";
             let blobPackageId = "";
@@ -1041,21 +1313,11 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
             if (packageId && meta.blobPackageId !== packageId) continue;
 
             if (meta.rawBlobId) {
-                // blob_id from chain is a big integer (U256) — convert to base64url (little-endian!)
-                let blobIdStr = String(meta.rawBlobId);
-                if (/^\d+$/.test(blobIdStr) && blobIdStr.length > 20) {
-                    try {
-                        const bigInt = BigInt(blobIdStr);
-                        const hex = bigInt.toString(16).padStart(64, '0');
-                        // Convert hex to bytes (big-endian), then REVERSE to little-endian
-                        const bytesBE = hex.match(/.{2}/g)!.map(b => parseInt(b, 16));
-                        const bytesLE = new Uint8Array(bytesBE.reverse());
-                        blobIdStr = Buffer.from(bytesLE).toString('base64url');
-                    } catch {
-                        // Keep as-is if conversion fails
-                    }
+                // blob_id from chain is a big integer (U256); convert to base64url (little-endian).
+                const blobIdStr = blobIdFromRaw(meta.rawBlobId);
+                if (blobIdStr) {
+                    blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, agentId: meta.blobAgentId });
                 }
-                blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, agentId: meta.blobAgentId });
             }
         }
 
@@ -1142,7 +1404,7 @@ app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
 const HOST = process.env.SIDECAR_HOST || "127.0.0.1";
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
     console.log(JSON.stringify({
         event: "sidecar_ready",
         host: HOST,
@@ -1150,3 +1412,28 @@ app.listen(PORT, HOST, () => {
         pid: process.pid,
     }));
 });
+
+// Graceful shutdown — close MCP transports first so SSE clients disconnect
+// cleanly, then close the HTTP server.
+async function gracefulShutdown(signal: string): Promise<void> {
+    console.log(JSON.stringify({ event: "sidecar_shutdown_begin", signal }));
+    try {
+        await shutdownMcpSessions();
+    } catch (err: any) {
+        console.error(`[sidecar] mcp shutdown error: ${err?.message || err}`);
+    }
+    server.close((err) => {
+        if (err) {
+            console.error(`[sidecar] http close error: ${err.message}`);
+            process.exit(1);
+        }
+        console.log(JSON.stringify({ event: "sidecar_shutdown_complete" }));
+        process.exit(0);
+    });
+    setTimeout(() => {
+        console.error("[sidecar] forced exit after 5s");
+        process.exit(1);
+    }, 5_000).unref();
+}
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

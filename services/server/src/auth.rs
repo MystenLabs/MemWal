@@ -9,7 +9,7 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
+use crate::storage::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing
@@ -28,7 +28,7 @@ pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 ///
 /// Flow:
 /// 1. Verify Ed25519 signature: `{timestamp}.{method}.{path}.{body_sha256}`
-/// 2. Resolve account: cache → indexed accounts → registry scan → header hint → config fallback
+/// 2. Resolve account: cache → signed header hint/config fallback → registry scan
 /// 3. Verify onchain: public_key ∈ MemWalAccount.delegate_keys
 /// 4. Cache the mapping for future requests
 /// 5. Store AuthInfo { public_key, owner } in request extensions
@@ -242,7 +242,7 @@ pub async fn verify_signature(
         }
     }
 
-    // Step 2: Resolve account — cache → indexed accounts → registry scan → header hint → config fallback
+    // Step 2: Resolve account — cache → signed header hint/config fallback → registry scan
     // LOW-2: Always use constant_time_reject so that timing of the resolution error
     // ("account not found" vs "key not in account") cannot be observed by callers.
     let (account_id, owner) =
@@ -273,8 +273,8 @@ pub async fn verify_signature(
 
 /// Resolve a delegate key to its account using multiple strategies:
 /// 1. PostgreSQL cache (fastest)
-/// 2. On-chain registry scan (slower, but auto-discovers)
-/// 3. Header hint or config fallback (manual)
+/// 2. Signed header hint or config fallback (single-object verification)
+/// 3. On-chain registry scan (slower, auto-discovery fallback)
 ///
 /// After successful resolution, the mapping is cached for future requests.
 async fn resolve_account(
@@ -314,7 +314,44 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 2: Scan AccountRegistry on-chain
+    // Strategy 2: Use exact account hint/config fallback before any registry scan.
+    //
+    // Modern SDKs always send x-account-id and LOW-23 includes it in the
+    // canonical signature, so an intermediary cannot swap this hint. Verifying
+    // the signed object directly avoids an expensive AccountRegistry scan that
+    // fetches many account objects on cache miss.
+    if let Some(exact_account_id) = account_id_hint
+        .as_deref()
+        .or(state.config.memwal_account_id.as_deref())
+    {
+        let owner = verify_delegate_key_onchain(
+            &state.http_client,
+            &state.config.sui_rpc_url,
+            exact_account_id,
+            pk_bytes,
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "exact account {} verification failed: {}",
+                exact_account_id, e
+            )
+        })?;
+
+        let _ = state
+            .db
+            .cache_delegate_key(public_key_hex, exact_account_id, &owner)
+            .await;
+
+        tracing::debug!(
+            "account resolved from exact account id: {}",
+            exact_account_id
+        );
+        return Ok((exact_account_id.to_string(), owner));
+    }
+
+    // Strategy 3: Scan AccountRegistry on-chain only when no exact account id
+    // is available.
     match find_account_by_delegate_key(
         &state.http_client,
         &state.config.sui_rpc_url,
@@ -336,32 +373,7 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 3: Use header hint or config fallback
-    let fallback_account_id = account_id_hint
-        .or_else(|| state.config.memwal_account_id.clone())
-        .ok_or_else(|| "no account found: not in cache, registry, or header".to_string())?;
-
-    let owner = verify_delegate_key_onchain(
-        &state.http_client,
-        &state.config.sui_rpc_url,
-        &fallback_account_id,
-        pk_bytes,
-    )
-    .await
-    .map_err(|e| {
-        format!(
-            "fallback account {} verification failed: {}",
-            fallback_account_id, e
-        )
-    })?;
-
-    // Cache for future requests
-    let _ = state
-        .db
-        .cache_delegate_key(public_key_hex, &fallback_account_id, &owner)
-        .await;
-
-    Ok((fallback_account_id, owner))
+    Err("no account found: not in cache, exact account id, or registry".to_string())
 }
 
 // ============================================================

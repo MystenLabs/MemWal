@@ -300,11 +300,11 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
 ```json
 {
   "namespace": "demo",
-  "limit": 50
+  "limit": 10
 }
 ```
 
-`limit` defaults to `50`.
+`limit` defaults to `10`.
 
 **Response:**
 

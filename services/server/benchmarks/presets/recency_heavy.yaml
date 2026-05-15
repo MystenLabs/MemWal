@@ -1,0 +1,7 @@
+# Optimized for temporal reasoning queries — user contradictions, updates
+name: recency_heavy
+weights:
+  semantic: 0.3
+  importance: 0.2
+  recency: 0.4
+  frequency: 0.1

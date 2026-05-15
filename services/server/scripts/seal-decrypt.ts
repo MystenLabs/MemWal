@@ -29,13 +29,12 @@ import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
 import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
+import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 
 // Network config from env vars
 const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-const SEAL_KEY_SERVERS = (process.env.SEAL_KEY_SERVERS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
 
 // ============================================================
 // Parse CLI arguments
@@ -110,10 +109,7 @@ async function main() {
     // Initialize SEAL client
     const sealClient = new SealClient({
         suiClient: suiClient as any,
-        serverConfigs: SEAL_KEY_SERVERS.map((id) => ({
-            objectId: id,
-            weight: 1,
-        })),
+        serverConfigs: SEAL_SERVER_CONFIGS,
         verifyKeyServers: true,
     });
 
@@ -154,7 +150,7 @@ async function main() {
         ids: [fullId],
         txBytes,
         sessionKey,
-        threshold: 1,
+        threshold: SEAL_THRESHOLD,
     });
 
     // Step 5: Decrypt locally using fetched keys
