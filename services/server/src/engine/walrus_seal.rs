@@ -235,6 +235,10 @@ impl MemoryEngine for WalrusSealEngine {
             )
         })?;
 
+        let _wallet_guard = self.key_pool.lock_index(key_index).await.ok_or_else(|| {
+            AppError::Internal(format!("Invalid Sui key index selected: {}", key_index))
+        })?;
+
         // Upload the prepared ciphertext to Walrus via the relay sidecar
         // (pool key pays gas). `defer_transfer = false` — the blob is
         // transferred to `owner` immediately, same as the inlined

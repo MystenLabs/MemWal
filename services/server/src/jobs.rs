@@ -303,6 +303,14 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
+    let _wallet_guard = state
+        .key_pool
+        .lock_index(wallet_index)
+        .await
+        .ok_or_else(|| {
+            WalletJobError::Permanent(format!("invalid wallet index: {}", wallet_index))
+        })?;
+
     crate::storage::walrus::set_metadata_batch(
         &state.http_client,
         &state.config.sidecar_url,
@@ -390,6 +398,12 @@ async fn execute_upload_and_transfer(
         wallet_index,
         encrypted.len(),
     );
+
+    let _wallet_guard = state
+        .key_pool
+        .lock_index(wallet_index)
+        .await
+        .ok_or_else(|| fail(format!("invalid wallet index: {}", wallet_index)))?;
 
     // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
     let upload_result = crate::storage::walrus::upload_blob(
@@ -494,7 +508,10 @@ async fn execute_upload_and_transfer(
 /// don't burn retry budget on inputs that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
-/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - Enoki sponsor / dry-run failures → `Transient` even when the upstream
+///   message embeds a `MoveAbort`, because retries can rotate wallet slots or
+///   wait for Sui coin state to settle.
+/// - Bare `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
 /// - `InsufficientGas` / `ObjectNotFound` /
@@ -653,6 +670,11 @@ pub async fn execute_remember(
     let key_index = match state.key_pool.next_index() {
         Some(idx) => idx,
         None => fail!("No Sui keys configured in pool"),
+    };
+
+    let _wallet_guard = match state.key_pool.lock_index(key_index).await {
+        Some(guard) => guard,
+        None => fail!(format!("invalid wallet index: {}", key_index)),
     };
 
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
@@ -869,6 +891,16 @@ mod tests {
                 msg
             );
         }
+    }
+
+    #[test]
+    fn classify_enoki_dry_run_move_abort_as_transient() {
+        let msg = "Enoki API error (400): dry_run_failed MoveAbort(balance::split)";
+        assert!(
+            !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+            "expected transient for: {}",
+            msg
+        );
     }
 
     #[test]

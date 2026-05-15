@@ -95,13 +95,19 @@ pub struct AppState {
 pub struct KeyPool {
     keys: Vec<String>,
     cursor: AtomicUsize,
+    locks: Vec<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<String>) -> Self {
+        let locks = keys
+            .iter()
+            .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+            .collect();
         Self {
             keys,
             cursor: AtomicUsize::new(0),
+            locks,
         }
     }
 
@@ -121,6 +127,16 @@ impl KeyPool {
         } else {
             Some(self.cursor.fetch_add(1, Ordering::Relaxed) % len)
         }
+    }
+
+    /// Acquire the per-wallet upload lock for a key index.
+    ///
+    /// This keeps multiple wallet jobs from spending the same key's SUI/WAL
+    /// coin objects concurrently while still allowing different keys to upload
+    /// in parallel.
+    pub async fn lock_index(&self, index: usize) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let lock = self.locks.get(index)?.clone();
+        Some(lock.lock_owned().await)
     }
 
     #[allow(dead_code)]
@@ -933,6 +949,22 @@ mod tests {
         assert_eq!(pool.next_index(), Some(0));
         assert_eq!(pool.next_index(), Some(1));
         assert_eq!(pool.next_index(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn key_pool_locks_are_per_index() {
+        let pool = KeyPool::new(vec!["a".into(), "b".into()]);
+        let first_guard = pool.lock_index(0).await.expect("key 0 lock exists");
+
+        assert!(pool.lock_index(1).await.is_some());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), pool.lock_index(0))
+                .await
+                .is_err()
+        );
+
+        drop(first_guard);
+        assert!(pool.lock_index(0).await.is_some());
     }
 
     // ── SponsorRateLimitConfig defaults ─────────────────────────────────

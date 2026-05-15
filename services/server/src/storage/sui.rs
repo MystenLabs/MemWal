@@ -1,4 +1,111 @@
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
+
+const SUI_RPC_MAX_ATTEMPTS: usize = 3;
+const SUI_RPC_RETRY_DELAY_MS: u64 = 150;
+const SUI_RPC_ERROR_SNIPPET_BYTES: usize = 512;
+
+async fn post_sui_rpc<T: DeserializeOwned>(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    body: &serde_json::Value,
+    context: &str,
+) -> Result<T, OnchainVerifyError> {
+    for attempt in 1..=SUI_RPC_MAX_ATTEMPTS {
+        let response = match http_client
+            .post(rpc_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                if attempt < SUI_RPC_MAX_ATTEMPTS {
+                    tracing::debug!(
+                        "{} Sui RPC request failed on attempt {}/{}: {}",
+                        context,
+                        attempt,
+                        SUI_RPC_MAX_ATTEMPTS,
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        SUI_RPC_RETRY_DELAY_MS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(OnchainVerifyError::RpcError(format!(
+                    "{} HTTP request failed after {} attempts: {}",
+                    context, SUI_RPC_MAX_ATTEMPTS, e
+                )));
+            }
+        };
+
+        let status = response.status();
+        let text = response.text().await.map_err(|e| {
+            OnchainVerifyError::RpcError(format!("{} failed to read response body: {}", context, e))
+        })?;
+
+        if !status.is_success() {
+            let snippet = response_snippet(&text);
+            if attempt < SUI_RPC_MAX_ATTEMPTS && is_retryable_status(status) {
+                tracing::debug!(
+                    "{} Sui RPC returned HTTP {} on attempt {}/{}: {}",
+                    context,
+                    status,
+                    attempt,
+                    SUI_RPC_MAX_ATTEMPTS,
+                    snippet
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    SUI_RPC_RETRY_DELAY_MS * attempt as u64,
+                ))
+                .await;
+                continue;
+            }
+            return Err(OnchainVerifyError::RpcError(format!(
+                "{} returned HTTP {}: {}",
+                context, status, snippet
+            )));
+        }
+
+        match serde_json::from_str::<T>(&text) {
+            Ok(parsed) => return Ok(parsed),
+            Err(e) => {
+                let snippet = response_snippet(&text);
+                if attempt < SUI_RPC_MAX_ATTEMPTS {
+                    tracing::debug!(
+                        "{} Sui RPC JSON parse failed on attempt {}/{}: {}; body: {}",
+                        context,
+                        attempt,
+                        SUI_RPC_MAX_ATTEMPTS,
+                        e,
+                        snippet
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                        SUI_RPC_RETRY_DELAY_MS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+                return Err(OnchainVerifyError::RpcError(format!(
+                    "{} failed to parse RPC response after {} attempts: {}; status: {}; body: {}",
+                    context, SUI_RPC_MAX_ATTEMPTS, e, status, snippet
+                )));
+            }
+        }
+    }
+
+    unreachable!("SUI_RPC_MAX_ATTEMPTS must be greater than zero")
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn response_snippet(text: &str) -> String {
+    text.chars().take(SUI_RPC_ERROR_SNIPPET_BYTES).collect()
+}
 
 /// Verify that a given public key is registered as a delegate key
 /// in the onchain MemWalAccount object.
@@ -24,15 +131,8 @@ pub async fn verify_delegate_key_onchain(
         ]
     });
 
-    let response = http_client
-        .post(rpc_url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
-
-    let rpc_response: RpcResponse = parse_json_rpc_response(response, "sui_getObject").await?;
+    let rpc_response: RpcResponse =
+        post_sui_rpc(http_client, rpc_url, &body, "verify delegate key").await?;
 
     if let Some(error) = rpc_response.error {
         return Err(OnchainVerifyError::RpcError(format!(
@@ -137,16 +237,8 @@ pub async fn find_account_by_delegate_key(
         "params": [registry_id, { "showContent": true }]
     });
 
-    let registry_resp = http_client
-        .post(rpc_url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&registry_body)
-        .send()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("Failed to fetch registry: {}", e)))?;
-
     let registry_json: serde_json::Value =
-        parse_json_rpc_response(registry_resp, "sui_getObject registry").await?;
+        post_sui_rpc(http_client, rpc_url, &registry_body, "fetch registry").await?;
 
     // Extract Table inner ID: result.data.content.fields.accounts.fields.id.id
     let table_id = registry_json
@@ -170,16 +262,8 @@ pub async fn find_account_by_delegate_key(
             "params": [table_id, cursor, 50]
         });
 
-        let response = http_client
-            .post(rpc_url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
-
         let resp_json: serde_json::Value =
-            parse_json_rpc_response(response, "suix_getDynamicFields").await?;
+            post_sui_rpc(http_client, rpc_url, &body, "scan registry dynamic fields").await?;
 
         if let Some(error) = resp_json.get("error") {
             return Err(OnchainVerifyError::RpcError(format!(
@@ -214,18 +298,8 @@ pub async fn find_account_by_delegate_key(
                 "params": [field_obj_id, { "showContent": true }]
             });
 
-            let field_resp = http_client
-                .post(rpc_url)
-                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .json(&field_body)
-                .send()
-                .await
-                .map_err(|e| {
-                    OnchainVerifyError::RpcError(format!("Failed to fetch field: {}", e))
-                })?;
-
             let field_json: serde_json::Value =
-                parse_json_rpc_response(field_resp, "sui_getObject dynamic field").await?;
+                post_sui_rpc(http_client, rpc_url, &field_body, "fetch registry field").await?;
 
             // Extract the account ID from the dynamic field value
             let account_id = field_json
@@ -281,57 +355,6 @@ pub async fn find_account_by_delegate_key(
 // ============================================================
 // Types for JSON-RPC response parsing
 // ============================================================
-
-async fn parse_json_rpc_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
-    context: &str,
-) -> Result<T, OnchainVerifyError> {
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("<missing>")
-        .to_string();
-    let bytes = response.bytes().await.map_err(|e| {
-        OnchainVerifyError::RpcError(format!(
-            "{}: failed to read RPC response body: {} (status={}, content-type={})",
-            context, e, status, content_type
-        ))
-    })?;
-
-    if !status.is_success() {
-        return Err(OnchainVerifyError::RpcError(format!(
-            "{}: RPC HTTP error status={}, content-type={}, body={}",
-            context,
-            status,
-            content_type,
-            body_snippet(&bytes),
-        )));
-    }
-
-    serde_json::from_slice(&bytes).map_err(|e| {
-        OnchainVerifyError::RpcError(format!(
-            "{}: failed to parse RPC JSON: {} (status={}, content-type={}, body={})",
-            context,
-            e,
-            status,
-            content_type,
-            body_snippet(&bytes),
-        ))
-    })
-}
-
-fn body_snippet(bytes: &[u8]) -> String {
-    const MAX_CHARS: usize = 512;
-
-    let text = String::from_utf8_lossy(bytes);
-    let mut snippet: String = text.chars().take(MAX_CHARS).collect();
-    if text.chars().count() > MAX_CHARS {
-        snippet.push_str("...");
-    }
-    snippet.replace('\n', "\\n").replace('\r', "\\r")
-}
 
 #[derive(Debug, Deserialize)]
 struct RpcResponse {
