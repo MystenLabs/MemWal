@@ -106,6 +106,9 @@ type UploadRelayTipConfigResponse = {
         address?: string;
     };
 };
+type AsyncLockRelease = () => void;
+type TransactionWaitLabel = "register" | "certify" | "metadata-transfer";
+type WalrusBlobFlow = ReturnType<WalrusClient["writeBlobFlow"]>;
 
 /**
  * Rewrite CoinWithBalance "gas" intents to explicit SUI coin type so Enoki
@@ -131,6 +134,35 @@ function patchGasCoinIntents(tx: Transaction): void {
 
         await next();
     });
+}
+
+class AsyncLock {
+    #locked = false;
+    #waiters: Array<(release: AsyncLockRelease) => void> = [];
+
+    get pending(): number {
+        return this.#waiters.length;
+    }
+
+    async acquire(): Promise<AsyncLockRelease> {
+        if (!this.#locked) {
+            this.#locked = true;
+            return this.#release;
+        }
+
+        return new Promise((resolve) => {
+            this.#waiters.push(resolve);
+        });
+    }
+
+    #release: AsyncLockRelease = () => {
+        const next = this.#waiters.shift();
+        if (next) {
+            next(this.#release);
+            return;
+        }
+        this.#locked = false;
+    };
 }
 
 const ENOKI_API_BASE_URL = "https://api.enoki.mystenlabs.com/v1";
@@ -160,12 +192,65 @@ const sidecarMetrics = {
     walletSubmittedTotal: 0,
     walletLockErrorsTotal: 0,
     walletPermanentFailuresTotal: 0,
+    walrusRegisterLockWaitTotalMs: 0,
+    walrusRegisterLockMaxWaitMs: 0,
 };
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
+const walrusRegisterLock = new AsyncLock();
 
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
     return [...new Set(addresses.filter((addr): addr is string => typeof addr === "string" && addr.length > 0))];
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForSuccessfulTransaction(digest: string, label: TransactionWaitLabel): Promise<void> {
+    const tx = await suiClient.waitForTransaction({
+        digest,
+        options: { showEffects: true },
+    });
+    const status = tx.effects?.status;
+    if (status?.status !== "success") {
+        throw new Error(
+            `${label} transaction failed (${digest}): ${status?.error || "missing execution status"}`,
+        );
+    }
+}
+
+function isRetryableWalrusRegisterError(message: string): boolean {
+    const lower = message.toLowerCase();
+    return (
+        lower.includes("dry_run_failed") ||
+        lower.includes("balance::split") ||
+        lower.includes("register transaction failed") ||
+        lower.includes("the operation was aborted due to timeout")
+    );
+}
+
+async function uploadRegisteredBlobWithRetry(flow: WalrusBlobFlow, digest: string): Promise<void> {
+    const delaysMs = [500, 1_500, 3_000];
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            await flow.upload({ digest });
+            return;
+        } catch (err: any) {
+            const message = err?.message || String(err);
+            const canRetry =
+                message.includes("Blob object not found in transaction effects") &&
+                attempt < delaysMs.length;
+            if (!canRetry) {
+                throw err;
+            }
+            console.warn(
+                `[walrus/upload] register digest ${digest} not visible to Walrus SDK yet; ` +
+                `retrying upload in ${delaysMs[attempt]}ms (attempt=${attempt + 1})`,
+            );
+            await sleep(delaysMs[attempt]);
+        }
+    }
 }
 
 async function getUploadRelayTipAddress(): Promise<string | null> {
@@ -726,7 +811,7 @@ async function setMetadataAndTransferBlobs(
         signer,
         dedupeAddresses([signerAddress, owner]),
     );
-    await suiClient.waitForTransaction({ digest });
+    await waitForSuccessfulTransaction(digest, "metadata-transfer");
     return digest;
 }
 
@@ -774,43 +859,90 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const signerAddress = signer.toSuiAddress();
         const blobData = new Uint8Array(Buffer.from(data, "base64"));
 
-        // writeBlobFlow is intentionally not serialized by signer. Current Sui
-        // no longer permanently locks coin objects for concurrent submissions;
-        // transient gas/RPC races are retried by the Apalis wallet job layer.
-        const flow = walrusClient.writeBlobFlow({ blob: blobData });
-        await flow.encode();
-
-        const registerTx = flow.register({
-            epochs,
-            // Server owns the blob initially (needed for certify step)
-            owner: signerAddress,
-            deletable: true,
-            // Store namespace + owner as on-chain metadata (queryable for restore)
-            attributes: {
-                ...(namespace ? { memwal_namespace: namespace } : {}),
-                ...(owner ? { memwal_owner: owner } : {}),
-                ...(packageId ? { memwal_package_id: packageId } : {}),
-            },
-        });
-
-        // Patch: convert GasCoin intents → sender's SUI coins.
-        // Enoki rejects GasCoin as tx argument, but relay requires the tip.
-        // After patching, signer pays tip from own SUI; Enoki sponsors gas.
-        patchGasCoinIntents(registerTx);
         const tipRecipient = await getUploadRelayTipAddress();
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
-        const registerDigest = await submitWalletTransaction(
-            registerTx,
-            signer,
-            registerAllowedAddresses,
-        );
-        await suiClient.waitForTransaction({ digest: registerDigest });
 
-        await flow.upload({ digest: registerDigest });
+        let flow: WalrusBlobFlow;
+        let registerDigest: string;
+        for (let registerAttempt = 1; ; registerAttempt += 1) {
+            // Walrus register uses global system state and WAL accounting. Rebuild
+            // the flow on each retry so storage/write payments are recalculated
+            // from fresh chain state.
+            flow = walrusClient.writeBlobFlow({ blob: blobData });
+            await flow.encode();
+
+            const registerTx = flow.register({
+                epochs,
+                // Server owns the blob initially (needed for certify step)
+                owner: signerAddress,
+                deletable: true,
+                // Store namespace + owner as on-chain metadata (queryable for restore)
+                attributes: {
+                    ...(namespace ? { memwal_namespace: namespace } : {}),
+                    ...(owner ? { memwal_owner: owner } : {}),
+                    ...(packageId ? { memwal_package_id: packageId } : {}),
+                },
+            });
+
+            // Patch: convert GasCoin intents → sender's SUI coins.
+            // Enoki rejects GasCoin as tx argument, but relay requires the tip.
+            // After patching, signer pays tip from own SUI; Enoki sponsors gas.
+            patchGasCoinIntents(registerTx);
+
+            const waitStartedAt = Date.now();
+            console.log(
+                `[walrus/register-lock] waiting keyIndex=${keyIndex} signer=${signerAddress} ` +
+                `pending=${walrusRegisterLock.pending} bytes=${blobData.length} epochs=${epochs} ` +
+                `attempt=${registerAttempt}`,
+            );
+            const releaseRegisterLock = await walrusRegisterLock.acquire();
+            const lockWaitMs = Date.now() - waitStartedAt;
+            const lockHeldStartedAt = Date.now();
+            sidecarMetrics.walrusRegisterLockWaitTotalMs += lockWaitMs;
+            sidecarMetrics.walrusRegisterLockMaxWaitMs = Math.max(
+                sidecarMetrics.walrusRegisterLockMaxWaitMs,
+                lockWaitMs,
+            );
+
+            try {
+                console.log(
+                    `[walrus/register-lock] acquired keyIndex=${keyIndex} signer=${signerAddress} ` +
+                    `waitMs=${lockWaitMs} allowed=${registerAllowedAddresses.join(",")} ` +
+                    `attempt=${registerAttempt}`,
+                );
+                registerDigest = await submitWalletTransaction(
+                    registerTx,
+                    signer,
+                    registerAllowedAddresses,
+                );
+                await waitForSuccessfulTransaction(registerDigest, "register");
+                console.log(
+                    `[walrus/register-lock] registered keyIndex=${keyIndex} signer=${signerAddress} ` +
+                    `digest=${registerDigest} heldMs=${Date.now() - lockHeldStartedAt} ` +
+                    `attempt=${registerAttempt}`,
+                );
+                break;
+            } catch (err: any) {
+                const message = err?.message || String(err);
+                const shouldRetry = registerAttempt < 3 && isRetryableWalrusRegisterError(message);
+                console.warn(
+                    `[walrus/register-lock] register failed keyIndex=${keyIndex} signer=${signerAddress} ` +
+                    `attempt=${registerAttempt} retry=${shouldRetry}: ${message}`,
+                );
+                if (!shouldRetry) {
+                    throw err;
+                }
+                await sleep(1_000 * registerAttempt);
+            } finally {
+                releaseRegisterLock();
+            }
+        }
+
+        await uploadRegisteredBlobWithRetry(flow, registerDigest);
 
         const certifyTx = flow.certify();
         const certifyDigest = await submitWalletTransaction(certifyTx, signer);
-        await suiClient.waitForTransaction({ digest: certifyDigest });
+        await waitForSuccessfulTransaction(certifyDigest, "certify");
 
         const blob = await flow.getBlob();
 
