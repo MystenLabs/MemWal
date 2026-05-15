@@ -268,6 +268,7 @@ pub async fn query_blobs_by_owner(
     owner_address: &str,
     namespace: Option<&str>,
     package_id: Option<&str>,
+    limit: Option<usize>,
 ) -> Result<Vec<OnChainBlob>, AppError> {
     let url = format!("{}/walrus/query-blobs", sidecar_url);
 
@@ -277,6 +278,9 @@ pub async fn query_blobs_by_owner(
     }
     if let Some(pkg) = package_id {
         body["packageId"] = serde_json::json!(pkg);
+    }
+    if let Some(limit) = limit {
+        body["limit"] = serde_json::json!(limit);
     }
 
     let mut req = client.post(&url).json(&body);
