@@ -365,6 +365,7 @@ pub async fn restore(
         owner,
         Some(namespace),
         Some(&state.config.package_id),
+        Some(limit),
     )
     .await?;
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
@@ -397,12 +398,11 @@ pub async fn restore(
         .filter(|id| !existing_set.contains(id.as_str()))
         .cloned()
         .collect();
-    // Apply limit — take the most recent N missing blobs (last N from chain query)
-    let missing_blob_ids: Vec<String> = if all_missing.len() > limit {
-        all_missing[all_missing.len() - limit..].to_vec()
-    } else {
-        all_missing
-    };
+    // Apply limit — query-blobs returns newest-first for restore's recent
+    // transaction path, so keep the first N missing blobs. If fewer than N
+    // candidates match after namespace/package filtering, restore returns a
+    // partial result instead of scanning the whole wallet.
+    let missing_blob_ids: Vec<String> = all_missing.into_iter().take(limit).collect();
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
         "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",

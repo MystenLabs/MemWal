@@ -13,8 +13,20 @@
 
 import { useState } from "react";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
-import { $getMemoryById } from "../plugins/MemoryHighlightPlugin";
-import { UPDATE_MEMORY_STATUS_COMMAND } from "../plugins/MemoryHighlightPlugin";
+import { $getMemoryById, UPDATE_MEMORY_STATUS_COMMAND } from "../plugins/MemoryHighlightPlugin";
+import { STORAGE_KEYS } from "@/feature/auth/constant";
+import type { SessionData } from "@/feature/auth/domain/type";
+
+function getSessionId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEYS.sessionId);
+    if (!raw) return null;
+    return (JSON.parse(raw) as SessionData | null)?.sessionId ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export function useNoteMemorySave() {
   const [editor] = useLexicalComposerContext();
@@ -47,10 +59,13 @@ export function useNoteMemorySave() {
         status: "uploading",
       });
 
-      // Call server-side API to remember (v2 SDK)
-      const response = await fetch("/api/memory/remember", {
+      const sessionId = getSessionId();
+      const response = await fetch("/api/memory/remember-one", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(sessionId ? { "x-session-id": sessionId } : {}),
+        },
         body: JSON.stringify({ text: memoryText }),
       });
 

@@ -12,6 +12,7 @@ import { Card, CardContent } from "@/shared/components/ui/card";
 import { Separator } from "@/shared/components/ui/separator";
 import type { MemoryData } from "@/shared/db/type";
 import { cn } from "@/shared/lib/utils";
+import { ZKLOGIN_CONFIG } from "@/feature/auth/constant";
 import {
   AlertCircle,
   CheckCircle2,
@@ -205,16 +206,17 @@ export function MemoryHoverPreview({
                     <span className="text-xs text-muted-foreground font-mono truncate">
                       {memory.memwalMemoryId.slice(0, 16)}...
                     </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // TODO: Open in Sui Explorer
-                        navigator.clipboard.writeText(memory.memwalMemoryId!);
-                      }}
-                      className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                    </button>
+                    {memory.memwalBlobId && (
+                      <a
+                        href={`https://walruscan.com/${ZKLOGIN_CONFIG.network}/blob/${memory.memwalBlobId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
                   </div>
 
                   {/* Blob ID */}
