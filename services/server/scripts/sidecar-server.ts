@@ -164,6 +164,7 @@ const sidecarMetrics = {
 };
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
+let activeWalrusUploads = 0;
 
 function shortAddress(address: unknown): string | undefined {
     if (typeof address !== "string") return undefined;
@@ -197,6 +198,35 @@ function summarizeEnokiError(text: string): Record<string, unknown> {
         // Fall through to raw body summary.
     }
     return { body: truncateForLog(text) };
+}
+
+function sidecarStateSnapshot(): Record<string, unknown> {
+    const memory = process.memoryUsage();
+    return {
+        pid: process.pid,
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        memory: {
+            rssMb: Math.round(memory.rss / 1024 / 1024),
+            heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+            heapTotalMb: Math.round(memory.heapTotal / 1024 / 1024),
+            externalMb: Math.round(memory.external / 1024 / 1024),
+        },
+        activeWalrusUploads,
+        walletSubmittedTotal: sidecarMetrics.walletSubmittedTotal,
+        walletLockErrorsTotal: sidecarMetrics.walletLockErrorsTotal,
+        walletPermanentFailuresTotal: sidecarMetrics.walletPermanentFailuresTotal,
+        uploadRelayTipCache:
+            uploadRelayTipAddressCache === undefined
+                ? "uninitialized"
+                : uploadRelayTipAddressCache === null
+                    ? "none"
+                    : "present",
+        serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
+        suiNetwork: SUI_NETWORK,
+        enokiNetwork,
+        enokiEnabled: !!enokiApiKey,
+        fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    };
 }
 
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
@@ -383,7 +413,11 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
+    res.json({
+        status: "ok",
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        activeWalrusUploads,
+    });
 });
 
 // MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
@@ -792,6 +826,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
     let namespaceForLog: unknown;
     let signerAddressForLog: string | undefined;
     let blobBytesForLog: number | undefined;
+    activeWalrusUploads += 1;
     try {
         const {
             data,
@@ -849,6 +884,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             signerSuiBalanceMist,
             enokiEnabled: !!enokiApiKey,
             fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+            state: sidecarStateSnapshot(),
         })}`);
 
         // writeBlobFlow is intentionally not serialized by signer. Current Sui
@@ -958,6 +994,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
     } catch (err: any) {
         const message = err?.message || String(err);
+        const postFailureSignerSuiBalanceMist = signerAddressForLog
+            ? await getSuiBalanceMist(signerAddressForLog)
+            : null;
         console.error(`[walrus/upload] [${traceId}] failed ${JSON.stringify({
             phase,
             keyIndex: keyIndexForLog,
@@ -966,11 +1005,15 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             namespace: namespaceForLog || "default",
             bytes: blobBytesForLog,
             uptimeMs: Date.now() - sidecarStartedAtMs,
+            postFailureSignerSuiBalanceMist,
             message: truncateForLog(message),
             hasMoveAbort: /moveabort/i.test(message),
             hasBalanceSplit: /balance.*split|split.*balance/i.test(message),
+            state: sidecarStateSnapshot(),
         })}`, err);
         res.status(500).json({ error: message, traceId });
+    } finally {
+        activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
     }
 });
 
@@ -1524,6 +1567,7 @@ const server = app.listen(PORT, HOST, () => {
         host: HOST,
         port: PORT,
         pid: process.pid,
+        state: sidecarStateSnapshot(),
     }));
 });
 
@@ -1556,6 +1600,7 @@ process.on("uncaughtException", (err) => {
         uptimeMs: Date.now() - sidecarStartedAtMs,
         message: truncateForLog(err?.message || String(err)),
         stack: truncateForLog(err?.stack || ""),
+        state: sidecarStateSnapshot(),
     })}`);
     process.exit(1);
 });
@@ -1564,5 +1609,6 @@ process.on("unhandledRejection", (reason) => {
         uptimeMs: Date.now() - sidecarStartedAtMs,
         reason: truncateForLog(reason instanceof Error ? reason.message : reason),
         stack: truncateForLog(reason instanceof Error ? reason.stack || "" : ""),
+        state: sidecarStateSnapshot(),
     })}`);
 });
