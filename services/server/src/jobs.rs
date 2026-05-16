@@ -361,8 +361,14 @@ async fn execute_upload_and_transfer(
     // Helper: mark failed and return Err. Classifies sidecar errors so Apalis
     // retries transient wallet/RPC conflicts and aborts deterministic failures.
     let fail = |msg: String| -> WalletJobError {
-        tracing::error!("[wallet-job:upload] {}", msg);
-        WalletJobError::classify_sidecar_error(&msg)
+        let classified = WalletJobError::classify_sidecar_error(&msg);
+        tracing::error!(
+            "[wallet-job:upload] {} classification={} retryable={}",
+            msg,
+            classified.kind(),
+            !classified.is_permanent()
+        );
+        classified
     };
 
     // ── Decode encrypted bytes ─────────────────────────────────
@@ -510,6 +516,13 @@ pub enum WalletJobError {
 }
 
 impl WalletJobError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            WalletJobError::Transient(_) => "transient",
+            WalletJobError::Permanent(_) => "permanent",
+        }
+    }
+
     /// True if the error is `Permanent` — caller should NOT retry.
     pub fn is_permanent(&self) -> bool {
         matches!(self, WalletJobError::Permanent(_))

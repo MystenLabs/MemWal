@@ -89,6 +89,7 @@ const walrusClient = new WalrusClient({
         sendTip: { max: 10_000_000 },
     },
 });
+const sidecarStartedAtMs = Date.now();
 
 const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
 const GAS_INTENT_TYPE = "gas";
@@ -164,6 +165,40 @@ const sidecarMetrics = {
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
 
+function shortAddress(address: unknown): string | undefined {
+    if (typeof address !== "string") return undefined;
+    if (address.length <= 18) return address;
+    return `${address.slice(0, 10)}...${address.slice(-6)}`;
+}
+
+function truncateForLog(value: unknown, max = 500): string {
+    const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+    return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function redactEnokiPath(path: string): string {
+    return path.replace(/\/transaction-blocks\/sponsor\/[^/?]+/, "/transaction-blocks/sponsor/<digest>");
+}
+
+function summarizeEnokiError(text: string): Record<string, unknown> {
+    try {
+        const parsed = JSON.parse(text) as { errors?: Array<{ code?: string; message?: string }> };
+        if (Array.isArray(parsed.errors)) {
+            return {
+                errors: parsed.errors.map((err) => ({
+                    code: err.code,
+                    message: truncateForLog(err.message || ""),
+                    hasMoveAbort: /moveabort/i.test(err.message || ""),
+                    hasBalanceSplit: /balance.*split|split.*balance/i.test(err.message || ""),
+                })),
+            };
+        }
+    } catch {
+        // Fall through to raw body summary.
+    }
+    return { body: truncateForLog(text) };
+}
+
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
     return [...new Set(addresses.filter((addr): addr is string => typeof addr === "string" && addr.length > 0))];
 }
@@ -211,6 +246,12 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
 
     const text = await resp.text();
     if (!resp.ok) {
+        console.error(`[enoki] api_error ${JSON.stringify({
+            path: redactEnokiPath(path),
+            status: resp.status,
+            network: enokiNetwork,
+            ...summarizeEnokiError(text),
+        })}`);
         throw new Error(`Enoki API error (${resp.status}): ${text}`);
     }
 
@@ -276,6 +317,16 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
     }
 }
 
+async function getSuiBalanceMist(owner: string): Promise<string | null> {
+    try {
+        const balance = await (suiClient as any).getBalance({ owner, coinType: SUI_TYPE });
+        return typeof balance?.totalBalance === "string" ? balance.totalBalance : null;
+    } catch (err: any) {
+        console.warn(`[wallet] balance lookup failed for ${shortAddress(owner)}: ${err?.message || err}`);
+        return null;
+    }
+}
+
 /**
  * Submit a Sui transaction via the Enoki sponsor path (or direct sign as
  * fallback). Wraps `executeWithEnokiSponsor` with metrics + lock-error
@@ -332,7 +383,7 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
 });
 
 // MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
@@ -734,6 +785,13 @@ async function setMetadataAndTransferBlobs(
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
 // 10 MB sits well above any realistic single-memory upload size.
 app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
+    const traceId = randomUUID();
+    let phase = "receive";
+    let keyIndexForLog: unknown;
+    let ownerForLog: unknown;
+    let namespaceForLog: unknown;
+    let signerAddressForLog: string | undefined;
+    let blobBytesForLog: number | undefined;
     try {
         const {
             data,
@@ -745,6 +803,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             deferTransfer = false,
             epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
+        keyIndexForLog = keyIndex;
+        ownerForLog = owner;
+        namespaceForLog = namespace;
         // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
         const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
 
@@ -768,18 +829,36 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         }
 
         // Decode signer
+        phase = "decode_signer";
         const { secretKey } = decodeSuiPrivateKey(privateKey);
         const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
         const signerAddress = signer.toSuiAddress();
+        signerAddressForLog = signerAddress;
         const blobData = new Uint8Array(Buffer.from(data, "base64"));
+        blobBytesForLog = blobData.length;
+        const signerSuiBalanceMist = await getSuiBalanceMist(signerAddress);
+        console.log(`[walrus/upload] [${traceId}] begin ${JSON.stringify({
+            keyIndex,
+            signer: shortAddress(signerAddress),
+            owner: shortAddress(owner),
+            namespace: namespace || "default",
+            bytes: blobData.length,
+            epochs,
+            deferTransfer,
+            signerSuiBalanceMist,
+            enokiEnabled: !!enokiApiKey,
+            fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+        })}`);
 
         // writeBlobFlow is intentionally not serialized by signer. Current Sui
         // no longer permanently locks coin objects for concurrent submissions;
         // transient gas/RPC races are retried by the Apalis wallet job layer.
+        phase = "encode";
         const flow = walrusClient.writeBlobFlow({ blob: blobData });
         await flow.encode();
 
+        phase = "register_build";
         const registerTx = flow.register({
             epochs,
             // Server owns the blob initially (needed for certify step)
@@ -799,19 +878,31 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         patchGasCoinIntents(registerTx);
         const tipRecipient = await getUploadRelayTipAddress();
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
+        phase = "register_sponsor";
+        console.log(`[walrus/upload] [${traceId}] register_sponsor ${JSON.stringify({
+            keyIndex,
+            signer: shortAddress(signerAddress),
+            tipRecipient: shortAddress(tipRecipient),
+            allowedAddresses: registerAllowedAddresses.map(shortAddress),
+        })}`);
         const registerDigest = await submitWalletTransaction(
             registerTx,
             signer,
             registerAllowedAddresses,
         );
+        phase = "register_wait";
         await suiClient.waitForTransaction({ digest: registerDigest });
 
+        phase = "upload_blob";
         await flow.upload({ digest: registerDigest });
 
+        phase = "certify_sponsor";
         const certifyTx = flow.certify();
         const certifyDigest = await submitWalletTransaction(certifyTx, signer);
+        phase = "certify_wait";
         await suiClient.waitForTransaction({ digest: certifyDigest });
 
+        phase = "get_blob";
         const blob = await flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
@@ -819,6 +910,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
             try {
+                phase = "metadata_transfer";
                 await setMetadataAndTransferBlobs(
                     signer,
                     [{ blobObjectId, namespace }],
@@ -826,7 +918,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                     packageId,
                     agentId,
                 );
-                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
+                console.log(`[walrus/upload] [${traceId}] metadata_transfer_ok ${JSON.stringify({
+                    blobObjectId,
+                    owner: shortAddress(owner),
+                    namespace: namespace || "default",
+                })}`);
             } catch (metaErr: any) {
                 // LOW-14: Previously the metadata-set + transfer failure was swallowed
                 // and /walrus/upload returned 200 with the blob_id, leaving the blob
@@ -835,7 +931,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                 // primitive after certify), so at minimum we log loudly AND return
                 // 500 so the caller can react (retry / mark stored-but-not-owned).
                 console.error(
-                    `[walrus/upload] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
+                    `[walrus/upload] [${traceId}] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
                     `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
                 );
                 return res.status(500).json({
@@ -847,15 +943,33 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             }
         }
 
+        phase = "respond";
+        console.log(`[walrus/upload] [${traceId}] ok ${JSON.stringify({
+            blobId: blob.blobId,
+            objectId: blobObjectId,
+            transferStatus: deferTransfer ? "deferred" : "ok",
+            keyIndex,
+            bytes: blobBytesForLog,
+        })}`);
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
             transferStatus: deferTransfer ? "deferred" : "ok",
         });
     } catch (err: any) {
-        const traceId = randomUUID();
         const message = err?.message || String(err);
-        console.error(`[walrus/upload] [${traceId}] error:`, err);
+        console.error(`[walrus/upload] [${traceId}] failed ${JSON.stringify({
+            phase,
+            keyIndex: keyIndexForLog,
+            signer: shortAddress(signerAddressForLog),
+            owner: shortAddress(ownerForLog),
+            namespace: namespaceForLog || "default",
+            bytes: blobBytesForLog,
+            uptimeMs: Date.now() - sidecarStartedAtMs,
+            message: truncateForLog(message),
+            hasMoveAbort: /moveabort/i.test(message),
+            hasBalanceSplit: /balance.*split|split.*balance/i.test(message),
+        })}`, err);
         res.status(500).json({ error: message, traceId });
     }
 });
@@ -1437,3 +1551,18 @@ async function gracefulShutdown(signal: string): Promise<void> {
 }
 process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
+process.on("uncaughtException", (err) => {
+    console.error(`[sidecar] uncaught_exception ${JSON.stringify({
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        message: truncateForLog(err?.message || String(err)),
+        stack: truncateForLog(err?.stack || ""),
+    })}`);
+    process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+    console.error(`[sidecar] unhandled_rejection ${JSON.stringify({
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        reason: truncateForLog(reason instanceof Error ? reason.message : reason),
+        stack: truncateForLog(reason instanceof Error ? reason.stack || "" : ""),
+    })}`);
+});
