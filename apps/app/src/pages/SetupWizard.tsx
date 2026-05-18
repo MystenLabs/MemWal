@@ -18,7 +18,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, Copy } from 'lucide-react'
+import { LogOut, Copy, KeyRound } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
@@ -36,6 +36,20 @@ function getPersistedAuthMethod(): string | null {
 function isMaxDelegateKeysError(err: unknown): boolean {
     const message = err instanceof Error ? err.message : String(err)
     return message.includes('abort code: 2') && message.includes('add_delegate_key')
+}
+
+function normalizePrivateKeyHex(raw: string): string {
+    return raw.trim().replace(/^0x/i, '').replace(/\s+/g, '').toLowerCase()
+}
+
+function bytesToHex(bytes: Uint8Array | number[]): string {
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function hexToBytes(hex: string): Uint8Array {
+    return new Uint8Array(
+        Array.from({ length: hex.length / 2 }, (_, i) => parseInt(hex.slice(i * 2, i * 2 + 2), 16))
+    )
 }
 
 async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
@@ -77,6 +91,24 @@ async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, a
     return 0
 }
 
+async function getRegisteredDelegatePublicKeys(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<string[]> {
+    const obj = await suiClient.getObject({
+        id: accountId,
+        options: { showContent: true },
+    })
+    if (obj?.data?.content && 'fields' in obj.data.content) {
+        const fields = obj.data.content.fields as any
+        const keys = fields?.delegate_keys ?? []
+        return keys.map((k: any) => {
+            const f = k.fields ?? k
+            const pkBytes: number[] = f.public_key ?? []
+            return bytesToHex(pkBytes)
+        })
+    }
+
+    return []
+}
+
 export default function SetupWizard() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
@@ -92,6 +124,8 @@ export default function SetupWizard() {
     const [confirmed, setConfirmed] = useState(false)
     const [txStatus, setTxStatus] = useState('')
     const [error, setError] = useState('')
+    const [importKeyHex, setImportKeyHex] = useState('')
+    const [importingKey, setImportingKey] = useState(false)
     const [suiAddress, setSuiAddress] = useState('')
 
     const setupRunningRef = useRef(false)
@@ -107,25 +141,27 @@ export default function SetupWizard() {
         }
     }, [step, navigate])
 
-    // ── Generate Ed25519 keypair (shared) ──
-    const generateKeys = useCallback(async () => {
+    const deriveDelegateKey = useCallback(async (privateKeyHexValue: string) => {
         const ed = await import('@noble/ed25519')
         const { blake2b } = await import('@noble/hashes/blake2.js')
-        const privateKey = new Uint8Array(32)
-        crypto.getRandomValues(privateKey)
+        const privateKey = hexToBytes(privateKeyHexValue)
         const publicKey = await ed.getPublicKeyAsync(privateKey)
-
-        const privHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('')
-        const pubHex = Array.from(publicKey).map(b => b.toString(16).padStart(2, '0')).join('')
 
         const input = new Uint8Array(33)
         input[0] = 0x00
         input.set(publicKey, 1)
         const addressBytes = blake2b(input, { dkLen: 32 })
-        const suiAddr = '0x' + Array.from(new Uint8Array(addressBytes)).map((b: number) => b.toString(16).padStart(2, '0')).join('')
+        const suiAddr = '0x' + bytesToHex(new Uint8Array(addressBytes))
 
-        return { privHex, pubHex, suiAddr }
+        return { privHex: privateKeyHexValue, pubHex: bytesToHex(publicKey), suiAddr }
     }, [])
+
+    // ── Generate Ed25519 keypair (shared) ──
+    const generateKeys = useCallback(async () => {
+        const privateKey = new Uint8Array(32)
+        crypto.getRandomValues(privateKey)
+        return deriveDelegateKey(bytesToHex(privateKey))
+    }, [deriveDelegateKey])
 
     // ── Register delegate key on-chain (shared) ──
     const registerOnchain = useCallback(async (
@@ -233,6 +269,43 @@ export default function SetupWizard() {
         }
     }, [generateKeys])
 
+    const handleImportKey = useCallback(async () => {
+        if (setupRunningRef.current) return
+
+        const normalizedKey = normalizePrivateKeyHex(importKeyHex)
+        if (!/^[0-9a-f]{64}$/.test(normalizedKey)) {
+            setError('delegate key must be a 64-character hex private key.')
+            return
+        }
+
+        setupRunningRef.current = true
+        setImportingKey(true)
+        setError('')
+
+        try {
+            const accountId = await getAccountObjectId(suiClient, address)
+            if (!accountId) {
+                throw new Error('no MemWal account found for this wallet. generate a new delegate key first.')
+            }
+
+            const { pubHex } = await deriveDelegateKey(normalizedKey)
+            const registeredPublicKeys = await getRegisteredDelegatePublicKeys(suiClient, accountId)
+            if (!registeredPublicKeys.includes(pubHex)) {
+                throw new Error('this delegate key is not registered on-chain for the connected wallet.')
+            }
+
+            setDelegateKeys(normalizedKey, pubHex, accountId)
+            setImportKeyHex('')
+            setStep('done')
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'failed to import delegate key. please try again.'
+            setError(message)
+        } finally {
+            setImportingKey(false)
+            setupRunningRef.current = false
+        }
+    }, [address, importKeyHex, deriveDelegateKey, suiClient, setDelegateKeys])
+
     // ── Wallet: register on-chain after user confirms key ──
     const executeOnchain = useCallback(async () => {
         if (setupRunningRef.current) return
@@ -332,6 +405,47 @@ export default function SetupWizard() {
                             <button className="lp-btn-yellow" onClick={handleGenerate}>
                                 generate delegate key
                             </button>
+
+                            <div style={{ margin: '28px 0 18px', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                                or
+                            </div>
+
+                            <div style={{ textAlign: 'left' }}>
+                                <div className="input-group">
+                                    <label htmlFor="delegate-key-input">enter existing delegate key</label>
+                                    <textarea
+                                        id="delegate-key-input"
+                                        className="input"
+                                        rows={3}
+                                        value={importKeyHex}
+                                        onChange={(e) => setImportKeyHex(e.target.value)}
+                                        placeholder="paste your delegate private key"
+                                        spellCheck={false}
+                                        style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }}
+                                    />
+                                </div>
+                                {error && (
+                                    <div style={{
+                                        background: 'rgba(248,113,113,0.08)',
+                                        border: '1px solid rgba(248,113,113,0.2)',
+                                        borderRadius: 'var(--radius-md)',
+                                        padding: 12,
+                                        marginBottom: 12,
+                                        color: 'var(--danger)',
+                                        fontSize: '0.82rem',
+                                    }}>
+                                        {error}
+                                    </div>
+                                )}
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={handleImportKey}
+                                    disabled={importingKey || !importKeyHex.trim()}
+                                    style={{ width: '100%', justifyContent: 'center' }}
+                                >
+                                    <KeyRound size={14} /> {importingKey ? 'checking key...' : 'use delegate key'}
+                                </button>
+                            </div>
                         </div>
                     )}
 
