@@ -69,6 +69,7 @@ pub async fn enqueue_wallet_job(
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
 /// inside a multi-byte sequence (e.g. emoji).
+#[cfg(test)]
 pub(super) fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;

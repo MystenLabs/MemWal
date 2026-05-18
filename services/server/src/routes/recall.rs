@@ -15,8 +15,6 @@ use std::sync::Arc;
 
 use crate::types::*;
 
-use super::truncate_str;
-
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -94,10 +92,10 @@ pub async fn recall(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     tracing::info!(
-        "recall: query=\"{}...\" owner={} ns={}",
-        truncate_str(&body.query, 50),
-        owner,
-        namespace
+        query_len = body.query.len(),
+        owner = %owner,
+        namespace = %namespace,
+        "recall request"
     );
 
     let t0 = std::time::Instant::now();

@@ -710,16 +710,18 @@ impl std::fmt::Display for AppError {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        crate::observability::record_app_error(self.kind());
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Internal(msg) => {
                 // SEC: Never leak internal error details to the client.
-                // Log the full message server-side with a trace ID so
+                // Log the full message server-side with a request ID so
                 // operators can correlate, then return a generic message.
-                let trace_id = uuid::Uuid::new_v4().to_string();
+                let trace_id = crate::observability::current_request_id()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 tracing::error!(
-                    trace_id = %trace_id,
+                    request_id = %trace_id,
                     "Internal server error: {}",
                     msg,
                 );
@@ -735,6 +737,19 @@ impl axum::response::IntoResponse for AppError {
 
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
+    }
+}
+
+impl AppError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AppError::BadRequest(_) => "bad_request",
+            AppError::Unauthorized(_) => "unauthorized",
+            AppError::Internal(_) => "internal",
+            AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::RateLimited(_) => "rate_limited",
+            AppError::QuotaExceeded(_) => "quota_exceeded",
+        }
     }
 }
 

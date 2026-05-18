@@ -159,10 +159,20 @@ pub async fn sponsor_proxy(
     if let Some(secret) = state.config.sidecar_secret.as_deref() {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy failed: {}", e)))?;
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "sponsor",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("sponsor", "transport_error");
+        AppError::Internal(format!("Sponsor proxy failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external("sidecar", "sponsor", &status_label, started.elapsed());
 
     let upstream_status = resp.status();
     let resp_body = resp
@@ -177,6 +187,7 @@ pub async fn sponsor_proxy(
             .body(Body::from(resp_body))
             .unwrap())
     } else {
+        crate::observability::record_sidecar_failure("sponsor", "http_error");
         tracing::error!(
             "sponsor upstream error {}: {}",
             upstream_status,
@@ -268,10 +279,25 @@ pub async fn sponsor_execute_proxy(
     if let Some(secret) = state.config.sidecar_secret.as_deref() {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy failed: {}", e)))?;
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "sponsor_execute",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
+        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "sponsor_execute",
+        &status_label,
+        started.elapsed(),
+    );
 
     let upstream_status = resp.status();
     let resp_body = resp
@@ -286,6 +312,7 @@ pub async fn sponsor_execute_proxy(
             .body(Body::from(resp_body))
             .unwrap())
     } else {
+        crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
         tracing::error!(
             "sponsor/execute upstream error {}: {}",
             upstream_status,

@@ -317,6 +317,56 @@ const JSON_LIMIT_SEAL_ENCRYPT = "2mb"; // matches PROTECTED_BODY_LIMIT_BYTES (au
 const JSON_LIMIT_SEAL_DECRYPT = "2mb"; // single encrypted blob, same size class as encrypt
 const JSON_LIMIT_SEAL_DECRYPT_BATCH = "8mb"; // up to 25 × ~320 KiB items
 const JSON_LIMIT_WALRUS_UPLOAD = "10mb"; // base64-encoded encrypted blob
+type RequestWithId = Request & { requestId?: string };
+
+function sanitizeRequestId(value: unknown): string | null {
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(trimmed)) return null;
+    return trimmed;
+}
+
+function requestIdFor(req: Request): string {
+    return (req as RequestWithId).requestId
+        ?? sanitizeRequestId(req.headers["x-request-id"])
+        ?? randomUUID();
+}
+
+function errorMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    return String(err);
+}
+
+function sidecarLog(
+    level: "info" | "warn" | "error",
+    event: string,
+    fields: Record<string, unknown> = {},
+): void {
+    const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        level,
+        scope: "memwal-sidecar",
+        event,
+        ...fields,
+    });
+    if (level === "error") {
+        console.error(line);
+    } else if (level === "warn") {
+        console.warn(line);
+    } else {
+        console.log(line);
+    }
+}
+
+app.use((req: RequestWithId, res: Response, next: NextFunction) => {
+    const requestId = sanitizeRequestId(req.headers["x-request-id"])
+        ?? sanitizeRequestId(req.headers["x-correlation-id"])
+        ?? randomUUID();
+    req.requestId = requestId;
+    res.setHeader("x-request-id", requestId);
+    next();
+});
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
@@ -410,8 +460,11 @@ app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), asyn
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/encrypt] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        sidecarLog("error", "seal_encrypt_failed", {
+            requestId: traceId,
+            error: errorMessage(err),
+        });
         res.status(500).json({ error: "Internal server error", traceId });
     }
 });
@@ -526,8 +579,11 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/decrypt] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        sidecarLog("error", "seal_decrypt_failed", {
+            requestId: traceId,
+            error: errorMessage(err),
+        });
         res.status(500).json({ error: "Internal server error", traceId });
     }
 });
@@ -630,8 +686,11 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/decrypt-batch] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        sidecarLog("error", "seal_decrypt_batch_failed", {
+            requestId: traceId,
+            error: errorMessage(err),
+        });
         res.status(500).json({ error: "Internal server error", traceId });
     }
 });
@@ -853,9 +912,12 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             transferStatus: deferTransfer ? "deferred" : "ok",
         });
     } catch (err: any) {
-        const traceId = randomUUID();
-        const message = err?.message || String(err);
-        console.error(`[walrus/upload] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "walrus_upload_failed", {
+            requestId: traceId,
+            error: message,
+        });
         res.status(500).json({ error: message, traceId });
     }
 });
@@ -901,9 +963,12 @@ app.post("/walrus/set-metadata-batch", express.json({ limit: "1mb" }), async (re
         console.log(`[walrus/set-metadata-batch] transferred ${normalized.length} blobs to owner`);
         res.json({ transferred: normalized.length, digest });
     } catch (err: any) {
-        const traceId = randomUUID();
-        const message = err?.message || String(err);
-        console.error(`[walrus/set-metadata-batch] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "walrus_set_metadata_batch_failed", {
+            requestId: traceId,
+            error: message,
+        });
         res.status(500).json({ error: message, traceId });
     }
 });
@@ -932,9 +997,12 @@ app.post("/walrus/set-metadata", express.json({ limit: "128kb" }), async (req, r
         );
         res.json({ transferred: 1, digest });
     } catch (err: any) {
-        const traceId = randomUUID();
-        const message = err?.message || String(err);
-        console.error(`[walrus/set-metadata] [${traceId}] error:`, err);
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "walrus_set_metadata_failed", {
+            requestId: traceId,
+            error: message,
+        });
         res.status(500).json({ error: message, traceId });
     }
 });
@@ -1324,8 +1392,13 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
         console.log(`[query-blobs] returning ${blobs.length} blobs (filtered from ${rawObjs.length}) for owner=${owner} ns=${namespace || '*'}`);
         res.json({ blobs, total: blobs.length });
     } catch (err: any) {
-        console.error(`[walrus/query-blobs] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "walrus_query_blobs_failed", {
+            requestId: traceId,
+            error: message,
+        });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -1356,8 +1429,13 @@ app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, r
         console.log(`[sponsor] sponsored tx created (digest_len=${sponsored.digest.length})`);
         res.json(sponsored); // { bytes, digest }
     } catch (err: any) {
-        console.error(`[sponsor] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "sponsor_failed", {
+            requestId: traceId,
+            error: message,
+        });
+        res.status(500).json({ error: message, traceId });
     }
 });
 
@@ -1393,8 +1471,13 @@ app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async
         console.log(`[sponsor/execute] executed sponsored tx (digest_len=${digest.length})`);
         res.json(executed); // { digest }
     } catch (err: any) {
-        console.error(`[sponsor/execute] error: ${err.message || err}`);
-        res.status(500).json({ error: err.message || String(err) });
+        const traceId = requestIdFor(req);
+        const message = errorMessage(err);
+        sidecarLog("error", "sponsor_execute_failed", {
+            requestId: traceId,
+            error: message,
+        });
+        res.status(500).json({ error: message, traceId });
     }
 });
 

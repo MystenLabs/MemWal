@@ -18,7 +18,7 @@ use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, C
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{cleanup_expired_blob, truncate_str};
+use super::cleanup_expired_blob;
 
 /// ENG-1747: the `/api/ask` system prompt — a versioned text asset with a
 /// `{MEMORY_CONTEXT}` placeholder (substituted with the `<memory>`-tag-
@@ -171,10 +171,10 @@ pub async fn ask(
     // `recall` already enforces (MED-3) — see routes/recall.rs.
     let limit = body.limit.unwrap_or(5).min(100);
     tracing::info!(
-        "ask: question=\"{}...\" owner={} ns={}",
-        truncate_str(&body.question, 50),
-        owner,
-        namespace
+        question_len = body.question.len(),
+        owner = %owner,
+        namespace = %namespace,
+        "ask request"
     );
 
     // F3 (structure-review): probe the SEAL credential up front. If the
@@ -261,7 +261,7 @@ pub async fn ask(
         .ok_or_else(|| AppError::Internal("OPENAI_API_KEY required for /api/ask".into()))?;
     let url = format!("{}/chat/completions", state.config.openai_api_base);
 
-    let resp = state
+    let req = state
         .http_client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -280,10 +280,25 @@ pub async fn ask(
             ],
             temperature: 0.7,
             max_tokens: 512,
-        })
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM request failed: {}", e)))?;
+        });
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "openai",
+            "ask_chat_completions",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("LLM request failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "openai",
+        "ask_chat_completions",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
         let status = resp.status();

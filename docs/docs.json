@@ -99,6 +99,7 @@
               "relayer/overview",
               "relayer/public-relayer",
               "relayer/self-hosting",
+              "relayer/observability",
               "relayer/api-reference"
             ]
           }

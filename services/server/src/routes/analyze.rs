@@ -24,7 +24,7 @@ use crate::rate_limit;
 use crate::services::extractor::MAX_ANALYZE_FACTS;
 use crate::types::*;
 
-use super::{collect_bounded_results, enqueue_wallet_job, truncate_str};
+use super::{collect_bounded_results, enqueue_wallet_job};
 
 const ANALYZE_CONCURRENCY: usize = 5;
 
@@ -60,10 +60,10 @@ pub async fn analyze(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     tracing::info!(
-        "analyze: text=\"{}...\" owner={} ns={}",
-        truncate_str(&body.text, 50),
-        owner,
-        namespace
+        text_len = body.text.len(),
+        owner = %owner,
+        namespace = %namespace,
+        "analyze request"
     );
 
     // Step 1: Extract facts using the Extractor service (sync — fast, ~1-2s)
@@ -257,10 +257,10 @@ pub async fn analyze(
         .map_err(|e| AppError::Internal(format!("Failed to enqueue analyze job: {}", e)))?;
 
         tracing::info!(
-            "analyze: fact enqueued job_id={} wallet={} fact=\"{}...\"",
-            job_id,
+            job_id = %job_id,
             wallet_index,
-            truncate_str(&fact_text, 40)
+            fact_len = fact_text.len(),
+            "analyze fact enqueued"
         );
         accepted_facts.push(AnalyzeAcceptedFact {
             text: fact_text,

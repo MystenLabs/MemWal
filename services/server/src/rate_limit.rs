@@ -326,6 +326,7 @@ impl TokenBucket {
 
 /// Build a 429 response with JSON body and Retry-After header.
 fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) -> Response {
+    crate::observability::record_rate_limit_denial(layer);
     let body = serde_json::json!({
         "error": "Rate limit exceeded",
         "layer": layer,
@@ -347,6 +348,7 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
 /// in-memory fallback also cannot be used (e.g., lock poisoned).
 /// HIGH-2 fix: previously Redis errors silently allowed requests through.
 fn rate_limiter_unavailable_response() -> Response {
+    crate::observability::record_app_error("rate_limiter_unavailable");
     let body = serde_json::json!({
         "error": "Rate limiter temporarily unavailable",
         "retry_after_seconds": 30,
@@ -533,6 +535,7 @@ pub async fn rate_limit_middleware(
     // --- Fallback path: Redis unreachable — use in-memory token buckets ---
     if redis_down {
         tracing::warn!("rate limit: Redis is unreachable, using in-memory fallback");
+        crate::observability::record_rate_limit_fallback("authenticated");
         let mut fallback = state.fallback_rate_limit.lock().await;
 
         if !fallback.can_consume(
@@ -705,7 +708,10 @@ pub async fn check_sender_rate_limit(
     )
     .await
     {
-        Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::MinuteLimitExceeded),
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
         Err(e) => {
             tracing::warn!("check_sender_rate_limit: Redis error (minute): {} — switching to in-memory fallback", e);
             redis_down = true;
@@ -726,7 +732,10 @@ pub async fn check_sender_rate_limit(
         )
         .await
         {
-            Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::HourLimitExceeded),
+            Ok(WindowCheckResult::Denied) => {
+                crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
+                return Ok(SponsorRlResult::HourLimitExceeded);
+            }
             Err(e) => {
                 tracing::warn!("check_sender_rate_limit: Redis error (hour): {} — switching to in-memory fallback", e);
                 redis_down = true;
@@ -737,11 +746,14 @@ pub async fn check_sender_rate_limit(
 
     // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
     if redis_down {
+        crate::observability::record_rate_limit_fallback("sponsor_sender");
         let mut fallback = state.fallback_rate_limit.lock().await;
         if !fallback.can_consume(&min_key, 1.0, per_minute as f64, 60.0) {
+            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
             return Ok(SponsorRlResult::MinuteLimitExceeded);
         }
         if !fallback.can_consume(&hr_key, 1.0, per_hour as f64, 3600.0) {
+            crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
             return Ok(SponsorRlResult::HourLimitExceeded);
         }
         fallback.consume(&min_key, 1.0, per_minute as f64, 60.0);
@@ -942,6 +954,7 @@ pub async fn sponsor_rate_limit_middleware(
     // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
     if redis_down {
         tracing::warn!("sponsor_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
+        crate::observability::record_rate_limit_fallback("sponsor_ip");
         let mut fallback = state.fallback_rate_limit.lock().await;
 
         if !fallback.can_consume(&min_key, 1.0, config.per_minute as f64, 60.0) {
