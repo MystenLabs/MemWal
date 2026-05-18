@@ -164,6 +164,11 @@ pub async fn ask(
         return Err(AppError::BadRequest("Question cannot be empty".into()));
     }
 
+    // Validate scoring_weights up front — fail fast on malformed input
+    // before we burn an embed + vector search + Walrus + SEAL round-trip.
+    let weights = body.scoring_weights.clone().unwrap_or_default();
+    weights.validate()?;
+
     let owner = &auth.owner;
     let namespace = &body.namespace;
     // LOW-S5: cap `limit` so a misbehaving client can't make us pull a
@@ -174,6 +179,7 @@ pub async fn ask(
         question_len = body.question.len(),
         owner = %owner,
         namespace = %namespace,
+        ranker_active = weights.is_ranker_active(),
         "ask request"
     );
 
@@ -220,18 +226,13 @@ pub async fn ask(
     // Zip created_at on (engine returns None; recall path is responsible).
     super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
 
-    // Validate scoring_weights up front so malformed input returns a 400
-    // rather than silently degrading to default ordering.
-    let weights = body.scoring_weights.unwrap_or_default();
-    weights.validate()?;
-    let ranker_active = weights.recency.abs() >= f64::EPSILON;
-    if ranker_active {
+    if weights.is_ranker_active() {
         tracing::info!(
-            "ask: ranker active owner={} semantic={} recency={} half_life_days={}",
-            owner,
-            weights.semantic,
-            weights.recency,
-            weights.recency_half_life_days
+            owner = %owner,
+            semantic = weights.semantic,
+            recency = weights.recency,
+            half_life_days = weights.recency_half_life_days,
+            "ask: ranker active"
         );
     }
 

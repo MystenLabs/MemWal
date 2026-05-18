@@ -493,6 +493,23 @@ impl Default for ScoringWeights {
 }
 
 impl ScoringWeights {
+    /// Minimum allowed half-life. Anything smaller (incl. subnormals like
+    /// `f64::MIN_POSITIVE`) makes the `exp(-age * ln2 / half_life)` term
+    /// collapse to `0.0` for any non-zero `age`, silently turning the
+    /// recency signal into a constant. ~86 milliseconds is well below any
+    /// real-world recall use case and still survives float arithmetic.
+    const MIN_HALF_LIFE_DAYS: f64 = 1e-6;
+
+    /// True when the ranker actually computes scores (rather than
+    /// short-circuiting to the input order). Mirrors the
+    /// `recency.abs() < f64::EPSILON` predicate inside `CompositeRanker`
+    /// so handler-side gating (validation logs, tracing breadcrumbs)
+    /// stays in lockstep with what the ranker actually does. Keep this
+    /// in sync with [`crate::services::ranker::CompositeRanker::rank`].
+    pub fn is_ranker_active(&self) -> bool {
+        self.recency.abs() >= f64::EPSILON
+    }
+
     /// Return an error if the weights are outside reasonable bounds. The
     /// `CompositeRanker` already has internal guards (NaN sorts as Equal,
     /// non-positive half-life zeros out the recency term) so we wouldn't
@@ -506,9 +523,10 @@ impl ScoringWeights {
     ///   semantic match = better), which is almost certainly a bug, not a
     ///   feature. The 100.0 ceiling is generous; a real client doesn't
     ///   need values that large.
-    /// - `recency_half_life_days` must be positive when `recency > 0`
-    ///   (a zero or negative half-life with non-zero recency would be a
-    ///   silent no-op — surface it as a 400 so the client notices).
+    /// - `recency_half_life_days` must be at least `MIN_HALF_LIFE_DAYS`
+    ///   (≈86 ms) when `recency > 0`. A zero / negative / subnormal
+    ///   half-life with non-zero recency silently degrades the recency
+    ///   term to zero — surface it as a 400 so the client notices.
     pub fn validate(&self) -> Result<(), AppError> {
         for (name, value) in [
             ("semantic", self.semantic),
@@ -530,10 +548,11 @@ impl ScoringWeights {
                 )));
             }
         }
-        if self.recency > 0.0 && self.recency_half_life_days <= 0.0 {
+        if self.recency > 0.0 && self.recency_half_life_days < Self::MIN_HALF_LIFE_DAYS {
             return Err(AppError::BadRequest(format!(
-                "scoring_weights.recency_half_life_days must be positive when \
+                "scoring_weights.recency_half_life_days must be >= {} when \
                  recency > 0 (got {})",
+                Self::MIN_HALF_LIFE_DAYS,
                 self.recency_half_life_days
             )));
         }
@@ -1108,5 +1127,146 @@ mod tests {
         assert!(AppError::QuotaExceeded("x".into())
             .to_string()
             .contains("Quota Exceeded"));
+    }
+
+    // ── ScoringWeights::validate() — full bounds matrix ──────────────────
+
+    /// Build weights from explicit fields so tests don't depend on
+    /// `Default::default()` if someone changes the defaults later.
+    fn w(semantic: f64, recency: f64, half_life: f64) -> ScoringWeights {
+        ScoringWeights {
+            semantic,
+            recency,
+            recency_half_life_days: half_life,
+        }
+    }
+
+    fn assert_bad_request_mentions(w: &ScoringWeights, needle: &str) {
+        match w.validate() {
+            Err(AppError::BadRequest(msg)) => assert!(
+                msg.contains(needle),
+                "expected error mentioning {:?}, got: {}",
+                needle,
+                msg
+            ),
+            other => panic!(
+                "expected BadRequest containing {:?}, got: {:?}",
+                needle, other
+            ),
+        }
+    }
+
+    #[test]
+    fn validate_default_is_ok() {
+        ScoringWeights::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_nan_on_each_field() {
+        assert_bad_request_mentions(&w(f64::NAN, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, f64::NAN, 30.0), "recency");
+        assert_bad_request_mentions(&w(1.0, 0.0, f64::NAN), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_infinity_on_each_field() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_bad_request_mentions(&w(v, 0.0, 30.0), "semantic");
+            assert_bad_request_mentions(&w(1.0, v, 30.0), "recency");
+            assert_bad_request_mentions(&w(1.0, 0.0, v), "recency_half_life_days");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_weights() {
+        assert_bad_request_mentions(&w(-0.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, -1.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_rejects_weights_above_100() {
+        assert_bad_request_mentions(&w(100.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, 200.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_accepts_exact_boundaries() {
+        // 0.0 and 100.0 are inclusive; half-life only matters when recency > 0.
+        w(0.0, 0.0, 30.0).validate().unwrap();
+        w(100.0, 100.0, 30.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, 0.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_negative_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, -1.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_subnormal_half_life_when_recency_positive() {
+        // Subnormal would silently collapse `exp(-age * ln(2) / half_life)`
+        // to 0 for any non-zero age — surface as 400 instead of degrading
+        // the recency signal to a constant.
+        assert_bad_request_mentions(&w(1.0, 0.5, f64::MIN_POSITIVE), "recency_half_life_days");
+        // Just below the floor — still rejected.
+        assert_bad_request_mentions(
+            &w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS / 2.0),
+            "recency_half_life_days",
+        );
+    }
+
+    #[test]
+    fn validate_allows_negative_half_life_when_recency_zero() {
+        // Carve-out: half-life is only constrained when recency > 0, so a
+        // client that sets recency=0 can leave half-life at whatever
+        // (the ranker short-circuits anyway). Pinning this keeps the
+        // no-op default path from getting a spurious 400 if a stale SDK
+        // forwards a placeholder half-life.
+        w(1.0, 0.0, -1.0).validate().unwrap();
+        w(1.0, 0.0, 0.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_half_life_at_floor() {
+        // The minimum is inclusive: exactly MIN_HALF_LIFE_DAYS is allowed.
+        w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS)
+            .validate()
+            .unwrap();
+    }
+
+    // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────
+
+    #[test]
+    fn is_ranker_active_false_for_default() {
+        assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_true_for_non_zero_recency() {
+        assert!(w(1.0, 0.2, 30.0).is_ranker_active());
+        assert!(w(1.0, 0.0001, 30.0).is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_false_for_subepsilon_recency() {
+        // Below EPSILON ≈ 2.22e-16 is treated as zero — the ranker would
+        // short-circuit, so the handler considers itself inactive too.
+        assert!(!w(1.0, f64::EPSILON / 2.0, 30.0).is_ranker_active());
+    }
+
+    // ── Refactor-safety: default short-circuits, wire contract pinned ────
+
+    #[test]
+    fn default_recency_is_zero_so_short_circuit_engages() {
+        // If you change `ScoringWeights::default().recency` away from 0.0,
+        // you change the wire contract on every existing client (the new
+        // `score` field would suddenly appear on every default-weighted
+        // recall response). Failing this test = ack the change.
+        assert_eq!(ScoringWeights::default().recency, 0.0);
+        assert!(!ScoringWeights::default().is_ranker_active());
     }
 }

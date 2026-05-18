@@ -88,6 +88,12 @@ pub async fn recall(
         return Err(AppError::BadRequest("Query cannot be empty".into()));
     }
 
+    // Validate scoring_weights up front — fail fast on malformed input
+    // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
+    // vector search + Walrus + SEAL round-trip just to 400 at the end.
+    let weights = body.scoring_weights.clone().unwrap_or_default();
+    weights.validate()?;
+
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -95,6 +101,7 @@ pub async fn recall(
         query_len = body.query.len(),
         owner = %owner,
         namespace = %namespace,
+        ranker_active = weights.is_ranker_active(),
         "recall request"
     );
 
@@ -145,24 +152,17 @@ pub async fn recall(
     // SearchHit it already has. See `routes::zip_created_at_onto_hydrated`.
     super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
 
-    // Validate `scoring_weights` before running the ranker — surface a 400
-    // for malformed input (NaN, negative weights, etc.) instead of silently
-    // degrading.
-    let weights = body.scoring_weights.unwrap_or_default();
-    weights.validate()?;
-
     // Log when the ranker is opted in (non-default `scoring_weights`) so a
     // future "client X is seeing weird ordering" debugging session has a
     // breadcrumb. Default weights short-circuit and aren't logged — that's
     // every other request.
-    let ranker_active = weights.recency.abs() >= f64::EPSILON;
-    if ranker_active {
+    if weights.is_ranker_active() {
         tracing::info!(
-            "recall: ranker active owner={} semantic={} recency={} half_life_days={}",
-            owner,
-            weights.semantic,
-            weights.recency,
-            weights.recency_half_life_days
+            owner = %owner,
+            semantic = weights.semantic,
+            recency = weights.recency,
+            half_life_days = weights.recency_half_life_days,
+            "recall: ranker active"
         );
     }
 

@@ -101,7 +101,7 @@ impl CompositeRanker {
     pub fn score(hit: &HydratedMemory, weights: &ScoringWeights, now: DateTime<Utc>) -> f64 {
         let semantic_term = weights.semantic * (1.0 - hit.distance);
 
-        let recency_term = if weights.recency.abs() < f64::EPSILON {
+        let recency_term = if !weights.is_ranker_active() {
             0.0
         } else if let Some(created_at) = hit.created_at {
             let age_secs = (now - created_at).num_seconds().max(0) as f64;
@@ -143,7 +143,7 @@ impl Ranker for CompositeRanker {
         // `score = None` so the handler omits the wire-level field, keeping
         // behaviour byte-identical to the pre-ranker code under default
         // weights.
-        if weights.recency.abs() < f64::EPSILON {
+        if !weights.is_ranker_active() {
             return hits
                 .into_iter()
                 .map(|memory| RankedHit {
