@@ -27,6 +27,7 @@ interface ParsedArgs {
     relayerUrl?: string;
     webUrl?: string;
     label?: string;
+    namespace?: string;
 }
 
 /** Per-environment URL shortcuts. `--dev`/`--staging`/`--local` set both
@@ -77,11 +78,17 @@ function parseArgs(argv: string[]): ParsedArgs {
             case "--label":
                 out.label = next();
                 break;
+            case "--namespace":
+            case "--ns":
+                out.namespace = next();
+                break;
             default:
                 // Allow `--relayer=URL` and `--web-url=URL` forms too.
                 if (a?.startsWith("--relayer=")) out.relayerUrl = a.split("=", 2)[1];
                 else if (a?.startsWith("--web-url=")) out.webUrl = a.split("=", 2)[1];
                 else if (a?.startsWith("--label=")) out.label = a.split("=", 2)[1];
+                else if (a?.startsWith("--namespace=")) out.namespace = a.split("=", 2)[1];
+                else if (a?.startsWith("--ns=")) out.namespace = a.split("=", 2)[1];
                 // Unknown flag: ignore silently.
                 break;
         }
@@ -116,6 +123,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // "Antigravity", ...) after the first MCP `initialize` request. User
     // can rename anytime from the dashboard.
     const label = args.label ?? process.env.MEMWAL_CLIENT_LABEL ?? "MCP Client";
+    // Default memory namespace applied to memory tool calls when the agent
+    // omits one. CLI > env, then UNSET — we deliberately do NOT hardcode a
+    // fallback here: if neither is set, the namespace argument is left off
+    // the forwarded call and the relayer applies its own "default" namespace.
+    // An explicit per-call `namespace` from the agent always wins (see
+    // applyDefaultNamespace in bridge.ts).
+    const namespace = args.namespace ?? process.env.MEMWAL_NAMESPACE;
 
     let creds = loadCreds();
     if (creds && args.relayerUrl && creds.relayerUrl !== args.relayerUrl) {
@@ -163,7 +177,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             // tool from the MCP client) opens the correct dashboard. Before
             // this fix `--dev` was silently dropped here and the flow always
             // routed to prod (https://memwal.ai).
-            await runAuthRequiredServer({ relayerUrl, webUrl, label });
+            await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
             return;
         }
         // TTY = manual invocation. Block on the browser flow as before.
@@ -201,7 +215,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
 
-    await runBridge(creds, { relayerUrl, webUrl, label });
+    await runBridge(creds, { relayerUrl, webUrl, label, namespace });
 }
 
 function printHelp(): void {
@@ -230,11 +244,19 @@ function printHelp(): void {
         "  --label <text>                   Friendly delegate-key label",
         "                                   registered on-chain. Default:",
         '                                   "MemWal MCP"',
+        "  --namespace <name>               Default memory namespace applied",
+        "                                   to memwal_remember / recall /",
+        "                                   analyze / restore when the agent",
+        "                                   omits one. An explicit per-call",
+        "                                   namespace always wins. Unset →",
+        '                                   relayer uses its "default".',
+        "                                   Alias: --ns",
         "",
         "Environment (equivalent to options):",
         "  MEMWAL_SERVER_URL                same as --relayer",
         "  MEMWAL_WEB_URL                   same as --web-url",
         "  MEMWAL_CLIENT_LABEL              same as --label",
+        "  MEMWAL_NAMESPACE                 same as --namespace",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
         "Minimal MCP client config (Cursor, Claude Desktop, etc.):",
@@ -255,6 +277,19 @@ function printHelp(): void {
         '        "args": [',
         '          "-y", "@mysten-incubation/memwal-mcp",',
         '          "--relayer", "https://relayer.dev.memwal.ai"',
+        "        ]",
+        "      }",
+        "    }",
+        "  }",
+        "",
+        "Pinned to a memory namespace (set once, no per-call namespace needed):",
+        "  {",
+        '    "mcpServers": {',
+        '      "memwal": {',
+        '        "command": "npx",',
+        '        "args": [',
+        '          "-y", "@mysten-incubation/memwal-mcp",',
+        '          "--namespace", "work"',
         "        ]",
         "      }",
         "    }",

@@ -85,11 +85,50 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
 | `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the MemWal dashboard. |
+| `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
 | `--login` (or `login` subcommand) | — | Force a re-login even when credentials exist. |
 | `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
 | `--help`, `-h` | — | Print usage and exit. |
 
 Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
+
+## Default namespace
+
+Set a default memory namespace once in your client config instead of having
+the agent pass `namespace` on every call. The package injects it into
+`memwal_remember`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
+calls that don't already carry one.
+
+Precedence, highest first:
+
+1. **Explicit per-call `namespace`** — a non-empty `namespace` in the tool
+   call is used as-is. The configured default never overrides it.
+2. **`--namespace` CLI flag** (alias `--ns`).
+3. **`MEMWAL_NAMESPACE` environment variable**.
+4. **Unset** — the call is forwarded without a `namespace` and the relayer
+   applies its own `"default"` namespace.
+
+CLI wins over the environment variable when both are set, matching every other
+flag in the table above.
+
+<Note>
+`memwal_restore` still lists `namespace` as **required** in its tool schema,
+so agents normally pass one explicitly. A configured default is only used as a
+fallback if the agent calls `memwal_restore` without a namespace.
+</Note>
+
+Example — pin every memory call to a `work` namespace:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp", "--namespace", "work"]
+    }
+  }
+}
+```
 
 ## Credential file
 
