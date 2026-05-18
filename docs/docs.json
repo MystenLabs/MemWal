@@ -110,7 +110,9 @@
           {
             "group": "Model Context Protocol",
             "pages": [
-              "mcp/overview"
+              "mcp/overview",
+              "mcp/quick-start",
+              "mcp/reference"
             ]
           }
         ]
