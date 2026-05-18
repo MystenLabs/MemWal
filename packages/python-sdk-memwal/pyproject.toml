@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memwal"
+version = "0.1.0"
+description = "Python SDK for MemWal — Privacy-first AI memory with Ed25519 signing"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "MemWal Team" },
+]
+keywords = ["memwal", "ai", "memory", "ed25519", "privacy", "walrus", "sui"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.27.0",
+    "PyNaCl>=1.5.0",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.2.0"]
+openai = ["openai>=1.0.0"]
+all = ["langchain-core>=0.2.0", "openai>=1.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.21.0",
+    "ruff>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://memwal.ai"
+Documentation = "https://docs.memwal.ai"
+Repository = "https://github.com/MystenLabs/MemWal"
+
+[tool.hatch.build.targets.wheel]
+packages = ["memwal"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
