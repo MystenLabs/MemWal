@@ -196,30 +196,57 @@ pub async fn ask(
     // blob cache -> Walrus download -> SEAL decrypt -> UTF-8 path as
     // recall, with reactive cleanup on Walrus 404. The engine derives the
     // SEAL credential from `auth`; per-blob errors are logged inside it.
-    let fetch_tasks = hits.into_iter().map(|hit| {
+    // We borrow `hits` for the fan-out so it's still around for the
+    // `zip_created_at_onto_hydrated` call below.
+    let fetch_tasks = hits.iter().map(|hit| {
         let auth = &auth;
         let engine = &state.engine;
-        async move {
-            engine
-                .fetch_one(owner, &hit.blob_id, hit.distance, auth)
-                .await
-        }
+        let blob_id = hit.blob_id.clone();
+        let distance = hit.distance;
+        async move { engine.fetch_one(owner, &blob_id, distance, auth).await }
     });
-    let memories: Vec<RecallResult> = futures::future::join_all(fetch_tasks)
+    let mut hydrated: Vec<crate::engine::HydratedMemory> = futures::future::join_all(fetch_tasks)
         .await
         .into_iter()
         // fetch_one returns Ok(None) for blobs that are gone / failed to
         // decrypt; surface only the AppError (sidecar down, etc.).
         .filter_map(|r| match r {
-            Ok(Some(m)) => Some(Ok(RecallResult {
-                blob_id: m.blob_id,
-                text: m.text,
-                distance: m.distance,
-            })),
+            Ok(Some(m)) => Some(Ok(m)),
             Ok(None) => None,
             Err(e) => Some(Err(e)),
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+
+    // Zip created_at on (engine returns None; recall path is responsible).
+    super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
+
+    // Validate scoring_weights up front so malformed input returns a 400
+    // rather than silently degrading to default ordering.
+    let weights = body.scoring_weights.unwrap_or_default();
+    weights.validate()?;
+    let ranker_active = weights.recency.abs() >= f64::EPSILON;
+    if ranker_active {
+        tracing::info!(
+            "ask: ranker active owner={} semantic={} recency={} half_life_days={}",
+            owner,
+            weights.semantic,
+            weights.recency,
+            weights.recency_half_life_days
+        );
+    }
+
+    // Composite re-rank — same contract as /api/recall.
+    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+
+    let memories: Vec<RecallResult> = ranked
+        .into_iter()
+        .map(|r| RecallResult {
+            blob_id: r.memory.blob_id,
+            text: r.memory.text,
+            distance: r.memory.distance,
+            score: r.score,
+        })
+        .collect();
 
     let memories_used = memories.len();
     tracing::info!("ask: {} memories found for context", memories_used);
@@ -619,6 +646,7 @@ mod tests {
             blob_id: "blob123".into(),
             text: "User likes coffee".into(),
             distance: 0.1,
+            score: None,
         }];
 
         let lines: Vec<String> = memories

@@ -243,21 +243,26 @@ impl VectorDb {
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
+        // `created_at` is selected alongside the cosine distance so the
+        // recall pipeline can rank by recency without a second round-trip.
+        // It's NOT NULL since migration 001, so the column comes back
+        // typed as `DateTime<Utc>` directly.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64)>, AppError> = sqlx::query_as(
-            "SELECT blob_id, (embedding <=> $1)::float8 AS distance
+        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>)>, AppError> =
+            sqlx::query_as(
+                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
              LIMIT $4",
-        )
-        .bind(embedding)
-        .bind(owner)
-        .bind(namespace)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+            )
+            .bind(embedding)
+            .bind(owner)
+            .bind(namespace)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),
@@ -267,7 +272,11 @@ impl VectorDb {
 
         let results = rows
             .into_iter()
-            .map(|(blob_id, distance)| SearchHit { blob_id, distance })
+            .map(|(blob_id, distance, created_at)| SearchHit {
+                blob_id,
+                distance,
+                created_at,
+            })
             .collect();
 
         Ok(results)
