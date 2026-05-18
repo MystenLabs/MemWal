@@ -88,6 +88,46 @@ See [How It Works](/mcp/how-it-works) for the full flow and security model.
 - The package can open the browser flow, save credentials, and recover from missing auth inline.
 - It keeps bearer credentials out of the MCP client config in the common stdio path.
 
+## Default memory namespace
+
+Memory tools take an optional `namespace` so you can keep, say, `work` and
+`personal` memories separate. Instead of having the agent pass it on every
+call, pin a default once in your client config — the package fills it in
+whenever the agent omits one.
+
+**Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp", "--namespace", "work"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`) — via env var:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp"],
+      "env": { "MEMWAL_NAMESPACE": "work" }
+    }
+  }
+}
+```
+
+An explicit per-call `namespace` from the agent always wins over the
+configured default. If neither a flag/env default nor a per-call value is
+set, the relayer applies its own `"default"` namespace. See
+[Reference](/mcp/reference#default-namespace) for the full precedence rules
+and `memwal_restore` behavior.
+
 ## What the MCP package adds
 
 Compared with wiring a raw HTTP MCP endpoint by hand, the package adds a few important runtime behaviors:
