@@ -15,6 +15,21 @@ from typing import List, Optional
 # Config
 # ============================================================
 
+#: Default ``server_url`` when neither an explicit URL nor an ``env`` preset
+#: is supplied. Kept as a module constant so ``__post_init__`` can tell an
+#: untouched default apart from an explicitly-passed custom URL.
+DEFAULT_SERVER_URL = "http://localhost:8000"
+
+#: Named relayer environments. Mirrors the TypeScript SDK / MCP package
+#: ``--prod`` / ``--dev`` / ``--staging`` / ``--local`` presets so the same
+#: shorthand works across every MemWal client.
+ENV_PRESETS = {
+    "prod": "https://relayer.memwal.ai",
+    "dev": "https://relayer.dev.memwal.ai",
+    "staging": "https://relayer.staging.memwal.ai",
+    "local": "http://127.0.0.1:8000",
+}
+
 
 @dataclass
 class MemWalConfig:
@@ -23,14 +38,33 @@ class MemWalConfig:
     Attributes:
         key: Ed25519 private key (hex string). This is the delegate key from app.memwal.com.
         account_id: MemWalAccount object ID on Sui.
-        server_url: Server URL (default: http://localhost:8000).
+        server_url: Server URL (default: http://localhost:8000). An explicit
+            non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
+        env: Optional relayer preset — one of ``"prod"``, ``"dev"``,
+            ``"staging"``, ``"local"``. Resolves ``server_url`` to the matching
+            hosted relayer when ``server_url`` is left at its default.
+            Precedence: explicit ``server_url`` > ``env`` > default.
     """
 
     key: str
     account_id: str
-    server_url: str = "http://localhost:8000"
+    server_url: str = DEFAULT_SERVER_URL
     namespace: str = "default"
+    env: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.env is not None:
+            preset = ENV_PRESETS.get(self.env)
+            if preset is None:
+                valid = ", ".join(sorted(ENV_PRESETS))
+                raise ValueError(
+                    f"Unknown env preset {self.env!r}. Valid presets: {valid}"
+                )
+            # Explicit, non-default server_url takes precedence over the
+            # preset; only fill from the preset when server_url is untouched.
+            if self.server_url == DEFAULT_SERVER_URL:
+                self.server_url = preset
 
 
 # ============================================================

@@ -33,6 +33,7 @@ from .client import (
 from .middleware import with_memwal_langchain, with_memwal_openai
 from .utils import delegate_key_to_sui_address, delegate_key_to_public_key
 from .types import (
+    ENV_PRESETS,
     AnalyzedFact,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -81,6 +82,7 @@ __all__ = [
     "withMemWal",
     # Types
     "MemWalConfig",
+    "ENV_PRESETS",
     "AskMemory",
     "AskResult",
     "RememberResult",

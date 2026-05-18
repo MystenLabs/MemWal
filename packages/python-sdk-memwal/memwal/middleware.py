@@ -143,6 +143,7 @@ def with_memwal_langchain(
     auto_save: bool = True,
     min_relevance: float = 0.3,
     debug: bool = False,
+    env: Optional[str] = None,
 ) -> "BaseChatModel":
     """Wrap a LangChain ``BaseChatModel`` with MemWal memory management.
 
@@ -163,6 +164,8 @@ def with_memwal_langchain(
         auto_save: Auto-save new facts from conversation.
         min_relevance: Minimum similarity score (0-1) to include a memory.
         debug: Enable debug logging.
+        env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
+            ``"local"``). Same precedence as :meth:`MemWal.create`.
 
     Returns:
         A wrapped ``BaseChatModel`` that automatically uses MemWal memory.
@@ -181,6 +184,7 @@ def with_memwal_langchain(
         account_id=account_id,
         server_url=server_url,
         namespace=namespace,
+        env=env,
     )
 
     log = logger.debug if not debug else logger.warning
@@ -298,6 +302,7 @@ def with_memwal_openai(
     auto_save: bool = True,
     min_relevance: float = 0.3,
     debug: bool = False,
+    env: Optional[str] = None,
 ) -> Any:
     """Wrap an OpenAI client with MemWal memory management.
 
@@ -320,6 +325,8 @@ def with_memwal_openai(
         auto_save: Auto-save new facts from conversation.
         min_relevance: Minimum similarity score (0-1) to include a memory.
         debug: Enable debug logging.
+        env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
+            ``"local"``). Same precedence as :meth:`MemWal.create`.
 
     Returns:
         The same client, with ``chat.completions.create`` wrapped to use MemWal.
@@ -329,6 +336,7 @@ def with_memwal_openai(
         account_id=account_id,
         server_url=server_url,
         namespace=namespace,
+        env=env,
     )
 
     log = logger.debug if not debug else logger.warning

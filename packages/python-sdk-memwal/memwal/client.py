@@ -131,6 +131,7 @@ class MemWal:
         account_id: str,
         server_url: str = "http://localhost:8000",
         namespace: str = "default",
+        env: Optional[str] = None,
     ) -> "MemWal":
         """Create a new MemWal client instance.
 
@@ -139,6 +140,10 @@ class MemWal:
             account_id: MemWalAccount object ID on Sui.
             server_url: Server URL (default: ``http://localhost:8000``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
+            env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
+                or ``"local"``. Resolves ``server_url`` to the matching hosted
+                relayer unless an explicit non-default ``server_url`` is given.
+                Precedence: explicit ``server_url`` > ``env`` > default.
 
         Returns:
             A configured :class:`MemWal` instance.
@@ -148,6 +153,7 @@ class MemWal:
             account_id=account_id,
             server_url=server_url,
             namespace=namespace,
+            env=env,
         )
         return cls(config)
 
@@ -843,16 +849,19 @@ class MemWalSync:
         account_id: str,
         server_url: str = "http://localhost:8000",
         namespace: str = "default",
+        env: Optional[str] = None,
     ) -> "MemWalSync":
         """Create a synchronous MemWal client.
 
-        Same parameters as :meth:`MemWal.create`.
+        Same parameters as :meth:`MemWal.create` (including the ``env``
+        relayer preset).
         """
         inner = MemWal.create(
             key=key,
             account_id=account_id,
             server_url=server_url,
             namespace=namespace,
+            env=env,
         )
         return cls(inner)
 
