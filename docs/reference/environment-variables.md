@@ -28,6 +28,8 @@ These are not all enforced at boot, but most real deployments need them.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `8000` | Relayer port |
+| `RUST_LOG` | `memwal_server=info,tower_http=info` | Rust tracing filter for relayer logs |
+| `LOG_FORMAT` | pretty text | Set to `json` for machine-parseable structured logs |
 | `SIDECAR_URL` | `http://localhost:9000` | Sidecar HTTP endpoint |
 | `OPENAI_API_BASE` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `SUI_NETWORK` | `mainnet` | Picks the fallback RPC URL and network-driven service defaults |

@@ -90,6 +90,7 @@ impl Extractor for LlmExtractor {
 
         let url = format!("{}/chat/completions", self.config.openai_api_base);
 
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(&url)
@@ -112,7 +113,22 @@ impl Extractor for LlmExtractor {
             })
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("LLM API request failed: {}", e)))?;
+            .map_err(|e| {
+                crate::observability::observe_external(
+                    "openai",
+                    "chat_completions",
+                    "transport_error",
+                    started.elapsed(),
+                );
+                AppError::Internal(format!("LLM API request failed: {}", e))
+            })?;
+        let status_label = resp.status().as_u16().to_string();
+        crate::observability::observe_external(
+            "openai",
+            "chat_completions",
+            &status_label,
+            started.elapsed(),
+        );
 
         if !resp.status().is_success() {
             let status = resp.status();

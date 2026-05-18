@@ -152,13 +152,32 @@ async fn upload_blob_inner(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
     let resp = req
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Sidecar walrus/upload request failed: {}", e)))?;
+        .map_err(|e| {
+            crate::observability::observe_external(
+                "sidecar",
+                "walrus_upload",
+                "transport_error",
+                started.elapsed(),
+            );
+            crate::observability::record_sidecar_failure("walrus_upload", "transport_error");
+            AppError::Internal(format!("Sidecar walrus/upload request failed: {}", e))
+        })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_upload",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_upload", "http_error");
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
             return Err(AppError::Internal(format!(
@@ -222,18 +241,38 @@ pub async fn set_metadata_batch(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    let req = crate::observability::apply_request_id_header(req);
 
+    let started = std::time::Instant::now();
     let resp = req
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
         .map_err(|e| {
+            crate::observability::observe_external(
+                "sidecar",
+                "walrus_set_metadata_batch",
+                "transport_error",
+                started.elapsed(),
+            );
+            crate::observability::record_sidecar_failure(
+                "walrus_set_metadata_batch",
+                "transport_error",
+            );
             AppError::Internal(format!(
                 "Sidecar walrus/set-metadata-batch request failed: {}",
                 e
             ))
         })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_set_metadata_batch",
+        &status_label,
+        started.elapsed(),
+    );
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_set_metadata_batch", "http_error");
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
             return Err(AppError::Internal(format!(
@@ -287,12 +326,28 @@ pub async fn query_blobs_by_owner(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e)))?;
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "walrus_query_blobs",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("walrus_query_blobs", "transport_error");
+        AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_query_blobs",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_query_blobs", "http_error");
         let body = resp.text().await.unwrap_or_default();
         return Err(AppError::Internal(format!(
             "walrus query-blobs failed: {}",
@@ -325,20 +380,41 @@ pub async fn download_blob(
     blob_id: &str,
 ) -> Result<Vec<u8>, AppError> {
     // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
+    let started = std::time::Instant::now();
     let download_fut = walrus_client.read_blob_by_id(blob_id);
     let bytes = match tokio::time::timeout(std::time::Duration::from_secs(15), download_fut).await {
-        Ok(Ok(data)) => data,
+        Ok(Ok(data)) => {
+            crate::observability::observe_external(
+                "walrus",
+                "download_blob",
+                "ok",
+                started.elapsed(),
+            );
+            data
+        }
         Ok(Err(e)) => {
             let err_str = e.to_string();
             let is_not_found = err_str.contains("404")
                 || err_str.to_lowercase().contains("not found")
                 || err_str.to_lowercase().contains("blob not found");
             if is_not_found {
+                crate::observability::observe_external(
+                    "walrus",
+                    "download_blob",
+                    "not_found",
+                    started.elapsed(),
+                );
                 return Err(AppError::BlobNotFound(format!(
                     "Blob {} expired or not found: {}",
                     blob_id, err_str
                 )));
             } else {
+                crate::observability::observe_external(
+                    "walrus",
+                    "download_blob",
+                    "error",
+                    started.elapsed(),
+                );
                 return Err(AppError::Internal(format!(
                     "Walrus download failed: {}",
                     err_str
@@ -346,8 +422,14 @@ pub async fn download_blob(
             }
         }
         Err(_) => {
+            crate::observability::observe_external(
+                "walrus",
+                "download_blob",
+                "timeout",
+                started.elapsed(),
+            );
             return Err(AppError::Internal(format!(
-                "Walrus download timed out after 10s for blob {}",
+                "Walrus download timed out after 15s for blob {}",
                 blob_id
             )));
         }

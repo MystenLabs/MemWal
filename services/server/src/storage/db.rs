@@ -8,6 +8,14 @@ pub struct VectorDb {
     pool: PgPool,
 }
 
+fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
+    if result.is_ok() {
+        "ok"
+    } else {
+        "error"
+    }
+}
+
 impl VectorDb {
     /// Initialize database connection pool and run migrations
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
@@ -98,7 +106,8 @@ impl VectorDb {
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
-        sqlx::query(
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (id) DO UPDATE SET
@@ -116,7 +125,9 @@ impl VectorDb {
         .bind(blob_size_bytes)
         .execute(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
+        result?;
 
         tracing::debug!(
             "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
@@ -147,7 +158,8 @@ impl VectorDb {
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
-        sqlx::query(
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET
@@ -167,7 +179,13 @@ impl VectorDb {
         .bind(plaintext)
         .execute(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)));
+        crate::observability::observe_db(
+            "vector.insert_plaintext",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
 
         tracing::debug!(
             "inserted plaintext vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
@@ -195,14 +213,21 @@ impl VectorDb {
         blob_id: &str,
         owner: &str,
     ) -> Result<Option<String>, AppError> {
-        let row: Option<(Option<String>,)> = sqlx::query_as(
+        let started = std::time::Instant::now();
+        let result: Result<Option<(Option<String>,)>, AppError> = sqlx::query_as(
             "SELECT plaintext FROM vector_entries WHERE blob_id = $1 AND owner = $2 LIMIT 1",
         )
         .bind(blob_id)
         .bind(owner)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)));
+        crate::observability::observe_db(
+            "vector.fetch_plaintext",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let row = result?;
 
         Ok(row.and_then(|(plaintext,)| plaintext))
     }
@@ -218,7 +243,8 @@ impl VectorDb {
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
-        let rows: Vec<(String, f64)> = sqlx::query_as(
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String, f64)>, AppError> = sqlx::query_as(
             "SELECT blob_id, (embedding <=> $1)::float8 AS distance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
@@ -231,7 +257,13 @@ impl VectorDb {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        crate::observability::observe_db(
+            "vector.search_similar",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
 
         let results = rows
             .into_iter()
@@ -247,7 +279,8 @@ impl VectorDb {
         owner: &str,
         namespace: &str,
     ) -> Result<Vec<String>, AppError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
             "SELECT DISTINCT blob_id FROM vector_entries
              WHERE owner = $1 AND namespace = $2",
         )
@@ -255,7 +288,13 @@ impl VectorDb {
         .bind(namespace)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to get blobs by namespace: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to get blobs by namespace: {}", e)));
+        crate::observability::observe_db(
+            "vector.get_blobs_by_namespace",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
 
         Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
     }
@@ -268,7 +307,8 @@ impl VectorDb {
         owner: &str,
         namespace: &str,
     ) -> Result<(i64, i64), AppError> {
-        let row: (i64, i64) = sqlx::query_as(
+        let started = std::time::Instant::now();
+        let result: Result<(i64, i64), AppError> = sqlx::query_as(
             "SELECT COUNT(*)::BIGINT, COALESCE(SUM(blob_size_bytes)::BIGINT, 0)
              FROM vector_entries WHERE owner = $1 AND namespace = $2",
         )
@@ -276,7 +316,13 @@ impl VectorDb {
         .bind(namespace)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to get namespace stats: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to get namespace stats: {}", e)));
+        crate::observability::observe_db(
+            "vector.namespace_stats",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let row = result?;
 
         Ok(row)
     }
@@ -287,12 +333,19 @@ impl VectorDb {
     /// retrievable and stop counting toward storage quota.) Reachable via
     /// `POST /api/forget` — authed, owner-scoped.
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
+        let started = std::time::Instant::now();
         let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
             .bind(owner)
             .bind(namespace)
             .execute(&self.pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)))?;
+            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
+        crate::observability::observe_db(
+            "vector.delete_by_namespace",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let result = result?;
 
         let rows = result.rows_affected();
         tracing::info!(
@@ -308,14 +361,19 @@ impl VectorDb {
     /// Called reactively when Walrus returns 404 during blob download.
     /// LOW-10: Requires owner to prevent cross-user blob deletion.
     pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
+        let started = std::time::Instant::now();
         let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
             .bind(blob_id)
             .bind(owner)
             .execute(&self.pool)
             .await
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to delete vector by blob_id: {}", e))
-            })?;
+            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
+        crate::observability::observe_db(
+            "vector.delete_by_blob_id",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let result = result?;
 
         let rows = result.rows_affected();
         if rows > 0 {
@@ -339,15 +397,21 @@ impl VectorDb {
         &self,
         public_key_hex: &str,
     ) -> Result<Option<(String, String)>, AppError> {
-        let result: Option<(String, String)> = sqlx::query_as(
+        let started = std::time::Instant::now();
+        let result: Result<Option<(String, String)>, AppError> = sqlx::query_as(
             "SELECT account_id, owner FROM delegate_key_cache WHERE public_key = $1 AND expires_at > NOW()",
         )
         .bind(public_key_hex)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to query cache: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to query cache: {}", e)));
+        crate::observability::observe_db(
+            "delegate_cache.get",
+            db_status(&result),
+            started.elapsed(),
+        );
 
-        Ok(result)
+        result
     }
 
     /// Cache a verified delegate key → account mapping.
@@ -357,7 +421,8 @@ impl VectorDb {
         account_id: &str,
         owner: &str,
     ) -> Result<(), AppError> {
-        sqlx::query(
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
             "INSERT INTO delegate_key_cache (public_key, account_id, owner, expires_at)
              VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
              ON CONFLICT (public_key)
@@ -368,7 +433,13 @@ impl VectorDb {
         .bind(owner)
         .execute(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to cache delegate key: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to cache delegate key: {}", e)));
+        crate::observability::observe_db(
+            "delegate_cache.set",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
 
         tracing::debug!(
             "cached delegate key: {} -> account {}",
@@ -459,6 +530,7 @@ impl VectorDb {
         owner: &str,
         lock_key: i64,
     ) -> Result<i64, AppError> {
+        let started = std::time::Instant::now();
         let mut tx = self
             .pool
             .begin()
@@ -483,6 +555,7 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
+        crate::observability::observe_db("quota.storage_used_with_lock", "ok", started.elapsed());
         Ok(row.0)
     }
 

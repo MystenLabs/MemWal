@@ -102,83 +102,92 @@ fn spawn_prepare_remember_job(
     namespace: String,
     agent_public_key: String,
 ) {
+    let request_context = crate::observability::current_context();
     tokio::spawn(async move {
-        let result: Result<(), AppError> = async {
-            // ENG-1407: texts beyond the embedder's context window must be
-            // summarized first. Summarization runs sequentially before the
-            // embed/encrypt fan-out because the summary is the embedder's
-            // input — encrypt still uses the original `text`.
-            let needs_summary =
-                text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
-            let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
-                let summary =
-                    summarize_for_embedding(&state.http_client, &state.config, &text).await?;
-                tracing::info!(
-                    "remember prep: summarized {} bytes → {} bytes for embedding (job_id={})",
-                    text.len(),
-                    summary.len(),
-                    job_id,
+        let work = async move {
+            let result: Result<(), AppError> = async {
+                // ENG-1407: texts beyond the embedder's context window must be
+                // summarized first. Summarization runs sequentially before the
+                // embed/encrypt fan-out because the summary is the embedder's
+                // input — encrypt still uses the original `text`.
+                let needs_summary =
+                    text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
+                let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
+                    let summary =
+                        summarize_for_embedding(&state.http_client, &state.config, &text).await?;
+                    tracing::info!(
+                        "remember prep: summarized {} bytes → {} bytes for embedding (job_id={})",
+                        text.len(),
+                        summary.len(),
+                        job_id,
+                    );
+                    std::borrow::Cow::Owned(summary)
+                } else {
+                    std::borrow::Cow::Borrowed(text.as_str())
+                };
+
+                let embed_fut = state.embedder.embed(&embed_input);
+                let encrypt_fut = crate::storage::seal::seal_encrypt(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    text.as_bytes(),
+                    &owner,
+                    &state.config.package_id,
                 );
-                std::borrow::Cow::Owned(summary)
-            } else {
-                std::borrow::Cow::Borrowed(text.as_str())
-            };
+                let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
+                let vector = vector_result?;
+                let encrypted = encrypted_result?;
 
-            let embed_fut = state.embedder.embed(&embed_input);
-            let encrypt_fut = crate::storage::seal::seal_encrypt(
-                &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
-                text.as_bytes(),
-                &owner,
-                &state.config.package_id,
-            );
-            let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-            let vector = vector_result?;
-            let encrypted = encrypted_result?;
+                rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
 
-            rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
+                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                    AppError::Internal(
+                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                            .into(),
+                    )
+                })?;
+                let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
 
-            let wallet_index = state.key_pool.next_index().ok_or_else(|| {
-                AppError::Internal(
-                    "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                        .into(),
+                enqueue_wallet_job(
+                    &state,
+                    wallet_index,
+                    WalletOperation::UploadAndTransfer {
+                        encrypted_b64,
+                        vector,
+                        owner: owner.clone(),
+                        namespace: namespace.clone(),
+                        package_id: state.config.package_id.clone(),
+                        agent_public_key: Some(agent_public_key.clone()),
+                        remember_job_id: Some(job_id.clone()),
+                        epochs: 50,
+                    },
                 )
-            })?;
-            let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+                .await?;
 
-            enqueue_wallet_job(
-                &state,
-                wallet_index,
-                WalletOperation::UploadAndTransfer {
-                    encrypted_b64,
-                    vector,
-                    owner: owner.clone(),
-                    namespace: namespace.clone(),
-                    package_id: state.config.package_id.clone(),
-                    agent_public_key: Some(agent_public_key.clone()),
-                    remember_job_id: Some(job_id.clone()),
-                    epochs: 50,
-                },
-            )
-            .await?;
+                tracing::info!(
+                    "remember prepared: job_id={} owner={} ns={} encrypted_bytes={} wallet={}",
+                    job_id,
+                    owner,
+                    namespace,
+                    encrypted.len(),
+                    wallet_index,
+                );
+                Ok(())
+            }
+            .await;
 
-            tracing::info!(
-                "remember prepared: job_id={} owner={} ns={} encrypted_bytes={} wallet={}",
-                job_id,
-                owner,
-                namespace,
-                encrypted.len(),
-                wallet_index,
-            );
-            Ok(())
-        }
-        .await;
+            if let Err(e) = result {
+                let msg = e.to_string();
+                tracing::error!("remember preparation failed: job_id={} {}", job_id, msg);
+                mark_remember_job_failed(&state, &job_id, &msg).await;
+            }
+        };
 
-        if let Err(e) = result {
-            let msg = e.to_string();
-            tracing::error!("remember preparation failed: job_id={} {}", job_id, msg);
-            mark_remember_job_failed(&state, &job_id, &msg).await;
+        if let Some(request_context) = request_context {
+            crate::observability::with_request_context(request_context, work).await;
+        } else {
+            work.await;
         }
     });
 }
@@ -189,118 +198,129 @@ fn spawn_prepare_bulk_remember_job(
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
 ) {
+    let request_context = crate::observability::current_context();
     tokio::spawn(async move {
-        let job_ids: Vec<String> = pending_items
-            .iter()
-            .map(|item| item.job_id.clone())
-            .collect();
-        let result: Result<(), AppError> = async {
-            let prep_tasks: Vec<_> = pending_items
-                .into_iter()
-                .map(|item| {
-                    let state = Arc::clone(&state);
-                    let owner = owner.clone();
-                    async move {
-                        // ENG-1407: bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
-                        // each, so the same summarize-before-embed rule applies here.
-                        let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
-                            && state.config.openai_api_key.is_some();
-                        let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
-                            let summary = summarize_for_embedding(
-                                &state.http_client,
-                                &state.config,
-                                &item.text,
-                            )
-                            .await?;
-                            tracing::info!(
-                                "bulk prep: summarized {} bytes → {} bytes for embedding (job_id={})",
-                                item.text.len(),
-                                summary.len(),
-                                item.job_id,
-                            );
-                            std::borrow::Cow::Owned(summary)
-                        } else {
-                            std::borrow::Cow::Borrowed(item.text.as_str())
-                        };
-
-                        let embed_fut = state.embedder.embed(&embed_input);
-                        let encrypt_fut = crate::storage::seal::seal_encrypt(
-                            &state.http_client,
-                            &state.config.sidecar_url,
-                            state.config.sidecar_secret.as_deref(),
-                            item.text.as_bytes(),
-                            &owner,
-                            &state.config.package_id,
-                        );
-                        let (vector_result, encrypted_result) =
-                            tokio::join!(embed_fut, encrypt_fut);
-                        Ok::<_, AppError>((
-                            item.job_id,
-                            item.namespace,
-                            vector_result?,
-                            encrypted_result?,
-                        ))
-                    }
-                })
+        let work = async move {
+            let job_ids: Vec<String> = pending_items
+                .iter()
+                .map(|item| item.job_id.clone())
                 .collect();
+            let result: Result<(), AppError> = async {
+                let prep_tasks: Vec<_> = pending_items
+                    .into_iter()
+                    .map(|item| {
+                        let state = Arc::clone(&state);
+                        let owner = owner.clone();
+                        async move {
+                            // ENG-1407: bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
+                            // each, so the same summarize-before-embed rule applies here.
+                            let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
+                                && state.config.openai_api_key.is_some();
+                            let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
+                                let summary = summarize_for_embedding(
+                                    &state.http_client,
+                                    &state.config,
+                                    &item.text,
+                                )
+                                .await?;
+                                tracing::info!(
+                                    "bulk prep: summarized {} bytes → {} bytes for embedding (job_id={})",
+                                    item.text.len(),
+                                    summary.len(),
+                                    item.job_id,
+                                );
+                                std::borrow::Cow::Owned(summary)
+                            } else {
+                                std::borrow::Cow::Borrowed(item.text.as_str())
+                            };
 
-            let prep_results = collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
+                            let embed_fut = state.embedder.embed(&embed_input);
+                            let encrypt_fut = crate::storage::seal::seal_encrypt(
+                                &state.http_client,
+                                &state.config.sidecar_url,
+                                state.config.sidecar_secret.as_deref(),
+                                item.text.as_bytes(),
+                                &owner,
+                                &state.config.package_id,
+                            );
+                            let (vector_result, encrypted_result) =
+                                tokio::join!(embed_fut, encrypt_fut);
+                            Ok::<_, AppError>((
+                                item.job_id,
+                                item.namespace,
+                                vector_result?,
+                                encrypted_result?,
+                            ))
+                        }
+                    })
+                    .collect();
 
-            let mut prepared: Vec<(String, String, Vec<f32>, Vec<u8>)> =
-                Vec::with_capacity(prep_results.len());
-            let mut total_encrypted_bytes: i64 = 0;
-            for result in prep_results {
-                let (job_id, namespace, vector, encrypted) = result?;
-                total_encrypted_bytes += encrypted.len() as i64;
-                prepared.push((job_id, namespace, vector, encrypted));
+                let prep_results =
+                    collect_bounded_results(prep_tasks, BULK_EMBED_CONCURRENCY).await;
+
+                let mut prepared: Vec<(String, String, Vec<f32>, Vec<u8>)> =
+                    Vec::with_capacity(prep_results.len());
+                let mut total_encrypted_bytes: i64 = 0;
+                for result in prep_results {
+                    let (job_id, namespace, vector, encrypted) = result?;
+                    total_encrypted_bytes += encrypted.len() as i64;
+                    prepared.push((job_id, namespace, vector, encrypted));
+                }
+
+                rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
+
+                let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
+                for (job_id, namespace, vector, encrypted) in prepared {
+                    let wallet_index = state
+                        .key_pool
+                        .next_index()
+                        .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+                    let encrypted_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&encrypted);
+                    bulk_items.push(BulkRememberItem {
+                        job_id,
+                        encrypted_b64,
+                        vector,
+                        namespace,
+                        wallet_index,
+                    });
+                }
+
+                let mut storage = state.bulk_job_storage.clone();
+                storage
+                    .push(crate::jobs::BulkRememberJob {
+                        owner: owner.clone(),
+                        package_id: state.config.package_id.clone(),
+                        agent_public_key: Some(agent_public_key.clone()),
+                        items: bulk_items,
+                        epochs: 50,
+                    })
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!("Failed to enqueue bulk remember job: {}", e))
+                    })?;
+
+                tracing::info!(
+                    "remember_bulk prepared: {} items owner={} total_encrypted_bytes={}",
+                    job_ids.len(),
+                    owner,
+                    total_encrypted_bytes
+                );
+                Ok(())
             }
+            .await;
 
-            rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
-
-            let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
-            for (job_id, namespace, vector, encrypted) in prepared {
-                let wallet_index = state
-                    .key_pool
-                    .next_index()
-                    .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
-                let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
-                bulk_items.push(BulkRememberItem {
-                    job_id,
-                    encrypted_b64,
-                    vector,
-                    namespace,
-                    wallet_index,
-                });
+            if let Err(e) = result {
+                let msg = e.to_string();
+                tracing::error!("remember_bulk preparation failed: {}", msg);
+                mark_remember_jobs_failed(&state, &job_ids, &msg).await;
             }
+        };
 
-            let mut storage = state.bulk_job_storage.clone();
-            storage
-                .push(crate::jobs::BulkRememberJob {
-                    owner: owner.clone(),
-                    package_id: state.config.package_id.clone(),
-                    agent_public_key: Some(agent_public_key.clone()),
-                    items: bulk_items,
-                    epochs: 50,
-                })
-                .await
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to enqueue bulk remember job: {}", e))
-                })?;
-
-            tracing::info!(
-                "remember_bulk prepared: {} items owner={} total_encrypted_bytes={}",
-                job_ids.len(),
-                owner,
-                total_encrypted_bytes
-            );
-            Ok(())
-        }
-        .await;
-
-        if let Err(e) = result {
-            let msg = e.to_string();
-            tracing::error!("remember_bulk preparation failed: {}", msg);
-            mark_remember_jobs_failed(&state, &job_ids, &msg).await;
+        if let Some(request_context) = request_context {
+            crate::observability::with_request_context(request_context, work).await;
+        } else {
+            work.await;
         }
     });
 }
@@ -384,7 +404,7 @@ async fn summarize_with_prompt(
 
     let url = format!("{}/chat/completions", config.openai_api_base);
 
-    let resp = client
+    let req = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
@@ -402,10 +422,25 @@ async fn summarize_with_prompt(
             ],
             temperature: 0.1,
             max_tokens,
-        })
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Summarization API request failed: {}", e)))?;
+        });
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "openai",
+            "summarize_for_embedding",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Summarization API request failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "openai",
+        "summarize_for_embedding",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
         let status = resp.status();
