@@ -9,6 +9,18 @@ This page documents every tool, flag, environment variable, and transport route 
 
 The MCP server exposes **six tools** — four **memory tools** that round-trip to the relayer, and two **session tools** served locally by the stdio package.
 
+## First-run behavior
+
+When `~/.memwal/credentials.json` is missing, the stdio package does **not** exit immediately if it was launched by an MCP host.
+
+Instead it starts in an auth-required mode that:
+
+- responds to MCP `initialize`
+- exposes the memory tools plus `memwal_login`
+- returns an actionable error for memory tool calls until sign-in completes
+
+This is why many first-run sessions show `memwal_login` before the other tools are actually usable.
+
 ### memwal_remember
 
 Save a fact to the user's MemWal personal memory. Call only when the user explicitly asks to remember or save something. Pass the full statement — do not summarize.
@@ -79,6 +91,41 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 
 Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
 
+## Credential file
+
+The stdio package stores credentials at:
+
+```text
+~/.memwal/credentials.json
+```
+
+The file includes:
+
+- delegate private key
+- delegate public key
+- delegate address
+- wallet address
+- account ID
+- package ID
+- relayer URL
+- label
+- creation timestamp
+
+The file is written with restrictive permissions (`0600`) on supported systems.
+
+<Warning>
+Treat the delegate private key in this file like an API key. Anyone who gets it can act as this MCP client until the delegate is revoked.
+</Warning>
+
+## Client config paths
+
+Common local config locations:
+
+- **Cursor**: `~/.cursor/mcp.json`
+- **Claude Desktop (macOS)**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Codex**: `~/.codex/config.toml`
+- **Claude Code**: stored through the `claude mcp add` registry
+
 ### Environment presets
 
 Shortcut flags that set both the relayer and the dashboard URL in one switch:
@@ -133,6 +180,20 @@ claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
 
 If your client cannot attach headers from the CLI, edit the generated MCP config file to add them manually.
 
+### When to prefer HTTP vs stdio
+
+Prefer **stdio** when:
+
+- the MCP host already supports local `command + args`
+- you want inline `memwal_login` UX
+- you do not want to paste long-lived bearer credentials into client config
+
+Prefer **Streamable HTTP** when:
+
+- the MCP host supports remote MCP servers and request headers cleanly
+- you are wiring a shared hosted endpoint instead of a local package
+- you intentionally want a config based on explicit bearer credentials
+
 ### Public routes
 
 The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
@@ -147,6 +208,20 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 
 The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal MemWal SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
 
+## Runtime safety notes
+
+### 401 behavior
+
+If the relayer returns `401 Unauthorized`, the package surfaces a clear error but does **not** auto-delete `~/.memwal/credentials.json`.
+
+That is intentional. A `401` can mean a revoked delegate key, but it can also come from a transient edge/proxy/network issue. Leaving the file untouched avoids turning a temporary failure into forced re-auth.
+
+### `--relayer` override behavior
+
+If a saved credentials file already points at one relayer and the current process is launched with a different `--relayer`, the override applies to the **current process only**.
+
+The saved file is not silently rewritten. To rotate the saved relayer permanently, sign out and log in again on the target environment.
+
 ## Self-Hosting
 
 Self-hosted relayers expose the same public MCP routes as the hosted relayer. The most common operator-tunable settings:
@@ -159,6 +234,17 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute |
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
+
+## Logout semantics
+
+`memwal_logout` and `--logout` only delete local credentials from this machine.
+
+They do **not**:
+
+- revoke the on-chain delegate key
+- remove the delegate from the MemWal dashboard
+
+If the delegate itself should stop working, revoke it from the dashboard too.
 
 ## Troubleshooting
 

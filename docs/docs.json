@@ -112,7 +112,9 @@
             "pages": [
               "mcp/overview",
               "mcp/quick-start",
-              "mcp/reference"
+              "mcp/how-it-works",
+              "mcp/reference",
+              "mcp/changelog"
             ]
           }
         ]

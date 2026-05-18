@@ -13,6 +13,20 @@ This page gets you from zero to a working MemWal MCP server inside Cursor, Claud
 
 No npm install needed — `npx` fetches the `@mysten-incubation/memwal-mcp` package on demand.
 
+## Choose your login path
+
+You have two valid ways to get credentials onto the machine:
+
+- **Inline from the MCP client**: add the package to the client config first, then let the agent call `memwal_login`
+- **Manual from a terminal**: run `npx -y @mysten-incubation/memwal-mcp login --prod` yourself before wiring the client
+
+Both paths end with the same local file: `~/.memwal/credentials.json`.
+
+For most teams, the best default is:
+
+- use the **stdio package** for local MCP clients
+- use **Streamable HTTP** only when the client clearly supports remote MCP headers cleanly
+
 ## Installation
 
 <Steps>
@@ -88,6 +102,23 @@ No npm install needed — `npx` fetches the `@mysten-incubation/memwal-mcp` pack
   </Step>
 </Steps>
 
+## Common config locations
+
+- **Cursor**: `~/.cursor/mcp.json`
+- **Claude Desktop (macOS)**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Codex**: `~/.codex/config.toml`
+- **Claude Code**: managed through `claude mcp add` / `claude mcp list`
+
+## What first run should look like
+
+If you skip the manual terminal login and go straight to the MCP client, that is fine.
+
+- The package does **not** crash when credentials are missing.
+- Instead it starts in an **auth-required mode** that still exposes `memwal_login`.
+- Ask the agent to run `memwal_login`, approve the browser flow, then retry the original memory action.
+
+That behavior is intentional. It avoids the old UX where the MCP host only showed a vague “failed to start server” message.
+
 ## Verify
 
 ### Check connectivity
@@ -105,7 +136,9 @@ You should see six tools:
 - `memwal_login`
 - `memwal_logout`
 
-If you only see five — or only `memwal_login` — credentials are missing. Run the login command from step 1 again or ask the agent to call `memwal_login`.
+If you only see five — or only `memwal_login` — credentials are missing. This is the expected first-run state in many MCP clients. Run the login command from step 1 again or ask the agent to call `memwal_login`.
+
+If you do **not** see any MemWal tools at all, the MCP host likely never loaded the package. Double-check the config file path, restart the client fully, and confirm you are on Node 20+.
 
 ### Save and recall a memory
 
@@ -129,6 +162,18 @@ Use memwal_analyze on this paragraph: "I live in Saigon, work as a software engi
 
 The tool extracts each distinct fact and saves them as separate memories. Follow up with `memwal_recall` to verify any one of them came back.
 
+## Direct HTTP setup
+
+If your MCP client supports remote servers with custom headers, you can connect directly to the hosted relayer instead of running `npx` locally.
+
+Use:
+
+- URL: `https://relayer.memwal.ai/api/mcp`
+- Header: `Authorization: Bearer <delegatePrivateKey>`
+- Header: `x-memwal-account-id: <accountId>`
+
+Those values come from `~/.memwal/credentials.json` after a successful login. See [Reference](/mcp/reference#streamable-http) for the full config shape and security notes.
+
 ## Switching environments
 
 Need to hop between prod, staging, dev, or a local relayer without re-editing your client config?
@@ -139,6 +184,19 @@ npx -y @mysten-incubation/memwal-mcp login --staging
 ```
 
 Your client config doesn't change — the package reads the saved environment from `~/.memwal/credentials.json` on each run. See [Environment presets](/mcp/reference#environment-presets) for all four shortcuts.
+
+## Local development
+
+To point the package at a local dashboard + relayer during development:
+
+```bash
+npx -y @mysten-incubation/memwal-mcp login --local
+```
+
+That preset maps to:
+
+- relayer: `http://127.0.0.1:8000`
+- dashboard: `http://localhost:5173`
 
 ## Signing out
 
@@ -155,6 +213,9 @@ This deletes the local credentials file. The on-chain delegate key is **not** re
 <CardGroup cols={2}>
   <Card title="Reference" icon="book" href="/mcp/reference">
     All six tools with parameters, CLI flags, and transport routes
+  </Card>
+  <Card title="How It Works" icon="route" href="/mcp/how-it-works">
+    Auth-required mode, local credentials, and bridge behavior
   </Card>
   <Card title="Streamable HTTP transport" icon="globe" href="/mcp/reference#streamable-http">
     Skip `npx` — point your client at the relayer URL directly
