@@ -20,7 +20,7 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::walrus::SetMetadataBatchEntry;
-use crate::types::{AppState, BLOB_CACHE_KEY_PREFIX};
+use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
 // ============================================================
 // WalletJob — unified job type for all wallet-signing operations
@@ -71,7 +71,8 @@ pub enum WalletOperation {
 }
 
 fn default_epochs() -> u32 {
-    50
+    let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+    configured_walrus_storage_epochs(&network)
 }
 
 pub(crate) async fn warm_blob_cache_after_upload(
@@ -533,6 +534,9 @@ impl WalletJobError {
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        if lower.contains("moveabort") || lower.contains("move abort") {
+            return WalletJobError::Permanent(msg.to_string());
+        }
         if lower.contains("objectlocked")
             || lower.contains("object_locked")
             || lower.contains("object is locked")
@@ -542,9 +546,6 @@ impl WalletJobError {
             || lower.contains("sponsored transaction has expired")
         {
             return WalletJobError::Transient(msg.to_string());
-        }
-        if lower.contains("moveabort") || lower.contains("move abort") {
-            return WalletJobError::Permanent(msg.to_string());
         }
         WalletJobError::Transient(msg.to_string())
     }
@@ -875,6 +876,7 @@ mod tests {
         for msg in [
             "MoveAbort(MoveLocation { module: ... }, 1)",
             "Move abort at code 7",
+            "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
         ] {
             assert!(
                 WalletJobError::classify_sidecar_error(msg).is_permanent(),

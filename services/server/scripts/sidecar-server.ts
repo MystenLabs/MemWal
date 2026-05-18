@@ -67,7 +67,14 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         : "https://upload-relay.mainnet.walrus.space"
 );
 
-const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 3;
+const MAX_WALRUS_EPOCHS = 5;
+const DEFAULT_WALRUS_EPOCHS = (() => {
+    const parsed = Number.parseInt(process.env.WALRUS_STORAGE_EPOCHS || "", 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(parsed, MAX_WALRUS_EPOCHS);
+    }
+    return SUI_NETWORK === "mainnet" ? 3 : MAX_WALRUS_EPOCHS;
+})();
 const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 const suiClient = new SuiJsonRpcClient({
@@ -81,14 +88,19 @@ const sealClient = new SealClient({
     verifyKeyServers: true,
 });
 
-const walrusClient = new WalrusClient({
-    network: SUI_NETWORK,
-    suiClient: suiClient as any,
-    uploadRelay: {
-        host: WALRUS_UPLOAD_RELAY_URL,
-        sendTip: { max: 10_000_000 },
-    },
-});
+function createWalrusClient(): WalrusClient {
+    return new WalrusClient({
+        network: SUI_NETWORK,
+        suiClient: suiClient as any,
+        uploadRelay: {
+            host: WALRUS_UPLOAD_RELAY_URL,
+            sendTip: { max: 10_000_000 },
+        },
+    });
+}
+
+let walrusClient = createWalrusClient();
+let walrusClientCreatedAtMs = Date.now();
 const sidecarStartedAtMs = Date.now();
 
 const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
@@ -107,6 +119,14 @@ type UploadRelayTipConfigResponse = {
         address?: string;
     };
 };
+
+function clampWalrusEpochs(rawEpochs: unknown): number {
+    const parsed = Number(rawEpochs);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return DEFAULT_WALRUS_EPOCHS;
+    }
+    return Math.min(Math.floor(parsed), MAX_WALRUS_EPOCHS);
+}
 
 /**
  * Rewrite CoinWithBalance "gas" intents to explicit SUI coin type so Enoki
@@ -144,6 +164,14 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
     const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
+const WALRUS_CLIENT_MAX_AGE_MS = (() => {
+    const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
+})();
+const UPLOAD_RELAY_TIP_CACHE_TTL_MS = (() => {
+    const parsed = Number.parseInt(process.env.UPLOAD_RELAY_TIP_CACHE_TTL_MS || "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
+})();
 
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
@@ -164,6 +192,7 @@ const sidecarMetrics = {
 };
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
+let uploadRelayTipAddressCacheLoadedAtMs = 0;
 let activeWalrusUploads = 0;
 
 function shortAddress(address: unknown): string | undefined {
@@ -200,11 +229,40 @@ function summarizeEnokiError(text: string): Record<string, unknown> {
     return { body: truncateForLog(text) };
 }
 
+function isMoveAbortBalanceSplit(message: string): boolean {
+    return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
+}
+
+function clearUploadRelayTipCache(): void {
+    uploadRelayTipAddressCache = undefined;
+    uploadRelayTipAddressCacheLoadedAtMs = 0;
+}
+
+function refreshWalrusClient(reason: string): void {
+    try {
+        walrusClient.reset();
+    } catch (err: any) {
+        console.warn(`[walrus/client] reset failed before refresh reason=${reason}: ${err?.message || err}`);
+    }
+    walrusClient = createWalrusClient();
+    walrusClientCreatedAtMs = Date.now();
+    clearUploadRelayTipCache();
+    console.warn(`[walrus/client] refreshed reason=${reason}`);
+}
+
+function refreshWalrusClientIfStale(): void {
+    const ageMs = Date.now() - walrusClientCreatedAtMs;
+    if (ageMs >= WALRUS_CLIENT_MAX_AGE_MS) {
+        refreshWalrusClient(`max_age_${ageMs}ms`);
+    }
+}
+
 function sidecarStateSnapshot(): Record<string, unknown> {
     const memory = process.memoryUsage();
+    const now = Date.now();
     return {
         pid: process.pid,
-        uptimeMs: Date.now() - sidecarStartedAtMs,
+        uptimeMs: now - sidecarStartedAtMs,
         memory: {
             rssMb: Math.round(memory.rss / 1024 / 1024),
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
@@ -221,6 +279,10 @@ function sidecarStateSnapshot(): Record<string, unknown> {
                 : uploadRelayTipAddressCache === null
                     ? "none"
                     : "present",
+        uploadRelayTipCacheAgeMs: uploadRelayTipAddressCache === undefined
+            ? null
+            : now - uploadRelayTipAddressCacheLoadedAtMs,
+        walrusClientAgeMs: now - walrusClientCreatedAtMs,
         serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
         suiNetwork: SUI_NETWORK,
         enokiNetwork,
@@ -234,7 +296,10 @@ function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
 }
 
 async function getUploadRelayTipAddress(): Promise<string | null> {
-    if (uploadRelayTipAddressCache !== undefined) {
+    if (
+        uploadRelayTipAddressCache !== undefined &&
+        Date.now() - uploadRelayTipAddressCacheLoadedAtMs < UPLOAD_RELAY_TIP_CACHE_TTL_MS
+    ) {
         return uploadRelayTipAddressCache;
     }
 
@@ -248,10 +313,12 @@ async function getUploadRelayTipAddress(): Promise<string | null> {
         const address = json.send_tip?.address;
         if (typeof address === "string" && address.startsWith("0x")) {
             uploadRelayTipAddressCache = address;
+            uploadRelayTipAddressCacheLoadedAtMs = Date.now();
             return address;
         }
 
         uploadRelayTipAddressCache = null;
+        uploadRelayTipAddressCacheLoadedAtMs = Date.now();
         return null;
     } catch (err: any) {
         console.warn(`[upload-relay] could not load tip-config: ${err.message || err}`);
@@ -841,8 +908,8 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         keyIndexForLog = keyIndex;
         ownerForLog = owner;
         namespaceForLog = namespace;
-        // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
-        const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
+        // LOW-17: Cap epochs to prevent accidental large storage purchases.
+        const epochs = clampWalrusEpochs(rawEpochs);
 
         if (!data || keyIndex === undefined) {
             return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
@@ -872,6 +939,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         signerAddressForLog = signerAddress;
         const blobData = new Uint8Array(Buffer.from(data, "base64"));
         blobBytesForLog = blobData.length;
+        refreshWalrusClientIfStale();
         const signerSuiBalanceMist = await getSuiBalanceMist(signerAddress);
         console.log(`[walrus/upload] [${traceId}] begin ${JSON.stringify({
             keyIndex,
@@ -994,6 +1062,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
     } catch (err: any) {
         const message = err?.message || String(err);
+        if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
+            refreshWalrusClient("register_sponsor_balance_split");
+        }
         const postFailureSignerSuiBalanceMist = signerAddressForLog
             ? await getSuiBalanceMist(signerAddressForLog)
             : null;

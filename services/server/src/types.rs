@@ -26,6 +26,27 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Sidecar caps Walrus storage purchases to avoid accidental large spends.
+pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 5;
+
+pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
+    match network {
+        "mainnet" => 3,
+        _ => MAX_WALRUS_STORAGE_EPOCHS,
+    }
+}
+
+pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
+    let default = default_walrus_storage_epochs_for_network(network);
+    match std::env::var("WALRUS_STORAGE_EPOCHS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    {
+        Some(epochs) if epochs > 0 => epochs.min(MAX_WALRUS_STORAGE_EPOCHS),
+        _ => default,
+    }
+}
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -152,6 +173,8 @@ pub struct Config {
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
     pub walrus_aggregator_url: String,
+    /// Number of Walrus storage epochs requested for new uploads.
+    pub walrus_storage_epochs: u32,
     /// Primary key (used for SEAL decrypt / recall). Unchanged.
     pub sui_private_key: Option<String>,
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
@@ -203,6 +226,7 @@ impl Config {
                 .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string()),
             walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
                 .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
+            walrus_storage_epochs: configured_walrus_storage_epochs(&network),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
             sui_private_keys: {
                 // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).
@@ -942,6 +966,15 @@ mod tests {
         let config = SponsorRateLimitConfig::default();
         assert_eq!(config.per_minute, 10);
         assert_eq!(config.per_hour, 30);
+    }
+
+    #[test]
+    fn walrus_storage_epochs_default_by_network() {
+        assert_eq!(default_walrus_storage_epochs_for_network("mainnet"), 3);
+        assert_eq!(
+            default_walrus_storage_epochs_for_network("testnet"),
+            MAX_WALRUS_STORAGE_EPOCHS
+        );
     }
 
     // ── AppError Display implementations ────────────────────────────────
