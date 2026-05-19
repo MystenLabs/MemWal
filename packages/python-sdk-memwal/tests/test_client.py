@@ -16,7 +16,7 @@ import respx
 
 from memwal.client import MemWal, MemWalError
 from memwal.types import RecallManualOptions, RememberManualOptions
-from memwal.utils import bytes_to_hex, sha256_hex
+from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
 # ============================================================
 # Fixtures
@@ -94,6 +94,7 @@ class TestRemember:
         assert len(headers["x-signature"]) == 128  # 64 bytes = 128 hex chars
         assert "x-timestamp" in headers
         assert headers["x-timestamp"].isdigit()
+        assert "x-nonce" in headers
         assert headers["x-delegate-key"] == _TEST_KEY_HEX
         assert headers["x-account-id"] == _TEST_ACCOUNT_ID
         assert headers["content-type"] == "application/json"
@@ -120,7 +121,15 @@ class TestRemember:
         # Reconstruct the signing message
         timestamp = headers["x-timestamp"]
         body_hash = sha256_hex(body_str)
-        message = f"{timestamp}.POST./api/remember.{body_hash}"
+        nonce = headers["x-nonce"]
+        message = build_signature_message(
+            timestamp=timestamp,
+            method="POST",
+            path="/api/remember",
+            body_sha256=body_hash,
+            nonce=nonce,
+            account_id=headers["x-account-id"],
+        )
 
         # Verify signature
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(headers["x-public-key"]))
