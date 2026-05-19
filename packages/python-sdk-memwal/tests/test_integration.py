@@ -40,13 +40,14 @@ import hashlib
 import json
 import os
 import time
+import uuid
 
 import httpx
 import nacl.signing
 import pytest
 
 from memwal.client import MemWal, MemWalError, MemWalSync
-from memwal.utils import bytes_to_hex
+from memwal.utils import build_signature_message, bytes_to_hex
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -78,7 +79,15 @@ def _raw_signed_request(
     body_bytes = json.dumps(body, separators=(",", ":")).encode()
     body_hash = hashlib.sha256(body_bytes).hexdigest()
     timestamp = timestamp_override or str(int(time.time()))
-    message = f"{timestamp}.{method.upper()}.{path}.{body_hash}"
+    nonce = str(uuid.uuid4())
+    message = build_signature_message(
+        timestamp=timestamp,
+        method=method.upper(),
+        path=path,
+        body_sha256=body_hash,
+        nonce=nonce,
+        account_id=ACCOUNT_ID or "0x0",
+    )
     signed = signing_key.sign(message.encode())
     signature_hex = signed.signature.hex()
     pub_key_hex = pub_key_override or signing_key.verify_key.encode().hex()
@@ -93,6 +102,8 @@ def _raw_signed_request(
                 "x-public-key": pub_key_hex,
                 "x-signature": signature_hex,
                 "x-timestamp": timestamp,
+                "x-nonce": nonce,
+                "x-account-id": ACCOUNT_ID or "0x0",
             },
         )
 

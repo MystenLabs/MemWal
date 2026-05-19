@@ -131,14 +131,16 @@ class TestBuildSignatureMessage:
     """Tests for build_signature_message -- the exact format the server expects."""
 
     def test_format_matches_spec(self) -> None:
-        """Signature message MUST be: {timestamp}.{method}.{path}.{body_sha256}"""
+        """Signature message MUST match the canonical 6-part server format."""
         result = build_signature_message(
             timestamp="1700000000",
             method="POST",
             path="/api/remember",
             body_sha256="abc123",
+            nonce="550e8400-e29b-41d4-a716-446655440000",
+            account_id="0xabc123",
         )
-        assert result == "1700000000.POST./api/remember.abc123"
+        assert result == "1700000000.POST./api/remember.abc123.550e8400-e29b-41d4-a716-446655440000.0xabc123"
 
     def test_get_method(self) -> None:
         result = build_signature_message(
@@ -146,6 +148,8 @@ class TestBuildSignatureMessage:
             method="GET",
             path="/health",
             body_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            nonce="550e8400-e29b-41d4-a716-446655440000",
+            account_id="0xabc123",
         )
         parts = result.split(".")
         assert parts[0] == "1700000001"
@@ -164,8 +168,10 @@ class TestBuildSignatureMessage:
         path = "/api/remember"
         body = json.dumps({"text": "hello", "namespace": "default"}, separators=(",", ":"))
         body_hash = sha256_hex(body)
+        nonce = "550e8400-e29b-41d4-a716-446655440000"
+        account_id = "0xabc123"
 
-        message = build_signature_message(timestamp, method, path, body_hash)
+        message = build_signature_message(timestamp, method, path, body_hash, nonce=nonce, account_id=account_id)
         sig_hex, pub_hex = sign_message(message, signing_key)
 
         # Verify (as the server would)
@@ -178,10 +184,17 @@ class TestBuildSignatureMessage:
         body_str = json.dumps(body, separators=(",", ":"))
         body_hash = sha256_hex(body_str)
 
-        message = build_signature_message("1700000000", "POST", "/api/remember", body_hash)
+        message = build_signature_message(
+            "1700000000",
+            "POST",
+            "/api/remember",
+            body_hash,
+            nonce="550e8400-e29b-41d4-a716-446655440000",
+            account_id="0xabc123",
+        )
 
-        # Extract the hash from the message
-        extracted_hash = message.split(".")[-1]
+        # Extract the hash from the canonical 6-part message
+        extracted_hash = message.split(".")[3]
         assert extracted_hash == body_hash
         assert extracted_hash == hashlib.sha256(body_str.encode("utf-8")).hexdigest()
 
