@@ -15,12 +15,14 @@
  *     --namespace     default \
  *     --limit         5 \
  *     --remember-runs 3 \
+ *     --post-remember-sleep-secs 30 \
  *     --cold-runs     3 \
  *     --warm-runs     10 \
  *     --output        benchmark-results/live.json
  *
  * The script runs `--remember-runs` remember calls first, then `--cold-runs`
- * recall calls, then `--warm-runs` recall calls with the same query.
+ * recall calls, then `--warm-runs` recall calls with the same query. Set
+ * `--post-remember-sleep-secs` to wait between remember and recall phases.
  *
  * Output:
  *   • ANSI table with p50/p95/p99 per phase
@@ -59,6 +61,7 @@ interface Args {
   namespace: string;
   limit: number;
   rememberRuns: number;
+  postRememberSleepSecs: number;
   coldRuns: number;
   warmRuns: number;
   output: string;
@@ -83,6 +86,7 @@ Optional:
   --namespace     <ns>           Namespace              [default: default]
   --limit         <n>            Top-K results          [default: 5]
   --remember-runs <n>            Remember runs          [default: 3]
+  --post-remember-sleep-secs <n> Wait after remember before recall [default: 30]
   --cold-runs     <n>            Cold recall runs       [default: 3]
   --warm-runs     <n>            Warm recall runs       [default: 10]
   --output        <file>         JSON output path       [default: bench-live-results.json]
@@ -134,6 +138,7 @@ function parseArgs(): Args {
     namespace,
     limit,
     rememberRuns: parseInt(get("--remember-runs", "3")!, 10),
+    postRememberSleepSecs: parseInt(get("--post-remember-sleep-secs", "30")!, 10),
     coldRuns: parseInt(get("--cold-runs", "3")!, 10),
     warmRuns: parseInt(get("--warm-runs", "10")!, 10),
     output: get("--output", "bench-live-results.json")!,
@@ -168,6 +173,10 @@ const C = {
 
 function color(enabled: boolean, code: string, s: string): string {
   return enabled ? `${code}${s}${C.reset}` : s;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buildAuth(delegateKey: string): Auth {
@@ -436,6 +445,7 @@ async function main(): Promise<void> {
   console.log(`  remember text: "${args.rememberText.slice(0, 60)}"`);
   console.log(`  query:         "${args.query.slice(0, 60)}"`);
   console.log(`  remember runs: ${args.rememberRuns}`);
+  console.log(`  post-remember sleep: ${args.postRememberSleepSecs}s`);
   console.log(`  cold runs:     ${args.coldRuns}`);
   console.log(`  warm runs:     ${args.warmRuns}`);
   console.log();
@@ -455,6 +465,13 @@ async function main(): Promise<void> {
     (result) => `(id=${result.memoryId ?? "unknown"}, blob=${result.blobId ?? "unknown"})`,
   );
   batches.push(rememberBatch);
+
+  if (args.postRememberSleepSecs > 0) {
+    console.log(
+      color(col, C.dim, `\n  waiting ${args.postRememberSleepSecs}s before recall phases...`)
+    );
+    await sleep(args.postRememberSleepSecs * 1000);
+  }
 
   console.log(color(col, C.magenta, `\n  ── Cold recall path (${args.coldRuns} runs) ──`));
   const coldBatch = await runBatch(
@@ -507,6 +524,7 @@ async function main(): Promise<void> {
       rememberText: args.rememberText,
       query: args.query,
       rememberRuns: args.rememberRuns,
+      postRememberSleepSecs: args.postRememberSleepSecs,
       coldRuns: args.coldRuns,
       warmRuns: args.warmRuns,
     },

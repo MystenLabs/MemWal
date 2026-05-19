@@ -162,14 +162,26 @@ async fn main() {
         WALLET_QUEUE_NAME
     );
 
-    // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs).
-    // `Arc` so the MemoryEngine impl shares the same client handle.
-    let walrus_client = Arc::new(
-        walrus_rs::WalrusClient::new(&config.walrus_aggregator_url, &config.walrus_publisher_url)
-            .expect("Failed to initialize Walrus client (invalid URL?)"),
-    );
+    reqwest::Url::parse(&config.walrus_publisher_url)
+        .expect("Failed to initialize Walrus publisher (invalid URL?)");
+    for aggregator_url in &config.walrus_aggregator_urls {
+        reqwest::Url::parse(aggregator_url)
+            .expect("Failed to initialize Walrus aggregator (invalid URL?)");
+    }
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
+    if config.walrus_aggregator_urls.len() > 1 {
+        tracing::info!(
+            "  Walrus aggregator race: {} candidates, race_after={}ms",
+            config.walrus_aggregator_urls.len(),
+            config.walrus_aggregator_race_after_ms
+        );
+    }
+    if config.walrus_skip_consistency_check {
+        tracing::warn!(
+            "  Walrus reads: WALRUS_SKIP_CONSISTENCY_CHECK=true for trusted MemWal cold reads"
+        );
+    }
     // Log upload key status
     let pool_size = config.sui_private_keys.len();
     if pool_size > 0 {
@@ -250,7 +262,6 @@ async fn main() {
         Arc::new(WalrusSealEngine::new(
             Arc::clone(&db),
             http_client.clone(),
-            Arc::clone(&walrus_client),
             Arc::clone(&key_pool),
             Arc::clone(&config),
             redis.clone(),
@@ -277,7 +288,6 @@ async fn main() {
         db,
         config: Arc::clone(&config),
         http_client,
-        walrus_client,
         key_pool,
         engine,
         embedder,

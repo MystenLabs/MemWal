@@ -1,8 +1,10 @@
 use crate::types::{AppError, SidecarError};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::time::Duration;
 
 const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(180);
+const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Result of a Walrus blob upload
 pub struct UploadResult {
@@ -370,75 +372,280 @@ pub async fn query_blobs_by_owner(
     Ok(result.blobs)
 }
 
-/// Download a blob from Walrus via the walrus_rs SDK (Aggregator HTTP API).
-/// Note: this is already native Rust — no sidecar needed.
+/// Download a blob from one or more Walrus aggregators.
 ///
-/// Returns `AppError::BlobNotFound` when the blob has expired or doesn't exist
-/// (HTTP 404 from the aggregator). Callers can use this to trigger DB cleanup.
-pub async fn download_blob(
-    walrus_client: &walrus_rs::WalrusClient,
+/// The first URL is treated as primary. When more URLs are configured, cold
+/// reads race the next candidate after `race_after`; the first successful 2xx
+/// response wins. This supports low-latency proxy/CDN aggregators while keeping
+/// the existing single-aggregator behavior when no extra URL is configured.
+///
+/// `skip_consistency_check` is intentionally caller-controlled because it
+/// should only be enabled for trusted, MemWal-written blobs.
+pub async fn download_blob_from_aggregators(
+    client: &reqwest::Client,
+    aggregator_urls: &[String],
     blob_id: &str,
+    skip_consistency_check: bool,
+    race_after: Duration,
 ) -> Result<Vec<u8>, AppError> {
-    // Timeout to avoid hanging on broken/slow blobs (Walrus 500s can take 60s+)
-    let started = std::time::Instant::now();
-    let download_fut = walrus_client.read_blob_by_id(blob_id);
-    let bytes = match tokio::time::timeout(std::time::Duration::from_secs(15), download_fut).await {
-        Ok(Ok(data)) => {
-            crate::observability::observe_external(
-                "walrus",
-                "download_blob",
-                "ok",
-                started.elapsed(),
-            );
-            data
+    let aggregator_urls: Vec<String> = aggregator_urls
+        .iter()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if aggregator_urls.is_empty() {
+        return Err(AppError::Internal(
+            "Walrus download failed: no aggregator URLs configured".into(),
+        ));
+    }
+
+    if aggregator_urls.len() == 1 {
+        return download_blob_from_aggregator(
+            client,
+            &aggregator_urls[0],
+            blob_id,
+            skip_consistency_check,
+        )
+        .await;
+    }
+
+    let mut tasks = FuturesUnordered::new();
+    let mut errors: Vec<(String, AppError)> = Vec::new();
+    let mut next_index = 0usize;
+
+    tasks.push(download_blob_candidate(
+        client.clone(),
+        aggregator_urls[next_index].clone(),
+        blob_id.to_string(),
+        skip_consistency_check,
+    ));
+    next_index += 1;
+
+    loop {
+        if tasks.is_empty() {
+            if next_index < aggregator_urls.len() {
+                tasks.push(download_blob_candidate(
+                    client.clone(),
+                    aggregator_urls[next_index].clone(),
+                    blob_id.to_string(),
+                    skip_consistency_check,
+                ));
+                next_index += 1;
+                continue;
+            }
+            break;
         }
-        Ok(Err(e)) => {
-            let err_str = e.to_string();
-            let is_not_found = err_str.contains("404")
-                || err_str.to_lowercase().contains("not found")
-                || err_str.to_lowercase().contains("blob not found");
-            if is_not_found {
-                crate::observability::observe_external(
-                    "walrus",
-                    "download_blob",
-                    "not_found",
-                    started.elapsed(),
-                );
-                return Err(AppError::BlobNotFound(format!(
-                    "Blob {} expired or not found: {}",
-                    blob_id, err_str
-                )));
-            } else {
-                crate::observability::observe_external(
-                    "walrus",
-                    "download_blob",
-                    "error",
-                    started.elapsed(),
-                );
-                return Err(AppError::Internal(format!(
-                    "Walrus download failed: {}",
-                    err_str
-                )));
+
+        if next_index >= aggregator_urls.len() {
+            match tasks.next().await {
+                Some((_, Ok(bytes))) => return Ok(bytes),
+                Some((url, Err(err))) => errors.push((url, err)),
+                None => break,
+            }
+            continue;
+        }
+
+        if race_after.is_zero() {
+            while next_index < aggregator_urls.len() {
+                tasks.push(download_blob_candidate(
+                    client.clone(),
+                    aggregator_urls[next_index].clone(),
+                    blob_id.to_string(),
+                    skip_consistency_check,
+                ));
+                next_index += 1;
+            }
+            continue;
+        }
+
+        tokio::select! {
+            result = tasks.next() => {
+                match result {
+                    Some((_, Ok(bytes))) => return Ok(bytes),
+                    Some((url, Err(err))) => errors.push((url, err)),
+                    None => {}
+                }
+            }
+            _ = tokio::time::sleep(race_after) => {
+                tasks.push(download_blob_candidate(
+                    client.clone(),
+                    aggregator_urls[next_index].clone(),
+                    blob_id.to_string(),
+                    skip_consistency_check,
+                ));
+                next_index += 1;
             }
         }
-        Err(_) => {
+    }
+
+    Err(aggregate_download_errors(blob_id, &errors))
+}
+
+async fn download_blob_candidate(
+    client: reqwest::Client,
+    aggregator_url: String,
+    blob_id: String,
+    skip_consistency_check: bool,
+) -> (String, Result<Vec<u8>, AppError>) {
+    let result =
+        download_blob_from_aggregator(&client, &aggregator_url, &blob_id, skip_consistency_check)
+            .await;
+    (aggregator_url, result)
+}
+
+async fn download_blob_from_aggregator(
+    client: &reqwest::Client,
+    aggregator_url: &str,
+    blob_id: &str,
+    skip_consistency_check: bool,
+) -> Result<Vec<u8>, AppError> {
+    let started = std::time::Instant::now();
+    let mut url = reqwest::Url::parse(aggregator_url)
+        .and_then(|base| base.join(&format!("v1/blobs/{blob_id}")))
+        .map_err(|e| AppError::Internal(format!("Invalid Walrus aggregator URL: {}", e)))?;
+    if skip_consistency_check {
+        url.query_pairs_mut()
+            .append_pair("skip_consistency_check", "true");
+    }
+
+    let resp = client
+        .get(url.clone())
+        .timeout(WALRUS_DOWNLOAD_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| {
+            let status = if e.is_timeout() {
+                "timeout"
+            } else {
+                "transport_error"
+            };
             crate::observability::observe_external(
                 "walrus",
                 "download_blob",
-                "timeout",
+                status,
                 started.elapsed(),
             );
-            return Err(AppError::Internal(format!(
-                "Walrus download timed out after 15s for blob {}",
-                blob_id
-            )));
-        }
-    };
+            AppError::Internal(format!(
+                "Walrus download failed from {}: {}",
+                aggregator_url, e
+            ))
+        })?;
+
+    let status = resp.status();
+    let status_label = status.as_u16().to_string();
+    crate::observability::observe_external(
+        "walrus",
+        "download_blob",
+        &status_label,
+        started.elapsed(),
+    );
+
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(AppError::BlobNotFound(format!(
+            "Blob {} expired or not found at {}",
+            blob_id, aggregator_url
+        )));
+    }
+
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "Walrus download failed from {} with status {}: {}",
+            aggregator_url, status, body
+        )));
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| {
+        crate::observability::observe_external(
+            "walrus",
+            "download_blob",
+            "body_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!(
+            "Failed to read Walrus blob {} from {}: {}",
+            blob_id, aggregator_url, e
+        ))
+    })?;
 
     tracing::info!(
-        "walrus download ok: blob_id={}, {} bytes",
+        "walrus download ok: blob_id={}, {} bytes, aggregator={}, skip_consistency_check={}",
         blob_id,
-        bytes.len()
+        bytes.len(),
+        aggregator_url,
+        skip_consistency_check
     );
-    Ok(bytes)
+    Ok(bytes.to_vec())
+}
+
+fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> AppError {
+    if !errors.is_empty()
+        && errors
+            .iter()
+            .all(|(_, err)| matches!(err, AppError::BlobNotFound(_)))
+    {
+        return AppError::BlobNotFound(format!(
+            "Blob {} expired or not found across {} Walrus aggregators",
+            blob_id,
+            errors.len()
+        ));
+    }
+
+    let summary = errors
+        .iter()
+        .map(|(url, err)| format!("{}: {}", url, err))
+        .collect::<Vec<_>>()
+        .join("; ");
+    AppError::Internal(format!(
+        "Walrus download failed for blob {} across {} aggregators: {}",
+        blob_id,
+        errors.len(),
+        summary
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aggregate_download_errors;
+    use crate::types::AppError;
+
+    #[test]
+    fn aggregate_download_errors_preserves_not_found_cleanup_signal() {
+        let errors = vec![
+            (
+                "https://a.example".to_string(),
+                AppError::BlobNotFound("404".into()),
+            ),
+            (
+                "https://b.example".to_string(),
+                AppError::BlobNotFound("404".into()),
+            ),
+        ];
+
+        assert!(matches!(
+            aggregate_download_errors("blob", &errors),
+            AppError::BlobNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn aggregate_download_errors_keeps_transient_errors_internal() {
+        let errors = vec![
+            (
+                "https://a.example".to_string(),
+                AppError::BlobNotFound("404".into()),
+            ),
+            (
+                "https://b.example".to_string(),
+                AppError::Internal("timeout".into()),
+            ),
+        ];
+
+        assert!(matches!(
+            aggregate_download_errors("blob", &errors),
+            AppError::Internal(_)
+        ));
+    }
 }

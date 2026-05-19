@@ -26,6 +26,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Delay before racing a cold Walrus read against the next configured aggregator.
+pub const DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS: u64 = 150;
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -38,8 +41,6 @@ pub struct AppState {
     /// `Arc` so the engine + handlers share one immutable config.
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
-    /// `Arc` so the engine shares the Walrus client handle.
-    pub walrus_client: Arc<walrus_rs::WalrusClient>,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads.
     /// `Arc` so the engine's `store_blob` can draw from the same pool.
     pub key_pool: Arc<KeyPool>,
@@ -157,6 +158,16 @@ pub struct Config {
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
     pub walrus_aggregator_url: String,
+    /// Ordered aggregator candidates used for cold Walrus reads. The primary
+    /// `walrus_aggregator_url` is always first; `WALRUS_AGGREGATOR_URLS`
+    /// appends additional low-latency/proxy endpoints for tail-race reads.
+    pub walrus_aggregator_urls: Vec<String>,
+    /// Opt-in Walrus read optimization for blobs written by this relayer.
+    /// When true, cold reads append `skip_consistency_check=true`.
+    pub walrus_skip_consistency_check: bool,
+    /// Delay before launching the next aggregator candidate on a cold read.
+    /// Zero launches all configured candidates immediately.
+    pub walrus_aggregator_race_after_ms: u64,
     /// Primary key (used for SEAL decrypt / recall). Unchanged.
     pub sui_private_key: Option<String>,
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
@@ -189,6 +200,14 @@ impl Config {
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
         };
+        let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
+            .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
+        let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
+            .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string());
+        let walrus_aggregator_urls = parse_walrus_aggregator_urls(
+            &walrus_aggregator_url,
+            std::env::var("WALRUS_AGGREGATOR_URLS").ok().as_deref(),
+        );
 
         Self {
             port: std::env::var("PORT")
@@ -204,10 +223,14 @@ impl Config {
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            walrus_publisher_url: std::env::var("WALRUS_PUBLISHER_URL")
-                .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string()),
-            walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
-                .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
+            walrus_publisher_url,
+            walrus_aggregator_url,
+            walrus_aggregator_urls,
+            walrus_skip_consistency_check: env_bool("WALRUS_SKIP_CONSISTENCY_CHECK"),
+            walrus_aggregator_race_after_ms: std::env::var("WALRUS_AGGREGATOR_RACE_AFTER_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
             sui_private_keys: {
                 // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).
@@ -238,6 +261,36 @@ impl Config {
                 .unwrap_or(false),
         }
     }
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut push_unique = |raw: &str| {
+        let value = raw.trim();
+        if !value.is_empty() && !urls.iter().any(|existing| existing == value) {
+            urls.push(value.to_string());
+        }
+    };
+
+    push_unique(primary);
+    if let Some(extra_csv) = extra_csv {
+        for value in extra_csv.split(',') {
+            push_unique(value);
+        }
+    }
+
+    urls
 }
 
 // ============================================================
@@ -944,6 +997,24 @@ mod tests {
         assert_eq!(BLOB_CACHE_KEY_PREFIX, "memwal:blob:v1:");
         assert_eq!(DEFAULT_BLOB_CACHE_TTL_SECS, 14 * 24 * 60 * 60);
         assert_eq!(DEFAULT_BLOB_CACHE_MAX_BYTES, 512 * 1024);
+        assert_eq!(DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS, 150);
+    }
+
+    #[test]
+    fn parse_walrus_aggregator_urls_keeps_primary_first_and_dedupes() {
+        let urls = parse_walrus_aggregator_urls(
+            "https://primary.example",
+            Some(" https://secondary.example,https://primary.example,,https://third.example "),
+        );
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://primary.example".to_string(),
+                "https://secondary.example".to_string(),
+                "https://third.example".to_string(),
+            ]
+        );
     }
 
     #[test]

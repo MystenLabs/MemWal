@@ -478,14 +478,26 @@ pub async fn restore(
 
     // Step 3: Download all missing blobs from Walrus concurrently
     let db = &state.db;
+    let http_client = state.http_client.clone();
+    let aggregator_urls = state.config.walrus_aggregator_urls.clone();
+    let race_after = std::time::Duration::from_millis(state.config.walrus_aggregator_race_after_ms);
     let download_tasks: Vec<_> = missing_blob_ids
         .iter()
         .map(|blob_id| {
-            let walrus_client = &state.walrus_client;
+            let http_client = http_client.clone();
+            let aggregator_urls = aggregator_urls.clone();
             let blob_id = blob_id.clone();
             let owner_for_cleanup = owner.clone();
             async move {
-                match walrus::download_blob(walrus_client, &blob_id).await {
+                match walrus::download_blob_from_aggregators(
+                    &http_client,
+                    &aggregator_urls,
+                    &blob_id,
+                    false,
+                    race_after,
+                )
+                .await
+                {
                     Ok(data) => Some((blob_id, data)),
                     Err(AppError::BlobNotFound(msg)) => {
                         tracing::warn!("restore: blob expired, skipping: {}", msg);
