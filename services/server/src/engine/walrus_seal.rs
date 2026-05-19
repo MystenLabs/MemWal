@@ -342,6 +342,9 @@ impl MemoryEngine for WalrusSealEngine {
             blob_id: blob_id.to_string(),
             text,
             distance,
+            // Engine doesn't fetch created_at; the recall handler zips
+            // it on from the SearchHit. See HydratedMemory docs.
+            created_at: None,
         }))
     }
 
@@ -445,6 +448,9 @@ impl MemoryEngine for WalrusSealEngine {
                         blob_id: f.blob_id.clone(),
                         text,
                         distance: f.distance,
+                        // Engine doesn't fetch created_at; recall handler
+                        // zips it on. See HydratedMemory docs.
+                        created_at: None,
                     }),
                     Err(e) => {
                         tracing::warn!(

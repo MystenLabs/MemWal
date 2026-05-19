@@ -28,7 +28,7 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use services::{Embedder, Extractor, LlmExtractor, OpenAiEmbedder};
+use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
@@ -269,6 +269,8 @@ async fn main() {
     ));
     let extractor: Arc<dyn Extractor> =
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
+    // CompositeRanker is stateless — one shared instance is fine.
+    let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
     // Shared application state
     let state = Arc::new(AppState {
@@ -280,6 +282,7 @@ async fn main() {
         engine,
         embedder,
         extractor,
+        ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
