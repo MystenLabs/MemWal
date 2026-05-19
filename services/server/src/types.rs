@@ -734,6 +734,26 @@ pub struct HealthResponse {
     /// at startup that they're hitting a benchmark-mode server before
     /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
     pub mode: String,
+    /// MEM-56: the prompt version constants the running binary is using.
+    /// The benchmark harness reads this at run start and pins the
+    /// versions into the result-artifact JSON so a future "score jumped"
+    /// delta is attributable to the prompt change rather than guessed
+    /// at from git history. Both fields are always populated — there is
+    /// no "version unknown" state for a running server.
+    pub prompt_versions: PromptVersions,
+}
+
+/// MEM-56: prompt version constants surfaced on `/health`. See the
+/// `*_PROMPT_VERSION` consts in `services::extractor` and `routes::admin`.
+#[derive(Debug, Serialize)]
+pub struct PromptVersions {
+    /// `FACT_EXTRACTION_PROMPT_VERSION` from `services::extractor` — the
+    /// extractor system prompt used by `/api/analyze` and the
+    /// summarise-long-text path in `/api/remember`.
+    pub extract: String,
+    /// `ASK_SYSTEM_PROMPT_VERSION` from `routes::admin` — the LLM
+    /// system prompt that wraps recalled memories on `/api/ask`.
+    pub ask: String,
 }
 
 /// GET /config response (ENG-1697).
@@ -1268,5 +1288,26 @@ mod tests {
         // recall response). Failing this test = ack the change.
         assert_eq!(ScoringWeights::default().recency, 0.0);
         assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    // ── MEM-56: HealthResponse.prompt_versions wire shape ────────────────
+
+    #[test]
+    fn health_response_serializes_prompt_versions_block() {
+        // The benchmark harness reads exactly these field names — pin the
+        // wire shape so a rename can't silently break the run-artifact
+        // pipeline.
+        let resp = HealthResponse {
+            status: "ok".to_string(),
+            version: "0.1.0".to_string(),
+            mode: "benchmark".to_string(),
+            prompt_versions: PromptVersions {
+                extract: "extract.v1".to_string(),
+                ask: "ask.v1".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
+        assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
     }
 }

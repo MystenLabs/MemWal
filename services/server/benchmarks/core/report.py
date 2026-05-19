@@ -181,6 +181,20 @@ def generate_comparison_table(
         overall_row.append(f"**{score:.2f}**" if score is not None else "-")
     rows.append(overall_row)
 
+    # MEM-56: prompt-version provenance row. Renders `extract.vN/ask.vM`
+    # per preset so a future "score jumped" delta is attributable to the
+    # prompt change vs the weights change. Empty cells when an artifact
+    # predates MEM-56 (legacy comparisons stay readable).
+    pv_row = ["_prompt versions_"]
+    for r in results:
+        pv = r.get("prompt_versions", {}) or {}
+        extract = pv.get("extract", "-")
+        ask = pv.get("ask", "-")
+        pv_row.append(f"{extract}/{ask}" if extract != "-" or ask != "-" else "-")
+    for _ in baselines:
+        pv_row.append("-")
+    rows.append(pv_row)
+
     return tabulate(rows, headers=headers, tablefmt="github")
 
 

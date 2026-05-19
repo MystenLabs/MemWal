@@ -172,6 +172,14 @@ class RunArtifact:
     benchmark: str
     preset: str
 
+    # MEM-56: the `extract.v*` / `ask.v*` versions the server was running
+    # at the moment the run started. Captured from GET /health.
+    # Empty-dict default only for legacy artifacts loaded by `compare`;
+    # fresh runs always populate this — the harness fails fast at startup
+    # if the server doesn't expose `prompt_versions` so no fresh artifact
+    # can land with an empty dict.
+    prompt_versions: dict[str, str] = field(default_factory=dict)
+
     config: dict = field(default_factory=dict)
     ingestion: IngestionStats = field(default_factory=IngestionStats)
     metrics_overall: CategoryMetrics = field(default_factory=CategoryMetrics)
