@@ -91,6 +91,28 @@
         ]
       },
       {
+        "tab": "Python SDK",
+        "groups": [
+          {
+            "group": "Python SDK",
+            "pages": [
+              "python-sdk/quick-start",
+              {
+                "group": "Usage",
+                "root": "python-sdk/usage",
+                "pages": [
+                  "python-sdk/usage/memwal",
+                  "python-sdk/usage/memwal-manual",
+                  "python-sdk/usage/with-memwal"
+                ]
+              },
+              "python-sdk/api-reference",
+              "python-sdk/changelog"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Relayer",
         "groups": [
           {

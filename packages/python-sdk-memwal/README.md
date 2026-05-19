@@ -91,6 +91,32 @@ async with MemWal.create(
     await memwal.remember("I prefer dark mode")
 ```
 
+## Environment Presets
+
+Instead of hardcoding a relayer URL, pass `env` to target a hosted relayer.
+Same shorthand as the TypeScript SDK and MCP package.
+
+```python
+from memwal import MemWal
+
+memwal = MemWal.create(
+    key=os.environ["MEMWAL_KEY"],
+    account_id=os.environ["MEMWAL_ACCOUNT_ID"],
+    env="prod",   # prod | dev | staging | local
+)
+```
+
+| `env` | Relayer URL |
+|-------|-------------|
+| `prod` | `https://relayer.memwal.ai` |
+| `dev` | `https://relayer.dev.memwal.ai` |
+| `staging` | `https://relayer.staging.memwal.ai` |
+| `local` | `http://127.0.0.1:8000` |
+
+Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
+over the default. An unknown preset raises `ValueError`. `env` is also accepted
+by `MemWalSync.create`, `with_memwal_langchain`, and `with_memwal_openai`.
+
 ## AI Middleware
 
 ### LangChain
@@ -162,10 +188,10 @@ Create a new async client.
 Every request is signed with Ed25519:
 
 ```
-message = f"{timestamp}.{method}.{path}.{sha256(body)}.{nonce}.{account_id}"
+message = f"{timestamp}.{method}.{path}.{sha256(body)}"
 ```
 
-Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce`, `x-delegate-key`, `x-account-id`.
+Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-delegate-key`, `x-account-id`.
 
 ## License
 

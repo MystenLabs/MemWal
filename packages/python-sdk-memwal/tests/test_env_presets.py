@@ -1,0 +1,71 @@
+"""Tests for the relayer environment presets (prod/dev/staging/local).
+
+Pure config resolution — no network. Mirrors the precedence rule documented
+in the README: explicit non-default ``server_url`` > ``env`` > default.
+"""
+
+import pytest
+
+from memwal import ENV_PRESETS, MemWal, MemWalConfig, MemWalSync
+from memwal.types import DEFAULT_SERVER_URL
+
+# A throwaway but structurally valid 32-byte Ed25519 seed (64 hex chars).
+KEY = "11" * 32
+ACCOUNT = "0x" + "ab" * 32
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ("prod", "https://relayer.memwal.ai"),
+        ("dev", "https://relayer.dev.memwal.ai"),
+        ("staging", "https://relayer.staging.memwal.ai"),
+        ("local", "http://127.0.0.1:8000"),
+    ],
+)
+def test_env_preset_resolves(env, expected):
+    cfg = MemWalConfig(key=KEY, account_id=ACCOUNT, env=env)
+    assert cfg.server_url == expected
+    assert ENV_PRESETS[env] == expected
+
+
+def test_explicit_server_url_overrides_env():
+    cfg = MemWalConfig(
+        key=KEY,
+        account_id=ACCOUNT,
+        server_url="https://my.custom.relayer",
+        env="prod",
+    )
+    assert cfg.server_url == "https://my.custom.relayer"
+
+
+def test_no_env_keeps_default():
+    cfg = MemWalConfig(key=KEY, account_id=ACCOUNT)
+    assert cfg.server_url == DEFAULT_SERVER_URL
+
+
+def test_unknown_env_raises():
+    with pytest.raises(ValueError, match="Unknown env preset"):
+        MemWalConfig(key=KEY, account_id=ACCOUNT, env="prdo")
+
+
+def test_create_threads_env_through_to_client():
+    client = MemWal.create(key=KEY, account_id=ACCOUNT, env="staging")
+    assert client._server_url == "https://relayer.staging.memwal.ai"
+
+
+def test_sync_create_threads_env_through():
+    client = MemWalSync.create(key=KEY, account_id=ACCOUNT, env="dev")
+    assert client._inner._server_url == "https://relayer.dev.memwal.ai"
+
+
+def test_explicit_default_url_with_env_still_takes_preset():
+    # Passing the default URL explicitly is indistinguishable from not
+    # passing it — documented edge: the preset still applies.
+    cfg = MemWalConfig(
+        key=KEY,
+        account_id=ACCOUNT,
+        server_url=DEFAULT_SERVER_URL,
+        env="prod",
+    )
+    assert cfg.server_url == "https://relayer.memwal.ai"

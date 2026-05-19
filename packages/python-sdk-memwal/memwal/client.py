@@ -29,7 +29,7 @@ import asyncio
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence, TypeVar
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
 
@@ -55,6 +55,7 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -128,16 +129,21 @@ class MemWal:
         cls,
         key: str,
         account_id: str,
-        server_url: str = "https://relayer.memwal.ai",
+        server_url: str = "http://localhost:8000",
         namespace: str = "default",
+        env: Optional[str] = None,
     ) -> "MemWal":
         """Create a new MemWal client instance.
 
         Args:
             key: Ed25519 private key hex string (the delegate key).
             account_id: MemWalAccount object ID on Sui.
-            server_url: Server URL (default: ``https://relayer.memwal.ai``).
+            server_url: Server URL (default: ``http://localhost:8000``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
+            env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
+                or ``"local"``. Resolves ``server_url`` to the matching hosted
+                relayer unless an explicit non-default ``server_url`` is given.
+                Precedence: explicit ``server_url`` > ``env`` > default.
 
         Returns:
             A configured :class:`MemWal` instance.
@@ -147,6 +153,7 @@ class MemWal:
             account_id=account_id,
             server_url=server_url,
             namespace=namespace,
+            env=env,
         )
         return cls(config)
 
@@ -708,14 +715,12 @@ class MemWal:
     ) -> Dict[str, Any]:
         """Make a signed request to the server.
 
-        Signature format:
-            ``{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}``
+        Signature format: ``{timestamp}.{method}.{path}.{body_sha256}``
 
         Headers sent:
             - ``x-public-key``: Ed25519 public key hex
             - ``x-signature``: Ed25519 signature hex
             - ``x-timestamp``: Unix seconds string
-            - ``x-nonce``: UUID v4 replay-protection nonce
             - ``x-delegate-key``: Private key hex
             - ``x-account-id``: MemWalAccount object ID
             - ``Content-Type``: application/json
@@ -842,22 +847,27 @@ class MemWalSync:
         cls,
         key: str,
         account_id: str,
-        server_url: str = "https://relayer.memwal.ai",
+        server_url: str = "http://localhost:8000",
         namespace: str = "default",
+        env: Optional[str] = None,
     ) -> "MemWalSync":
         """Create a synchronous MemWal client.
 
-        Same parameters as :meth:`MemWal.create`.
+        Same parameters as :meth:`MemWal.create` (including the ``env``
+        relayer preset).
         """
         inner = MemWal.create(
             key=key,
             account_id=account_id,
             server_url=server_url,
             namespace=namespace,
+            env=env,
         )
         return cls(inner)
 
     def _run(self, coro: Any) -> Any:
+        import asyncio
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

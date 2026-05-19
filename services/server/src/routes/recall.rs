@@ -88,6 +88,12 @@ pub async fn recall(
         return Err(AppError::BadRequest("Query cannot be empty".into()));
     }
 
+    // Validate scoring_weights up front — fail fast on malformed input
+    // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
+    // vector search + Walrus + SEAL round-trip just to 400 at the end.
+    let weights = body.scoring_weights.clone().unwrap_or_default();
+    weights.validate()?;
+
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -95,6 +101,7 @@ pub async fn recall(
         query_len = body.query.len(),
         owner = %owner,
         namespace = %namespace,
+        ranker_active = weights.is_ranker_active(),
         "recall request"
     );
 
@@ -131,17 +138,50 @@ pub async fn recall(
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
-    let hit_refs: Vec<(String, f64)> = hits.into_iter().map(|h| (h.blob_id, h.distance)).collect();
-    let (hydrated, dropped_count, timings) =
+    let hit_refs: Vec<(String, f64)> = hits
+        .iter()
+        .map(|h| (h.blob_id.clone(), h.distance))
+        .collect();
+    let (mut hydrated, dropped_count, timings) =
         state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 
-    let results: Vec<RecallResult> = hydrated
+    // Zip `created_at` from the SearchHits onto the HydratedMemory records
+    // so the ranker's recency signal has the timestamps it needs. Engines
+    // leave `created_at = None`; the recall path populates it from the
+    // SearchHit it already has. See `routes::zip_created_at_onto_hydrated`.
+    super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
+
+    // Log when the ranker is opted in (non-default `scoring_weights`) so a
+    // future "client X is seeing weird ordering" debugging session has a
+    // breadcrumb. Default weights short-circuit and aren't logged — that's
+    // every other request.
+    if weights.is_ranker_active() {
+        tracing::info!(
+            owner = %owner,
+            semantic = weights.semantic,
+            recency = weights.recency,
+            half_life_days = weights.recency_half_life_days,
+            "recall: ranker active"
+        );
+    }
+
+    // Composite re-rank. With default weights (semantic=1.0, recency=0.0)
+    // this is a no-op and preserves the pgvector cosine order exactly —
+    // pinned by the `default_weights_preserve_input_order` and
+    // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
+    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+
+    let results: Vec<RecallResult> = ranked
         .into_iter()
-        .map(|m| RecallResult {
-            blob_id: m.blob_id,
-            text: m.text,
-            distance: m.distance,
+        .map(|r| RecallResult {
+            blob_id: r.memory.blob_id,
+            text: r.memory.text,
+            distance: r.memory.distance,
+            // `score` is `Some` only when the ranker ran (recency > 0); the
+            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
+            // type omits the field from the wire when default-weighted.
+            score: r.score,
         })
         .collect();
     let total = results.len();

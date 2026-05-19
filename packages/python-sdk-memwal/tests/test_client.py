@@ -94,7 +94,6 @@ class TestRemember:
         assert len(headers["x-signature"]) == 128  # 64 bytes = 128 hex chars
         assert "x-timestamp" in headers
         assert headers["x-timestamp"].isdigit()
-        assert "x-nonce" in headers
         assert headers["x-delegate-key"] == _TEST_KEY_HEX
         assert headers["x-account-id"] == _TEST_ACCOUNT_ID
         assert headers["content-type"] == "application/json"
@@ -121,8 +120,7 @@ class TestRemember:
         # Reconstruct the signing message
         timestamp = headers["x-timestamp"]
         body_hash = sha256_hex(body_str)
-        nonce = headers["x-nonce"]
-        message = f"{timestamp}.POST./api/remember.{body_hash}.{nonce}.{_TEST_ACCOUNT_ID}"
+        message = f"{timestamp}.POST./api/remember.{body_hash}"
 
         # Verify signature
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(headers["x-public-key"]))

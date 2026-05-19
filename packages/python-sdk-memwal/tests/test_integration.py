@@ -46,6 +46,7 @@ import nacl.signing
 import pytest
 
 from memwal.client import MemWal, MemWalError, MemWalSync
+from memwal.utils import bytes_to_hex
 
 # ── Config ───────────────────────────────────────────────────────────────────
 

@@ -63,11 +63,18 @@ pub struct MemoryRef {
 }
 
 /// A hydrated memory — what `fetch_one` / `fetch_batch` return.
+///
+/// `created_at` is optional because the engine doesn't fetch it (it isn't
+/// needed for the cache → Walrus → SEAL choreography). The recall handler
+/// already has it on the `SearchHit` from `db.search_similar` and zips it
+/// onto the hydrated record before passing the batch to the ranker. Engines
+/// leave it as `None`.
 #[derive(Debug, Clone)]
 pub struct HydratedMemory {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-stage timing breakdown returned by `fetch_batch` so the recall

@@ -25,6 +25,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 
 def _load_env() -> None:
@@ -49,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memwal import (  # noqa: E402
     MemWal,
+    MemWalRememberJobFailed,
     RememberBulkItem,
     RememberBulkOptions,
 )

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
-use crate::services::{Embedder, Extractor};
+use crate::services::{Embedder, Extractor, Ranker};
 use crate::storage::db::VectorDb;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -54,6 +54,11 @@ pub struct AppState {
     /// LLM fact-extraction service — `LlmExtractor` (gpt-4o-mini). Used by
     /// `analyze`.
     pub extractor: Arc<dyn Extractor>,
+    /// Recall re-ranker — `CompositeRanker` blends semantic similarity
+    /// with optional recency decay. Used by `/api/recall` and `/api/ask`
+    /// when the request body sets `scoring_weights`; default weights
+    /// preserve the pgvector cosine order exactly.
+    pub ranker: Arc<dyn Ranker>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -390,6 +395,11 @@ pub struct RecallRequest {
     pub limit: usize,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights. Omitted → response order is
+    /// byte-identical to a pgvector cosine-distance sort. See
+    /// [`ScoringWeights`].
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,12 +421,143 @@ pub struct RecallResult {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
+    /// Composite score used for ranking. Present only when the ranker
+    /// actually ran (i.e. when `scoring_weights` was supplied with
+    /// `recency > 0` so the ranker didn't short-circuit). `None` when
+    /// the response is in default pgvector-cosine order — in that case
+    /// the score is just `1.0 - distance` and we don't bother surfacing
+    /// a derived field. `#[serde(skip_serializing_if)]` keeps the wire
+    /// shape byte-identical to today for default-weights requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
+    /// Insertion timestamp from `vector_entries.created_at`. Used by the
+    /// composite ranker for recency scoring; threaded through unchanged
+    /// in the engine `fetch_*` calls. Always present (column is NOT NULL
+    /// in migration 001).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Composite-scoring weights for `/api/recall` and `/api/ask`. Optional on
+/// the wire — when omitted, the response order is byte-identical to a
+/// pure pgvector cosine-distance sort (today's behaviour).
+///
+/// The score formula is:
+///
+/// ```text
+/// score = semantic * (1.0 - distance)
+///       + recency  * exp(-age_days / recency_half_life_days)
+/// ```
+///
+/// Sorted descending (higher score = better). `default()` returns
+/// `semantic=1.0, recency=0.0` so deserialising an empty body yields the
+/// "today" ordering exactly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoringWeights {
+    /// Weight applied to `1.0 - cosine_distance`. Default 1.0.
+    #[serde(default = "default_semantic_weight")]
+    pub semantic: f64,
+    /// Weight applied to `exp(-age_days / half_life)`. Default 0.0.
+    /// When effectively zero, the ranker short-circuits and preserves
+    /// the input order (which is already cosine-sorted by pgvector).
+    #[serde(default)]
+    pub recency: f64,
+    /// Half-life for the recency decay term, in days. Default 30.
+    /// A memory aged exactly `half_life` days has recency score 0.5;
+    /// twice that, 0.25; etc.
+    #[serde(default = "default_recency_half_life_days")]
+    pub recency_half_life_days: f64,
+}
+
+fn default_semantic_weight() -> f64 {
+    1.0
+}
+
+fn default_recency_half_life_days() -> f64 {
+    30.0
+}
+
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        Self {
+            semantic: 1.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+        }
+    }
+}
+
+impl ScoringWeights {
+    /// Minimum allowed half-life. Anything smaller (incl. subnormals like
+    /// `f64::MIN_POSITIVE`) makes the `exp(-age * ln2 / half_life)` term
+    /// collapse to `0.0` for any non-zero `age`, silently turning the
+    /// recency signal into a constant. ~86 milliseconds is well below any
+    /// real-world recall use case and still survives float arithmetic.
+    const MIN_HALF_LIFE_DAYS: f64 = 1e-6;
+
+    /// True when the ranker actually computes scores (rather than
+    /// short-circuiting to the input order). Mirrors the
+    /// `recency.abs() < f64::EPSILON` predicate inside `CompositeRanker`
+    /// so handler-side gating (validation logs, tracing breadcrumbs)
+    /// stays in lockstep with what the ranker actually does. Keep this
+    /// in sync with [`crate::services::ranker::CompositeRanker::rank`].
+    pub fn is_ranker_active(&self) -> bool {
+        self.recency.abs() >= f64::EPSILON
+    }
+
+    /// Return an error if the weights are outside reasonable bounds. The
+    /// `CompositeRanker` already has internal guards (NaN sorts as Equal,
+    /// non-positive half-life zeros out the recency term) so we wouldn't
+    /// crash — but it's friendlier to return a 400 up-front than to
+    /// silently degrade to the default ordering.
+    ///
+    /// Constraints:
+    /// - no NaN or infinite weights
+    /// - signal weights (`semantic`, `recency`) must be in `[0.0, 100.0]`
+    ///   — negative weights would invert the signal (older = better, less
+    ///   semantic match = better), which is almost certainly a bug, not a
+    ///   feature. The 100.0 ceiling is generous; a real client doesn't
+    ///   need values that large.
+    /// - `recency_half_life_days` must be at least `MIN_HALF_LIFE_DAYS`
+    ///   (≈86 ms) when `recency > 0`. A zero / negative / subnormal
+    ///   half-life with non-zero recency silently degrades the recency
+    ///   term to zero — surface it as a 400 so the client notices.
+    pub fn validate(&self) -> Result<(), AppError> {
+        for (name, value) in [
+            ("semantic", self.semantic),
+            ("recency", self.recency),
+            ("recency_half_life_days", self.recency_half_life_days),
+        ] {
+            if !value.is_finite() {
+                return Err(AppError::BadRequest(format!(
+                    "scoring_weights.{} must be a finite number (got {})",
+                    name, value
+                )));
+            }
+        }
+        for (name, value) in [("semantic", self.semantic), ("recency", self.recency)] {
+            if !(0.0..=100.0).contains(&value) {
+                return Err(AppError::BadRequest(format!(
+                    "scoring_weights.{} must be in [0.0, 100.0] (got {})",
+                    name, value
+                )));
+            }
+        }
+        if self.recency > 0.0 && self.recency_half_life_days < Self::MIN_HALF_LIFE_DAYS {
+            return Err(AppError::BadRequest(format!(
+                "scoring_weights.recency_half_life_days must be >= {} when \
+                 recency > 0 (got {})",
+                Self::MIN_HALF_LIFE_DAYS,
+                self.recency_half_life_days
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// POST /api/analyze
@@ -515,6 +656,11 @@ pub struct AskRequest {
     pub limit: Option<usize>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights applied to the retrieved
+    /// memories before they're injected into the LLM prompt. Omitted →
+    /// pgvector cosine order. See [`ScoringWeights`].
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
@@ -981,5 +1127,146 @@ mod tests {
         assert!(AppError::QuotaExceeded("x".into())
             .to_string()
             .contains("Quota Exceeded"));
+    }
+
+    // ── ScoringWeights::validate() — full bounds matrix ──────────────────
+
+    /// Build weights from explicit fields so tests don't depend on
+    /// `Default::default()` if someone changes the defaults later.
+    fn w(semantic: f64, recency: f64, half_life: f64) -> ScoringWeights {
+        ScoringWeights {
+            semantic,
+            recency,
+            recency_half_life_days: half_life,
+        }
+    }
+
+    fn assert_bad_request_mentions(w: &ScoringWeights, needle: &str) {
+        match w.validate() {
+            Err(AppError::BadRequest(msg)) => assert!(
+                msg.contains(needle),
+                "expected error mentioning {:?}, got: {}",
+                needle,
+                msg
+            ),
+            other => panic!(
+                "expected BadRequest containing {:?}, got: {:?}",
+                needle, other
+            ),
+        }
+    }
+
+    #[test]
+    fn validate_default_is_ok() {
+        ScoringWeights::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_nan_on_each_field() {
+        assert_bad_request_mentions(&w(f64::NAN, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, f64::NAN, 30.0), "recency");
+        assert_bad_request_mentions(&w(1.0, 0.0, f64::NAN), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_infinity_on_each_field() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_bad_request_mentions(&w(v, 0.0, 30.0), "semantic");
+            assert_bad_request_mentions(&w(1.0, v, 30.0), "recency");
+            assert_bad_request_mentions(&w(1.0, 0.0, v), "recency_half_life_days");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_weights() {
+        assert_bad_request_mentions(&w(-0.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, -1.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_rejects_weights_above_100() {
+        assert_bad_request_mentions(&w(100.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, 200.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_accepts_exact_boundaries() {
+        // 0.0 and 100.0 are inclusive; half-life only matters when recency > 0.
+        w(0.0, 0.0, 30.0).validate().unwrap();
+        w(100.0, 100.0, 30.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, 0.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_negative_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, -1.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_subnormal_half_life_when_recency_positive() {
+        // Subnormal would silently collapse `exp(-age * ln(2) / half_life)`
+        // to 0 for any non-zero age — surface as 400 instead of degrading
+        // the recency signal to a constant.
+        assert_bad_request_mentions(&w(1.0, 0.5, f64::MIN_POSITIVE), "recency_half_life_days");
+        // Just below the floor — still rejected.
+        assert_bad_request_mentions(
+            &w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS / 2.0),
+            "recency_half_life_days",
+        );
+    }
+
+    #[test]
+    fn validate_allows_negative_half_life_when_recency_zero() {
+        // Carve-out: half-life is only constrained when recency > 0, so a
+        // client that sets recency=0 can leave half-life at whatever
+        // (the ranker short-circuits anyway). Pinning this keeps the
+        // no-op default path from getting a spurious 400 if a stale SDK
+        // forwards a placeholder half-life.
+        w(1.0, 0.0, -1.0).validate().unwrap();
+        w(1.0, 0.0, 0.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_half_life_at_floor() {
+        // The minimum is inclusive: exactly MIN_HALF_LIFE_DAYS is allowed.
+        w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS)
+            .validate()
+            .unwrap();
+    }
+
+    // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────
+
+    #[test]
+    fn is_ranker_active_false_for_default() {
+        assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_true_for_non_zero_recency() {
+        assert!(w(1.0, 0.2, 30.0).is_ranker_active());
+        assert!(w(1.0, 0.0001, 30.0).is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_false_for_subepsilon_recency() {
+        // Below EPSILON ≈ 2.22e-16 is treated as zero — the ranker would
+        // short-circuit, so the handler considers itself inactive too.
+        assert!(!w(1.0, f64::EPSILON / 2.0, 30.0).is_ranker_active());
+    }
+
+    // ── Refactor-safety: default short-circuits, wire contract pinned ────
+
+    #[test]
+    fn default_recency_is_zero_so_short_circuit_engages() {
+        // If you change `ScoringWeights::default().recency` away from 0.0,
+        // you change the wire contract on every existing client (the new
+        // `score` field would suddenly appear on every default-weighted
+        // recall response). Failing this test = ack the change.
+        assert_eq!(ScoringWeights::default().recency, 0.0);
+        assert!(!ScoringWeights::default().is_ranker_active());
     }
 }
