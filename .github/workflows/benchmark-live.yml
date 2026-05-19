@@ -39,6 +39,10 @@ on:
         description: Remember runs
         required: false
         default: '3'
+      post_remember_sleep_secs:
+        description: Seconds to wait after remember before recall phases
+        required: false
+        default: '30'
       cold_runs:
         description: Cold-path runs
         required: false
@@ -67,6 +71,7 @@ jobs:
       QUERY: ${{ github.event.inputs.query || 'benchmark memory' }}
       LIMIT: ${{ github.event.inputs.limit || '5' }}
       REMEMBER_RUNS: ${{ github.event.inputs.remember_runs || '3' }}
+      POST_REMEMBER_SLEEP_SECS: ${{ github.event.inputs.post_remember_sleep_secs || '30' }}
       COLD_RUNS: ${{ github.event.inputs.cold_runs || '3' }}
       WARM_RUNS: ${{ github.event.inputs.warm_runs || '10' }}
       BENCH_DELEGATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
@@ -113,6 +118,7 @@ jobs:
             --namespace "$NAMESPACE" \
             --limit "$LIMIT" \
             --remember-runs "$REMEMBER_RUNS" \
+            --post-remember-sleep-secs "$POST_REMEMBER_SLEEP_SECS" \
             --cold-runs "$COLD_RUNS" \
             --warm-runs "$WARM_RUNS" \
             --output benchmark-results/memory-api.json \
