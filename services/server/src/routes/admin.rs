@@ -26,7 +26,9 @@ use super::cleanup_expired_blob;
 /// guard. Bundled at compile time.
 const ASK_SYSTEM_PROMPT: &str = include_str!("../services/prompts/ask.txt");
 /// Version ID for the ask prompt. Bump on every meaningful prompt change.
-#[allow(dead_code)]
+/// Exposed on `GET /health` via `HealthResponse.prompt_versions.ask` so
+/// the benchmark harness can pin it into the result-artifact metadata
+/// (MEM-56).
 const ASK_SYSTEM_PROMPT_VERSION: &str = "ask.v1";
 
 // ============================================================
@@ -119,6 +121,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             "benchmark".to_string()
         } else {
             "production".to_string()
+        },
+        // MEM-56: surface the prompt-version constants so benchmark
+        // run-artifacts can pin them at run start. Read from the same
+        // consts the running binary uses for extraction (`/api/analyze`)
+        // and ask (`/api/ask`) — no separate config to drift.
+        prompt_versions: PromptVersions {
+            extract: crate::services::extractor::FACT_EXTRACTION_PROMPT_VERSION.to_string(),
+            ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
     })
 }
