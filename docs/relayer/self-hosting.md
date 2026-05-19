@@ -7,7 +7,7 @@ Self-hosting means running your own relayer — either pointing at an existing M
 The managed relayer provided by Walrus Foundation is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
 If you want the default relayer-handled SDK flow while reducing trust in the
-host operator, see [Nautilus TEE Deployment](/relayer/nautilus-tee).
+host operator, see the [TEE Deployment Pattern](/relayer/nautilus-tee).
 
 ## Personas & When to Self-Host
 
@@ -82,6 +82,7 @@ curl http://localhost:8000/health
 - `MEMWAL_REGISTRY_ID`
 - `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
 - `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` — SEAL server config for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers.
+- `SIDECAR_AUTH_TOKEN` — shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it.
 
 ### Recommended
 
@@ -172,5 +173,5 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 
 ## Read Next
 
-- [Nautilus TEE Deployment](/relayer/nautilus-tee)
+- [TEE Deployment Pattern](/relayer/nautilus-tee)
 - [Relayer API](/relayer/api-reference)
