@@ -250,7 +250,7 @@ pub async fn analyze(
                 package_id: state.config.package_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
-                epochs: 50,
+                epochs: state.config.walrus_storage_epochs,
             },
         )
         .await

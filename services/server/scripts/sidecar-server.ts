@@ -33,6 +33,12 @@ const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testn
 
 const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
 const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
+const SEAL_KEY_SERVER_TIMEOUT_MS = parsePositiveIntEnv(
+    "SEAL_KEY_SERVER_TIMEOUT_MS",
+    25_000,
+    1_000,
+    120_000,
+);
 
 if (SEAL_SERVER_CONFIGS.length === 0) {
     console.error(
@@ -67,7 +73,14 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         : "https://upload-relay.mainnet.walrus.space"
 );
 
-const DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "testnet" ? 50 : 3;
+const MAX_WALRUS_EPOCHS = 5;
+const DEFAULT_WALRUS_EPOCHS = (() => {
+    const parsed = Number.parseInt(process.env.WALRUS_STORAGE_EPOCHS || "", 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(parsed, MAX_WALRUS_EPOCHS);
+    }
+    return SUI_NETWORK === "mainnet" ? 3 : MAX_WALRUS_EPOCHS;
+})();
 const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 const suiClient = new SuiJsonRpcClient({
@@ -79,16 +92,23 @@ const sealClient = new SealClient({
     suiClient: suiClient as any,
     serverConfigs: SEAL_SERVER_CONFIGS,
     verifyKeyServers: true,
+    timeout: SEAL_KEY_SERVER_TIMEOUT_MS,
 });
 
-const walrusClient = new WalrusClient({
-    network: SUI_NETWORK,
-    suiClient: suiClient as any,
-    uploadRelay: {
-        host: WALRUS_UPLOAD_RELAY_URL,
-        sendTip: { max: 10_000_000 },
-    },
-});
+function createWalrusClient(): WalrusClient {
+    return new WalrusClient({
+        network: SUI_NETWORK,
+        suiClient: suiClient as any,
+        uploadRelay: {
+            host: WALRUS_UPLOAD_RELAY_URL,
+            sendTip: { max: 10_000_000 },
+        },
+    });
+}
+
+let walrusClient = createWalrusClient();
+let walrusClientCreatedAtMs = Date.now();
+const sidecarStartedAtMs = Date.now();
 
 const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
 const GAS_INTENT_TYPE = "gas";
@@ -106,6 +126,14 @@ type UploadRelayTipConfigResponse = {
         address?: string;
     };
 };
+
+function clampWalrusEpochs(rawEpochs: unknown): number {
+    const parsed = Number(rawEpochs);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return DEFAULT_WALRUS_EPOCHS;
+    }
+    return Math.min(Math.floor(parsed), MAX_WALRUS_EPOCHS);
+}
 
 /**
  * Rewrite CoinWithBalance "gas" intents to explicit SUI coin type so Enoki
@@ -143,6 +171,14 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
     const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
+const WALRUS_CLIENT_MAX_AGE_MS = (() => {
+    const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
+})();
+const UPLOAD_RELAY_TIP_CACHE_TTL_MS = (() => {
+    const parsed = Number.parseInt(process.env.UPLOAD_RELAY_TIP_CACHE_TTL_MS || "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
+})();
 
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
@@ -163,13 +199,173 @@ const sidecarMetrics = {
 };
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
+let uploadRelayTipAddressCacheLoadedAtMs = 0;
+let activeWalrusUploads = 0;
+
+function shortAddress(address: unknown): string | undefined {
+    if (typeof address !== "string") return undefined;
+    if (address.length <= 18) return address;
+    return `${address.slice(0, 10)}...${address.slice(-6)}`;
+}
+
+function truncateForLog(value: unknown, max = 500): string {
+    const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+    return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function parsePositiveIntEnv(
+    name: string,
+    fallback: number,
+    min: number,
+    max: number,
+): number {
+    const raw = process.env[name]?.trim();
+    if (!raw) return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed < min) {
+        console.warn(`[sidecar] ignoring invalid ${name}=${raw}; using ${fallback}`);
+        return fallback;
+    }
+    return Math.min(parsed, max);
+}
+
+function errorMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === "string") return err;
+    return String(err);
+}
+
+function errorName(err: unknown): string {
+    if (err instanceof Error && err.name) return err.name;
+    if (typeof err === "object" && err && "name" in err) {
+        const name = (err as { name?: unknown }).name;
+        if (typeof name === "string" && name.length > 0) return name;
+    }
+    return "Error";
+}
+
+function formattedError(err: unknown): string {
+    const name = errorName(err);
+    const msg = errorMessage(err);
+    return name && name !== "Error" ? `${name}: ${msg}` : msg;
+}
+
+function sendSealFailure(
+    res: Response,
+    operation: string,
+    phase: string,
+    err: unknown,
+    traceId: string = randomUUID(),
+) {
+    const message = formattedError(err);
+    const error = `${operation} failed during ${phase}: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
+    console.error(`[${operation}] [${traceId}] phase=${phase} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`, err);
+    res.status(500).json({
+        error,
+        traceId,
+        phase,
+        timeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,
+        errorName: errorName(err),
+    });
+}
+
+function redactEnokiPath(path: string): string {
+    return path.replace(/\/transaction-blocks\/sponsor\/[^/?]+/, "/transaction-blocks/sponsor/<digest>");
+}
+
+function summarizeEnokiError(text: string): Record<string, unknown> {
+    try {
+        const parsed = JSON.parse(text) as { errors?: Array<{ code?: string; message?: string }> };
+        if (Array.isArray(parsed.errors)) {
+            return {
+                errors: parsed.errors.map((err) => ({
+                    code: err.code,
+                    message: truncateForLog(err.message || ""),
+                    hasMoveAbort: /moveabort/i.test(err.message || ""),
+                    hasBalanceSplit: /balance.*split|split.*balance/i.test(err.message || ""),
+                })),
+            };
+        }
+    } catch {
+        // Fall through to raw body summary.
+    }
+    return { body: truncateForLog(text) };
+}
+
+function isMoveAbortBalanceSplit(message: string): boolean {
+    return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
+}
+
+function clearUploadRelayTipCache(): void {
+    uploadRelayTipAddressCache = undefined;
+    uploadRelayTipAddressCacheLoadedAtMs = 0;
+}
+
+function refreshWalrusClient(reason: string): void {
+    try {
+        walrusClient.reset();
+    } catch (err: any) {
+        console.warn(`[walrus/client] reset failed before refresh reason=${reason}: ${err?.message || err}`);
+    }
+    walrusClient = createWalrusClient();
+    walrusClientCreatedAtMs = Date.now();
+    clearUploadRelayTipCache();
+    console.warn(`[walrus/client] refreshed reason=${reason}`);
+}
+
+function refreshWalrusClientIfStale(): void {
+    const ageMs = Date.now() - walrusClientCreatedAtMs;
+    if (ageMs >= WALRUS_CLIENT_MAX_AGE_MS) {
+        refreshWalrusClient(`max_age_${ageMs}ms`);
+    }
+}
+
+function sidecarStateSnapshot(): Record<string, unknown> {
+    const memory = process.memoryUsage();
+    const now = Date.now();
+    return {
+        pid: process.pid,
+        uptimeMs: now - sidecarStartedAtMs,
+        memory: {
+            rssMb: Math.round(memory.rss / 1024 / 1024),
+            heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+            heapTotalMb: Math.round(memory.heapTotal / 1024 / 1024),
+            externalMb: Math.round(memory.external / 1024 / 1024),
+        },
+        activeWalrusUploads,
+        walletSubmittedTotal: sidecarMetrics.walletSubmittedTotal,
+        walletLockErrorsTotal: sidecarMetrics.walletLockErrorsTotal,
+        walletPermanentFailuresTotal: sidecarMetrics.walletPermanentFailuresTotal,
+        uploadRelayTipCache:
+            uploadRelayTipAddressCache === undefined
+                ? "uninitialized"
+                : uploadRelayTipAddressCache === null
+                    ? "none"
+                    : "present",
+        uploadRelayTipCacheAgeMs: uploadRelayTipAddressCache === undefined
+            ? null
+            : now - uploadRelayTipAddressCacheLoadedAtMs,
+        walrusClientAgeMs: now - walrusClientCreatedAtMs,
+        serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
+        sealServerCount: SEAL_SERVER_CONFIGS.length,
+        sealThreshold: SEAL_THRESHOLD,
+        sealKeyServerTimeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,
+        suiNetwork: SUI_NETWORK,
+        enokiNetwork,
+        enokiEnabled: !!enokiApiKey,
+        fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    };
+}
 
 function dedupeAddresses(addresses: (string | null | undefined)[]): string[] {
     return [...new Set(addresses.filter((addr): addr is string => typeof addr === "string" && addr.length > 0))];
 }
 
 async function getUploadRelayTipAddress(): Promise<string | null> {
-    if (uploadRelayTipAddressCache !== undefined) {
+    if (
+        uploadRelayTipAddressCache !== undefined &&
+        Date.now() - uploadRelayTipAddressCacheLoadedAtMs < UPLOAD_RELAY_TIP_CACHE_TTL_MS
+    ) {
         return uploadRelayTipAddressCache;
     }
 
@@ -183,10 +379,12 @@ async function getUploadRelayTipAddress(): Promise<string | null> {
         const address = json.send_tip?.address;
         if (typeof address === "string" && address.startsWith("0x")) {
             uploadRelayTipAddressCache = address;
+            uploadRelayTipAddressCacheLoadedAtMs = Date.now();
             return address;
         }
 
         uploadRelayTipAddressCache = null;
+        uploadRelayTipAddressCacheLoadedAtMs = Date.now();
         return null;
     } catch (err: any) {
         console.warn(`[upload-relay] could not load tip-config: ${err.message || err}`);
@@ -211,11 +409,57 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
 
     const text = await resp.text();
     if (!resp.ok) {
+        console.error(`[enoki] api_error ${JSON.stringify({
+            path: redactEnokiPath(path),
+            status: resp.status,
+            network: enokiNetwork,
+            ...summarizeEnokiError(text),
+        })}`);
         throw new Error(`Enoki API error (${resp.status}): ${text}`);
     }
 
     const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
     return parsed.data;
+}
+
+function isSponsoredTransactionExpired(err: unknown): boolean {
+    const msg = errorMessage(err);
+    return /sponsored transaction has expired/i.test(msg)
+        || /"code"\s*:\s*"expired"/i.test(msg);
+}
+
+async function executeSponsoredTransactionOnce(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+): Promise<string> {
+    const txKindBytes = await tx.build({
+        client: suiClient as any,
+        onlyTransactionKind: true,
+    });
+
+    const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
+        network: enokiNetwork,
+        transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
+        sender: signer.toSuiAddress(),
+        ...(allowedAddresses?.length ? { allowedAddresses } : {}),
+    });
+
+    const signature = await signer.signTransaction(
+        new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
+    );
+
+    // LOW-15: Defense-in-depth — encode digest before path interpolation.
+    const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
+    const executed = await callEnoki<EnokiExecuteResponse>(
+        `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
+        {
+            digest: sponsored.digest,
+            signature: signature.signature,
+        }
+    );
+
+    return executed.digest;
 }
 
 async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, allowedAddresses?: string[]): Promise<string> {
@@ -232,36 +476,25 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
         return direct.digest;
     }
 
+    let sponsorError: unknown;
     try {
-        const txKindBytes = await tx.build({
-            client: suiClient as any,
-            onlyTransactionKind: true,
-        });
-
-        const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
-            network: enokiNetwork,
-            transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
-            sender: signer.toSuiAddress(),
-            ...(allowedAddresses?.length ? { allowedAddresses } : {}),
-        });
-
-        const signature = await signer.signTransaction(
-            new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
-        );
-
-        // LOW-15: Defense-in-depth — encode digest before path interpolation.
-        const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
-        const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
-            {
-                digest: sponsored.digest,
-                signature: signature.signature,
-            }
-        );
-
-        return executed.digest;
+        return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
     } catch (err: any) {
-        const errMsg = err?.message || String(err);
+        if (isSponsoredTransactionExpired(err)) {
+            console.warn(`[enoki-sponsor] sponsored tx expired; retrying sponsor/execute once: ${err?.message || err}`);
+            try {
+                return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
+            } catch (retryErr: any) {
+                sponsorError = retryErr;
+            }
+        } else {
+            sponsorError = err;
+        }
+    }
+
+    {
+        const err = sponsorError;
+        const errMsg = errorMessage(err);
         if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
             console.error(`[enoki-sponsor] sponsor failed and fallback disabled: ${errMsg}`);
             throw err;
@@ -273,6 +506,16 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
             transaction: tx,
         });
         return direct.digest;
+    }
+}
+
+async function getSuiBalanceMist(owner: string): Promise<string | null> {
+    try {
+        const balance = await (suiClient as any).getBalance({ owner, coinType: SUI_TYPE });
+        return typeof balance?.totalBalance === "string" ? balance.totalBalance : null;
+    } catch (err: any) {
+        console.warn(`[wallet] balance lookup failed for ${shortAddress(owner)}: ${err?.message || err}`);
+        return null;
     }
 }
 
@@ -333,11 +576,6 @@ function requestIdFor(req: Request): string {
         ?? randomUUID();
 }
 
-function errorMessage(err: unknown): string {
-    if (err instanceof Error) return err.message;
-    return String(err);
-}
-
 function sidecarLog(
     level: "info" | "warn" | "error",
     event: string,
@@ -382,7 +620,11 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 
 // Health check — placed before auth middleware so it is always reachable.
 app.get("/health", (_req: Request, res: Response) => {
-    res.json({ status: "ok" });
+    res.json({
+        status: "ok",
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        activeWalrusUploads,
+    });
 });
 
 // MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
@@ -443,12 +685,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // to PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) of plaintext plus base64 + JSON
 // framing overhead.
 app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
+    let phase = "validate";
     try {
         const { data, owner, packageId } = req.body;
         if (!data || !owner || !packageId) {
             return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
         }
 
+        phase = "encrypt";
         const plaintext = Buffer.from(data, "base64");
         const result = await sealClient.encrypt({
             threshold: SEAL_THRESHOLD,
@@ -460,12 +704,7 @@ app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), asyn
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        const traceId = requestIdFor(req);
-        sidecarLog("error", "seal_encrypt_failed", {
-            requestId: traceId,
-            error: errorMessage(err),
-        });
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/encrypt", phase, err, requestIdFor(req));
     }
 });
 
@@ -525,12 +764,14 @@ async function resolveSessionKey(
 // POST /seal/decrypt
 // ============================================================
 app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), async (req, res) => {
+    let phase = "validate";
     try {
         const { data, packageId, accountId } = req.body;
         if (!data || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
         }
 
+        phase = "resolve_session";
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
@@ -540,11 +781,13 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
             });
         }
 
+        phase = "parse";
         // Parse encrypted object to get key ID
         const encryptedData = new Uint8Array(Buffer.from(data, "base64"));
         const parsed = EncryptedObject.parse(encryptedData);
         const fullId = parsed.id;
 
+        phase = "build_ptb";
         // Convert hex ID to byte array for PTB
         const idBytes = Array.from(
             Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
@@ -561,6 +804,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         });
         const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
 
+        phase = "fetch_keys";
         // Fetch keys from key servers
         await sealClient.fetchKeys({
             ids: [fullId],
@@ -569,6 +813,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
             threshold: SEAL_THRESHOLD,
         });
 
+        phase = "decrypt";
         // Decrypt locally
         const decrypted = await sealClient.decrypt({
             data: encryptedData,
@@ -579,12 +824,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        const traceId = requestIdFor(req);
-        sidecarLog("error", "seal_decrypt_failed", {
-            requestId: traceId,
-            error: errorMessage(err),
-        });
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/decrypt", phase, err, requestIdFor(req));
     }
 });
 
@@ -595,6 +835,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
 // ============================================================
 // HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
 app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
+    let phase = "validate";
     try {
         const { items, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
@@ -610,6 +851,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             return res.status(400).json({ error: "Missing required fields: packageId, accountId" });
         }
 
+        phase = "resolve_session";
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
@@ -619,6 +861,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             });
         }
 
+        phase = "parse";
         // Parse all encrypted objects and collect unique SEAL IDs
         const parsedItems: { index: number; encryptedData: Uint8Array; fullId: string }[] = [];
         const errors: { index: number; error: string }[] = [];
@@ -629,7 +872,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
                 const parsed = EncryptedObject.parse(encryptedData);
                 parsedItems.push({ index: i, encryptedData, fullId: parsed.id });
             } catch (err: any) {
-                errors.push({ index: i, error: `parse failed: ${err.message}` });
+                errors.push({ index: i, error: `parse failed: ${errorMessage(err)}` });
             }
         }
 
@@ -637,6 +880,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             return res.json({ results: [], errors });
         }
 
+        phase = "build_ptb";
         // Collect all unique IDs
         const allIds = [...new Set(parsedItems.map(p => p.fullId))];
 
@@ -656,14 +900,33 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
         }
         const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
 
+        phase = "fetch_keys";
         // ONE fetchKeys call for ALL IDs
-        await sealClient.fetchKeys({
-            ids: allIds,
-            txBytes,
-            sessionKey,
-            threshold: SEAL_THRESHOLD,
-        });
+        try {
+            await sealClient.fetchKeys({
+                ids: allIds,
+                txBytes,
+                sessionKey,
+                threshold: SEAL_THRESHOLD,
+            });
+        } catch (err: any) {
+            const traceId = randomUUID();
+            const message = formattedError(err);
+            const error = `fetch_keys failed: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
+            console.error(
+                `[seal/decrypt-batch] [${traceId}] phase=fetch_keys items=${parsedItems.length} uniqueIds=${allIds.length} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`,
+                err,
+            );
+            return res.json({
+                results: [],
+                errors: [
+                    ...errors,
+                    ...parsedItems.map((item) => ({ index: item.index, error })),
+                ],
+            });
+        }
 
+        phase = "decrypt";
         // Decrypt each blob using the shared sessionKey
         const results: { index: number; decryptedData: string }[] = [];
 
@@ -679,19 +942,14 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
                     decryptedData: Buffer.from(decrypted).toString("base64"),
                 });
             } catch (err: any) {
-                errors.push({ index: item.index, error: `decrypt failed: ${err.message}` });
+                errors.push({ index: item.index, error: `decrypt failed: ${formattedError(err)}` });
             }
         }
 
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        const traceId = requestIdFor(req);
-        sidecarLog("error", "seal_decrypt_batch_failed", {
-            requestId: traceId,
-            error: errorMessage(err),
-        });
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/decrypt-batch", phase, err, requestIdFor(req));
     }
 });
 
@@ -793,6 +1051,14 @@ async function setMetadataAndTransferBlobs(
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
 // 10 MB sits well above any realistic single-memory upload size.
 app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
+    const traceId = requestIdFor(req);
+    let phase = "receive";
+    let keyIndexForLog: unknown;
+    let ownerForLog: unknown;
+    let namespaceForLog: unknown;
+    let signerAddressForLog: string | undefined;
+    let blobBytesForLog: number | undefined;
+    activeWalrusUploads += 1;
     try {
         const {
             data,
@@ -804,8 +1070,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             deferTransfer = false,
             epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
         } = req.body;
-        // LOW-17: Cap epochs at 5 to prevent accidental large storage purchases
-        const epochs = Math.min(Number(rawEpochs) || DEFAULT_WALRUS_EPOCHS, 5);
+        keyIndexForLog = keyIndex;
+        ownerForLog = owner;
+        namespaceForLog = namespace;
+        // LOW-17: Cap epochs to prevent accidental large storage purchases.
+        const epochs = clampWalrusEpochs(rawEpochs);
 
         if (!data || keyIndex === undefined) {
             return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
@@ -827,18 +1096,38 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         }
 
         // Decode signer
+        phase = "decode_signer";
         const { secretKey } = decodeSuiPrivateKey(privateKey);
         const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
         const signerAddress = signer.toSuiAddress();
+        signerAddressForLog = signerAddress;
         const blobData = new Uint8Array(Buffer.from(data, "base64"));
+        blobBytesForLog = blobData.length;
+        refreshWalrusClientIfStale();
+        const signerSuiBalanceMist = await getSuiBalanceMist(signerAddress);
+        console.log(`[walrus/upload] [${traceId}] begin ${JSON.stringify({
+            keyIndex,
+            signer: shortAddress(signerAddress),
+            owner: shortAddress(owner),
+            namespace: namespace || "default",
+            bytes: blobData.length,
+            epochs,
+            deferTransfer,
+            signerSuiBalanceMist,
+            enokiEnabled: !!enokiApiKey,
+            fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+            state: sidecarStateSnapshot(),
+        })}`);
 
         // writeBlobFlow is intentionally not serialized by signer. Current Sui
         // no longer permanently locks coin objects for concurrent submissions;
         // transient gas/RPC races are retried by the Apalis wallet job layer.
+        phase = "encode";
         const flow = walrusClient.writeBlobFlow({ blob: blobData });
         await flow.encode();
 
+        phase = "register_build";
         const registerTx = flow.register({
             epochs,
             // Server owns the blob initially (needed for certify step)
@@ -858,19 +1147,31 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         patchGasCoinIntents(registerTx);
         const tipRecipient = await getUploadRelayTipAddress();
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
+        phase = "register_sponsor";
+        console.log(`[walrus/upload] [${traceId}] register_sponsor ${JSON.stringify({
+            keyIndex,
+            signer: shortAddress(signerAddress),
+            tipRecipient: shortAddress(tipRecipient),
+            allowedAddresses: registerAllowedAddresses.map(shortAddress),
+        })}`);
         const registerDigest = await submitWalletTransaction(
             registerTx,
             signer,
             registerAllowedAddresses,
         );
+        phase = "register_wait";
         await suiClient.waitForTransaction({ digest: registerDigest });
 
+        phase = "upload_blob";
         await flow.upload({ digest: registerDigest });
 
+        phase = "certify_sponsor";
         const certifyTx = flow.certify();
         const certifyDigest = await submitWalletTransaction(certifyTx, signer);
+        phase = "certify_wait";
         await suiClient.waitForTransaction({ digest: certifyDigest });
 
+        phase = "get_blob";
         const blob = await flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
@@ -878,6 +1179,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
             try {
+                phase = "metadata_transfer";
                 await setMetadataAndTransferBlobs(
                     signer,
                     [{ blobObjectId, namespace }],
@@ -885,7 +1187,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                     packageId,
                     agentId,
                 );
-                console.log(`[walrus/upload] metadata set + transferred blob ${blobObjectId} to owner (ns=${namespace})`);
+                console.log(`[walrus/upload] [${traceId}] metadata_transfer_ok ${JSON.stringify({
+                    blobObjectId,
+                    owner: shortAddress(owner),
+                    namespace: namespace || "default",
+                })}`);
             } catch (metaErr: any) {
                 // LOW-14: Previously the metadata-set + transfer failure was swallowed
                 // and /walrus/upload returned 200 with the blob_id, leaving the blob
@@ -894,7 +1200,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                 // primitive after certify), so at minimum we log loudly AND return
                 // 500 so the caller can react (retry / mark stored-but-not-owned).
                 console.error(
-                    `[walrus/upload] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
+                    `[walrus/upload] [${traceId}] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
                     `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
                 );
                 return res.status(500).json({
@@ -906,19 +1212,49 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             }
         }
 
+        phase = "respond";
+        console.log(`[walrus/upload] [${traceId}] ok ${JSON.stringify({
+            blobId: blob.blobId,
+            objectId: blobObjectId,
+            transferStatus: deferTransfer ? "deferred" : "ok",
+            keyIndex,
+            bytes: blobBytesForLog,
+        })}`);
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
             transferStatus: deferTransfer ? "deferred" : "ok",
         });
     } catch (err: any) {
-        const traceId = requestIdFor(req);
-        const message = errorMessage(err);
+        const message = err?.message || String(err);
+        if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
+            refreshWalrusClient("register_sponsor_balance_split");
+        }
+        const postFailureSignerSuiBalanceMist = signerAddressForLog
+            ? await getSuiBalanceMist(signerAddressForLog)
+            : null;
+        console.error(`[walrus/upload] [${traceId}] failed ${JSON.stringify({
+            phase,
+            keyIndex: keyIndexForLog,
+            signer: shortAddress(signerAddressForLog),
+            owner: shortAddress(ownerForLog),
+            namespace: namespaceForLog || "default",
+            bytes: blobBytesForLog,
+            uptimeMs: Date.now() - sidecarStartedAtMs,
+            postFailureSignerSuiBalanceMist,
+            message: truncateForLog(message),
+            hasMoveAbort: /moveabort/i.test(message),
+            hasBalanceSplit: /balance.*split|split.*balance/i.test(message),
+            state: sidecarStateSnapshot(),
+        })}`, err);
         sidecarLog("error", "walrus_upload_failed", {
             requestId: traceId,
+            phase,
             error: message,
         });
         res.status(500).json({ error: message, traceId });
+    } finally {
+        activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
     }
 });
 
@@ -1493,6 +1829,7 @@ const server = app.listen(PORT, HOST, () => {
         host: HOST,
         port: PORT,
         pid: process.pid,
+        state: sidecarStateSnapshot(),
     }));
 });
 
@@ -1520,3 +1857,20 @@ async function gracefulShutdown(signal: string): Promise<void> {
 }
 process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
+process.on("uncaughtException", (err) => {
+    console.error(`[sidecar] uncaught_exception ${JSON.stringify({
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        message: truncateForLog(err?.message || String(err)),
+        stack: truncateForLog(err?.stack || ""),
+        state: sidecarStateSnapshot(),
+    })}`);
+    process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+    console.error(`[sidecar] unhandled_rejection ${JSON.stringify({
+        uptimeMs: Date.now() - sidecarStartedAtMs,
+        reason: truncateForLog(reason instanceof Error ? reason.message : reason),
+        stack: truncateForLog(reason instanceof Error ? reason.stack || "" : ""),
+        state: sidecarStateSnapshot(),
+    })}`);
+});

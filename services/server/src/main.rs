@@ -92,7 +92,7 @@ async fn main() {
         .args(["tsx", "sidecar-server.ts"])
         .current_dir(&scripts_dir)
         .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .expect("Failed to start TS sidecar. Is Node.js installed?");
@@ -124,6 +124,50 @@ async fn main() {
         sidecar_child.kill().await.ok();
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
     }
+
+    // Keep a cheap heartbeat in the Rust logs so operators can distinguish
+    // Enoki/Walrus failures from the sidecar process becoming unavailable.
+    let sidecar_watch_client = http_client.clone();
+    let sidecar_watch_url = health_url.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut consecutive_failures = 0u32;
+        loop {
+            interval.tick().await;
+            match sidecar_watch_client
+                .get(&sidecar_watch_url)
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if consecutive_failures > 0 {
+                        tracing::info!(
+                            "  sidecar: health recovered after {} failed check(s)",
+                            consecutive_failures
+                        );
+                    }
+                    consecutive_failures = 0;
+                }
+                Ok(resp) => {
+                    consecutive_failures += 1;
+                    tracing::error!(
+                        "  sidecar: health check failed status={} consecutive_failures={}",
+                        resp.status(),
+                        consecutive_failures
+                    );
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    tracing::error!(
+                        "  sidecar: health check error consecutive_failures={} error={}",
+                        consecutive_failures,
+                        e
+                    );
+                }
+            }
+        }
+    });
 
     // Initialize database (PostgreSQL + pgvector).
     // `Arc` so the MemoryEngine impl shares the same pool as the handlers.

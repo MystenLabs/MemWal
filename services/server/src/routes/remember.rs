@@ -160,7 +160,7 @@ fn spawn_prepare_remember_job(
                         package_id: state.config.package_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         remember_job_id: Some(job_id.clone()),
-                        epochs: 50,
+                        epochs: state.config.walrus_storage_epochs,
                     },
                 )
                 .await?;
@@ -293,7 +293,7 @@ fn spawn_prepare_bulk_remember_job(
                         package_id: state.config.package_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         items: bulk_items,
-                        epochs: 50,
+                        epochs: state.config.walrus_storage_epochs,
                     })
                     .await
                     .map_err(|e| {
@@ -901,7 +901,7 @@ pub async fn remember_manual(
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
     // Persist via the storage engine: Walrus upload (pool key pays gas,
-    // epochs=50, immediate transfer to owner) -> Postgres index row.
+    // configured storage epochs, immediate transfer to owner) -> Postgres index row.
     // Same logic as before, now in engine/walrus_seal.rs::store_blob.
     let mref = state
         .engine
@@ -1045,6 +1045,7 @@ mod tests {
             openai_api_base,
             walrus_publisher_url: "http://localhost:9001".to_string(),
             walrus_aggregator_url: "http://localhost:9002".to_string(),
+            walrus_storage_epochs: 3,
             walrus_aggregator_urls: vec!["http://localhost:9002".to_string()],
             walrus_skip_consistency_check: false,
             walrus_aggregator_race_after_ms: crate::types::DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS,

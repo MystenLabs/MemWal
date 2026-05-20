@@ -255,8 +255,20 @@ pub enum DecryptOutcome {
 
 impl DecryptOutcome {
     fn permanent_from_error(err: &str) -> bool {
+        let lower = err.to_ascii_lowercase();
+        if lower.contains("timeout")
+            || lower.contains("fetch_keys failed")
+            || lower.contains("too many failed fetch")
+            || lower.contains("internal server")
+            || lower.contains("temporarily unavailable")
+            || lower.contains("rate limit")
+            || lower.contains("429")
+            || lower.contains("503")
+        {
+            return false;
+        }
+
         err.contains("Not enough shares")
-            || err.contains("decrypt failed")
             || err.contains("InvalidCiphertext")
             || err.contains("InvalidPersonalMessageSignature")
     }
@@ -387,4 +399,40 @@ pub async fn seal_decrypt_batch(
     );
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DecryptOutcome;
+
+    #[test]
+    fn classifies_seal_timeouts_as_transient() {
+        for msg in [
+            "fetch_keys failed: TimeoutError: The operation was aborted due to timeout",
+            "decrypt failed: TimeoutError: The operation was aborted due to timeout",
+            "seal decrypt-batch failed: Internal server error",
+            "TooManyFailedFetchKeyRequestsError",
+        ] {
+            assert!(
+                !DecryptOutcome::permanent_from_error(msg),
+                "expected transient: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_clear_seal_auth_or_ciphertext_errors_as_permanent() {
+        for msg in [
+            "Not enough shares",
+            "InvalidCiphertext",
+            "InvalidPersonalMessageSignature",
+        ] {
+            assert!(
+                DecryptOutcome::permanent_from_error(msg),
+                "expected permanent: {}",
+                msg
+            );
+        }
+    }
 }

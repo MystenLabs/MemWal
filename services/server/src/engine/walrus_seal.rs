@@ -36,8 +36,6 @@ use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 /// SEAL decrypt-batch chunk size (matches the inlined `recall` value).
 const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
-/// Epoch lifetime requested for blobs uploaded via the manual / job paths.
-const STORE_BLOB_EPOCHS: u64 = 50;
 
 /// Production engine — uploads prepared ciphertext to Walrus, indexes
 /// the row in Postgres, serves reads through the Redis blob cache.
@@ -249,7 +247,7 @@ impl MemoryEngine for WalrusSealEngine {
             &self.config.sidecar_url,
             self.config.sidecar_secret.as_deref(),
             bytes,
-            STORE_BLOB_EPOCHS,
+            self.config.walrus_storage_epochs as u64,
             owner,
             key_index,
             namespace,
