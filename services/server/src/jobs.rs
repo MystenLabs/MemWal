@@ -769,7 +769,8 @@ async fn execute_upload_and_transfer(
 /// don't burn retry budget on inputs that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
-/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure), except
+///   `balance::split` stale-state failures that can recover after sidecar refresh
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
 /// - `InsufficientGas` / `ObjectNotFound` /
@@ -802,6 +803,12 @@ impl WalletJobError {
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        if (lower.contains("moveabort") || lower.contains("move abort"))
+            && lower.contains("balance")
+            && lower.contains("split")
+        {
+            return WalletJobError::Transient(msg.to_string());
+        }
         if lower.contains("moveabort") || lower.contains("move abort") {
             return WalletJobError::Permanent(msg.to_string());
         }
@@ -943,7 +950,7 @@ pub async fn execute_remember(
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
         &encrypted,
-        50,
+        state.config.walrus_storage_epochs as u64,
         &job.owner,
         key_index,
         &job.namespace,
@@ -1196,11 +1203,24 @@ mod tests {
         for msg in [
             "MoveAbort(MoveLocation { module: ... }, 1)",
             "Move abort at code 7",
-            "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
         ] {
             assert!(
                 WalletJobError::classify_sidecar_error(msg).is_permanent(),
                 "expected permanent for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_balance_split_move_abort_as_transient() {
+        for msg in [
+            "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
+            "move abort during balance split",
+        ] {
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected transient for: {}",
                 msg
             );
         }

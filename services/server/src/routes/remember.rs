@@ -901,7 +901,7 @@ pub async fn remember_manual(
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
     // Persist via the storage engine: Walrus upload (pool key pays gas,
-    // epochs=50, immediate transfer to owner) -> Postgres index row.
+    // configured storage epochs, immediate transfer to owner) -> Postgres index row.
     // Same logic as before, now in engine/walrus_seal.rs::store_blob.
     let mref = state
         .engine
