@@ -60,11 +60,16 @@ pub trait Extractor: Send + Sync {
 const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 
 /// Version ID for the extraction prompt. Bump on every meaningful prompt
-/// change. Intended for the benchmark harness / run artifacts so results
-/// are attributable to a specific prompt version (not yet wired into a
-/// response — marker const for now).
-#[allow(dead_code)]
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v1";
+/// change. Surfaced on `GET /health` (`HealthResponse.prompt_versions.extract`)
+/// and pinned into benchmark result-artifact JSONs so a "score jumped in
+/// week N" delta is attributable to the prompt change rather than guessed
+/// at from git history (MEM-56).
+///
+/// `extract.v2` (MEM-55): relaxed the "facts about the user" scope to
+/// cover memorable facts from either party — fixes the systematic
+/// undercount of assistant-side facts on LongMemEval's
+/// `single_session_assistant` category. Source: `prompts/extract.txt`.
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v2";
 
 pub struct LlmExtractor {
     http_client: reqwest::Client,
