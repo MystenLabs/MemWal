@@ -1,12 +1,13 @@
 ---
-title: "Nautilus TEE Deployment"
+title: "TEE Deployment Pattern"
+description: "Run the MemWal relayer with a TEE deployment pattern and understand what remains for a full Sui Nautilus integration."
 ---
 
-Run the MemWal relayer inside a Nautilus TEE when you want the default SDK flow
-without giving the host operator direct access to plaintext memory payloads.
-The goal is a tamper-resistant, hardware-attested deployment pattern: incoming
+Run the MemWal relayer with a TEE deployment pattern when you want the default
+SDK flow without giving the host operator direct access to plaintext memory
+payloads. The goal is a tamper-resistant, hardware-attested deployment: incoming
 memories may still be plaintext at the relayer API boundary, but the relayer
-processes them inside the TEE and sends SEAL-encrypted ciphertext out to Walrus.
+processes them inside a TEE and sends SEAL-encrypted ciphertext out to Walrus.
 
 This pattern keeps the existing relayer behavior: clients send plaintext to the
 relayer, the relayer embeds and SEAL-encrypts it, encrypted blobs go to Walrus,
@@ -14,11 +15,29 @@ and PostgreSQL stores searchable vector metadata. The difference is that the
 plaintext boundary moves from a normal host process into the enclave.
 
 <Note>
-This is a deployment pattern, not a separate relayer implementation. Validate
-the manifest fields against the Nautilus version you deploy with, and use the
+This is a deployment pattern, not a separate relayer implementation. Validate the
+manifest fields against the Nautilus version you deploy with, and use the
 reference files in `services/server/deploy/nautilus` as the MemWal-specific
 starting point.
 </Note>
+
+<Warning>
+This template is not a complete Sui Nautilus application by itself. A full
+Nautilus integration also needs enclave attestation or measurement verification
+and, when required by your trust model, Move-side verification of the TEE output
+or registered enclave identity.
+</Warning>
+
+## What This Provides
+
+| Layer | Status |
+| --- | --- |
+| Relayer runtime | Uses the existing Rust relayer and TypeScript sidecar |
+| TEE-oriented image | Provides a wrapper `Containerfile` and entrypoint checks |
+| Runtime config | Provides a manifest example and secret/env template |
+| Local smoke test | Verifies Docker image boot, sidecar readiness, `/health`, and `/metrics` |
+| Nautilus deployment | Requires your Nautilus CLI/platform to build and run the enclave image |
+| Attestation verification | Must be wired through your Nautilus/Sui verification path before clients rely on it |
 
 ## Architecture Flow
 
@@ -26,7 +45,7 @@ starting point.
 flowchart LR
     Client["Client / SDK<br/>plaintext remember/recall"]
 
-    subgraph TEE["Nautilus TEE enclave"]
+    subgraph TEE["TEE enclave / Nautilus runtime target"]
         Relayer["Rust relayer<br/>auth, embedding, search"]
         Sidecar["TypeScript sidecar<br/>SEAL + Walrus SDK"]
     end
@@ -70,6 +89,10 @@ Template files:
 | File | Purpose |
 | --- | --- |
 | `services/server/deploy/nautilus/README.md` | Operator checklist and file map |
+| `services/server/deploy/nautilus/Containerfile` | TEE wrapper image that adds the runtime entrypoint |
+| `services/server/deploy/nautilus/Makefile` | Local build, run, and health-smoke helpers |
+| `services/server/deploy/nautilus/run.sh` | Runtime entrypoint with required-env validation |
+| `services/server/deploy/nautilus/host-forwarder.sh` | Optional host-side VSOCK bridge helper for Nitro-style deployments |
 | `services/server/deploy/nautilus/nautilus.toml.example` | Reference Nautilus manifest values for this service |
 | `services/server/deploy/nautilus/runtime.env.example` | Runtime environment and secret mapping |
 
@@ -83,19 +106,29 @@ cp services/server/deploy/nautilus/runtime.env.example .env.nautilus
 Then replace placeholder values and wire `.env.nautilus` into your Nautilus or
 CI secret mechanism. Do not bake secrets into the enclave image.
 
-The relayer image can be built from the existing Dockerfile:
+Build the reference image from the repo root:
 
 ```bash
-docker build \
-  -f services/server/Dockerfile \
-  -t memwal-relayer:nautilus \
-  services/server
+make -C services/server/deploy/nautilus build
 ```
 
-Use Nautilus to build and deploy the enclave image from that payload, then pin
-the image measurement or attestation identity produced by the deployment. The
-exact build/publish/run commands are Nautilus-version specific; the MemWal
-requirements are the runtime variables and external endpoints listed below.
+That target first builds the existing `services/server/Dockerfile` runtime image,
+then builds the TEE wrapper image from `Containerfile`. Use Nautilus to build and
+deploy the enclave image from that payload, then pin the image measurement or
+attestation identity produced by the deployment. The exact build/publish/run
+commands are Nautilus-version specific; the MemWal requirements are the runtime
+variables and external endpoints listed below.
+
+For a local container smoke test with a filled env file:
+
+```bash
+make -C services/server/deploy/nautilus run-local ENV_FILE=.env.nautilus
+make -C services/server/deploy/nautilus smoke RELAYER_URL=http://127.0.0.1:8000
+```
+
+Local Docker smoke tests only prove that the image and relayer entrypoint boot.
+They do not prove the process is running inside a TEE and do not produce a
+Nautilus attestation or onchain verification result.
 
 ## Required Runtime Variables
 
@@ -119,6 +152,7 @@ These map directly to the existing self-hosted relayer config.
 | `WALRUS_UPLOAD_RELAY_URL` | no | Upload relay override if required by the sidecar |
 | `PORT` | no | Relayer HTTP port; default `8000` |
 | `SIDECAR_URL` | no | Keep inside the enclave, usually `http://127.0.0.1:9000` |
+| `SIDECAR_AUTH_TOKEN` | yes | Shared secret for Rust-to-sidecar calls; sidecar refuses to start without it |
 | `LOG_FORMAT` | no | Set `json` for production logs |
 | `ALLOWED_ORIGINS` | no | Browser CORS allowlist |
 
@@ -143,17 +177,35 @@ values from `runtime.env.example`. Prefer private networking for PostgreSQL and
 Redis. Public AI, Sui, Walrus, and SEAL endpoints should still be egress-limited
 to exact hosts.
 
+For Nitro-style deployments that require explicit host-side VSOCK bridges,
+`host-forwarder.sh` can expose the relayer on the host and forward configured
+external endpoints from the enclave to TCP services. It reads the same runtime
+env file and only starts optional outbound proxies when the matching
+`*_PROXY_VSOCK_PORT` variables are set.
+
+## Nautilus Completion Checklist
+
+To turn this template into a complete Nautilus deployment, the operator still
+needs to perform the platform-specific steps for the Nautilus version in use:
+
+1. Generate or adapt the Nautilus manifest using `nautilus.toml.example` as the MemWal-specific input.
+2. Build the enclave artifact with the installed Nautilus toolchain or CI workflow.
+3. Deploy the enclave artifact to the target TEE host or Nautilus provider.
+4. Record the enclave measurement, PCRs, or attestation identity produced by that build.
+5. Register or publish the expected identity through the Nautilus/Sui verification path used by the deployment.
+6. Require clients, gateway policy, or Move-side verification to check that identity before trusting the endpoint as a Nautilus deployment.
+
 ## Secrets Handling
 
 - Inject secrets at runtime through Nautilus/CI secrets, not through Docker build args.
-- Keep `SERVER_SUI_PRIVATE_KEY`, `SERVER_SUI_PRIVATE_KEYS`, `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `ENOKI_API_KEY`, and SEAL API keys out of git.
+- Keep `SERVER_SUI_PRIVATE_KEY`, `SERVER_SUI_PRIVATE_KEYS`, `SIDECAR_AUTH_TOKEN`, `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `ENOKI_API_KEY`, and SEAL API keys out of git.
 - Restrict host access to the runtime env file and any Nautilus secret store.
 - Disable debug consoles and broad shell access on production enclave hosts.
 - Rotate the server wallet keys if the host-side secret delivery path is exposed.
 
 ## Operational Verification
 
-After deployment, check the public health endpoint:
+After any local or TEE deployment, check the public health endpoint:
 
 ```bash
 curl "$TEE_RELAYER_URL/health"
@@ -164,6 +216,9 @@ Check metrics if your ingress exposes them to trusted operators:
 ```bash
 curl "$TEE_RELAYER_URL/metrics"
 ```
+
+For Nautilus/TEE deployments, also verify the platform-specific attestation or
+measurement output. The local Docker smoke test does not cover this step.
 
 Run a remember/recall smoke test through the TEE endpoint:
 
@@ -224,7 +279,9 @@ database URLs.
 ## Security Considerations
 
 TEE deployment reduces trust in the relayer host, but it does not make the
-default SDK path end-to-end encrypted.
+default SDK path end-to-end encrypted. Nautilus adds value only when the
+attested enclave identity is verified by clients, gateway policy, or onchain
+logic before the endpoint is trusted.
 
 - Plaintext exists inside the enclave while handling `remember`, `recall`, `analyze`, `ask`, and `restore`.
 - SEAL encryption begins inside the sidecar before Walrus upload. Walrus should only receive encrypted bytes.
@@ -233,7 +290,7 @@ default SDK path end-to-end encrypted.
 - External embedding and LLM providers may see plaintext unless you run those services inside the enclave or switch to a provider/trust model you accept.
 - TLS should terminate inside the enclave or use an equivalent enclave-protected channel. If a host load balancer terminates TLS before forwarding to the enclave, the host can observe plaintext.
 - The host still controls availability, traffic routing, and endpoint allowlists. TEE protects confidentiality and integrity of code/data inside the enclave, not uptime.
-- Client-side attestation verification is required for the strongest story. Publish the expected Nautilus image measurement and require clients or gateway policy to verify it. Without verification, users still trust that the advertised endpoint is the enclave deployment.
+- Client-side, gateway, or onchain attestation verification is required for the strongest story. Publish the expected Nautilus image measurement and require that verification path to check it. Without verification, users still trust that the advertised endpoint is the enclave deployment.
 - Keep structured logs, metrics labels, traces, and error bodies free of plaintext and secrets.
 
 If you need the relayer to never see plaintext at all, use the manual SDK flow
@@ -244,4 +301,4 @@ instead of the default relayer-handled path.
 - [Self-Hosting](/relayer/self-hosting)
 - [Environment Variables](/reference/environment-variables)
 - [Trust & Security Model](/fundamentals/architecture/data-flow-security-model)
-- [Sui Nautilus docs](https://docs.sui.io/concepts/cryptography/nautilus)
+- [Sui Nautilus docs](https://docs.sui.io/guides/developer/nautilus)

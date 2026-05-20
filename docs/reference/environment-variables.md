@@ -13,6 +13,7 @@ For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting
 | `MEMWAL_PACKAGE_ID` | Sui package ID. See [Contract Overview](/contract/overview) |
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID. See [Contract Overview](/contract/overview) |
 | `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | SEAL server config used by the sidecar for encrypt and decrypt. Prefer `SEAL_SERVER_CONFIGS` for committee servers |
+| `SIDECAR_AUTH_TOKEN` | Shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it |
 
 ## Usually Required
 

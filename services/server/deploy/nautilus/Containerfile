@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# TEE wrapper image for the MemWal relayer.
+#
+# Build the base runtime image first:
+#   docker build -f services/server/Dockerfile -t memwal-relayer:runtime services/server
+#
+# Then build this wrapper from the repository root:
+#   docker build -f services/server/deploy/nautilus/Containerfile \
+#     --build-arg BASE_IMAGE=memwal-relayer:runtime \
+#     -t memwal-relayer:nautilus .
+
+ARG BASE_IMAGE=memwal-relayer:runtime
+FROM ${BASE_IMAGE}
+
+USER root
+COPY --chown=appuser:appuser services/server/deploy/nautilus/run.sh /app/run.sh
+RUN chmod 0755 /app/run.sh
+
+USER appuser
+WORKDIR /app
+
+ENV PORT=8000
+ENV SIDECAR_PORT=9000
+ENV SIDECAR_URL=http://127.0.0.1:9000
+ENV SIDECAR_SCRIPTS_DIR=/app/scripts
+ENV LOG_FORMAT=json
+
+ENTRYPOINT ["/app/run.sh"]
