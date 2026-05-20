@@ -33,6 +33,12 @@ const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testn
 
 const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
 const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
+const SEAL_KEY_SERVER_TIMEOUT_MS = parsePositiveIntEnv(
+    "SEAL_KEY_SERVER_TIMEOUT_MS",
+    25_000,
+    1_000,
+    120_000,
+);
 
 if (SEAL_SERVER_CONFIGS.length === 0) {
     console.error(
@@ -86,6 +92,7 @@ const sealClient = new SealClient({
     suiClient: suiClient as any,
     serverConfigs: SEAL_SERVER_CONFIGS,
     verifyKeyServers: true,
+    timeout: SEAL_KEY_SERVER_TIMEOUT_MS,
 });
 
 function createWalrusClient(): WalrusClient {
@@ -206,6 +213,62 @@ function truncateForLog(value: unknown, max = 500): string {
     return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function parsePositiveIntEnv(
+    name: string,
+    fallback: number,
+    min: number,
+    max: number,
+): number {
+    const raw = process.env[name]?.trim();
+    if (!raw) return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed < min) {
+        console.warn(`[sidecar] ignoring invalid ${name}=${raw}; using ${fallback}`);
+        return fallback;
+    }
+    return Math.min(parsed, max);
+}
+
+function errorMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === "string") return err;
+    return String(err);
+}
+
+function errorName(err: unknown): string {
+    if (err instanceof Error && err.name) return err.name;
+    if (typeof err === "object" && err && "name" in err) {
+        const name = (err as { name?: unknown }).name;
+        if (typeof name === "string" && name.length > 0) return name;
+    }
+    return "Error";
+}
+
+function formattedError(err: unknown): string {
+    const name = errorName(err);
+    const msg = errorMessage(err);
+    return name && name !== "Error" ? `${name}: ${msg}` : msg;
+}
+
+function sendSealFailure(
+    res: Response,
+    operation: string,
+    phase: string,
+    err: unknown,
+    traceId = randomUUID(),
+) {
+    const message = formattedError(err);
+    const error = `${operation} failed during ${phase}: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
+    console.error(`[${operation}] [${traceId}] phase=${phase} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`, err);
+    res.status(500).json({
+        error,
+        traceId,
+        phase,
+        timeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,
+        errorName: errorName(err),
+    });
+}
+
 function redactEnokiPath(path: string): string {
     return path.replace(/\/transaction-blocks\/sponsor\/[^/?]+/, "/transaction-blocks/sponsor/<digest>");
 }
@@ -284,6 +347,9 @@ function sidecarStateSnapshot(): Record<string, unknown> {
             : now - uploadRelayTipAddressCacheLoadedAtMs,
         walrusClientAgeMs: now - walrusClientCreatedAtMs,
         serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
+        sealServerCount: SEAL_SERVER_CONFIGS.length,
+        sealThreshold: SEAL_THRESHOLD,
+        sealKeyServerTimeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,
         suiNetwork: SUI_NETWORK,
         enokiNetwork,
         enokiEnabled: !!enokiApiKey,
@@ -356,6 +422,46 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     return parsed.data;
 }
 
+function isSponsoredTransactionExpired(err: unknown): boolean {
+    const msg = errorMessage(err);
+    return /sponsored transaction has expired/i.test(msg)
+        || /"code"\s*:\s*"expired"/i.test(msg);
+}
+
+async function executeSponsoredTransactionOnce(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+): Promise<string> {
+    const txKindBytes = await tx.build({
+        client: suiClient as any,
+        onlyTransactionKind: true,
+    });
+
+    const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
+        network: enokiNetwork,
+        transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
+        sender: signer.toSuiAddress(),
+        ...(allowedAddresses?.length ? { allowedAddresses } : {}),
+    });
+
+    const signature = await signer.signTransaction(
+        new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
+    );
+
+    // LOW-15: Defense-in-depth — encode digest before path interpolation.
+    const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
+    const executed = await callEnoki<EnokiExecuteResponse>(
+        `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
+        {
+            digest: sponsored.digest,
+            signature: signature.signature,
+        }
+    );
+
+    return executed.digest;
+}
+
 async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, allowedAddresses?: string[]): Promise<string> {
     if (!enokiApiKey) {
         if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
@@ -370,36 +476,25 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
         return direct.digest;
     }
 
+    let sponsorError: unknown;
     try {
-        const txKindBytes = await tx.build({
-            client: suiClient as any,
-            onlyTransactionKind: true,
-        });
-
-        const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
-            network: enokiNetwork,
-            transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
-            sender: signer.toSuiAddress(),
-            ...(allowedAddresses?.length ? { allowedAddresses } : {}),
-        });
-
-        const signature = await signer.signTransaction(
-            new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
-        );
-
-        // LOW-15: Defense-in-depth — encode digest before path interpolation.
-        const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
-        const executed = await callEnoki<EnokiExecuteResponse>(
-            `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
-            {
-                digest: sponsored.digest,
-                signature: signature.signature,
-            }
-        );
-
-        return executed.digest;
+        return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
     } catch (err: any) {
-        const errMsg = err?.message || String(err);
+        if (isSponsoredTransactionExpired(err)) {
+            console.warn(`[enoki-sponsor] sponsored tx expired; retrying sponsor/execute once: ${err?.message || err}`);
+            try {
+                return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
+            } catch (retryErr: any) {
+                sponsorError = retryErr;
+            }
+        } else {
+            sponsorError = err;
+        }
+    }
+
+    {
+        const err = sponsorError;
+        const errMsg = errorMessage(err);
         if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
             console.error(`[enoki-sponsor] sponsor failed and fallback disabled: ${errMsg}`);
             throw err;
@@ -545,12 +640,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // to PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) of plaintext plus base64 + JSON
 // framing overhead.
 app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
+    let phase = "validate";
     try {
         const { data, owner, packageId } = req.body;
         if (!data || !owner || !packageId) {
             return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
         }
 
+        phase = "encrypt";
         const plaintext = Buffer.from(data, "base64");
         const result = await sealClient.encrypt({
             threshold: SEAL_THRESHOLD,
@@ -562,9 +659,7 @@ app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), asyn
         const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
         res.json({ encryptedData: encryptedBase64 });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/encrypt] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/encrypt", phase, err);
     }
 });
 
@@ -624,12 +719,14 @@ async function resolveSessionKey(
 // POST /seal/decrypt
 // ============================================================
 app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), async (req, res) => {
+    let phase = "validate";
     try {
         const { data, packageId, accountId } = req.body;
         if (!data || !packageId || !accountId) {
             return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
         }
 
+        phase = "resolve_session";
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
@@ -639,11 +736,13 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
             });
         }
 
+        phase = "parse";
         // Parse encrypted object to get key ID
         const encryptedData = new Uint8Array(Buffer.from(data, "base64"));
         const parsed = EncryptedObject.parse(encryptedData);
         const fullId = parsed.id;
 
+        phase = "build_ptb";
         // Convert hex ID to byte array for PTB
         const idBytes = Array.from(
             Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
@@ -660,6 +759,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         });
         const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
 
+        phase = "fetch_keys";
         // Fetch keys from key servers
         await sealClient.fetchKeys({
             ids: [fullId],
@@ -668,6 +768,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
             threshold: SEAL_THRESHOLD,
         });
 
+        phase = "decrypt";
         // Decrypt locally
         const decrypted = await sealClient.decrypt({
             data: encryptedData,
@@ -678,9 +779,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         const decryptedBase64 = Buffer.from(decrypted).toString("base64");
         res.json({ decryptedData: decryptedBase64 });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/decrypt] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/decrypt", phase, err);
     }
 });
 
@@ -691,6 +790,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
 // ============================================================
 // HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
 app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
+    let phase = "validate";
     try {
         const { items, packageId, accountId } = req.body;
         if (!items || !Array.isArray(items) || items.length === 0) {
@@ -706,6 +806,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             return res.status(400).json({ error: "Missing required fields: packageId, accountId" });
         }
 
+        phase = "resolve_session";
         // ENG-1697: resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
@@ -715,6 +816,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             });
         }
 
+        phase = "parse";
         // Parse all encrypted objects and collect unique SEAL IDs
         const parsedItems: { index: number; encryptedData: Uint8Array; fullId: string }[] = [];
         const errors: { index: number; error: string }[] = [];
@@ -725,7 +827,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
                 const parsed = EncryptedObject.parse(encryptedData);
                 parsedItems.push({ index: i, encryptedData, fullId: parsed.id });
             } catch (err: any) {
-                errors.push({ index: i, error: `parse failed: ${err.message}` });
+                errors.push({ index: i, error: `parse failed: ${errorMessage(err)}` });
             }
         }
 
@@ -733,6 +835,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
             return res.json({ results: [], errors });
         }
 
+        phase = "build_ptb";
         // Collect all unique IDs
         const allIds = [...new Set(parsedItems.map(p => p.fullId))];
 
@@ -752,14 +855,33 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
         }
         const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
 
+        phase = "fetch_keys";
         // ONE fetchKeys call for ALL IDs
-        await sealClient.fetchKeys({
-            ids: allIds,
-            txBytes,
-            sessionKey,
-            threshold: SEAL_THRESHOLD,
-        });
+        try {
+            await sealClient.fetchKeys({
+                ids: allIds,
+                txBytes,
+                sessionKey,
+                threshold: SEAL_THRESHOLD,
+            });
+        } catch (err: any) {
+            const traceId = randomUUID();
+            const message = formattedError(err);
+            const error = `fetch_keys failed: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
+            console.error(
+                `[seal/decrypt-batch] [${traceId}] phase=fetch_keys items=${parsedItems.length} uniqueIds=${allIds.length} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`,
+                err,
+            );
+            return res.json({
+                results: [],
+                errors: [
+                    ...errors,
+                    ...parsedItems.map((item) => ({ index: item.index, error })),
+                ],
+            });
+        }
 
+        phase = "decrypt";
         // Decrypt each blob using the shared sessionKey
         const results: { index: number; decryptedData: string }[] = [];
 
@@ -775,16 +897,14 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
                     decryptedData: Buffer.from(decrypted).toString("base64"),
                 });
             } catch (err: any) {
-                errors.push({ index: item.index, error: `decrypt failed: ${err.message}` });
+                errors.push({ index: item.index, error: `decrypt failed: ${formattedError(err)}` });
             }
         }
 
         console.log(`[seal/decrypt-batch] ${results.length}/${items.length} decrypted ok, ${errors.length} errors`);
         res.json({ results, errors });
     } catch (err: any) {
-        const traceId = randomUUID();
-        console.error(`[seal/decrypt-batch] [${traceId}] error:`, err);
-        res.status(500).json({ error: "Internal server error", traceId });
+        sendSealFailure(res, "seal/decrypt-batch", phase, err);
     }
 });
 

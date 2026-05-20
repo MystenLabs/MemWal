@@ -13,6 +13,42 @@ pub struct UploadResult {
     pub object_id: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum UploadBlobError {
+    App(AppError),
+    MetadataTransferFailed {
+        blob_id: String,
+        object_id: String,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for UploadBlobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UploadBlobError::App(err) => write!(f, "{}", err),
+            UploadBlobError::MetadataTransferFailed { message, .. } => write!(f, "{}", message),
+        }
+    }
+}
+
+impl std::error::Error for UploadBlobError {}
+
+impl From<AppError> for UploadBlobError {
+    fn from(err: AppError) -> Self {
+        UploadBlobError::App(err)
+    }
+}
+
+impl From<UploadBlobError> for AppError {
+    fn from(err: UploadBlobError) -> Self {
+        match err {
+            UploadBlobError::App(err) => err,
+            UploadBlobError::MetadataTransferFailed { message, .. } => AppError::Internal(message),
+        }
+    }
+}
+
 /// A blob discovered from on-chain query
 #[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)]
@@ -56,6 +92,16 @@ struct WalrusUploadRequest {
 #[serde(rename_all = "camelCase")]
 struct WalrusUploadResponse {
     blob_id: String,
+    object_id: Option<String>,
+    #[serde(default)]
+    transfer_status: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WalrusUploadErrorResponse {
+    error: String,
+    blob_id: Option<String>,
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
@@ -105,7 +151,7 @@ pub async fn upload_blob(
     namespace: &str,
     package_id: &str,
     agent_id: Option<&str>,
-) -> Result<UploadResult, AppError> {
+) -> Result<UploadResult, UploadBlobError> {
     upload_blob_inner(
         client,
         sidecar_url,
@@ -135,7 +181,7 @@ async fn upload_blob_inner(
     package_id: &str,
     agent_id: Option<&str>,
     defer_transfer: bool,
-) -> Result<UploadResult, AppError> {
+) -> Result<UploadResult, UploadBlobError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
@@ -156,34 +202,64 @@ async fn upload_blob_inner(
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Sidecar walrus/upload request failed: {}", e)))?;
+        .map_err(|e| {
+            UploadBlobError::App(AppError::Internal(format!(
+                "Sidecar walrus/upload request failed: {}",
+                e
+            )))
+        })?;
 
     if !resp.status().is_success() {
         let body = resp.text().await.unwrap_or_default();
-        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(AppError::Internal(format!(
+        if let Ok(err) = serde_json::from_str::<WalrusUploadErrorResponse>(&body) {
+            if err.transfer_status.as_deref() == Some("failed") {
+                if let (Some(blob_id), Some(object_id)) = (err.blob_id, err.object_id) {
+                    return Err(UploadBlobError::MetadataTransferFailed {
+                        blob_id,
+                        object_id,
+                        message: err.error,
+                    });
+                }
+            }
+            return Err(UploadBlobError::App(AppError::Internal(format!(
                 "walrus upload failed: {}",
                 err.error
-            )));
+            ))));
         }
-        return Err(AppError::Internal(format!(
+        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
+            return Err(UploadBlobError::App(AppError::Internal(format!(
+                "walrus upload failed: {}",
+                err.error
+            ))));
+        }
+        return Err(UploadBlobError::App(AppError::Internal(format!(
             "walrus upload failed: {}",
             body
-        )));
+        ))));
     }
 
     let result: WalrusUploadResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!("Failed to parse walrus/upload response: {}", e))
+        UploadBlobError::App(AppError::Internal(format!(
+            "Failed to parse walrus/upload response: {}",
+            e
+        )))
     })?;
     if result.transfer_status.as_deref() == Some("failed") {
-        return Err(AppError::Internal(
+        if let Some(object_id) = result.object_id.clone() {
+            return Err(UploadBlobError::MetadataTransferFailed {
+                blob_id: result.blob_id.clone(),
+                object_id,
+                message: "walrus upload completed but metadata/transfer failed".into(),
+            });
+        }
+        return Err(UploadBlobError::App(AppError::Internal(
             "walrus upload completed but metadata/transfer failed".into(),
-        ));
+        )));
     }
     if defer_transfer && result.object_id.is_none() {
-        return Err(AppError::Internal(
+        return Err(UploadBlobError::App(AppError::Internal(
             "walrus deferred upload returned no object_id".into(),
-        ));
+        )));
     }
 
     tracing::info!(
