@@ -47,7 +47,6 @@ const STORE_BLOB_EPOCHS: u64 = 50;
 pub struct WalrusSealEngine {
     db: Arc<VectorDb>,
     http_client: reqwest::Client,
-    walrus_client: Arc<walrus_rs::WalrusClient>,
     key_pool: Arc<KeyPool>,
     config: Arc<Config>,
     redis: redis::aio::MultiplexedConnection,
@@ -64,7 +63,6 @@ impl WalrusSealEngine {
     pub fn new(
         db: Arc<VectorDb>,
         http_client: reqwest::Client,
-        walrus_client: Arc<walrus_rs::WalrusClient>,
         key_pool: Arc<KeyPool>,
         config: Arc<Config>,
         redis: redis::aio::MultiplexedConnection,
@@ -74,7 +72,6 @@ impl WalrusSealEngine {
         Self {
             db,
             http_client,
-            walrus_client,
             key_pool,
             config,
             redis,
@@ -193,7 +190,15 @@ impl WalrusSealEngine {
         if let Some(ciphertext) = self.cache_get(blob_id).await {
             return Some((ciphertext, true));
         }
-        match walrus::download_blob(&self.walrus_client, blob_id).await {
+        match walrus::download_blob_from_aggregators(
+            &self.http_client,
+            &self.config.walrus_aggregator_urls,
+            blob_id,
+            self.config.walrus_skip_consistency_check,
+            Duration::from_millis(self.config.walrus_aggregator_race_after_ms),
+        )
+        .await
+        {
             Ok(ciphertext) => {
                 self.cache_put(blob_id, &ciphertext).await;
                 Some((ciphertext, false))
@@ -342,6 +347,9 @@ impl MemoryEngine for WalrusSealEngine {
             blob_id: blob_id.to_string(),
             text,
             distance,
+            // Engine doesn't fetch created_at; the recall handler zips
+            // it on from the SearchHit. See HydratedMemory docs.
+            created_at: None,
         }))
     }
 
@@ -445,6 +453,9 @@ impl MemoryEngine for WalrusSealEngine {
                         blob_id: f.blob_id.clone(),
                         text,
                         distance: f.distance,
+                        // Engine doesn't fetch created_at; recall handler
+                        // zips it on. See HydratedMemory docs.
+                        created_at: None,
                     }),
                     Err(e) => {
                         tracing::warn!(

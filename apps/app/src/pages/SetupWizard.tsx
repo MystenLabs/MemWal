@@ -415,11 +415,12 @@ export default function SetupWizard() {
                                     <label htmlFor="delegate-key-input">enter existing delegate key</label>
                                     <textarea
                                         id="delegate-key-input"
-                                        className="input"
+                                        className="input setup-import-textarea"
                                         rows={3}
                                         value={importKeyHex}
                                         onChange={(e) => setImportKeyHex(e.target.value)}
                                         placeholder="paste your delegate private key"
+                                        aria-label="existing delegate key"
                                         spellCheck={false}
                                         style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }}
                                     />
@@ -438,10 +439,9 @@ export default function SetupWizard() {
                                     </div>
                                 )}
                                 <button
-                                    className="btn btn-secondary"
+                                    className="btn btn-secondary setup-import-button"
                                     onClick={handleImportKey}
                                     disabled={importingKey || !importKeyHex.trim()}
-                                    style={{ width: '100%', justifyContent: 'center' }}
                                 >
                                     <KeyRound size={14} /> {importingKey ? 'checking key...' : 'use delegate key'}
                                 </button>

@@ -69,6 +69,7 @@ pub async fn enqueue_wallet_job(
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
 /// inside a multi-byte sequence (e.g. emoji).
+#[cfg(test)]
 pub(super) fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -136,6 +137,32 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
                 e
             );
         }
+    }
+}
+
+// ============================================================
+// Ranker plumbing — zip created_at from SearchHits onto HydratedMemory
+// ============================================================
+
+/// Zip the `created_at` timestamp from a slice of `SearchHit`s onto a mutable
+/// slice of `HydratedMemory`s by `blob_id`. The storage engines deliberately
+/// leave `HydratedMemory.created_at = None` (they don't fetch it as part of
+/// the cache → Walrus → SEAL choreography); the recall handler already has
+/// the timestamp from `db.search_similar` and threads it onto the hydrated
+/// records here so the composite ranker can use it for the recency signal.
+///
+/// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
+/// it here keeps the two call sites in sync.
+pub(super) fn zip_created_at_onto_hydrated(
+    hydrated: &mut [crate::engine::HydratedMemory],
+    hits: &[SearchHit],
+) {
+    let by_blob: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> = hits
+        .iter()
+        .map(|h| (h.blob_id.as_str(), h.created_at))
+        .collect();
+    for m in hydrated.iter_mut() {
+        m.created_at = by_blob.get(m.blob_id.as_str()).copied();
     }
 }
 

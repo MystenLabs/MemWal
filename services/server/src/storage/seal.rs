@@ -107,14 +107,31 @@ pub async fn seal_encrypt(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
     let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "seal_encrypt",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("seal_encrypt", "transport_error");
         AppError::Internal(format!(
             "Sidecar seal/encrypt request failed: {}. Is the sidecar running?",
             e
         ))
     })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "seal_encrypt",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("seal_encrypt", "http_error");
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
             return Err(AppError::Internal(format!(
@@ -175,14 +192,31 @@ pub async fn seal_decrypt(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
     let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "seal_decrypt",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("seal_decrypt", "transport_error");
         AppError::Internal(format!(
             "Sidecar seal/decrypt request failed: {}. Is the sidecar running?",
             e
         ))
     })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "seal_decrypt",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("seal_decrypt", "http_error");
         let body = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
             return Err(AppError::Internal(format!(
@@ -273,15 +307,32 @@ pub async fn seal_decrypt_batch(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    let req = crate::observability::apply_request_id_header(req);
 
+    let started = std::time::Instant::now();
     let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "seal_decrypt_batch",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("seal_decrypt_batch", "transport_error");
         AppError::Internal(format!(
             "Sidecar seal/decrypt-batch request failed: {}. Is the sidecar running?",
             e
         ))
     })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "seal_decrypt_batch",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("seal_decrypt_batch", "http_error");
         let body_text = resp.text().await.unwrap_or_default();
         if let Ok(err) = serde_json::from_str::<SidecarError>(&body_text) {
             return Err(AppError::Internal(format!(

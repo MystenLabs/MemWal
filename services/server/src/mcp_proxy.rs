@@ -44,6 +44,8 @@ const FORWARD_HEADER_EXACT: &[&str] = &[
     "authorization",
     "content-type",
     "accept",
+    "x-request-id",
+    "x-correlation-id",
     // MCP 2025-06 streamable HTTP transport headers — the SDK on both
     // sides reads these to route requests to the right session.
     "mcp-session-id",

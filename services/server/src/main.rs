@@ -2,6 +2,7 @@ mod auth;
 mod engine;
 mod jobs;
 mod mcp_proxy;
+mod observability;
 mod rate_limit;
 mod routes;
 mod services;
@@ -18,7 +19,6 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::trace::TraceLayer;
 
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
@@ -28,7 +28,7 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use services::{Embedder, Extractor, LlmExtractor, OpenAiEmbedder};
+use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
@@ -43,13 +43,7 @@ async fn main() {
     // Load .env file (optional, won't error if missing)
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "memwal_server=info,tower_http=info".into()),
-        )
-        .init();
+    observability::init_tracing();
 
     // Load config
     let config = Config::from_env();
@@ -212,14 +206,26 @@ async fn main() {
         WALLET_QUEUE_NAME
     );
 
-    // Initialize Walrus client (SDK wraps Publisher + Aggregator HTTP APIs).
-    // `Arc` so the MemoryEngine impl shares the same client handle.
-    let walrus_client = Arc::new(
-        walrus_rs::WalrusClient::new(&config.walrus_aggregator_url, &config.walrus_publisher_url)
-            .expect("Failed to initialize Walrus client (invalid URL?)"),
-    );
+    reqwest::Url::parse(&config.walrus_publisher_url)
+        .expect("Failed to initialize Walrus publisher (invalid URL?)");
+    for aggregator_url in &config.walrus_aggregator_urls {
+        reqwest::Url::parse(aggregator_url)
+            .expect("Failed to initialize Walrus aggregator (invalid URL?)");
+    }
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
+    if config.walrus_aggregator_urls.len() > 1 {
+        tracing::info!(
+            "  Walrus aggregator race: {} candidates, race_after={}ms",
+            config.walrus_aggregator_urls.len(),
+            config.walrus_aggregator_race_after_ms
+        );
+    }
+    if config.walrus_skip_consistency_check {
+        tracing::warn!(
+            "  Walrus reads: WALRUS_SKIP_CONSISTENCY_CHECK=true for trusted MemWal cold reads"
+        );
+    }
     // Log upload key status
     let pool_size = config.sui_private_keys.len();
     if pool_size > 0 {
@@ -300,7 +306,6 @@ async fn main() {
         Arc::new(WalrusSealEngine::new(
             Arc::clone(&db),
             http_client.clone(),
-            Arc::clone(&walrus_client),
             Arc::clone(&key_pool),
             Arc::clone(&config),
             redis.clone(),
@@ -319,17 +324,19 @@ async fn main() {
     ));
     let extractor: Arc<dyn Extractor> =
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
+    // CompositeRanker is stateless — one shared instance is fine.
+    let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
     // Shared application state
     let state = Arc::new(AppState {
         db,
         config: Arc::clone(&config),
         http_client,
-        walrus_client,
         key_pool,
         engine,
         embedder,
         extractor,
+        ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
@@ -568,6 +575,10 @@ async fn main() {
             "/config",
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route(
+            "/metrics",
+            get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .merge(sponsor_routes)
         .merge(mcp_routes);
 
@@ -606,6 +617,8 @@ async fn main() {
                     "x-nonce".parse::<header::HeaderName>().unwrap(),
                     "x-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+                    "x-request-id".parse::<header::HeaderName>().unwrap(),
+                    "x-correlation-id".parse::<header::HeaderName>().unwrap(),
                     // ENG-1697: SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's MemWalAccount id + optional default namespace.
@@ -620,7 +633,9 @@ async fn main() {
         .merge(public_routes)
         .with_state(state)
         .layer(cors)
-        .layer(TraceLayer::new_for_http());
+        .layer(middleware::from_fn(
+            observability::request_context_middleware,
+        ));
 
     // Start server
     let addr = format!("0.0.0.0:{}", config.port);
@@ -630,6 +645,7 @@ async fn main() {
 
     tracing::info!("memwal server listening on {}", addr);
     tracing::info!("  health: http://localhost:{}/health", config.port);
+    tracing::info!("  metrics: http://localhost:{}/metrics", config.port);
     tracing::info!(
         "  api:    http://localhost:{}/api/{{remember,recall,analyze}}",
         config.port

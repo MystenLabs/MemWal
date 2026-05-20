@@ -26,6 +26,51 @@ export interface BridgeConfig {
     relayerUrl: string;
     webUrl: string;
     label: string;
+    /** Default memory namespace resolved at boot (`--namespace` /
+     * `MEMWAL_NAMESPACE`). Injected into memory tool calls that omit a
+     * namespace. Undefined → don't inject; the relayer applies its own
+     * "default" namespace. */
+    namespace?: string;
+}
+
+/** Memory tools that take a `namespace` argument. `memwal_remember`,
+ * `memwal_recall`, and `memwal_analyze` treat it as optional; `memwal_restore`
+ * requires it (its upstream schema still lists `namespace` as required, so
+ * agents normally pass one — but a configured default is filled in if the
+ * agent calls it without). */
+const NAMESPACE_TOOLS = new Set([
+    "memwal_remember",
+    "memwal_recall",
+    "memwal_analyze",
+    "memwal_restore",
+]);
+
+/**
+ * Inject the configured default namespace into an outbound `tools/call`
+ * message when the agent omitted one. Mutates `msg.params.arguments` in place
+ * and returns `msg` (so it works inline before tracking/forwarding).
+ *
+ * No-op when:
+ *   - no default namespace is configured (`namespace` falsy), or
+ *   - the message is not a `tools/call` for a namespace-aware memory tool, or
+ *   - the caller already supplied a non-empty `namespace` — an explicit
+ *     per-call namespace always wins over the configured default.
+ */
+export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcMessage {
+    if (!namespace) return msg;
+    if (msg.method !== "tools/call") return msg;
+    const params = msg.params as
+        | { name?: string; arguments?: Record<string, unknown> }
+        | undefined;
+    if (!params || typeof params.name !== "string" || !NAMESPACE_TOOLS.has(params.name)) {
+        return msg;
+    }
+    const args = (params.arguments ??= {});
+    const current = args.namespace;
+    // Explicit, non-empty per-call namespace wins.
+    if (typeof current === "string" && current.trim() !== "") return msg;
+    args.namespace = namespace;
+    return msg;
 }
 
 /** Tools we serve LOCALLY (not forwarded to the relayer) so the user can
@@ -549,6 +594,11 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
                         return;
                     }
                 }
+
+                // Fill in the configured default namespace for memory tool
+                // calls that didn't pass one. Mutates msg in place so the
+                // forwarded — and any replayed-on-reconnect — copy carries it.
+                applyDefaultNamespace(msg, config.namespace);
 
                 // Track `tools/list` requests so the SSE pump can splice
                 // our local tools into the upstream response.

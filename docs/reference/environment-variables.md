@@ -28,12 +28,17 @@ These are not all enforced at boot, but most real deployments need them.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `8000` | Relayer port |
+| `RUST_LOG` | `memwal_server=info,tower_http=info` | Rust tracing filter for relayer logs |
+| `LOG_FORMAT` | pretty text | Set to `json` for machine-parseable structured logs |
 | `SIDECAR_URL` | `http://localhost:9000` | Sidecar HTTP endpoint |
 | `OPENAI_API_BASE` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `SUI_NETWORK` | `mainnet` | Picks the fallback RPC URL and network-driven service defaults |
 | `SUI_RPC_URL` | network default | Override the Sui fullnode URL |
 | `WALRUS_PUBLISHER_URL` | Walrus mainnet publisher | Override upload endpoint |
 | `WALRUS_AGGREGATOR_URL` | Walrus mainnet aggregator | Override download endpoint |
+| `WALRUS_AGGREGATOR_URLS` | none | Optional comma-separated extra aggregator/proxy endpoints for cold-read tail racing. `WALRUS_AGGREGATOR_URL` remains the primary |
+| `WALRUS_AGGREGATOR_RACE_AFTER_MS` | `150` | Delay before launching the next configured aggregator on a cold read. `0` races all candidates immediately |
+| `WALRUS_SKIP_CONSISTENCY_CHECK` | `false` | Appends `skip_consistency_check=true` to trusted MemWal cold reads. Keep disabled unless you accept the consistency tradeoff |
 | `BLOB_CACHE_TTL_SECS` | `1209600` | Redis TTL for cached SEAL ciphertext by `blob_id`. `0` disables blob cache use |
 | `BLOB_CACHE_MAX_BYTES` | `524288` | Maximum SEAL ciphertext bytes cached in Redis. Larger blobs stay Walrus-only; `0` disables blob cache use |
 | `SERVER_SUI_PRIVATE_KEYS` | none | Comma-separated upload key pool. Takes priority over `SERVER_SUI_PRIVATE_KEY` for uploads |
@@ -54,6 +59,8 @@ These are not all enforced at boot, but most real deployments need them.
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas when sponsorship is missing, expired, or rejected.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
+- `WALRUS_AGGREGATOR_URLS` is only used after the Redis ciphertext cache misses. Put low-latency cache/proxy endpoints first after the primary and keep 404/5xx cache TTLs short in your proxy.
+- `WALRUS_SKIP_CONSISTENCY_CHECK=true` should only be used for trusted blobs written by the relayer. Restore keeps consistency checks enabled for on-chain-discovered blobs.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
 - `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
 - `SEAL_SERVER_CONFIGS` is a JSON array of `{ objectId, weight, aggregatorUrl?, apiKeyName?, apiKey? }`. Committee key server configs require `aggregatorUrl`.

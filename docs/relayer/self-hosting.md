@@ -6,6 +6,9 @@ Self-hosting means running your own relayer — either pointing at an existing M
 
 The managed relayer provided by Walrus Foundation is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
+If you want the default relayer-handled SDK flow while reducing trust in the
+host operator, see [Nautilus TEE Deployment](/relayer/nautilus-tee).
+
 ## Personas & When to Self-Host
 
 There are two primary personas who typically self-host the relayer:
@@ -101,6 +104,8 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SIDECAR_URL` defaults to `http://localhost:9000`
 - `SUI_NETWORK` defaults to `mainnet`
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
+- `WALRUS_AGGREGATOR_URLS` can add comma-separated proxy/aggregator candidates for cold-read tail racing after Redis cache misses
+- `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted MemWal-written cold reads after accepting the consistency tradeoff
 - The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
 - `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 
@@ -157,9 +162,10 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 - The server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will exit
 - DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension)
 - Connection pool: 10 max connections (relayer), 3 max connections (indexer)
-- `/health` is the basic service check, API routes live under `/api/*`
+- `/health` is the basic service check, `/metrics` exposes Prometheus metrics, API routes live under `/api/*`
 - The indexer is recommended for fast account lookup in production — without it, the relayer falls back to onchain registry scans
 - Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based) — useful for local testing but not production
+- Use `LOG_FORMAT=json` in production and see [Observability](/relayer/observability) for dashboards and alerts
 
 ## Docker
 
@@ -168,4 +174,5 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 
 ## Read Next
 
+- [Nautilus TEE Deployment](/relayer/nautilus-tee)
 - [Relayer API](/relayer/api-reference)

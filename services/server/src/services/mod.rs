@@ -26,13 +26,13 @@
 pub mod embedder;
 pub mod extractor;
 pub mod llm_chat;
-
-// Placeholder modules — reserved namespace for follow-up work. See each
-// module's doc comment for the planned scope. They contain no code today
-// because dev's base has no consolidator or composite scoring; inventing a
-// trait without a real caller would be premature design.
-pub mod consolidator;
 pub mod ranker;
+
+// Placeholder module — reserved namespace for the consolidator (Mem0 v3
+// linked-memory-ids + supersede logic). Doc-only until a real caller
+// exists; inventing a trait without one would be premature design.
+pub mod consolidator;
 
 pub use embedder::{Embedder, OpenAiEmbedder};
 pub use extractor::{Extractor, LlmExtractor};
+pub use ranker::{CompositeRanker, Ranker};

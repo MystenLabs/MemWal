@@ -18,7 +18,7 @@ use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, C
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
-use super::{cleanup_expired_blob, truncate_str};
+use super::cleanup_expired_blob;
 
 /// ENG-1747: the `/api/ask` system prompt — a versioned text asset with a
 /// `{MEMORY_CONTEXT}` placeholder (substituted with the `<memory>`-tag-
@@ -26,7 +26,9 @@ use super::{cleanup_expired_blob, truncate_str};
 /// guard. Bundled at compile time.
 const ASK_SYSTEM_PROMPT: &str = include_str!("../services/prompts/ask.txt");
 /// Version ID for the ask prompt. Bump on every meaningful prompt change.
-#[allow(dead_code)]
+/// Exposed on `GET /health` via `HealthResponse.prompt_versions.ask` so
+/// the benchmark harness can pin it into the result-artifact metadata
+/// (MEM-56).
 const ASK_SYSTEM_PROMPT_VERSION: &str = "ask.v1";
 
 // ============================================================
@@ -120,6 +122,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         } else {
             "production".to_string()
         },
+        // MEM-56: surface the prompt-version constants so benchmark
+        // run-artifacts can pin them at run start. Read from the same
+        // consts the running binary uses for extraction (`/api/analyze`)
+        // and ask (`/api/ask`) — no separate config to drift.
+        prompt_versions: PromptVersions {
+            extract: crate::services::extractor::FACT_EXTRACTION_PROMPT_VERSION.to_string(),
+            ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
+        },
     })
 }
 
@@ -164,6 +174,11 @@ pub async fn ask(
         return Err(AppError::BadRequest("Question cannot be empty".into()));
     }
 
+    // Validate scoring_weights up front — fail fast on malformed input
+    // before we burn an embed + vector search + Walrus + SEAL round-trip.
+    let weights = body.scoring_weights.clone().unwrap_or_default();
+    weights.validate()?;
+
     let owner = &auth.owner;
     let namespace = &body.namespace;
     // LOW-S5: cap `limit` so a misbehaving client can't make us pull a
@@ -171,10 +186,11 @@ pub async fn ask(
     // `recall` already enforces (MED-3) — see routes/recall.rs.
     let limit = body.limit.unwrap_or(5).min(100);
     tracing::info!(
-        "ask: question=\"{}...\" owner={} ns={}",
-        truncate_str(&body.question, 50),
-        owner,
-        namespace
+        question_len = body.question.len(),
+        owner = %owner,
+        namespace = %namespace,
+        ranker_active = weights.is_ranker_active(),
+        "ask request"
     );
 
     // F3 (structure-review): probe the SEAL credential up front. If the
@@ -196,30 +212,52 @@ pub async fn ask(
     // blob cache -> Walrus download -> SEAL decrypt -> UTF-8 path as
     // recall, with reactive cleanup on Walrus 404. The engine derives the
     // SEAL credential from `auth`; per-blob errors are logged inside it.
-    let fetch_tasks = hits.into_iter().map(|hit| {
+    // We borrow `hits` for the fan-out so it's still around for the
+    // `zip_created_at_onto_hydrated` call below.
+    let fetch_tasks = hits.iter().map(|hit| {
         let auth = &auth;
         let engine = &state.engine;
-        async move {
-            engine
-                .fetch_one(owner, &hit.blob_id, hit.distance, auth)
-                .await
-        }
+        let blob_id = hit.blob_id.clone();
+        let distance = hit.distance;
+        async move { engine.fetch_one(owner, &blob_id, distance, auth).await }
     });
-    let memories: Vec<RecallResult> = futures::future::join_all(fetch_tasks)
+    let mut hydrated: Vec<crate::engine::HydratedMemory> = futures::future::join_all(fetch_tasks)
         .await
         .into_iter()
         // fetch_one returns Ok(None) for blobs that are gone / failed to
         // decrypt; surface only the AppError (sidecar down, etc.).
         .filter_map(|r| match r {
-            Ok(Some(m)) => Some(Ok(RecallResult {
-                blob_id: m.blob_id,
-                text: m.text,
-                distance: m.distance,
-            })),
+            Ok(Some(m)) => Some(Ok(m)),
             Ok(None) => None,
             Err(e) => Some(Err(e)),
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+
+    // Zip created_at on (engine returns None; recall path is responsible).
+    super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
+
+    if weights.is_ranker_active() {
+        tracing::info!(
+            owner = %owner,
+            semantic = weights.semantic,
+            recency = weights.recency,
+            half_life_days = weights.recency_half_life_days,
+            "ask: ranker active"
+        );
+    }
+
+    // Composite re-rank — same contract as /api/recall.
+    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+
+    let memories: Vec<RecallResult> = ranked
+        .into_iter()
+        .map(|r| RecallResult {
+            blob_id: r.memory.blob_id,
+            text: r.memory.text,
+            distance: r.memory.distance,
+            score: r.score,
+        })
+        .collect();
 
     let memories_used = memories.len();
     tracing::info!("ask: {} memories found for context", memories_used);
@@ -261,7 +299,7 @@ pub async fn ask(
         .ok_or_else(|| AppError::Internal("OPENAI_API_KEY required for /api/ask".into()))?;
     let url = format!("{}/chat/completions", state.config.openai_api_base);
 
-    let resp = state
+    let req = state
         .http_client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -280,10 +318,25 @@ pub async fn ask(
             ],
             temperature: 0.7,
             max_tokens: 512,
-        })
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM request failed: {}", e)))?;
+        });
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "openai",
+            "ask_chat_completions",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("LLM request failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "openai",
+        "ask_chat_completions",
+        &status_label,
+        started.elapsed(),
+    );
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -425,14 +478,26 @@ pub async fn restore(
 
     // Step 3: Download all missing blobs from Walrus concurrently
     let db = &state.db;
+    let http_client = state.http_client.clone();
+    let aggregator_urls = state.config.walrus_aggregator_urls.clone();
+    let race_after = std::time::Duration::from_millis(state.config.walrus_aggregator_race_after_ms);
     let download_tasks: Vec<_> = missing_blob_ids
         .iter()
         .map(|blob_id| {
-            let walrus_client = &state.walrus_client;
+            let http_client = http_client.clone();
+            let aggregator_urls = aggregator_urls.clone();
             let blob_id = blob_id.clone();
             let owner_for_cleanup = owner.clone();
             async move {
-                match walrus::download_blob(walrus_client, &blob_id).await {
+                match walrus::download_blob_from_aggregators(
+                    &http_client,
+                    &aggregator_urls,
+                    &blob_id,
+                    false,
+                    race_after,
+                )
+                .await
+                {
                     Ok(data) => Some((blob_id, data)),
                     Err(AppError::BlobNotFound(msg)) => {
                         tracing::warn!("restore: blob expired, skipping: {}", msg);
@@ -604,6 +669,7 @@ mod tests {
             blob_id: "blob123".into(),
             text: "User likes coffee".into(),
             distance: 0.1,
+            score: None,
         }];
 
         let lines: Vec<String> = memories

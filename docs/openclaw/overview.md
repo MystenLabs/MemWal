@@ -53,6 +53,9 @@ The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenC
   <Card title="Reference" icon="book" href="/openclaw/reference">
     Hooks, tools, CLI, configuration, and troubleshooting
   </Card>
+  <Card title="Changelog" icon="clock-rotate-left" href="/openclaw/changelog">
+    Release history for the `@mysten-incubation/oc-memwal` package
+  </Card>
   <Card title="Source Code" icon="github" href="https://github.com/MystenLabs/MemWal/tree/main/packages/openclaw-memory-memwal">
     Browse the source on GitHub
   </Card>
