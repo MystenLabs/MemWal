@@ -45,9 +45,9 @@ import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerEr
 type ResolvedSealServerConfig = Omit<SealServerConfig, "weight"> & { weight: number };
 
 // Default SEAL server configs per network.
-// Testnet uses Mysten's initial committee aggregator by default. Mainnet
-// remains on the legacy independent servers until an official committee
-// aggregator is available.
+// Keep testnet on the legacy independent servers so Manual mode can decrypt
+// data written by the hosted testnet relayer. Committee aggregators remain
+// supported through explicit sealServerConfigs.
 const DEFAULT_SEAL_SERVER_CONFIGS: Record<string, ResolvedSealServerConfig[]> = {
     mainnet: [
         {
@@ -61,12 +61,12 @@ const DEFAULT_SEAL_SERVER_CONFIGS: Record<string, ResolvedSealServerConfig[]> = 
     ],
     testnet: [
         {
-            // Official Mysten testnet committee aggregator. This is one
-            // decentralized SEAL server config whose aggregator fronts the
-            // committee threshold internally.
-            objectId: "0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98",
+            objectId: "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
             weight: 1,
-            aggregatorUrl: "https://seal-aggregator-testnet.mystenlabs.com",
+        },
+        {
+            objectId: "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+            weight: 1,
         },
     ],
 };
