@@ -9,6 +9,10 @@ const MYSTEN_TESTNET_COMMITTEE = {
     aggregatorUrl: "https://seal-aggregator-testnet.mystenlabs.com",
 };
 
+const PREVIOUS_TESTNET_INDEPENDENT_KEY_SERVERS =
+    "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75," +
+    "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8";
+
 test("SEAL_SERVER_CONFIGS overrides built-in defaults", () => {
     const configs = getSealServerConfigsFromEnv({
         SUI_NETWORK: "testnet",
@@ -60,6 +64,17 @@ test("single committee default has threshold 1", () => {
     const configs = getSealServerConfigsFromEnv({ SUI_NETWORK: "testnet" });
 
     assert.equal(getSealThresholdFromEnv(configs, {}), 1);
+});
+
+test("legacy testnet independent override keeps threshold 2", () => {
+    const configs = getSealServerConfigsFromEnv({
+        SUI_NETWORK: "testnet",
+        SEAL_KEY_SERVERS: PREVIOUS_TESTNET_INDEPENDENT_KEY_SERVERS,
+    });
+
+    assert.equal(configs.length, 2);
+    assert.ok(configs.every((config) => config.aggregatorUrl === undefined));
+    assert.equal(getSealThresholdFromEnv(configs, {}), 2);
 });
 
 test("explicit SEAL_THRESHOLD validation is unchanged", () => {

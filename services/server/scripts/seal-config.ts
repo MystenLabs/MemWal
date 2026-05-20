@@ -21,6 +21,10 @@ const DEFAULT_SEAL_SERVER_CONFIGS: Record<string, SealServerConfig[]> = {
     ],
     testnet: [
         {
+            // Official Mysten testnet committee aggregator. This is a single
+            // decentralized SEAL server config whose aggregator fronts the
+            // committee threshold internally; legacy independent 2-of-2
+            // deployments should pin SEAL_KEY_SERVERS instead.
             objectId: "0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98",
             weight: 1,
             aggregatorUrl: "https://seal-aggregator-testnet.mystenlabs.com",
