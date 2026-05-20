@@ -5,7 +5,7 @@
 //! benchmark harness's preset / `scoring_weights` plumbing is inert (all
 //! presets converge — see the 2026-05-13 benchmark archive READMEs).
 //!
-//! [`CompositeRanker`] blends two signals:
+//! [`CompositeRanker`] blends three signals:
 //!
 //! - **Semantic similarity** — `1 - cosine_distance`, monotonic in the
 //!   pgvector ordering we already have.
@@ -13,16 +13,18 @@
 //!   `exp(-age_days * ln(2) / half_life_days)`). A true half-life decay
 //!   that puts a memory aged exactly `half_life` days at 0.5, twice that
 //!   at 0.25, and so on.
+//! - **Importance** (MEM-54) — the per-fact bucket score persisted on
+//!   `vector_entries.importance` (vital / standard / trivial → 0.9 /
+//!   0.5 / 0.2). The column is `NOT NULL DEFAULT 0.5` so legacy rows fall
+//!   into the neutral bucket and don't reorder anything when this signal
+//!   is enabled.
 //!
 //! The final score is the weighted sum (see [`crate::types::ScoringWeights`]).
 //! The ranker sorts by this score **descending** (higher = better) and
 //! returns the reordered list.
 //!
-//! # Why semantic + recency, and not more signals (yet)
+//! # Why semantic + recency + importance, and not more signals (yet)
 //!
-//! - **Importance**: surfaced by the extractor LLM today but not persisted
-//!   — needs a migration + column write at ingest and a backfill. Deferred
-//!   to a follow-up (Phase A.2).
 //! - **Access frequency**: would require a write on every recall, hot-row
 //!   contention concerns. Deferred.
 //! - **BM25 keyword / entity matching**: text is on Walrus behind SEAL.
@@ -126,7 +128,23 @@ impl CompositeRanker {
             0.0
         };
 
-        semantic_term + recency_term
+        // MEM-54: importance term. `vector_entries.importance` is already
+        // in [0.0, 1.0] (bucket values are 0.2 / 0.5 / 0.9), so we don't
+        // need a normalisation step — just multiply by the weight.
+        //
+        // `importance = None` means the recall handler didn't zip the
+        // value on (or the engine returned a raw HydratedMemory we never
+        // saw a SearchHit for). Symmetric with the `created_at = None`
+        // recency branch: treat as neutral (0.0) rather than panicking,
+        // so a missing zip doesn't reorder hits incorrectly.
+        let importance_term = match hit.importance {
+            Some(imp) if weights.importance.abs() >= f64::EPSILON => {
+                weights.importance * (imp as f64)
+            }
+            _ => 0.0,
+        };
+
+        semantic_term + recency_term + importance_term
     }
 }
 
@@ -193,6 +211,22 @@ mod tests {
             text: format!("text for {}", blob_id),
             distance,
             created_at: Some(now() - chrono::Duration::days(age_days)),
+            // Default to the neutral bucket so existing tests stay
+            // semantically the same — `importance_term` is only non-zero
+            // when both the weight and the per-hit value are set.
+            importance: Some(crate::services::extractor::IMPORTANCE_STANDARD),
+        }
+    }
+
+    /// Variant for MEM-54 importance tests: lets the test pin the bucket
+    /// value (vital / standard / trivial) per hit.
+    fn hit_imp(blob_id: &str, distance: f64, age_days: i64, importance: f32) -> HydratedMemory {
+        HydratedMemory {
+            blob_id: blob_id.into(),
+            text: format!("text for {}", blob_id),
+            distance,
+            created_at: Some(now() - chrono::Duration::days(age_days)),
+            importance: Some(importance),
         }
     }
 
@@ -223,6 +257,7 @@ mod tests {
             semantic: 5.0,
             recency: 0.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         // Deliberately out-of-cosine-order input — proves we don't
         // re-sort it.
@@ -242,6 +277,7 @@ mod tests {
             semantic: 0.4,
             recency: 0.6,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let ranked = CompositeRanker.rank(vec![older, newer], &weights, now());
         assert_eq!(ids(&ranked), vec!["newer", "older"]);
@@ -257,6 +293,7 @@ mod tests {
             semantic: 1.0,
             recency: 0.01,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let ranked = CompositeRanker.rank(vec![older, newer], &weights, now());
         assert_eq!(ids(&ranked), vec!["older", "newer"]);
@@ -274,6 +311,7 @@ mod tests {
             semantic: 0.0,
             recency: 1.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let ranked = CompositeRanker.rank(vec![undated, dated_old], &weights, now());
         // dated_old has SOME recency contribution (e^(-3) ≈ 0.05); undated
@@ -290,6 +328,7 @@ mod tests {
             semantic: 0.0,
             recency: 1.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let mut future_hit = hit("future", 0.50, 0);
         future_hit.created_at = Some(now() + chrono::Duration::days(7));
@@ -307,6 +346,7 @@ mod tests {
             semantic: 0.0,
             recency: 1.0,
             recency_half_life_days: 0.0,
+            importance: 0.0,
         };
         let h = hit("any", 0.10, 0);
         let score = CompositeRanker::score(&h, &weights, now());
@@ -319,6 +359,7 @@ mod tests {
             semantic: 1.0,
             recency: 1.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let ranked = CompositeRanker.rank(vec![], &weights, now());
         assert!(ranked.is_empty());
@@ -332,6 +373,7 @@ mod tests {
             semantic: 0.0,
             recency: 1.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let h = hit("at_half_life", 0.50, 30);
         let score = CompositeRanker::score(&h, &weights, now());
@@ -366,6 +408,7 @@ mod tests {
             semantic: 0.5,
             recency: 0.5,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         };
         let hits = vec![hit("a", 0.10, 5), hit("b", 0.30, 60)];
         let ranked = CompositeRanker.rank(hits, &weights, now());
@@ -378,5 +421,123 @@ mod tests {
         for w in scores.windows(2) {
             assert!(w[0] >= w[1], "scores not in descending order: {:?}", scores);
         }
+    }
+
+    // ── MEM-54: importance signal tests ───────────────────────────────
+
+    #[test]
+    fn importance_only_promotes_vital_over_trivial() {
+        // Same distance + same age. The only differentiator is the bucket:
+        // vital (0.9) should outrank trivial (0.2) when the importance
+        // weight is the sole non-zero signal.
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+        let trivial = hit_imp("trivial", 0.20, 5, IMPORTANCE_TRIVIAL);
+        let vital = hit_imp("vital", 0.20, 5, IMPORTANCE_VITAL);
+        let weights = ScoringWeights {
+            semantic: 0.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 1.0,
+        };
+        let ranked = CompositeRanker.rank(vec![trivial, vital], &weights, now());
+        assert_eq!(ids(&ranked), vec!["vital", "trivial"]);
+    }
+
+    #[test]
+    fn importance_activates_ranker_without_recency() {
+        // A non-zero importance weight on its own should activate the
+        // ranker (is_ranker_active() returns true → ranker computes
+        // scores, not short-circuits). Pins the is_ranker_active update.
+        let weights = ScoringWeights {
+            semantic: 1.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.5,
+        };
+        assert!(weights.is_ranker_active());
+        let h = hit("a", 0.10, 0);
+        let ranked = CompositeRanker.rank(vec![h], &weights, now());
+        assert!(
+            ranked[0].score.is_some(),
+            "expected score Some when importance>0"
+        );
+    }
+
+    #[test]
+    fn importance_heavy_overrides_small_semantic_edge() {
+        // "vital_far" has a slightly worse semantic match but a vital
+        // bucket; "trivial_near" has a tiny semantic edge but a trivial
+        // bucket. With importance-heavy weights, vital_far should win.
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+        let trivial_near = hit_imp("trivial_near", 0.20, 0, IMPORTANCE_TRIVIAL);
+        let vital_far = hit_imp("vital_far", 0.25, 0, IMPORTANCE_VITAL);
+        let weights = ScoringWeights {
+            semantic: 0.3,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.7,
+        };
+        let ranked = CompositeRanker.rank(vec![trivial_near, vital_far], &weights, now());
+        assert_eq!(ids(&ranked), vec!["vital_far", "trivial_near"]);
+    }
+
+    #[test]
+    fn importance_zero_weight_is_inert() {
+        // Even if every hit has a non-zero importance value, a zero
+        // importance weight contributes nothing — the existing semantic
+        // order should be preserved exactly.
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+        let vital_far = hit_imp("vital_far", 0.50, 0, IMPORTANCE_VITAL);
+        let trivial_near = hit_imp("trivial_near", 0.10, 0, IMPORTANCE_TRIVIAL);
+        // Default-ish weights (semantic only, no importance).
+        let ranked = CompositeRanker.rank(
+            vec![trivial_near, vital_far],
+            &ScoringWeights::default(),
+            now(),
+        );
+        // trivial_near has better cosine (0.10 vs 0.50) → wins.
+        assert_eq!(ids(&ranked), vec!["trivial_near", "vital_far"]);
+    }
+
+    #[test]
+    fn importance_missing_value_treated_as_neutral() {
+        // A hit with `importance = None` (zip helper didn't populate, or
+        // engine emitted a raw HydratedMemory we never saw a SearchHit
+        // for) gets importance_term = 0.0. Mirrors the
+        // `missing_created_at_treated_as_no_recency_contribution` case
+        // for the recency signal.
+        use crate::services::extractor::IMPORTANCE_VITAL;
+        let mut undated_unrated = hit("undated_unrated", 0.10, 0);
+        undated_unrated.importance = None;
+        let vital = hit_imp("vital", 0.50, 0, IMPORTANCE_VITAL);
+        let weights = ScoringWeights {
+            semantic: 0.5,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 1.0,
+        };
+        let ranked = CompositeRanker.rank(vec![undated_unrated, vital], &weights, now());
+        // undated_unrated: 0.5 * (1-0.10) + 1.0 * 0 (None) = 0.45
+        // vital:           0.5 * (1-0.50) + 1.0 * 0.9    = 1.15
+        // vital wins.
+        assert_eq!(ids(&ranked), vec!["vital", "undated_unrated"]);
+    }
+
+    #[test]
+    fn importance_score_formula_exact() {
+        // Pin the exact arithmetic: semantic * (1 - distance) +
+        // importance * bucket_value. Recency weight is 0 so the recency
+        // term drops out cleanly.
+        use crate::services::extractor::IMPORTANCE_STANDARD;
+        let h = hit_imp("h", 0.20, 0, IMPORTANCE_STANDARD); // 0.5
+        let weights = ScoringWeights {
+            semantic: 1.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.4,
+        };
+        let score = CompositeRanker::score(&h, &weights, now());
+        // 1.0 * (1.0 - 0.20) + 0.4 * 0.5 = 0.8 + 0.2 = 1.0
+        assert!((score - 1.0).abs() < 1e-9, "expected 1.0, got {}", score);
     }
 }

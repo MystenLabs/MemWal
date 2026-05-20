@@ -227,6 +227,7 @@ impl MemoryEngine for WalrusSealEngine {
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
+        importance: f32,
         agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError> {
         // Pick the next Sui key slot (round-robin) so concurrent stores
@@ -268,7 +269,7 @@ impl MemoryEngine for WalrusSealEngine {
         let id = uuid::Uuid::new_v4().to_string();
         let blob_size = bytes.len() as i64;
         self.db
-            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size)
+            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size, importance)
             .await?;
 
         Ok(MemoryRef { id, blob_id })
@@ -345,9 +346,11 @@ impl MemoryEngine for WalrusSealEngine {
             blob_id: blob_id.to_string(),
             text,
             distance,
-            // Engine doesn't fetch created_at; the recall handler zips
-            // it on from the SearchHit. See HydratedMemory docs.
+            // Engine doesn't fetch created_at / importance; the recall
+            // handler zips them on from the SearchHit.
+            // See HydratedMemory docs.
             created_at: None,
+            importance: None,
         }))
     }
 
@@ -451,9 +454,10 @@ impl MemoryEngine for WalrusSealEngine {
                         blob_id: f.blob_id.clone(),
                         text,
                         distance: f.distance,
-                        // Engine doesn't fetch created_at; recall handler
-                        // zips it on. See HydratedMemory docs.
+                        // Engine doesn't fetch created_at / importance;
+                        // recall handler zips them on. See HydratedMemory.
                         created_at: None,
+                        importance: None,
                     }),
                     Err(e) => {
                         tracing::warn!(

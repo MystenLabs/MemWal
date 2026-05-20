@@ -83,6 +83,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
 
+        // MEM-54: importance signal column on vector_entries.
+        let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
+        sqlx::raw_sql(migration_009)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -94,7 +101,14 @@ impl VectorDb {
         &self.pool
     }
 
-    /// Insert a vector entry (with blob size tracking for storage quota)
+    /// Insert a vector entry (with blob size tracking for storage quota).
+    ///
+    /// MEM-54: `importance` is the per-fact score set at extraction time
+    /// (0.0–1.0, mapped from the extractor LLM's vital/standard/trivial
+    /// bucket via `services::extractor::importance_for_bucket`). Stored
+    /// on the new `importance` column (migration 009) so the recall
+    /// `CompositeRanker` can weight it into the composite score when
+    /// `scoring_weights.importance` is non-zero.
     pub async fn insert_vector(
         &self,
         id: &str,
@@ -103,19 +117,21 @@ impl VectorDb {
         blob_id: &str,
         vector: &[f32],
         blob_size_bytes: i64,
+        importance: f32,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
-                blob_size_bytes = EXCLUDED.blob_size_bytes",
+                blob_size_bytes = EXCLUDED.blob_size_bytes,
+                importance = EXCLUDED.importance",
         )
         .bind(id)
         .bind(owner)
@@ -123,6 +139,7 @@ impl VectorDb {
         .bind(blob_id)
         .bind(embedding)
         .bind(blob_size_bytes)
+        .bind(importance)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
@@ -155,20 +172,22 @@ impl VectorDb {
         vector: &[f32],
         plaintext: &str,
         blob_size_bytes: i64,
+        importance: f32,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext, importance)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
-                plaintext = EXCLUDED.plaintext",
+                plaintext = EXCLUDED.plaintext,
+                importance = EXCLUDED.importance",
         )
         .bind(id)
         .bind(owner)
@@ -177,6 +196,7 @@ impl VectorDb {
         .bind(embedding)
         .bind(blob_size_bytes)
         .bind(plaintext)
+        .bind(importance)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)));
@@ -243,14 +263,15 @@ impl VectorDb {
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
-        // `created_at` is selected alongside the cosine distance so the
-        // recall pipeline can rank by recency without a second round-trip.
-        // It's NOT NULL since migration 001, so the column comes back
-        // typed as `DateTime<Utc>` directly.
+        // `created_at` + `importance` are selected alongside the cosine
+        // distance so the recall pipeline can rank by recency / importance
+        // without a second round-trip. Both NOT NULL (migration 001 for
+        // created_at, 009 for importance) so the row tuple types are
+        // non-Option.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>)>, AppError> =
+        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
             sqlx::query_as(
-                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at
+                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
@@ -272,10 +293,11 @@ impl VectorDb {
 
         let results = rows
             .into_iter()
-            .map(|(blob_id, distance, created_at)| SearchHit {
+            .map(|(blob_id, distance, created_at, importance)| SearchHit {
                 blob_id,
                 distance,
                 created_at,
+                importance,
             })
             .collect();
 

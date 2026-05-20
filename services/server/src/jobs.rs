@@ -40,6 +40,13 @@ pub enum WalletOperation {
         encrypted_b64: String,
         /// Pre-computed embedding vector (1536-dim).
         vector: Vec<f32>,
+        /// MEM-54: per-fact importance set at extraction time. Persisted
+        /// on `vector_entries.importance` after Walrus upload completes.
+        /// `#[serde(default = "default_importance")]` so legacy job rows
+        /// enqueued before MEM-54 land at the neutral "standard" bucket
+        /// rather than failing deserialisation.
+        #[serde(default = "default_importance")]
+        importance: f32,
         /// MemWal owner address.
         owner: String,
         /// Namespace for isolation.
@@ -80,6 +87,12 @@ pub enum WalletOperation {
         /// Encrypted blob size to record with the vector row.
         #[serde(default)]
         blob_size_bytes: Option<i64>,
+        /// MEM-54: per-fact importance score, indexed alongside the vector
+        /// when this recovery job finalises the upload. Defaulted to
+        /// `IMPORTANCE_STANDARD` so legacy / pre-MEM-54 rows degrade to the
+        /// neutral bucket rather than failing deserialisation.
+        #[serde(default = "default_importance")]
+        importance: f32,
     },
     /// Finish a partially recovered upload after metadata+transfer has already
     /// succeeded. This keeps DB/vector retries from repeating an on-chain
@@ -92,12 +105,25 @@ pub enum WalletOperation {
         blob_id: String,
         vector: Vec<f32>,
         blob_size_bytes: i64,
+        /// MEM-54: same as on `UploadAndTransfer` — persisted on the
+        /// `vector_entries.importance` column. Defaulted to
+        /// `IMPORTANCE_STANDARD` for backwards compatibility with in-flight
+        /// recovery jobs enqueued before this field existed.
+        #[serde(default = "default_importance")]
+        importance: f32,
     },
 }
 
 fn default_epochs() -> u32 {
     let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
     configured_walrus_storage_epochs(&network)
+}
+
+/// MEM-54: serde default for `WalletOperation::UploadAndTransfer.importance`
+/// so legacy job rows enqueued before this field existed degrade to the
+/// neutral "standard" bucket on dequeue.
+fn default_importance() -> f32 {
+    crate::services::extractor::IMPORTANCE_STANDARD
 }
 
 pub(crate) async fn warm_blob_cache_after_upload(
@@ -274,6 +300,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
         WalletOperation::UploadAndTransfer {
             encrypted_b64,
             vector,
+            importance,
             owner,
             namespace,
             package_id,
@@ -303,6 +330,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 wallet_index,
                 encrypted_b64,
                 vector,
+                importance,
                 owner,
                 namespace,
                 package_id,
@@ -322,6 +350,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             blob_id,
             vector,
             blob_size_bytes,
+            importance,
         } => {
             let result = execute_set_metadata_and_transfer(
                 state,
@@ -345,6 +374,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                             &blob_id,
                             &vector,
                             blob_size_bytes,
+                            importance,
                             enqueued_wallet_index,
                         )
                         .await
@@ -358,6 +388,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                                 blob_id,
                                 vector,
                                 blob_size_bytes,
+                                importance,
                             )
                             .await
                             {
@@ -402,6 +433,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             blob_id,
             vector,
             blob_size_bytes,
+            importance,
         } => {
             insert_vector_and_mark_remember_done(
                 state,
@@ -411,6 +443,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 &blob_id,
                 &vector,
                 blob_size_bytes,
+                importance,
                 enqueued_wallet_index,
             )
             .await
@@ -479,6 +512,7 @@ async fn insert_vector_and_mark_remember_done(
     blob_id: &str,
     vector: &[f32],
     blob_size_bytes: i64,
+    importance: f32,
     wallet_index: usize,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
@@ -494,6 +528,7 @@ async fn insert_vector_and_mark_remember_done(
             blob_id,
             vector,
             blob_size_bytes,
+            importance,
         )
         .await
     {
@@ -540,6 +575,7 @@ async fn enqueue_finalize_uploaded_blob(
     blob_id: String,
     vector: Vec<f32>,
     blob_size_bytes: i64,
+    importance: f32,
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
@@ -552,6 +588,7 @@ async fn enqueue_finalize_uploaded_blob(
                 blob_id,
                 vector,
                 blob_size_bytes,
+                importance,
             },
         })
         .await
@@ -574,6 +611,7 @@ async fn execute_upload_and_transfer(
     wallet_index: usize,
     encrypted_b64: String,
     vector: Vec<f32>,
+    importance: f32,
     owner: String,
     namespace: String,
     package_id: String,
@@ -678,6 +716,7 @@ async fn execute_upload_and_transfer(
                         blob_id: Some(blob_id.clone()),
                         vector: Some(vector),
                         blob_size_bytes: Some(encrypted.len() as i64),
+                        importance,
                     },
                 })
                 .await
@@ -753,6 +792,7 @@ async fn execute_upload_and_transfer(
         &blob_id,
         &vector,
         encrypted.len() as i64,
+        importance,
         wallet_index,
     )
     .await
@@ -995,6 +1035,12 @@ pub async fn execute_remember(
                         blob_id: Some(blob_id.clone()),
                         vector: Some(job.vector.clone()),
                         blob_size_bytes: Some(encrypted.len() as i64),
+                        // MEM-54: legacy RememberJob payload predates the
+                        // importance field. Drain the queue at the neutral
+                        // "standard" bucket; new requests go through
+                        // WalletOperation::UploadAndTransfer which carries
+                        // importance through end-to-end.
+                        importance: crate::services::extractor::IMPORTANCE_STANDARD,
                     },
                 })
                 .await
@@ -1031,6 +1077,11 @@ pub async fn execute_remember(
             &blob_id,
             &job.vector,
             blob_size,
+            // MEM-54: legacy RememberJob payload predates the importance
+            // field. Drains the queue at the neutral "standard" bucket;
+            // new requests go through WalletOperation::UploadAndTransfer
+            // which carries importance through end-to-end.
+            crate::services::extractor::IMPORTANCE_STANDARD,
         )
         .await
     {
@@ -1074,6 +1125,12 @@ pub struct BulkRememberItem {
     pub namespace: String,
     /// Wallet index assigned at enqueue time.
     pub wallet_index: usize,
+    /// MEM-54: per-item importance score (defaults to "standard" 0.5 when
+    /// the bulk-remember route doesn't run extraction — e.g. SDK passes
+    /// pre-formed memories). `#[serde(default)]` so legacy bulk job rows
+    /// drain cleanly at the neutral default.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
 }
 
 /// Batch job payload — one BulkRememberJob per POST /api/remember/bulk call.
@@ -1150,6 +1207,7 @@ pub async fn execute_bulk_remember(
                 operation: WalletOperation::UploadAndTransfer {
                     encrypted_b64: item.encrypted_b64,
                     vector: item.vector,
+                    importance: item.importance,
                     owner: job.owner.clone(),
                     namespace,
                     package_id: job.package_id.clone(),

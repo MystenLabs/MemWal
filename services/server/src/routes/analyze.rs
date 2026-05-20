@@ -111,31 +111,38 @@ pub async fn analyze(
     if state.config.benchmark_mode {
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
-        let total_plaintext_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+        let total_plaintext_bytes: i64 =
+            facts.iter().map(|f| f.text.len() as i64).sum();
         rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
 
         let store_tasks: Vec<_> = facts
             .iter()
-            .map(|fact_text| {
+            .map(|fact| {
                 let state = Arc::clone(&state);
                 let owner = owner.clone();
                 let namespace = namespace.clone();
                 let agent_pk = auth.public_key.clone();
-                let fact_text = fact_text.clone();
+                let fact = fact.clone();
                 async move {
-                    let vector = state.embedder.embed(&fact_text).await?;
+                    let vector = state.embedder.embed(&fact.text).await?;
+                    // MEM-54: importance is threaded through the engine
+                    // (see store_blob signature in engine::MemoryEngine).
+                    // The PlaintextEngine persists it on the new
+                    // `vector_entries.importance` column; the ranker
+                    // consumes it at recall time.
                     let mref = state
                         .engine
                         .store_blob(
                             &owner,
                             &namespace,
-                            fact_text.as_bytes(),
+                            fact.text.as_bytes(),
                             &vector,
+                            fact.importance,
                             Some(&agent_pk),
                         )
                         .await?;
                     Ok::<_, AppError>(AnalyzeAcceptedFact {
-                        text: fact_text,
+                        text: fact.text,
                         id: mref.id.clone(),
                         job_id: mref.id,
                     })
@@ -182,22 +189,25 @@ pub async fn analyze(
     let auth_pubkey_base = auth.public_key.clone();
     let prep_tasks: Vec<_> = facts
         .iter()
-        .map(|fact_text| {
+        .map(|fact| {
             let state = Arc::clone(&state);
             let owner = owner.clone();
-            let fact_text = fact_text.clone();
+            let fact = fact.clone();
             async move {
-                let embed_fut = state.embedder.embed(&fact_text);
+                let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),
-                    fact_text.as_bytes(),
+                    fact.text.as_bytes(),
                     &owner,
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-                Ok::<_, AppError>((fact_text, vector_result?, encrypted_result?))
+                // MEM-54: carry `importance` through the prep tuple so
+                // the job payload below can persist it alongside the
+                // ciphertext + vector.
+                Ok::<_, AppError>((fact.text, fact.importance, vector_result?, encrypted_result?))
             }
         })
         .collect();
@@ -205,12 +215,12 @@ pub async fn analyze(
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
     // Quota check on total ciphertext size
-    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
     let mut total_encrypted_bytes: i64 = 0;
     for r in prep_results {
-        let (fact_text, vector, encrypted) = r?;
+        let (fact_text, importance, vector, encrypted) = r?;
         total_encrypted_bytes += encrypted.len() as i64;
-        prepared.push((fact_text, vector, encrypted));
+        prepared.push((fact_text, importance, vector, encrypted));
     }
     rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
 
@@ -218,7 +228,7 @@ pub async fn analyze(
     // Round-robin across wallet pool so facts upload in parallel.
     let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
     let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
-    for (fact_text, vector, encrypted) in prepared {
+    for (fact_text, importance, vector, encrypted) in prepared {
         let job_id = uuid::Uuid::new_v4().to_string();
 
         // Insert status row
@@ -245,6 +255,7 @@ pub async fn analyze(
             WalletOperation::UploadAndTransfer {
                 encrypted_b64,
                 vector,
+                importance,
                 owner: owner.clone(),
                 namespace: namespace.clone(),
                 package_id: state.config.package_id.clone(),

@@ -146,11 +146,12 @@ pub async fn recall(
         state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 
-    // Zip `created_at` from the SearchHits onto the HydratedMemory records
-    // so the ranker's recency signal has the timestamps it needs. Engines
-    // leave `created_at = None`; the recall path populates it from the
-    // SearchHit it already has. See `routes::zip_created_at_onto_hydrated`.
-    super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
+    // Zip `created_at` (recency signal) + `importance` (MEM-54) from the
+    // SearchHits onto the HydratedMemory records so the ranker has both
+    // signals it needs. Engines leave both fields as `None`; the recall
+    // path populates them from the SearchHit it already has. See
+    // `routes::zip_search_hit_fields_onto_hydrated`.
+    super::zip_search_hit_fields_onto_hydrated(&mut hydrated, &hits);
 
     // Log when the ranker is opted in (non-default `scoring_weights`) so a
     // future "client X is seeing weird ordering" debugging session has a
@@ -162,6 +163,10 @@ pub async fn recall(
             semantic = weights.semantic,
             recency = weights.recency,
             half_life_days = weights.recency_half_life_days,
+            // MEM-54: include the importance weight in the breadcrumb so
+            // ordering bug reports can be triaged against the full vector
+            // of weights the client sent.
+            importance = weights.importance,
             "recall: ranker active"
         );
     }

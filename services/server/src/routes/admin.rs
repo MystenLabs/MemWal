@@ -213,7 +213,7 @@ pub async fn ask(
     // recall, with reactive cleanup on Walrus 404. The engine derives the
     // SEAL credential from `auth`; per-blob errors are logged inside it.
     // We borrow `hits` for the fan-out so it's still around for the
-    // `zip_created_at_onto_hydrated` call below.
+    // `zip_search_hit_fields_onto_hydrated` call below.
     let fetch_tasks = hits.iter().map(|hit| {
         let auth = &auth;
         let engine = &state.engine;
@@ -233,8 +233,10 @@ pub async fn ask(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
 
-    // Zip created_at on (engine returns None; recall path is responsible).
-    super::zip_created_at_onto_hydrated(&mut hydrated, &hits);
+    // Zip created_at + importance on (engine returns None; recall path
+    // is responsible). MEM-54: importance joined the zip when the
+    // composite ranker grew an importance term.
+    super::zip_search_hit_fields_onto_hydrated(&mut hydrated, &hits);
 
     if weights.is_ranker_active() {
         tracing::info!(
@@ -242,6 +244,10 @@ pub async fn ask(
             semantic = weights.semantic,
             recency = weights.recency,
             half_life_days = weights.recency_half_life_days,
+            // MEM-54: include the importance weight in the breadcrumb so
+            // ordering bug reports can be triaged against the full vector
+            // of weights the client sent.
+            importance = weights.importance,
             "ask: ranker active"
         );
     }
@@ -634,7 +640,20 @@ pub async fn restore(
         });
         state
             .db
-            .insert_vector(&id, owner, namespace, blob_id, vector, blob_size)
+            .insert_vector(
+                &id,
+                owner,
+                namespace,
+                blob_id,
+                vector,
+                blob_size,
+                // MEM-54: restore flow re-indexes existing Walrus blobs after
+                // they fell out of pgvector. The original importance value is
+                // not preserved in the blob (it's a row-level signal). Use the
+                // neutral "standard" bucket so restored memories rank as
+                // average — neither boosted nor penalized.
+                crate::services::extractor::IMPORTANCE_STANDARD,
+            )
             .await?;
     }
 
