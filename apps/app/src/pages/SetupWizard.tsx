@@ -18,7 +18,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, Copy, KeyRound } from 'lucide-react'
+import { LogOut, Copy } from 'lucide-react'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
 
@@ -412,7 +412,6 @@ export default function SetupWizard() {
 
                             <div style={{ textAlign: 'left' }}>
                                 <div className="input-group">
-                                    <label htmlFor="delegate-key-input">enter existing delegate key</label>
                                     <textarea
                                         id="delegate-key-input"
                                         className="input setup-import-textarea"
@@ -443,7 +442,7 @@ export default function SetupWizard() {
                                     onClick={handleImportKey}
                                     disabled={importingKey || !importKeyHex.trim()}
                                 >
-                                    <KeyRound size={14} /> {importingKey ? 'checking key...' : 'use delegate key'}
+                                    {importingKey ? 'checking key...' : 'use delegate key'}
                                 </button>
                             </div>
                         </div>
