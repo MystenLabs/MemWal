@@ -51,9 +51,11 @@ impl PlaintextEngine {
                 blob_id: blob_id.to_string(),
                 text,
                 distance,
-                // Engine doesn't fetch created_at; the recall handler zips
-                // it on from the SearchHit. See HydratedMemory docs.
+                // Engine doesn't fetch created_at / importance; the recall
+                // handler zips them on from the SearchHit.
+                // See HydratedMemory docs.
                 created_at: None,
+                importance: None,
             })),
             Ok(None) => {
                 tracing::warn!(
@@ -81,6 +83,7 @@ impl MemoryEngine for PlaintextEngine {
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
+        importance: f32,
         _agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError> {
         // In benchmark mode the "prepared bytes" are plaintext UTF-8 —
@@ -99,7 +102,9 @@ impl MemoryEngine for PlaintextEngine {
         let blob_size = bytes.len() as i64;
 
         self.db
-            .insert_vector_plaintext(&id, owner, namespace, &blob_id, vector, &text, blob_size)
+            .insert_vector_plaintext(
+                &id, owner, namespace, &blob_id, vector, &text, blob_size, importance,
+            )
             .await?;
 
         Ok(MemoryRef { id, blob_id })

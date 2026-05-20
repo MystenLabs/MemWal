@@ -155,6 +155,11 @@ fn spawn_prepare_remember_job(
                     WalletOperation::UploadAndTransfer {
                         encrypted_b64,
                         vector,
+                        // MEM-54: manual /remember has no extractor → no
+                        // bucket signal. Use neutral "standard" so user-
+                        // supplied text isn't artificially boosted or
+                        // suppressed by the ranker's importance term.
+                        importance: crate::services::extractor::IMPORTANCE_STANDARD,
                         owner: owner.clone(),
                         namespace: namespace.clone(),
                         package_id: state.config.package_id.clone(),
@@ -281,6 +286,10 @@ fn spawn_prepare_bulk_remember_job(
                         job_id,
                         encrypted_b64,
                         vector,
+                        // MEM-54: bulk /remember mirrors single /remember —
+                        // no extractor in this path, so we use the neutral
+                        // standard bucket.
+                        importance: crate::services::extractor::IMPORTANCE_STANDARD,
                         namespace,
                         wallet_index,
                     });
@@ -910,6 +919,11 @@ pub async fn remember_manual(
             namespace,
             &encrypted_bytes,
             &body.vector,
+            // MEM-54: remember_manual is the user-supplied SDK path —
+            // the SDK doesn't run the extractor, so we have no bucket
+            // signal. Use neutral standard so manual writes rank with
+            // average importance.
+            crate::services::extractor::IMPORTANCE_STANDARD,
             Some(&auth.public_key),
         )
         .await?;

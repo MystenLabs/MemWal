@@ -64,17 +64,25 @@ pub struct MemoryRef {
 
 /// A hydrated memory — what `fetch_one` / `fetch_batch` return.
 ///
-/// `created_at` is optional because the engine doesn't fetch it (it isn't
-/// needed for the cache → Walrus → SEAL choreography). The recall handler
-/// already has it on the `SearchHit` from `db.search_similar` and zips it
-/// onto the hydrated record before passing the batch to the ranker. Engines
-/// leave it as `None`.
+/// `created_at` and `importance` are optional because the engine doesn't
+/// fetch them (they aren't needed for the cache → Walrus → SEAL
+/// choreography). The recall handler already has them on the `SearchHit`
+/// from `db.search_similar` and zips them onto the hydrated record before
+/// passing the batch to the ranker. Engines leave both as `None`.
 #[derive(Debug, Clone)]
 pub struct HydratedMemory {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// MEM-54: per-fact importance set at extraction time (vital / standard
+    /// / trivial mapped to a float in [0.2, 0.9]). Threaded through from
+    /// `SearchHit.importance` by the recall handler's zip helper, then
+    /// consumed by `CompositeRanker` when `scoring_weights.importance` is
+    /// non-zero. `None` only on the engine output before zipping; once
+    /// the zip helper runs, every hit carries the value (NOT NULL on the
+    /// column with default 0.5 — see migration 009).
+    pub importance: Option<f32>,
 }
 
 /// Per-stage timing breakdown returned by `fetch_batch` so the recall
@@ -109,12 +117,20 @@ pub trait MemoryEngine: Send + Sync {
     /// blob is registered against the right agent key; benchmark mode
     /// ignores it. Used by `remember_manual` and the `jobs.rs` workers
     /// — the three current copies of the upload-then-index code.
+    ///
+    /// MEM-54: `importance` is the per-fact score (0.0–1.0) assigned at
+    /// extraction time. Persisted on `vector_entries.importance` and
+    /// consumed at recall-time composite scoring. Pass `0.5` (the
+    /// "standard" bucket default) when no LLM-assigned score is
+    /// available (e.g. `remember_manual` legacy path that hasn't been
+    /// updated to surface importance from the SDK yet).
     async fn store_blob(
         &self,
         owner: &str,
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
+        importance: f32,
         agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError>;
 

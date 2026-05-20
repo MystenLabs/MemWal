@@ -518,6 +518,14 @@ pub struct SearchHit {
     /// in the engine `fetch_*` calls. Always present (column is NOT NULL
     /// in migration 001).
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// MEM-54: per-fact importance score from `vector_entries.importance`
+    /// (column added by migration 009). Set at extraction time by the
+    /// LLM-emitted vital/standard/trivial bucket (mapped to 0.9/0.5/0.2
+    /// via `services::extractor::importance_for_bucket`). Consumed by
+    /// `CompositeRanker` at recall time when `scoring_weights.importance`
+    /// is non-zero. NOT NULL with default 0.5 so legacy rows degrade
+    /// gracefully to the "standard" bucket.
+    pub importance: f32,
 }
 
 /// Composite-scoring weights for `/api/recall` and `/api/ask`. Optional on
@@ -527,21 +535,23 @@ pub struct SearchHit {
 /// The score formula is:
 ///
 /// ```text
-/// score = semantic * (1.0 - distance)
-///       + recency  * exp(-age_days / recency_half_life_days)
+/// score = semantic    * (1.0 - distance)
+///       + recency     * 2^(-age_days / recency_half_life_days)
+///       + importance  * vector_entries.importance   (already in [0,1])
 /// ```
 ///
 /// Sorted descending (higher score = better). `default()` returns
-/// `semantic=1.0, recency=0.0` so deserialising an empty body yields the
-/// "today" ordering exactly.
+/// `semantic=1.0, recency=0.0, importance=0.0` so deserialising an empty
+/// body yields the "today" ordering exactly.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoringWeights {
     /// Weight applied to `1.0 - cosine_distance`. Default 1.0.
     #[serde(default = "default_semantic_weight")]
     pub semantic: f64,
-    /// Weight applied to `exp(-age_days / half_life)`. Default 0.0.
-    /// When effectively zero, the ranker short-circuits and preserves
-    /// the input order (which is already cosine-sorted by pgvector).
+    /// Weight applied to `2^(-age_days / half_life)`. Default 0.0.
+    /// When all non-semantic weights are effectively zero, the ranker
+    /// short-circuits and preserves the input order (which is already
+    /// cosine-sorted by pgvector).
     #[serde(default)]
     pub recency: f64,
     /// Half-life for the recency decay term, in days. Default 30.
@@ -549,6 +559,14 @@ pub struct ScoringWeights {
     /// twice that, 0.25; etc.
     #[serde(default = "default_recency_half_life_days")]
     pub recency_half_life_days: f64,
+    /// MEM-54: weight applied to the per-fact importance score from
+    /// `vector_entries.importance` (set by the extractor's vital /
+    /// standard / trivial bucket → 0.9 / 0.5 / 0.2). Default 0.0 so the
+    /// existing default-weights path is byte-identical to the pre-MEM-54
+    /// behaviour. Opt in by passing a positive value via
+    /// `scoring_weights.importance` in the request body.
+    #[serde(default)]
+    pub importance: f64,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -565,6 +583,7 @@ impl Default for ScoringWeights {
             semantic: 1.0,
             recency: 0.0,
             recency_half_life_days: 30.0,
+            importance: 0.0,
         }
     }
 }
@@ -579,12 +598,16 @@ impl ScoringWeights {
 
     /// True when the ranker actually computes scores (rather than
     /// short-circuiting to the input order). Mirrors the
-    /// `recency.abs() < f64::EPSILON` predicate inside `CompositeRanker`
-    /// so handler-side gating (validation logs, tracing breadcrumbs)
-    /// stays in lockstep with what the ranker actually does. Keep this
-    /// in sync with [`crate::services::ranker::CompositeRanker::rank`].
+    /// `recency / importance < f64::EPSILON` predicate inside
+    /// `CompositeRanker` so handler-side gating (validation logs, tracing
+    /// breadcrumbs) stays in lockstep with what the ranker actually does.
+    /// Keep this in sync with [`crate::services::ranker::CompositeRanker::rank`].
+    ///
+    /// MEM-54: a non-zero `importance` weight is enough on its own to
+    /// activate the ranker — the importance signal alone can reorder hits
+    /// even when recency is off.
     pub fn is_ranker_active(&self) -> bool {
-        self.recency.abs() >= f64::EPSILON
+        self.recency.abs() >= f64::EPSILON || self.importance.abs() >= f64::EPSILON
     }
 
     /// Return an error if the weights are outside reasonable bounds. The
@@ -609,6 +632,7 @@ impl ScoringWeights {
             ("semantic", self.semantic),
             ("recency", self.recency),
             ("recency_half_life_days", self.recency_half_life_days),
+            ("importance", self.importance),
         ] {
             if !value.is_finite() {
                 return Err(AppError::BadRequest(format!(
@@ -617,7 +641,11 @@ impl ScoringWeights {
                 )));
             }
         }
-        for (name, value) in [("semantic", self.semantic), ("recency", self.recency)] {
+        for (name, value) in [
+            ("semantic", self.semantic),
+            ("recency", self.recency),
+            ("importance", self.importance),
+        ] {
             if !(0.0..=100.0).contains(&value) {
                 return Err(AppError::BadRequest(format!(
                     "scoring_weights.{} must be in [0.0, 100.0] (got {})",
@@ -1262,6 +1290,7 @@ mod tests {
             semantic,
             recency,
             recency_half_life_days: half_life,
+            importance: 0.0,
         }
     }
 
