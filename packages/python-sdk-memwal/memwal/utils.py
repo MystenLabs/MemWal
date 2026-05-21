@@ -7,10 +7,15 @@ Uses PyNaCl (nacl.signing) as the primary Ed25519 implementation.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+from datetime import datetime, timezone
 from typing import Tuple
 
 import nacl.signing
+
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_SUI_ED25519_SCHEME_FLAG = 0
 
 
 def hex_to_bytes(hex_str: str) -> bytes:
@@ -170,3 +175,116 @@ def delegate_key_to_public_key(private_key_hex: str) -> bytes:
     """
     signing_key = build_signing_key(private_key_hex)
     return bytes(signing_key.verify_key)
+
+
+def _bech32_polymod(values: bytes) -> int:
+    generators = [
+        0x3B6A57B2,
+        0x26508E6D,
+        0x1EA119FA,
+        0x3D4233DD,
+        0x2A1462B3,
+    ]
+    chk = 1
+    for value in values:
+        top = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ value
+        for i in range(5):
+            if (top >> i) & 1:
+                chk ^= generators[i]
+    return chk
+
+
+def _bech32_hrp_expand(hrp: str) -> bytes:
+    return bytes([ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp])
+
+
+def _bech32_create_checksum(hrp: str, data: bytes) -> bytes:
+    values = _bech32_hrp_expand(hrp) + data
+    polymod = _bech32_polymod(values + bytes(6)) ^ 1
+    return bytes((polymod >> 5 * (5 - i)) & 31 for i in range(6))
+
+
+def _convertbits(data: bytes, frombits: int, tobits: int, pad: bool = True) -> bytes:
+    acc = 0
+    bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    max_acc = (1 << (frombits + tobits - 1)) - 1
+    for value in data:
+        if value < 0 or value >> frombits:
+            raise ValueError("invalid value for convertbits")
+        acc = ((acc << frombits) | value) & max_acc
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        raise ValueError("invalid incomplete group for convertbits")
+    return bytes(ret)
+
+
+def bech32_encode(hrp: str, data: bytes) -> str:
+    combined = data + _bech32_create_checksum(hrp, data)
+    return hrp + "1" + "".join(_BECH32_CHARSET[d] for d in combined)
+
+
+def encode_sui_private_key(seed_bytes: bytes) -> str:
+    """Encode a 32-byte Ed25519 seed to Sui bech32 `suiprivkey...` format."""
+    if len(seed_bytes) != 32:
+        raise ValueError(f"Ed25519 seed must be exactly 32 bytes, got {len(seed_bytes)}")
+    payload = bytes([_SUI_ED25519_SCHEME_FLAG]) + seed_bytes
+    return bech32_encode("suiprivkey", _convertbits(payload, 8, 5))
+
+
+def uleb128_encode(value: int) -> bytes:
+    """Encode an integer using ULEB128."""
+    if value < 0:
+        raise ValueError("ULEB128 only supports non-negative integers")
+    encoded = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            encoded.append(byte | 0x80)
+        else:
+            encoded.append(byte)
+            return bytes(encoded)
+
+
+def serialize_bcs_byte_vector(value: bytes) -> bytes:
+    """BCS `vector<u8>` encoding: ULEB128 length prefix followed by bytes."""
+    return uleb128_encode(len(value)) + value
+
+
+def build_seal_session_personal_message(
+    package_id: str,
+    ttl_min: int,
+    creation_time_ms: int,
+    session_public_key_bytes: bytes,
+) -> bytes:
+    """Build the SEAL SessionKey personal message string expected by Mysten SEAL."""
+    creation_time_utc = datetime.fromtimestamp(
+        creation_time_ms / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    session_public_key_b64 = base64.b64encode(session_public_key_bytes).decode("ascii")
+    message = (
+        f"Accessing keys of package {package_id} for {ttl_min} mins from "
+        f"{creation_time_utc}, session key {session_public_key_b64}"
+    )
+    return message.encode("utf-8")
+
+
+def sign_sui_personal_message(
+    message: bytes, signing_key: nacl.signing.SigningKey
+) -> str:
+    """Sign a Sui PersonalMessage and return serialized base64 signature."""
+    intent_message = b"\x03\x00\x00" + serialize_bcs_byte_vector(message)
+    digest = hashlib.blake2b(intent_message, digest_size=32).digest()
+    signature_bytes = signing_key.sign(digest).signature
+    public_key_bytes = bytes(signing_key.verify_key)
+    serialized = bytes([_SUI_ED25519_SCHEME_FLAG]) + signature_bytes + public_key_bytes
+    return base64.b64encode(serialized).decode("ascii")

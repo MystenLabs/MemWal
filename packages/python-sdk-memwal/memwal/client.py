@@ -26,12 +26,14 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import random
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
+import nacl.signing
 
 from .types import (
     AnalyzedFact,
@@ -62,14 +64,20 @@ from .types import (
     RestoreResult,
 )
 from .utils import (
+    build_seal_session_personal_message,
     build_signature_message,
     build_signing_key,
     bytes_to_hex,
+    delegate_key_to_sui_address,
+    encode_sui_private_key,
     sha256_hex,
     sign_message,
+    sign_sui_personal_message,
 )
 
 T = TypeVar("T")
+SEAL_SESSION_TTL_MIN = 5
+SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 
 
 # ============================================================
@@ -123,6 +131,9 @@ class MemWal:
         self._server_url = config.server_url.rstrip("/")
         self._namespace = config.namespace
         self._client: Optional[httpx.AsyncClient] = None
+        self._server_config: Optional[Dict[str, str]] = None
+        self._session_cache: Optional[Tuple[str, int]] = None
+        self._session_build_task: Optional[asyncio.Task[str]] = None
 
     @classmethod
     def create(
@@ -659,11 +670,16 @@ class MemWal:
         Returns:
             :class:`RememberManualResult` with id, blob_id, owner, namespace.
         """
-        data = await self._signed_request("POST", "/api/remember/manual", {
-            "blob_id": opts.blob_id,
-            "vector": opts.vector,
-            "namespace": opts.namespace or self._namespace,
-        })
+        data = await self._signed_request(
+            "POST",
+            "/api/remember/manual",
+            {
+                "blob_id": opts.blob_id,
+                "vector": opts.vector,
+                "namespace": opts.namespace or self._namespace,
+            },
+            include_seal_session=False,
+        )
         return RememberManualResult(
             id=data["id"],
             blob_id=data["blob_id"],
@@ -683,11 +699,16 @@ class MemWal:
         Returns:
             :class:`RecallManualResult` with blob_id + distance pairs.
         """
-        data = await self._signed_request("POST", "/api/recall/manual", {
-            "vector": opts.vector,
-            "limit": opts.limit,
-            "namespace": opts.namespace or self._namespace,
-        })
+        data = await self._signed_request(
+            "POST",
+            "/api/recall/manual",
+            {
+                "vector": opts.vector,
+                "limit": opts.limit,
+                "namespace": opts.namespace or self._namespace,
+            },
+            include_seal_session=False,
+        )
         hits = [
             RecallManualHit(blob_id=h["blob_id"], distance=h["distance"])
             for h in data.get("results", [])
@@ -706,29 +727,141 @@ class MemWal:
     # Internal: Signed HTTP Requests
     # ============================================================
 
+    async def _fetch_server_config(self) -> Dict[str, str]:
+        if self._server_config is not None:
+            return self._server_config
+
+        response = await self._http.get(f"{self._server_url}/config")
+        if response.status_code != 200:
+            raise MemWalError(f"GET /config returned {response.status_code}")
+
+        data = response.json()
+        package_id = data.get("packageId")
+        network = data.get("network")
+        sui_rpc_url = data.get("suiRpcUrl")
+        if not package_id or not network or not sui_rpc_url:
+            raise MemWalError("GET /config response missing packageId / network / suiRpcUrl")
+
+        self._server_config = {
+            "packageId": package_id,
+            "network": network,
+            "suiRpcUrl": sui_rpc_url,
+        }
+        return self._server_config
+
+    async def _assert_first_package_version(self, sui_rpc_url: str, package_id: str) -> None:
+        response = await self._http.post(
+            sui_rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sui_getObject",
+                "params": [package_id, {"showBcs": False, "showContent": False, "showType": False}],
+            },
+        )
+        if response.status_code != 200:
+            raise MemWalError(f"sui_getObject returned {response.status_code}")
+
+        body = response.json()
+        result = body.get("result", {})
+        version = None
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                version = data.get("version")
+            if version is None:
+                obj = result.get("object")
+                if isinstance(obj, dict):
+                    version = obj.get("version")
+        if str(version) != "1":
+            raise MemWalError(
+                f"SEAL package {package_id} must be at version 1 to build x-seal-session, got {version!r}"
+            )
+
+    async def _build_seal_session_inner(self) -> str:
+        cfg = await self._fetch_server_config()
+        await self._assert_first_package_version(cfg["suiRpcUrl"], cfg["packageId"])
+
+        session_signing_key = nacl.signing.SigningKey.generate()
+        session_public_key = bytes(session_signing_key.verify_key)
+        creation_time_ms = int(time.time() * 1000)
+        personal_message = build_seal_session_personal_message(
+            package_id=cfg["packageId"],
+            ttl_min=SEAL_SESSION_TTL_MIN,
+            creation_time_ms=creation_time_ms,
+            session_public_key_bytes=session_public_key,
+        )
+        personal_message_signature = sign_sui_personal_message(
+            personal_message,
+            self._signing_key,
+        )
+
+        json_str = json.dumps(
+            {
+                "address": delegate_key_to_sui_address(self._private_key_hex),
+                "packageId": cfg["packageId"],
+                "mvrName": None,
+                "creationTimeMs": creation_time_ms,
+                "ttlMin": SEAL_SESSION_TTL_MIN,
+                "personalMessageSignature": personal_message_signature,
+                "sessionKey": encode_sui_private_key(bytes(session_signing_key)),
+            },
+            separators=(",", ":"),
+        )
+        session_bytes = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
+        self._session_cache = (
+            session_bytes,
+            int(time.time() * 1000) + SEAL_SESSION_TTL_MIN * 60_000 - SEAL_SESSION_SAFETY_MARGIN_MS,
+        )
+        return session_bytes
+
+    async def _build_seal_session(self) -> str:
+        now_ms = int(time.time() * 1000)
+        if self._session_cache is not None:
+            cached_bytes, expires_at_ms = self._session_cache
+            if now_ms < expires_at_ms:
+                return cached_bytes
+
+        if self._session_build_task is not None:
+            return await self._session_build_task
+
+        self._session_build_task = asyncio.create_task(self._build_seal_session_inner())
+        try:
+            return await self._session_build_task
+        finally:
+            self._session_build_task = None
+
     async def _signed_request(
         self,
         method: str,
         path: str,
         body: Dict[str, Any],
         accepted_statuses: tuple = (200,),
+        include_seal_session: bool = True,
     ) -> Dict[str, Any]:
         """Make a signed request to the server.
 
-        Signature format: ``{timestamp}.{method}.{path}.{body_sha256}``
+        Signature format:
+            ``{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}``
+
+        For ``GET`` requests the canonical body string is the empty string,
+        and no HTTP request body is sent. This keeps the signed payload hash
+        byte-compatible with the TypeScript SDK and with intermediaries that
+        strip ``GET`` bodies on the wire.
 
         Headers sent:
             - ``x-public-key``: Ed25519 public key hex
             - ``x-signature``: Ed25519 signature hex
             - ``x-timestamp``: Unix seconds string
-            - ``x-delegate-key``: Private key hex
+            - ``x-seal-session``: Base64-encoded exported session envelope
             - ``x-account-id``: MemWalAccount object ID
             - ``Content-Type``: application/json
         """
         import uuid
 
+        method_upper = method.upper()
         timestamp = str(int(time.time()))
-        body_str = json.dumps(body, separators=(",", ":"))
+        body_str = "" if method_upper == "GET" else json.dumps(body, separators=(",", ":"))
         body_hash = sha256_hex(body_str)
         # MED-1 / LOW-23: nonce + account_id are part of the canonical signed
         # message. Server rejects the request as "unsupported legacy SDK"
@@ -737,7 +870,7 @@ class MemWal:
 
         message = build_signature_message(
             timestamp,
-            method.upper(),
+            method_upper,
             path,
             body_hash,
             nonce=nonce,
@@ -752,15 +885,16 @@ class MemWal:
             "x-signature": signature_hex,
             "x-timestamp": timestamp,
             "x-nonce": nonce,
-            "x-delegate-key": self._private_key_hex,
             "x-account-id": self._account_id,
         }
+        if include_seal_session:
+            headers["x-seal-session"] = await self._build_seal_session()
 
         response = await self._http.request(
-            method=method.upper(),
+            method=method_upper,
             url=url,
             headers=headers,
-            content=body_str,
+            content=None if method_upper == "GET" else body_str,
         )
 
         if response.status_code not in accepted_statuses:

@@ -13,7 +13,8 @@ No-auth tests (always run, no env vars needed):
   - Unregistered key → SDK raises MemWalError
 
 Authenticated tests (require MEMWAL_KEY + MEMWAL_ACCOUNT_ID):
-  - remember()
+  - remember() acceptance
+  - remember_and_wait()
   - recall()
   - analyze()
   - ask()
@@ -181,30 +182,39 @@ class TestAuthRejection:
 
 @requires_key
 class TestRemember:
-    """remember() against live server."""
+    """remember() / remember_and_wait() against live server."""
 
-    def test_remember_returns_id_and_blob(self) -> None:
+    def test_remember_returns_job_id_and_status(self) -> None:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
         result = mw.remember("Integration test: the sky is blue", namespace="sdk-test")
+        assert result.job_id is not None and isinstance(result.job_id, str)
+        assert result.status in ("pending", "running")
+        print(f"\n  accepted job={result.job_id[:8]}... status={result.status}")
+
+    def test_remember_and_wait_returns_blob_and_owner(self) -> None:
+        mw = MemWalSync.create(
+            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
+        )
+        result = mw.remember_and_wait("Integration test: the sky is blue", namespace="sdk-test")
         assert result.id is not None and isinstance(result.id, str)
         assert result.blob_id is not None and isinstance(result.blob_id, str)
         assert result.owner.startswith("0x")
-        print(f"\n  id={result.id[:8]}... blob={result.blob_id[:8]}...")
+        print(f"\n  done job={result.id[:8]}... blob={result.blob_id[:8]}...")
 
     def test_remember_default_namespace(self) -> None:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        result = mw.remember("Integration test: namespace default")
+        result = mw.remember_and_wait("Integration test: namespace default")
         assert result.namespace == "default"
 
     def test_remember_custom_namespace(self) -> None:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        result = mw.remember("Integration test: custom namespace", namespace="sdk-test")
+        result = mw.remember_and_wait("Integration test: custom namespace", namespace="sdk-test")
         assert result.namespace == "sdk-test"
 
 
@@ -292,7 +302,7 @@ class TestFullFlow:
         )
 
         # Store a distinctive memory in an isolated namespace
-        mem = mw.remember(text, namespace=ns)
+        mem = mw.remember_and_wait(text, namespace=ns)
         assert mem.id is not None
 
         # Recall — should find the stored memory
@@ -309,7 +319,7 @@ class TestFullFlow:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        mw.remember("I am allergic to shellfish", namespace="sdk-test")
+        mw.remember_and_wait("I am allergic to shellfish", namespace="sdk-test")
         result = mw.ask("What are my food allergies?", limit=3, namespace="sdk-test")
         assert isinstance(result.answer, str)
         assert len(result.answer) > 0
@@ -335,13 +345,14 @@ class TestAsync:
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         ) as mw:
             result = await mw.remember("Async SDK test: Paris is the capital of France")
-            assert result.id is not None
+            assert result.job_id is not None
+            assert result.status in ("pending", "running")
 
     async def test_async_recall(self) -> None:
         async with MemWal.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         ) as mw:
-            await mw.remember("Async SDK test: I enjoy reading")
+            await mw.remember_and_wait("Async SDK test: I enjoy reading")
             result = await mw.recall("reading books", limit=3)
             assert isinstance(result.results, list)
 
