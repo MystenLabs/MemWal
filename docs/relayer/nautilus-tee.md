@@ -144,7 +144,7 @@ These map directly to the existing self-hosted relayer config.
 | `SUI_RPC_URL` | no | Sui fullnode endpoint reachable from the enclave |
 | `SERVER_SUI_PRIVATE_KEY` | yes | Primary server key for SEAL decrypt authorization |
 | `SERVER_SUI_PRIVATE_KEYS` | yes | Optional upload key pool; takes priority for Walrus uploads |
-| `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | maybe | SEAL key server config. Use `SEAL_SERVER_CONFIGS` for committee servers |
+| `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | maybe | Optional SEAL override. Defaults use the Mysten testnet committee aggregator where available; use `SEAL_SERVER_CONFIGS` for custom committees |
 | `OPENAI_API_KEY` | yes | Embedding and LLM provider key |
 | `OPENAI_API_BASE` | no | OpenAI-compatible base URL |
 | `WALRUS_PUBLISHER_URL` | no | Walrus upload endpoint |
@@ -169,7 +169,7 @@ The enclave must be allowed to reach:
 - Walrus publisher
 - Walrus aggregator
 - Walrus upload relay, if configured
-- SEAL key servers or committee aggregators
+- SEAL key servers or committee aggregators. On testnet, the built-in default is Mysten's initial committee aggregator. Mainnet uses the legacy independent key server default until an official committee aggregator is available.
 - OpenAI-compatible embedding and LLM provider
 
 If your Nautilus deployment requires an explicit outbound allowlist, mirror the
@@ -271,7 +271,7 @@ database URLs.
 | `/health` fails | Relayer process, sidecar boot, or ingress issue | Enclave process logs and sidecar readiness logs |
 | `remember` stays running | Walrus upload, wallet signing, or job queue failure | `remember_jobs`, Apalis job rows, sidecar Walrus logs |
 | `recall` returns empty after smoke write | Wrong namespace/account, pgvector issue, or upload job incomplete | Poll remember job, verify `owner + namespace`, check PostgreSQL migrations |
-| SEAL decrypt fails | Wrong server wallet, delegate auth, SEAL config, or key server outage | `SEAL_SERVER_CONFIGS`, `SERVER_SUI_PRIVATE_KEY`, key server reachability |
+| SEAL decrypt fails | Wrong server wallet, delegate auth, SEAL config, key server outage, or committee aggregator outage | `SEAL_SERVER_CONFIGS`, `SERVER_SUI_PRIVATE_KEY`, key server or aggregator reachability |
 | Embedding calls fail | AI endpoint blocked or invalid API key | `OPENAI_API_BASE`, `OPENAI_API_KEY`, outbound allowlist |
 | TLS/cert errors to DB or Redis | Host rewrite/proxy broke hostname validation | Preserve original hostnames when proxying TLS endpoints |
 | Plaintext appears in logs | Logging hygiene regression or debug middleware | Disable debug logs and scrub host/enclave log sinks |
