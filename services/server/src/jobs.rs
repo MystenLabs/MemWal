@@ -181,18 +181,67 @@ async fn update_remember_job_after_wallet_error(
     .await;
 }
 
-async fn mark_remember_job_failed(state: &AppState, remember_job_id: Option<&str>, msg: &str) {
+async fn mark_remember_job_failed(
+    pool: &sqlx::PgPool,
+    remember_job_id: Option<&str>,
+    msg: &str,
+) -> Result<(), sqlx::Error> {
     let Some(jid) = remember_job_id else {
-        return;
+        return Ok(());
     };
 
-    let _ = sqlx::query(
+    let result = sqlx::query(
         "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
     )
     .bind(msg)
     .bind(jid)
-    .execute(state.db.pool())
-    .await;
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    Ok(())
+}
+
+fn remember_job_persist_failure_message(msg: &str, persist_err: &sqlx::Error) -> String {
+    format!(
+        "{}; failed to persist remember_jobs failed status: {}",
+        msg, persist_err
+    )
+}
+
+async fn classify_wallet_remember_handoff_failure(
+    pool: &sqlx::PgPool,
+    remember_job_id: Option<&str>,
+    msg: String,
+) -> WalletJobError {
+    // Recovery handoff failures happen after an external side effect already
+    // succeeded: a Walrus upload and sometimes an on-chain transfer. Once the
+    // polling row is durably terminal, abort retries so clients see `failed`
+    // instead of polling `uploaded` / `running` forever. If that terminal
+    // state cannot be persisted, keep the wallet handler retryable so the row
+    // is not orphaned.
+    match mark_remember_job_failed(pool, remember_job_id, &msg).await {
+        Ok(()) => WalletJobError::Permanent(msg),
+        Err(persist_err) => {
+            WalletJobError::Transient(remember_job_persist_failure_message(&msg, &persist_err))
+        }
+    }
+}
+
+async fn handle_legacy_remember_handoff_failure(
+    pool: &sqlx::PgPool,
+    remember_job_id: &str,
+    msg: String,
+) -> Result<(), RememberJobError> {
+    match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
+        Ok(()) => Ok(()),
+        Err(persist_err) => Err(RememberJobError::Internal(
+            remember_job_persist_failure_message(&msg, &persist_err),
+        )),
+    }
 }
 
 /// A wallet job.
@@ -407,19 +456,18 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                             )
                             .await
                             {
-                                let msg = enqueue_err.to_string();
-                                mark_remember_job_failed(
-                                    state,
+                                let classified = classify_wallet_remember_handoff_failure(
+                                    state.db.pool(),
                                     finalize_remember_job_id.as_deref(),
-                                    &msg,
+                                    enqueue_err.to_string(),
                                 )
                                 .await;
                                 tracing::error!(
                                     "[wallet-job:set-metadata] job_id={} {}",
                                     finalize_remember_job_id.as_deref().unwrap_or("-"),
-                                    msg,
+                                    classified,
                                 );
-                                return Err(WalletJobError::Permanent(msg).into_apalis_error());
+                                return Err(classified.into_apalis_error());
                             }
                             tracing::warn!(
                                     "[wallet-job:set-metadata] finalization failed after transfer; enqueued index-only retry: {}",
@@ -748,10 +796,18 @@ async fn execute_upload_and_transfer(
                 })
                 .await
             {
-                let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
-                mark_remember_job_failed(state, recovery_remember_job_id.as_deref(), &msg).await;
-                tracing::error!("[wallet-job:upload] job_id={} {}", job_id_for_log, msg,);
-                return Err(WalletJobError::Permanent(msg));
+                let classified = classify_wallet_remember_handoff_failure(
+                    state.db.pool(),
+                    recovery_remember_job_id.as_deref(),
+                    format!("failed to enqueue metadata/transfer recovery job: {}", e),
+                )
+                .await;
+                tracing::error!(
+                    "[wallet-job:upload] job_id={} {}",
+                    job_id_for_log,
+                    classified,
+                );
+                return Err(classified);
             }
 
             tracing::info!(
@@ -1061,8 +1117,8 @@ pub async fn execute_remember(
             {
                 let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
                 tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
-                mark_remember_job_failed(state, Some(&job.job_id), &msg).await;
-                return Err(RememberJobError::Internal(msg));
+                return handle_legacy_remember_handoff_failure(state.db.pool(), &job.job_id, msg)
+                    .await;
             }
 
             tracing::info!(
@@ -1252,7 +1308,23 @@ pub async fn execute_bulk_remember(
 
 #[cfg(test)]
 mod tests {
-    use super::WalletJobError;
+    use std::sync::Arc;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::{
+        classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
+    };
+    use crate::storage::db::VectorDb;
+
+    fn test_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
+    }
+
+    async fn test_db() -> Arc<VectorDb> {
+        Arc::new(VectorDb::new(&test_database_url()).await.unwrap())
+    }
 
     #[test]
     fn classify_object_lock_as_transient() {
@@ -1333,5 +1405,146 @@ mod tests {
     fn transient_errors_remain_retryable() {
         let error = WalletJobError::Transient("timeout".to_string()).into_apalis_error();
         assert!(matches!(error, apalis::prelude::Error::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn recovery_enqueue_failure_marks_remember_job_failed() {
+        let db = test_db().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'uploaded')",
+        )
+        .bind(&job_id)
+        .bind("0xtest-owner")
+        .bind("test-ns")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let classified =
+            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
+                .await;
+
+        match classified {
+            WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
+            other => panic!("expected permanent handoff error, got {other}"),
+        }
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some(msg));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(db.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_handoff_failure_overrides_transient_looking_queue_error() {
+        let db = test_db().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: 503 service unavailable";
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'uploaded')",
+        )
+        .bind(&job_id)
+        .bind("0xtest-owner")
+        .bind("test-ns")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let classified =
+            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
+                .await;
+
+        match classified {
+            WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
+            other => panic!("expected permanent handoff error, got {other}"),
+        }
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some(msg));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(db.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn failed_status_persistence_keeps_wallet_handoff_retryable() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let msg = "failed to enqueue uploaded-blob finalization job: synthetic queue down";
+        let classified =
+            classify_wallet_remember_handoff_failure(&pool, Some("job-closed-pool"), msg.into())
+                .await;
+
+        match classified {
+            WalletJobError::Transient(got) => {
+                assert!(got.contains(msg));
+                assert!(got.contains("failed to persist remember_jobs failed status"));
+            }
+            other => panic!("expected transient handoff error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_remember_job_failed_returns_real_update_error() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let err = mark_remember_job_failed(&pool, Some("job-closed-pool"), "synthetic")
+            .await
+            .expect_err("closed pool should fail");
+
+        assert!(err.to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn missing_remember_job_keeps_handoff_retryable() {
+        let db = test_db().await;
+        let job_id = format!("missing-remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
+
+        let classified =
+            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
+                .await;
+
+        match classified {
+            WalletJobError::Transient(got) => {
+                assert!(got.contains(msg));
+                assert!(got.contains("failed to persist remember_jobs failed status"));
+                assert!(got.contains("no rows returned"));
+            }
+            other => panic!("expected transient handoff error, got {other}"),
+        }
     }
 }
