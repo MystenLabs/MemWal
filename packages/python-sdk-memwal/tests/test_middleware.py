@@ -51,6 +51,37 @@ _SERVER = "http://localhost:8000"
 
 _RECALL_URL = f"{_SERVER}/api/recall"
 _ANALYZE_URL = f"{_SERVER}/api/analyze"
+_SUI_RPC_URL = "http://localhost:9001"
+_PACKAGE_ID = "0x" + "11" * 32
+
+
+def _mock_seal_session_prereqs() -> None:
+    """Register mocks for the SEAL session prerequisites.
+
+    Every relayer-mode signed request (recall, analyze, remember) now starts
+    by fetching ``GET /config`` and verifying the SEAL package version via
+    ``sui_getObject``. Tests that drive MemWal through ``with_memwal_*`` must
+    register these or the first signed request raises
+    ``AllMockedAssertionError`` from respx.
+
+    Mirrors the helper of the same name in ``test_client.py``.
+    """
+    respx.get(f"{_SERVER}/config").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "packageId": _PACKAGE_ID,
+                "network": "testnet",
+                "suiRpcUrl": _SUI_RPC_URL,
+            },
+        )
+    )
+    respx.post(_SUI_RPC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"result": {"data": {"version": "1"}}},
+        )
+    )
 
 
 def _mock_recall(memories: list, *, total: int | None = None) -> httpx.Response:
@@ -213,6 +244,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_memories_injected_as_system_message(self) -> None:
         """When memories are found, a SystemMessage is injected before the HumanMessage."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain_core.outputs import ChatGeneration, ChatResult
 
@@ -249,6 +281,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_no_memories_found_no_injection(self) -> None:
         """When no memories match, the message list is passed unchanged."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain_core.outputs import ChatGeneration, ChatResult
 
@@ -278,6 +311,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_min_relevance_filters_low_score_memories(self) -> None:
         """Memories below min_relevance are filtered out."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain_core.outputs import ChatGeneration, ChatResult
 
@@ -313,6 +347,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_recall_failure_does_not_block_llm(self) -> None:
         """If MemWal recall fails, the LLM is still called with original messages."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import HumanMessage
 
         llm = self._make_llm()
@@ -329,6 +364,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_auto_save_triggers_analyze(self) -> None:
         """With auto_save=True, analyze() is called fire-and-forget after LLM call."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import HumanMessage
 
         llm = self._make_llm()
@@ -348,6 +384,7 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_no_user_message_no_recall(self) -> None:
         """If there's no user message, recall is not called."""
+        _mock_seal_session_prereqs()
         from langchain_core.messages import SystemMessage
 
         llm = self._make_llm()
@@ -402,6 +439,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     async def test_async_client_injects_memory(self) -> None:
         """Async OpenAI client: memory injected as system message before user message."""
+        _mock_seal_session_prereqs()
         client = self._make_async_client()
         captured_messages: list = []
 
@@ -434,6 +472,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     async def test_async_client_no_memories_no_injection(self) -> None:
         """No memories → original messages passed unchanged."""
+        _mock_seal_session_prereqs()
         client = self._make_async_client()
         captured: list = []
 
@@ -460,6 +499,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     async def test_async_client_recall_failure_resilient(self) -> None:
         """If recall fails, the LLM call still proceeds."""
+        _mock_seal_session_prereqs()
         client = self._make_async_client()
 
         respx.post(_RECALL_URL).mock(return_value=httpx.Response(500, text="error"))
@@ -477,6 +517,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     async def test_async_client_auto_save(self) -> None:
         """With auto_save=True, analyze is triggered after completion."""
+        _mock_seal_session_prereqs()
         client = self._make_async_client()
 
         respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
@@ -496,6 +537,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     async def test_min_relevance_filter(self) -> None:
         """Memories with relevance below min_relevance are not injected."""
+        _mock_seal_session_prereqs()
         client = self._make_async_client()
         captured: list = []
 
@@ -528,6 +570,7 @@ class TestWithMemWalOpenAI:
     @respx.mock
     def test_sync_client_wraps_create(self) -> None:
         """Sync OpenAI client wrapper is applied correctly."""
+        _mock_seal_session_prereqs()
         client = self._make_sync_client()
         original_create = client.chat.completions.create
 
