@@ -6,6 +6,51 @@ A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemE
 >
 > It runs against the server in **`BENCHMARK_MODE=true`** (the `PlaintextEngine` path — memories stored as plaintext in Postgres, bypassing SEAL + Walrus). `analyze` in that mode ingests *synchronously* (the response carries the stored ids and `status: "done"`), matching the SDK's pre-async analyze contract this harness was written against. Running through the production path would burn Walrus testnet quota measuring something this benchmark isn't testing. `BENCHMARK_MODE` is off by default and **not for production use**.
 
+---
+
+## TL;DR — first run
+
+```bash
+# 1. Local infra: Postgres + Redis (the server needs BOTH to boot)
+docker compose -f services/server/docker-compose.yml up -d
+
+# 2. Server .env (services/server/.env) — benchmark section:
+#      BENCHMARK_MODE=true
+#      RATE_LIMIT_DISABLED=1
+#      PORT=3001
+#    ...plus the always-required DATABASE_URL / MEMWAL_PACKAGE_ID /
+#    MEMWAL_REGISTRY_ID / a reachable SUI_RPC_URL + OPENAI_API_KEY.
+#    (Copy from services/server/.env.example — benchmark section at bottom.)
+
+# 3. Start the server — wait for the "BENCHMARK_MODE=true — using
+#    PlaintextEngine" warning in the logs.
+cd services/server && cargo run
+
+# 4. Harness setup (one-time)
+cd services/server/benchmarks
+python3 -m venv .venv && source .venv/bin/activate
+pip install datasets huggingface_hub openai httpx pynacl numpy pyyaml tabulate tqdm pytest
+cp config.example.yaml config.yaml
+#   edit config.yaml: delegate_key, account_id, judge.api_key (OpenRouter/OpenAI)
+
+# 5. Download a dataset (one-time per benchmark)
+python run.py download locomo
+
+# 6. Run it (ingest + eval both presets)
+python run.py full locomo --presets baseline,importance_heavy
+#   comparison table prints at the end; per-preset JSON lands in results/
+```
+
+**Network is required even in benchmark mode** — SEAL + Walrus are bypassed,
+but auth still verifies the delegate key against Sui RPC on every request,
+and embeds/judging hit OpenAI/OpenRouter. If your connection drops mid-run,
+recall starts returning 401 (Sui RPC unreachable) and the run is junk —
+kill it rather than trust the numbers.
+
+The rest of this doc is the detailed reference behind each step.
+
+---
+
 **Current supported benchmarks** (runtime at `concurrency: 10`, full e2e mode, two presets):
 
 | Benchmark | Status | Typical cost | Runtime (ingest + 2 eval presets) |
@@ -130,7 +175,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # Install deps directly (don't use pip install -e on Python 3.9)
-pip install datasets openai httpx pynacl numpy pyyaml tabulate tqdm pytest huggingface_hub
+pip install datasets huggingface_hub openai httpx pynacl numpy pyyaml tabulate tqdm pytest
 
 # Configure
 cp config.example.yaml config.yaml
