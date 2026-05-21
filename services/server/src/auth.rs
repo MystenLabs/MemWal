@@ -47,6 +47,7 @@ fn unsupported_legacy_sdk() -> StatusCode {
     StatusCode::UPGRADE_REQUIRED
 }
 
+#[tracing::instrument(name = "auth.verify_signature", skip_all)]
 pub async fn verify_signature(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -277,6 +278,7 @@ pub async fn verify_signature(
 /// 3. On-chain registry scan (slower, auto-discovery fallback)
 ///
 /// After successful resolution, the mapping is cached for future requests.
+#[tracing::instrument(name = "auth.resolve_account", skip_all)]
 async fn resolve_account(
     state: &AppState,
     public_key_hex: &str,

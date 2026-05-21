@@ -158,6 +158,12 @@ export interface AuthRequiredConfig {
     relayerUrl: string;
     webUrl: string;
     label: string;
+    /** Default memory namespace resolved at boot. Accepted here so the entry
+     * point can pass one config shape to both server modes — but auth-required
+     * mode never forwards a memory tool call (every non-login tool returns the
+     * login instruction), so there is nothing to namespace yet. It takes
+     * effect once credentials exist and the bridge runs. */
+    namespace?: string;
 }
 
 /** Send a `notifications/message` (MCP logging notification). Some clients

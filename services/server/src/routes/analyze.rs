@@ -24,7 +24,7 @@ use crate::rate_limit;
 use crate::services::extractor::MAX_ANALYZE_FACTS;
 use crate::types::*;
 
-use super::{collect_bounded_results, enqueue_wallet_job, truncate_str};
+use super::{collect_bounded_results, enqueue_wallet_job};
 
 const ANALYZE_CONCURRENCY: usize = 5;
 
@@ -34,6 +34,29 @@ const ANALYZE_CONCURRENCY: usize = 5;
 // so a hostile client cannot burn ~1 MiB of LLM tokens for the same
 // rate-limit weight as a tiny request.
 const MAX_ANALYZE_TEXT_BYTES: usize = 64 * 1024;
+
+/// MEM-57: How many existing memories to pull as pre-extraction dedup
+/// context for the extractor. Matches Mem0 v3's published pattern and the
+/// default `recall_limit` the benchmark harness uses, so the dedup
+/// context reflects what the user is most likely to ask about next.
+///
+/// Sized for the cost trade-off: each retrieved memory adds ~50-150ms
+/// of latency (one extra `search_similar` + `fetch_batch` round-trip),
+/// and roughly 50-100 tokens to the LLM input. K=10 keeps p95 latency
+/// within the +50-150ms budget called out in the MEM-57 ticket.
+const PRE_EXTRACTION_CONTEXT_LIMIT: usize = 10;
+
+/// MEM-57 P0: per-leg timeouts on the pre-extraction context retrieval.
+/// Set generously above measured p95 (embed ~150ms, search ~30ms warm /
+/// 500ms cold, fetch ~50ms warm) so a healthy server is unaffected, but
+/// tight enough to cap a stalled external dependency (OpenAI hiccup,
+/// pgvector cold-namespace tail, sidecar 5xx). On expiry the leg's
+/// fallback path fires — context goes empty, analyze continues. Total
+/// pre-extraction worst case after timeouts: ~1.6s vs the observed
+/// 30s benchmark outlier under no-timeout.
+const EMBED_TIMEOUT_MS: u64 = 800;
+const SEARCH_TIMEOUT_MS: u64 = 300;
+const FETCH_TIMEOUT_MS: u64 = 500;
 
 /// POST /api/analyze
 ///
@@ -60,14 +83,245 @@ pub async fn analyze(
     let owner = &auth.owner;
     let namespace = &body.namespace;
     tracing::info!(
-        "analyze: text=\"{}...\" owner={} ns={}",
-        truncate_str(&body.text, 50),
-        owner,
-        namespace
+        text_len = body.text.len(),
+        owner = %owner,
+        namespace = %namespace,
+        "analyze request"
     );
 
-    // Step 1: Extract facts using the Extractor service (sync — fast, ~1-2s)
-    let extracted = state.extractor.extract(&body.text).await?;
+    // ── MEM-57: Pre-extraction dedup context (Mem0 v3 pattern) ────────
+    //
+    // Before the extractor LLM call, fetch the top-K nearest existing
+    // memories for this input. The extractor sees them as
+    // `<related_memories>` and uses the context to skip duplicates and
+    // anchor borderline facts. This is the architectural fix for the
+    // MEM-54 v3 LME `single_session_assistant` regression — gives the
+    // LLM stronger signal for what is new vs already-known, so
+    // borderline assistant content gets confidently extracted rather
+    // than dropped under "be concise".
+    //
+    // Pre-extraction context is an *optimisation* — every recall-side
+    // failure mode (embed, search, fetch) falls back to plain extraction
+    // rather than failing the user's write. A user's write should not
+    // depend on their own read working. Each per-leg failure logs a
+    // `warn!` so production incidents are visible without breaking the
+    // ingest path.
+    //
+    // Empty-namespace fast path (task #84): a cheap btree existence
+    // check on `idx_vector_entries_owner_ns` skips the embed +
+    // `search_similar` round-trip on first-ingest-into-a-namespace.
+    // pgvector ≤0.7 HNSW with an `owner+namespace` filter does
+    // post-filtering and can have a 100-500ms tail on cold namespaces
+    // — the existence check eliminates that landmine, saves the embed
+    // call ($, ~60-120ms p50), and degrades gracefully on its own
+    // failure (treats "unknown" as "non-empty" → fall through to
+    // full path, safer than skipping context erroneously).
+    let pre_extract_t0 = std::time::Instant::now();
+    let mut pre_extract_status = "ok";
+    let mut pre_extract_embed_ms: u128 = 0;
+    let mut pre_extract_search_ms: u128 = 0;
+    let mut pre_extract_walrus_ms: u128 = 0;
+    let mut pre_extract_seal_ms: u128 = 0;
+    let mut pre_extract_dropped: usize = 0;
+
+    let namespace_has_memories: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM vector_entries WHERE owner = $1 AND namespace = $2 LIMIT 1",
+    )
+    .bind(owner)
+    .bind(namespace)
+    .fetch_optional(state.db.pool())
+    .await
+    .map(|r| r.is_some())
+    .unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            owner = %owner,
+            namespace = %namespace,
+            "analyze pre-extraction namespace-existence check failed; falling through to full path"
+        );
+        // Safer to *not* skip the recall when the existence check is
+        // ambiguous — degrades to "task #83 behaviour", not "no context".
+        true
+    });
+
+    let related_memories: Vec<crate::engine::HydratedMemory> = if !namespace_has_memories {
+        pre_extract_status = "skipped_empty_namespace";
+        Vec::new()
+    } else {
+        // Embed the input as a query. On embed failure, log + degrade —
+        // do NOT propagate via `?`, even though the embed below uses the
+        // same OpenAI endpoint as per-fact embeds (which DO propagate).
+        // The distinction: per-fact embeds produce vectors that get
+        // stored (data loss on failure); this one only feeds dedup
+        // context (best-effort optimisation).
+        // MEM-57 P0: each leg of the pre-extraction recall is wrapped in
+        // a `tokio::time::timeout`. On expiry the corresponding status
+        // (`embed_timeout`, `search_timeout`, `fetch_timeout`) is set
+        // and the context falls back to empty — analyze continues with
+        // plain extraction rather than blocking the user's write on a
+        // stalled external dependency.
+        let embed_t = std::time::Instant::now();
+        let input_vector_opt = match tokio::time::timeout(
+            std::time::Duration::from_millis(EMBED_TIMEOUT_MS),
+            state.embedder.embed(&body.text),
+        )
+        .await
+        {
+            Ok(Ok(v)) => Some(v),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    owner = %owner,
+                    namespace = %namespace,
+                    "analyze pre-extraction embed failed; falling back to plain extract"
+                );
+                pre_extract_status = "embed_failed";
+                None
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    owner = %owner,
+                    namespace = %namespace,
+                    timeout_ms = EMBED_TIMEOUT_MS,
+                    "analyze pre-extraction embed timed out; falling back to plain extract"
+                );
+                pre_extract_status = "embed_timeout";
+                None
+            }
+        };
+        pre_extract_embed_ms = embed_t.elapsed().as_millis();
+
+        match input_vector_opt {
+            None => Vec::new(),
+            Some(input_vector) => {
+                let search_t = std::time::Instant::now();
+                let search_result = tokio::time::timeout(
+                    std::time::Duration::from_millis(SEARCH_TIMEOUT_MS),
+                    state.db.search_similar(
+                        &input_vector,
+                        owner,
+                        namespace,
+                        PRE_EXTRACTION_CONTEXT_LIMIT,
+                    ),
+                )
+                .await;
+                pre_extract_search_ms = search_t.elapsed().as_millis();
+
+                match search_result {
+                    Ok(Ok(hits)) if hits.is_empty() => {
+                        // Existence check said non-empty but search found
+                        // 0 hits — possible if pgvector statistics are
+                        // stale or the index hasn't caught up. Rare but
+                        // not an error. Just no context this time.
+                        Vec::new()
+                    }
+                    Ok(Ok(hits)) => {
+                        let hit_refs: Vec<(String, f64)> = hits
+                            .iter()
+                            .map(|h| (h.blob_id.clone(), h.distance))
+                            .collect();
+                        // `fetch_batch` handles decrypt + cache + reactive
+                        // cleanup on 404 / decrypt failure. Dropped hits
+                        // just shrink the context; the extractor still
+                        // works with whatever survives. On total failure
+                        // (e.g. sidecar 5xx) or timeout, log and fall back.
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(FETCH_TIMEOUT_MS),
+                            state.engine.fetch_batch(owner, &hit_refs, &auth),
+                        )
+                        .await
+                        {
+                            Ok(Ok((hydrated, dropped, timings))) => {
+                                pre_extract_walrus_ms = timings.walrus_ms;
+                                pre_extract_seal_ms = timings.seal_ms;
+                                pre_extract_dropped = dropped;
+                                if dropped > 0 {
+                                    // Some context memories failed to
+                                    // decrypt — surface so we can see
+                                    // mass-decrypt-rot in production.
+                                    tracing::warn!(
+                                        owner = %owner,
+                                        namespace = %namespace,
+                                        requested = hit_refs.len(),
+                                        got = hydrated.len(),
+                                        dropped,
+                                        "analyze pre-extraction: some context memories dropped at decrypt"
+                                    );
+                                    pre_extract_status = "ok_with_dropped";
+                                }
+                                hydrated
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    owner = %owner,
+                                    namespace = %namespace,
+                                    "analyze pre-extraction fetch_batch failed; falling back to plain extract"
+                                );
+                                pre_extract_status = "fetch_failed";
+                                Vec::new()
+                            }
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    owner = %owner,
+                                    namespace = %namespace,
+                                    timeout_ms = FETCH_TIMEOUT_MS,
+                                    "analyze pre-extraction fetch_batch timed out; falling back to plain extract"
+                                );
+                                pre_extract_status = "fetch_timeout";
+                                Vec::new()
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            error = %e,
+                            owner = %owner,
+                            namespace = %namespace,
+                            "analyze pre-extraction search_similar failed; falling back to plain extract"
+                        );
+                        pre_extract_status = "search_failed";
+                        Vec::new()
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            owner = %owner,
+                            namespace = %namespace,
+                            timeout_ms = SEARCH_TIMEOUT_MS,
+                            "analyze pre-extraction search_similar timed out; falling back to plain extract"
+                        );
+                        pre_extract_status = "search_timeout";
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    };
+    let related_texts: Vec<&str> = related_memories.iter().map(|m| m.text.as_str()).collect();
+    let pre_extract_ms = pre_extract_t0.elapsed().as_millis();
+    tracing::info!(
+        owner = %owner,
+        namespace = %namespace,
+        related_count = related_texts.len(),
+        requested = PRE_EXTRACTION_CONTEXT_LIMIT,
+        dropped = pre_extract_dropped,
+        pre_extract_ms = %pre_extract_ms,
+        embed_ms = %pre_extract_embed_ms,
+        search_ms = %pre_extract_search_ms,
+        walrus_ms = %pre_extract_walrus_ms,
+        seal_ms = %pre_extract_seal_ms,
+        status = pre_extract_status,
+        "analyze pre-extraction context retrieved"
+    );
+
+    // Step 1: Extract facts using the Extractor service (sync — fast, ~1-2s).
+    // MEM-57: pass `related_memories` as dedup context. The LlmExtractor
+    // short-circuits to plain `extract` on empty slice — no wasted tokens
+    // when the namespace had no nearest hits.
+    let extracted = state
+        .extractor
+        .extract_with_context(&body.text, &related_texts)
+        .await?;
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
     let reserved_additional_weight = rate_limit::analyze_additional_weight(facts.len());
@@ -111,31 +365,38 @@ pub async fn analyze(
     if state.config.benchmark_mode {
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
-        let total_plaintext_bytes: i64 = facts.iter().map(|f| f.as_bytes().len() as i64).sum();
+        let total_plaintext_bytes: i64 =
+            facts.iter().map(|f| f.text.len() as i64).sum();
         rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
 
         let store_tasks: Vec<_> = facts
             .iter()
-            .map(|fact_text| {
+            .map(|fact| {
                 let state = Arc::clone(&state);
                 let owner = owner.clone();
                 let namespace = namespace.clone();
                 let agent_pk = auth.public_key.clone();
-                let fact_text = fact_text.clone();
+                let fact = fact.clone();
                 async move {
-                    let vector = state.embedder.embed(&fact_text).await?;
+                    let vector = state.embedder.embed(&fact.text).await?;
+                    // MEM-54: importance is threaded through the engine
+                    // (see store_blob signature in engine::MemoryEngine).
+                    // The PlaintextEngine persists it on the new
+                    // `vector_entries.importance` column; the ranker
+                    // consumes it at recall time.
                     let mref = state
                         .engine
                         .store_blob(
                             &owner,
                             &namespace,
-                            fact_text.as_bytes(),
+                            fact.text.as_bytes(),
                             &vector,
+                            fact.importance,
                             Some(&agent_pk),
                         )
                         .await?;
                     Ok::<_, AppError>(AnalyzeAcceptedFact {
-                        text: fact_text,
+                        text: fact.text,
                         id: mref.id.clone(),
                         job_id: mref.id,
                     })
@@ -182,22 +443,25 @@ pub async fn analyze(
     let auth_pubkey_base = auth.public_key.clone();
     let prep_tasks: Vec<_> = facts
         .iter()
-        .map(|fact_text| {
+        .map(|fact| {
             let state = Arc::clone(&state);
             let owner = owner.clone();
-            let fact_text = fact_text.clone();
+            let fact = fact.clone();
             async move {
-                let embed_fut = state.embedder.embed(&fact_text);
+                let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),
-                    fact_text.as_bytes(),
+                    fact.text.as_bytes(),
                     &owner,
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-                Ok::<_, AppError>((fact_text, vector_result?, encrypted_result?))
+                // MEM-54: carry `importance` through the prep tuple so
+                // the job payload below can persist it alongside the
+                // ciphertext + vector.
+                Ok::<_, AppError>((fact.text, fact.importance, vector_result?, encrypted_result?))
             }
         })
         .collect();
@@ -205,12 +469,12 @@ pub async fn analyze(
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
     // Quota check on total ciphertext size
-    let mut prepared: Vec<(String, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
     let mut total_encrypted_bytes: i64 = 0;
     for r in prep_results {
-        let (fact_text, vector, encrypted) = r?;
+        let (fact_text, importance, vector, encrypted) = r?;
         total_encrypted_bytes += encrypted.len() as i64;
-        prepared.push((fact_text, vector, encrypted));
+        prepared.push((fact_text, importance, vector, encrypted));
     }
     rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
 
@@ -218,7 +482,7 @@ pub async fn analyze(
     // Round-robin across wallet pool so facts upload in parallel.
     let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
     let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
-    for (fact_text, vector, encrypted) in prepared {
+    for (fact_text, importance, vector, encrypted) in prepared {
         let job_id = uuid::Uuid::new_v4().to_string();
 
         // Insert status row
@@ -245,22 +509,23 @@ pub async fn analyze(
             WalletOperation::UploadAndTransfer {
                 encrypted_b64,
                 vector,
+                importance,
                 owner: owner.clone(),
                 namespace: namespace.clone(),
                 package_id: state.config.package_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
-                epochs: 50,
+                epochs: state.config.walrus_storage_epochs,
             },
         )
         .await
         .map_err(|e| AppError::Internal(format!("Failed to enqueue analyze job: {}", e)))?;
 
         tracing::info!(
-            "analyze: fact enqueued job_id={} wallet={} fact=\"{}...\"",
-            job_id,
+            job_id = %job_id,
             wallet_index,
-            truncate_str(&fact_text, 40)
+            fact_len = fact_text.len(),
+            "analyze fact enqueued"
         );
         accepted_facts.push(AnalyzeAcceptedFact {
             text: fact_text,

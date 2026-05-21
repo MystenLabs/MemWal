@@ -1286,6 +1286,32 @@ h1, h2, h3 {
   box-shadow: 2px 2px 0 #000000;
 }
 
+.setup-import-textarea {
+  box-shadow: var(--neo-shadow);
+}
+
+.setup-import-textarea:focus {
+  box-shadow: var(--neo-shadow);
+}
+
+.setup-import-button {
+  width: 100%;
+  justify-content: center;
+  border-radius: 12px;
+  box-shadow: var(--neo-shadow);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.setup-import-button:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0 #000000;
+}
+
+.setup-import-button:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 #000000;
+}
+
 /* ========== Spinner ========== */
 
 .spinner {

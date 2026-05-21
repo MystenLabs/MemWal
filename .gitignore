@@ -123,3 +123,12 @@ railway-*.md
 # Personal/internal planning notes — never include in repo
 plans/
 .local-plans/
+
+# Benchmark archives + working analysis notes
+# Kept locally under
+# /Users/toiancom/WorkProjects/memwal/whole-system-documents/benchmark-archive/
+# instead — see that README. Result JSONs are large (~10-25MB per run),
+# add no value to source-tree clones, and have already lived their
+# reviewable life in past PRs.
+services/server/review/
+claudedocs/

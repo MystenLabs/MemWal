@@ -24,13 +24,28 @@ pub async fn verify_delegate_key_onchain(
         ]
     });
 
-    let response = http_client
+    let request = http_client
         .post(rpc_url)
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+    })?;
+    let status_label = response.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject",
+        &status_label,
+        started.elapsed(),
+    );
 
     let rpc_response: RpcResponse = parse_json_rpc_response(response, "sui_getObject").await?;
 
@@ -137,13 +152,28 @@ pub async fn find_account_by_delegate_key(
         "params": [registry_id, { "showContent": true }]
     });
 
-    let registry_resp = http_client
+    let request = http_client
         .post(rpc_url)
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&registry_body)
-        .send()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("Failed to fetch registry: {}", e)))?;
+        .json(&registry_body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let registry_resp = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject_registry",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("Failed to fetch registry: {}", e))
+    })?;
+    let status_label = registry_resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject_registry",
+        &status_label,
+        started.elapsed(),
+    );
 
     let registry_json: serde_json::Value =
         parse_json_rpc_response(registry_resp, "sui_getObject registry").await?;
@@ -170,13 +200,28 @@ pub async fn find_account_by_delegate_key(
             "params": [table_id, cursor, 50]
         });
 
-        let response = http_client
+        let request = http_client
             .post(rpc_url)
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
+            .json(&body);
+        let request = crate::observability::apply_request_id_header(request);
+        let started = std::time::Instant::now();
+        let response = request.send().await.map_err(|e| {
+            crate::observability::observe_external(
+                "sui_rpc",
+                "suix_getDynamicFields",
+                "transport_error",
+                started.elapsed(),
+            );
+            OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+        })?;
+        let status_label = response.status().as_u16().to_string();
+        crate::observability::observe_external(
+            "sui_rpc",
+            "suix_getDynamicFields",
+            &status_label,
+            started.elapsed(),
+        );
 
         let resp_json: serde_json::Value =
             parse_json_rpc_response(response, "suix_getDynamicFields").await?;
@@ -214,15 +259,28 @@ pub async fn find_account_by_delegate_key(
                 "params": [field_obj_id, { "showContent": true }]
             });
 
-            let field_resp = http_client
+            let request = http_client
                 .post(rpc_url)
                 .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .json(&field_body)
-                .send()
-                .await
-                .map_err(|e| {
-                    OnchainVerifyError::RpcError(format!("Failed to fetch field: {}", e))
-                })?;
+                .json(&field_body);
+            let request = crate::observability::apply_request_id_header(request);
+            let started = std::time::Instant::now();
+            let field_resp = request.send().await.map_err(|e| {
+                crate::observability::observe_external(
+                    "sui_rpc",
+                    "sui_getObject_dynamic_field",
+                    "transport_error",
+                    started.elapsed(),
+                );
+                OnchainVerifyError::RpcError(format!("Failed to fetch field: {}", e))
+            })?;
+            let status_label = field_resp.status().as_u16().to_string();
+            crate::observability::observe_external(
+                "sui_rpc",
+                "sui_getObject_dynamic_field",
+                &status_label,
+                started.elapsed(),
+            );
 
             let field_json: serde_json::Value =
                 parse_json_rpc_response(field_resp, "sui_getObject dynamic field").await?;

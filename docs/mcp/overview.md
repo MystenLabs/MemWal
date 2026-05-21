@@ -1,192 +1,139 @@
 ---
 title: "MCP"
+description: "Give MCP-aware AI clients access to your encrypted Walrus-backed MemWal memory."
 ---
 
-MemWal exposes a Model Context Protocol (MCP) server so MCP-aware clients can read from and write to a user's encrypted Walrus-backed memory.
+MemWal exposes a **Model Context Protocol (MCP) server** so MCP-aware clients can read from and write to your encrypted memory. Use it when you want Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or any other MCP client to call MemWal directly from an agent workflow — without writing custom integration code.
 
-Use MCP when you want tools like Cursor, Claude Desktop, Claude Code, or Antigravity to call MemWal directly from an agent workflow.
+## Features
 
-## Tools
+<CardGroup cols={2}>
+  <Card title="Six Built-In Tools" icon="wrench">
+    `memwal_remember`, `memwal_recall`, `memwal_analyze`, `memwal_restore`, `memwal_login`, `memwal_logout`
+  </Card>
+  <Card title="Inline Browser Login" icon="globe">
+    Agents call `memwal_login` to open a browser sign-in — no separate CLI step, no client restart
+  </Card>
+  <Card title="Two Transports" icon="arrows-left-right">
+    Streamable HTTP for remote MCP clients, or stdio package (`npx`) for local-command clients
+  </Card>
+  <Card title="Encrypted & User-Owned" icon="lock">
+    SEAL-encrypted, stored on Walrus, tied to your delegate key — you own the data
+  </Card>
+  <Card title="Cross-Client Memory" icon="arrows-rotate">
+    Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — one MemWal account, every client
+  </Card>
+  <Card title="Environment Presets" icon="server">
+    `--prod` / `--staging` / `--dev` / `--local` flags switch networks without editing client configs
+  </Card>
+</CardGroup>
 
-The MCP server exposes six tools — four memory tools that round-trip to the relayer, and two session tools served locally by the stdio package.
+## When to use this
 
-**Memory tools** (forwarded to the relayer):
+- You want an AI client to **call MemWal directly** — no custom SDK integration code in your app
+- You need the agent to **remember across conversations and sessions**
+- You're running **multiple MCP clients** and want all of them to share one memory store
+- You need **encrypted, user-owned memory** instead of platform-managed storage
 
-| Tool | Purpose |
-| --- | --- |
-| `memwal_remember` | Save a memory to MemWal |
-| `memwal_recall` | Search saved memories by query |
-| `memwal_analyze` | Extract and save durable facts from longer text |
-| `memwal_restore` | Re-index memories from onchain Walrus blob records |
+## Supported clients
 
-**Session tools** (handled locally by `@mysten-incubation/memwal-mcp`):
+The package is designed first for MCP hosts that run **local commands**:
 
-| Tool | Purpose |
-| --- | --- |
-| `memwal_login` | Open the browser, approve the wallet, and write credentials to `~/.memwal/credentials.json`. Use for first-time sign-in or to switch accounts. |
-| `memwal_logout` | Remove the saved credentials from this machine. The on-chain delegate key is not revoked — visit the dashboard to remove it from the account. |
+- Cursor
+- Claude Desktop
+- Claude Code
+- Codex
+- Antigravity
 
-The two session tools mean a user can sign in from inside their MCP client (Cursor, Claude Desktop, Claude Code, Antigravity, …) without leaving the chat to run a separate CLI command.
+If your MCP host supports **remote Streamable HTTP** servers with custom headers, you can also skip the local package and point directly at the relayer. See [Reference](/mcp/reference#streamable-http).
 
-## Transport Options
+## Get started
 
-MemWal supports two MCP connection modes.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/mcp/quick-start">
+    Install the package, sign in with your wallet, wire your client, and run your first tool call
+  </Card>
+  <Card title="How It Works" icon="route" href="/mcp/how-it-works">
+    Auth-required mode, inline browser login, local credential storage, and the stdio bridge
+  </Card>
+  <Card title="Reference" icon="book" href="/mcp/reference">
+    All six tools, CLI flags, environment presets, transport routes, and self-hosting notes
+  </Card>
+  <Card title="Changelog" icon="clock-rotate-left" href="/mcp/changelog">
+    Release history for the `@mysten-incubation/memwal-mcp` package
+  </Card>
+  <Card title="Source Code" icon="github" href="https://github.com/MystenLabs/MemWal/tree/main/packages/mcp">
+    Browse the `@mysten-incubation/memwal-mcp` package on GitHub
+  </Card>
+  <Card title="MemWal Dashboard" icon="window" href="https://memwal.ai">
+    Manage delegate keys, view storage, and revoke connected clients
+  </Card>
+</CardGroup>
 
-| Mode | Best for | Client config shape |
-| --- | --- | --- |
-| Streamable HTTP | Clients that support remote HTTP MCP servers | `url: "https://relayer.memwal.ai/api/mcp"` |
-| stdio package | Clients that run local MCP commands | `npx -y @mysten-incubation/memwal-mcp` |
+## What happens on the client machine
 
-For the hosted production relayer, the Streamable HTTP endpoint is:
+The MCP package is not just a thin HTTP wrapper.
 
-```text
-https://relayer.memwal.ai/api/mcp
-```
+1. It checks for `~/.memwal/credentials.json`.
+2. If the file is missing, it starts in an **auth-required mode** instead of crashing the MCP host.
+3. In that mode the agent can still call `memwal_login` inline.
+4. After wallet approval, the package writes credentials locally and future MemWal tool calls succeed without reconfiguring the client.
+5. Once signed in, the package bridges local stdio MCP traffic to the relayer and keeps `memwal_login` and `memwal_logout` local-only.
 
-The stdio package opens a browser-based wallet login the first time it runs, then stores credentials in `~/.memwal/credentials.json`.
+See [How It Works](/mcp/how-it-works) for the full flow and security model.
 
-<Warning>
-The MCP bearer token is the delegate private key created for the MCP client. Treat it like a long-lived API token. Do not commit MCP configs that contain a real `Authorization` header.
-</Warning>
+## Why use the package instead of raw HTTP
 
-## Streamable HTTP Setup
+- Most MCP hosts support local `command + args` servers before they support remote auth UX cleanly.
+- The package can open the browser flow, save credentials, and recover from missing auth inline.
+- It keeps bearer credentials out of the MCP client config in the common stdio path.
 
-Use this when your MCP client supports HTTP transport.
+## Default memory namespace
 
-The HTTP transport authenticates every request with a bearer token (the delegate private key) and account ID. To get those values, run the stdio package once to generate them:
+Memory tools take an optional `namespace` so you can keep, say, `work` and
+`personal` memories separate. Instead of having the agent pass it on every
+call, pin a default once in your client config — the package fills it in
+whenever the agent omits one.
 
-```bash
-npx -y @mysten-incubation/memwal-mcp login
-```
-
-This opens the dashboard, registers a delegate key, and writes credentials to `~/.memwal/credentials.json`. Copy `delegatePrivateKey` into the bearer token placeholder and `accountId` into `x-memwal-account-id`:
-
-```json
-{
-  "mcpServers": {
-    "memwal": {
-      "url": "https://relayer.memwal.ai/api/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_DELEGATE_PRIVATE_KEY>",
-        "x-memwal-account-id": "<YOUR_ACCOUNT_ID>"
-      }
-    }
-  }
-}
-```
-
-The relayer authenticates every request with the bearer key and account ID, then proxies the MCP protocol to the TypeScript sidecar.
-
-For Claude Code, the equivalent command is:
-
-```bash
-claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
-```
-
-If your client cannot attach headers from the command, add the headers in the generated MCP config file.
-
-## stdio Package Setup
-
-Use this when your MCP client supports command-based MCP servers. Add the entry to your client config:
-
-```json
-{
-  "mcpServers": {
-    "memwal": {
-      "command": "npx",
-      "args": ["-y", "@mysten-incubation/memwal-mcp"]
-    }
-  }
-}
-```
-
-**First run.** When `~/.memwal/credentials.json` is missing, the package starts in a sign-in-required mode and advertises a `memwal_login` tool to the client. Ask your agent to call `memwal_login` — it returns a one-time URL. Open the URL, approve the connection in your Sui wallet, and the next `memwal_*` call works without restarting the client.
-
-The login URL stays valid for **5 minutes**. If it expires, ask the agent to call `memwal_login` again to get a fresh one.
-
-**Manual fallback.** You can also pre-authorize from the terminal:
-
-```bash
-npx -y @mysten-incubation/memwal-mcp login
-```
-
-**Switching accounts or signing out.** Ask the agent to call `memwal_logout` (clears local credentials) followed by `memwal_login`. The CLI equivalent is:
-
-```bash
-npx -y @mysten-incubation/memwal-mcp --logout
-```
-
-After login, MCP clients can use the saved credentials without prompting again.
-
-## CLI Flags and Environment Variables
-
-The stdio package reads flags from `args` in the client config. Environment variables work too — flags win when both are set.
-
-| CLI flag | Environment variable | Description |
-| --- | --- | --- |
-| `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
-| `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
-| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the MemWal dashboard. |
-| `--login` | — | Force a re-login even when credentials already exist. |
-| `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
-| `--help`, `-h` | — | Print usage and exit. |
-
-Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
-
-## Environment Presets
-
-The stdio package accepts environment shortcuts that set both the relayer and the dashboard URL in one flag:
-
-| Flag | Relayer | Dashboard |
-| --- | --- | --- |
-| `--prod` | `https://relayer.memwal.ai` | `https://memwal.ai` |
-| `--dev` | `https://relayer.dev.memwal.ai` | `https://dev.memwal.ai` |
-| `--staging` | `https://relayer.staging.memwal.ai` | `https://staging.memwal.ai` |
-| `--local` | `http://127.0.0.1:8000` | `http://localhost:5173` |
-
-Explicit `--relayer` and `--web-url` override the preset. You can also pass explicit URLs without a preset:
+**Cursor** (`~/.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "memwal": {
       "command": "npx",
-      "args": [
-        "-y",
-        "@mysten-incubation/memwal-mcp",
-        "--relayer",
-        "https://relayer.dev.memwal.ai"
-      ]
+      "args": ["-y", "@mysten-incubation/memwal-mcp", "--namespace", "work"]
     }
   }
 }
 ```
 
-## Client Config
+**Claude Desktop** (`claude_desktop_config.json`) — via env var:
 
-Use the snippets above for Cursor, Claude Desktop, Claude Code, Antigravity, or any other MCP client that accepts either command-based stdio servers or Streamable HTTP servers.
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp"],
+      "env": { "MEMWAL_NAMESPACE": "work" }
+    }
+  }
+}
+```
 
-## Self-Hosting Notes
+An explicit per-call `namespace` from the agent always wins over the
+configured default. If neither a flag/env default nor a per-call value is
+set, the relayer applies its own `"default"` namespace. See
+[Reference](/mcp/reference#default-namespace) for the full precedence rules
+and `memwal_restore` behavior.
 
-Self-hosted relayers expose the same public MCP routes:
+## What the MCP package adds
 
-| Route | Purpose |
-| --- | --- |
-| `GET /api/mcp/sse` | Legacy SSE session for the stdio bridge |
-| `POST /api/mcp/messages` | JSON-RPC messages for the legacy SSE transport |
-| `GET /api/mcp` | Streamable HTTP server-to-client stream |
-| `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
-| `DELETE /api/mcp` | Close a Streamable HTTP session |
+Compared with wiring a raw HTTP MCP endpoint by hand, the package adds a few important runtime behaviors:
 
-The Rust relayer starts the TypeScript sidecar automatically and forwards MCP traffic to the sidecar over loopback. The sidecar resolves MCP bearer credentials into normal MemWal SDK sessions, so tool calls still use the same relayer, SEAL, Walrus, and pgvector paths as SDK calls.
-
-The MCP session limits that operators most often need to tune:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `SIDECAR_URL` | `http://localhost:9000` | Loopback endpoint the Rust relayer uses to reach the sidecar. |
-| `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP. |
-| `MCP_MAX_SESSIONS_PER_IP` | `16` | Cap on concurrent sessions from one source IP. |
-| `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute. |
-
-See [Environment Variables](/reference/environment-variables) for the full list, including SEAL and Walrus settings.
+- **First-run recovery**: when credentials are missing, the MCP host still gets a healthy server plus `memwal_login`
+- **Local session tools**: `memwal_login` and `memwal_logout` are handled on the client machine instead of forwarded upstream
+- **Automatic tool surfacing**: the package injects local session tools alongside the relayer-backed memory tools
+- **Session resilience**: the stdio bridge reconnects to the relayer if the underlying SSE session is dropped
+- **Safer defaults**: the common `npx` path avoids pasting long-lived bearer credentials into client config files

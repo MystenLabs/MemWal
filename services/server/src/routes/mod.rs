@@ -69,6 +69,7 @@ pub async fn enqueue_wallet_job(
 /// Truncate a string to at most `max_bytes` bytes without splitting a UTF-8
 /// character.  Falls back to the nearest char boundary when `max_bytes` lands
 /// inside a multi-byte sequence (e.g. emoji).
+#[cfg(test)]
 pub(super) fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -135,6 +136,46 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
                 owner,
                 e
             );
+        }
+    }
+}
+
+// ============================================================
+// Ranker plumbing — zip created_at + importance from SearchHits onto
+// HydratedMemory
+// ============================================================
+
+/// Zip the `created_at` timestamp **and** (MEM-54) the `importance` score
+/// from a slice of `SearchHit`s onto a mutable slice of `HydratedMemory`s
+/// by `blob_id`. The storage engines deliberately leave both fields as
+/// `None` (they don't fetch them as part of the cache → Walrus → SEAL
+/// choreography); the recall handler already has both on the `SearchHit`
+/// from `db.search_similar` and threads them onto the hydrated records
+/// here so the composite ranker can use them for the recency / importance
+/// signals.
+///
+/// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
+/// it here keeps the two call sites in sync.
+///
+/// Renamed from `zip_created_at_onto_hydrated` in MEM-54 once importance
+/// joined the zip. Single function (rather than two separate ones) because
+/// both fields come from the same `SearchHit` and we don't want to walk
+/// the hits vector twice for what's a hot path.
+pub(super) fn zip_search_hit_fields_onto_hydrated(
+    hydrated: &mut [crate::engine::HydratedMemory],
+    hits: &[SearchHit],
+) {
+    let by_blob: std::collections::HashMap<&str, (chrono::DateTime<chrono::Utc>, f32)> = hits
+        .iter()
+        .map(|h| (h.blob_id.as_str(), (h.created_at, h.importance)))
+        .collect();
+    for m in hydrated.iter_mut() {
+        if let Some((ts, imp)) = by_blob.get(m.blob_id.as_str()).copied() {
+            m.created_at = Some(ts);
+            m.importance = Some(imp);
+        } else {
+            m.created_at = None;
+            m.importance = None;
         }
     }
 }

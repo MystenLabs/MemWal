@@ -1,0 +1,36 @@
+---
+title: "Changelog"
+description: "Release history for the MemWal Python SDK."
+---
+
+Track what's new, changed, and fixed in `memwal` (Python).
+
+For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## Unreleased
+
+### Added
+
+- Relayer environment presets via `env="prod" | "dev" | "staging" | "local"` on `MemWal.create`, `MemWalSync.create`, `with_memwal_langchain`, and `with_memwal_openai`. Mirrors the TypeScript SDK / MCP package shorthand. Precedence: explicit non-default `server_url` > `env` > default; an unknown preset raises `ValueError`. `ENV_PRESETS` is exported from the package.
+
+## 0.1.0.dev1
+
+### Changed
+
+- Pre-release build of `0.1.0` with packaging and metadata fixes over `0.1.0.dev0`.
+
+## 0.1.0.dev0
+
+### Initial Release
+
+- `MemWal` async-native client and `MemWalSync` synchronous wrapper (notebook-safe)
+- Relayer-backed flow: `remember`, `recall`, `analyze`, `ask`, `restore`, `health`
+- Async remember model: `remember` returns an accepted job; `remember_and_wait`, `wait_for_remember_job`
+- Bulk remember (≤20 items): `remember_bulk_async`, `get_remember_bulk_status`, `wait_for_remember_jobs`, `remember_bulk_and_wait` with jittered exponential backoff
+- `analyze_and_wait` to settle every extracted-fact job
+- Lower-level methods: `remember_manual`, `recall_manual`, `embed`, `get_public_key_hex`
+- LangChain (`with_memwal_langchain`) and OpenAI (`with_memwal_openai`) middleware with automatic recall + fire-and-forget save
+- Ed25519 delegate-key auth via PyNaCl, with per-request nonce + account-id signing
+- Delegate-key utilities: `delegate_key_to_sui_address`, `delegate_key_to_public_key`
+- Namespace-scoped memory isolation
+- Python 3.9+; core deps `httpx` + `PyNaCl`; optional extras `[langchain]`, `[openai]`, `[all]`

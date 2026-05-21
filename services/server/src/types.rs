@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
-use crate::services::{Embedder, Extractor};
+use crate::services::{Embedder, Extractor, Ranker};
 use crate::storage::db::VectorDb;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,6 +26,30 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Sidecar caps Walrus storage purchases to avoid accidental large spends.
+pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 5;
+
+pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
+    match network {
+        "mainnet" => 3,
+        _ => MAX_WALRUS_STORAGE_EPOCHS,
+    }
+}
+
+pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
+    let default = default_walrus_storage_epochs_for_network(network);
+    match std::env::var("WALRUS_STORAGE_EPOCHS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    {
+        Some(epochs) if epochs > 0 => epochs.min(MAX_WALRUS_STORAGE_EPOCHS),
+        _ => default,
+    }
+}
+
+/// Delay before racing a cold Walrus read against the next configured aggregator.
+pub const DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS: u64 = 150;
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -38,8 +62,6 @@ pub struct AppState {
     /// `Arc` so the engine + handlers share one immutable config.
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
-    /// `Arc` so the engine shares the Walrus client handle.
-    pub walrus_client: Arc<walrus_rs::WalrusClient>,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads.
     /// `Arc` so the engine's `store_blob` can draw from the same pool.
     pub key_pool: Arc<KeyPool>,
@@ -54,6 +76,11 @@ pub struct AppState {
     /// LLM fact-extraction service — `LlmExtractor` (gpt-4o-mini). Used by
     /// `analyze`.
     pub extractor: Arc<dyn Extractor>,
+    /// Recall re-ranker — `CompositeRanker` blends semantic similarity
+    /// with optional recency decay. Used by `/api/recall` and `/api/ask`
+    /// when the request body sets `scoring_weights`; default weights
+    /// preserve the pgvector cosine order exactly.
+    pub ranker: Arc<dyn Ranker>,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -152,6 +179,18 @@ pub struct Config {
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
     pub walrus_aggregator_url: String,
+    /// Number of Walrus storage epochs requested for new uploads.
+    pub walrus_storage_epochs: u32,
+    /// Ordered aggregator candidates used for cold Walrus reads. The primary
+    /// `walrus_aggregator_url` is always first; `WALRUS_AGGREGATOR_URLS`
+    /// appends additional low-latency/proxy endpoints for tail-race reads.
+    pub walrus_aggregator_urls: Vec<String>,
+    /// Opt-in Walrus read optimization for blobs written by this relayer.
+    /// When true, cold reads append `skip_consistency_check=true`.
+    pub walrus_skip_consistency_check: bool,
+    /// Delay before launching the next aggregator candidate on a cold read.
+    /// Zero launches all configured candidates immediately.
+    pub walrus_aggregator_race_after_ms: u64,
     /// Primary key (used for SEAL decrypt / recall). Unchanged.
     pub sui_private_key: Option<String>,
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
@@ -184,6 +223,14 @@ impl Config {
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
         };
+        let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
+            .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
+        let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
+            .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string());
+        let walrus_aggregator_urls = parse_walrus_aggregator_urls(
+            &walrus_aggregator_url,
+            std::env::var("WALRUS_AGGREGATOR_URLS").ok().as_deref(),
+        );
 
         Self {
             port: std::env::var("PORT")
@@ -199,10 +246,15 @@ impl Config {
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            walrus_publisher_url: std::env::var("WALRUS_PUBLISHER_URL")
-                .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string()),
-            walrus_aggregator_url: std::env::var("WALRUS_AGGREGATOR_URL")
-                .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string()),
+            walrus_publisher_url,
+            walrus_aggregator_url,
+            walrus_storage_epochs: configured_walrus_storage_epochs(&network),
+            walrus_aggregator_urls,
+            walrus_skip_consistency_check: env_bool("WALRUS_SKIP_CONSISTENCY_CHECK"),
+            walrus_aggregator_race_after_ms: std::env::var("WALRUS_AGGREGATOR_RACE_AFTER_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS),
             sui_private_key: std::env::var("SERVER_SUI_PRIVATE_KEY").ok(),
             sui_private_keys: {
                 // SERVER_SUI_PRIVATE_KEYS takes priority (comma-separated list).
@@ -233,6 +285,36 @@ impl Config {
                 .unwrap_or(false),
         }
     }
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut push_unique = |raw: &str| {
+        let value = raw.trim();
+        if !value.is_empty() && !urls.iter().any(|existing| existing == value) {
+            urls.push(value.to_string());
+        }
+    };
+
+    push_unique(primary);
+    if let Some(extra_csv) = extra_csv {
+        for value in extra_csv.split(',') {
+            push_unique(value);
+        }
+    }
+
+    urls
 }
 
 // ============================================================
@@ -390,6 +472,11 @@ pub struct RecallRequest {
     pub limit: usize,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights. Omitted → response order is
+    /// byte-identical to a pgvector cosine-distance sort. See
+    /// [`ScoringWeights`].
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,12 +498,171 @@ pub struct RecallResult {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
+    /// Composite score used for ranking. Present only when the ranker
+    /// actually ran (i.e. when `scoring_weights` was supplied with
+    /// `recency > 0` so the ranker didn't short-circuit). `None` when
+    /// the response is in default pgvector-cosine order — in that case
+    /// the score is just `1.0 - distance` and we don't bother surfacing
+    /// a derived field. `#[serde(skip_serializing_if)]` keeps the wire
+    /// shape byte-identical to today for default-weights requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
+    /// Insertion timestamp from `vector_entries.created_at`. Used by the
+    /// composite ranker for recency scoring; threaded through unchanged
+    /// in the engine `fetch_*` calls. Always present (column is NOT NULL
+    /// in migration 001).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// MEM-54: per-fact importance score from `vector_entries.importance`
+    /// (column added by migration 009). Set at extraction time by the
+    /// LLM-emitted vital/standard/trivial bucket (mapped to 0.9/0.5/0.2
+    /// via `services::extractor::importance_for_bucket`). Consumed by
+    /// `CompositeRanker` at recall time when `scoring_weights.importance`
+    /// is non-zero. NOT NULL with default 0.5 so legacy rows degrade
+    /// gracefully to the "standard" bucket.
+    pub importance: f32,
+}
+
+/// Composite-scoring weights for `/api/recall` and `/api/ask`. Optional on
+/// the wire — when omitted, the response order is byte-identical to a
+/// pure pgvector cosine-distance sort (today's behaviour).
+///
+/// The score formula is:
+///
+/// ```text
+/// score = semantic    * (1.0 - distance)
+///       + recency     * 2^(-age_days / recency_half_life_days)
+///       + importance  * vector_entries.importance   (already in [0,1])
+/// ```
+///
+/// Sorted descending (higher score = better). `default()` returns
+/// `semantic=1.0, recency=0.0, importance=0.0` so deserialising an empty
+/// body yields the "today" ordering exactly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScoringWeights {
+    /// Weight applied to `1.0 - cosine_distance`. Default 1.0.
+    #[serde(default = "default_semantic_weight")]
+    pub semantic: f64,
+    /// Weight applied to `2^(-age_days / half_life)`. Default 0.0.
+    /// When all non-semantic weights are effectively zero, the ranker
+    /// short-circuits and preserves the input order (which is already
+    /// cosine-sorted by pgvector).
+    #[serde(default)]
+    pub recency: f64,
+    /// Half-life for the recency decay term, in days. Default 30.
+    /// A memory aged exactly `half_life` days has recency score 0.5;
+    /// twice that, 0.25; etc.
+    #[serde(default = "default_recency_half_life_days")]
+    pub recency_half_life_days: f64,
+    /// MEM-54: weight applied to the per-fact importance score from
+    /// `vector_entries.importance` (set by the extractor's vital /
+    /// standard / trivial bucket → 0.9 / 0.5 / 0.2). Default 0.0 so the
+    /// existing default-weights path is byte-identical to the pre-MEM-54
+    /// behaviour. Opt in by passing a positive value via
+    /// `scoring_weights.importance` in the request body.
+    #[serde(default)]
+    pub importance: f64,
+}
+
+fn default_semantic_weight() -> f64 {
+    1.0
+}
+
+fn default_recency_half_life_days() -> f64 {
+    30.0
+}
+
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        Self {
+            semantic: 1.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.0,
+        }
+    }
+}
+
+impl ScoringWeights {
+    /// Minimum allowed half-life. Anything smaller (incl. subnormals like
+    /// `f64::MIN_POSITIVE`) makes the `exp(-age * ln2 / half_life)` term
+    /// collapse to `0.0` for any non-zero `age`, silently turning the
+    /// recency signal into a constant. ~86 milliseconds is well below any
+    /// real-world recall use case and still survives float arithmetic.
+    const MIN_HALF_LIFE_DAYS: f64 = 1e-6;
+
+    /// True when the ranker actually computes scores (rather than
+    /// short-circuiting to the input order). Mirrors the
+    /// `recency / importance < f64::EPSILON` predicate inside
+    /// `CompositeRanker` so handler-side gating (validation logs, tracing
+    /// breadcrumbs) stays in lockstep with what the ranker actually does.
+    /// Keep this in sync with [`crate::services::ranker::CompositeRanker::rank`].
+    ///
+    /// MEM-54: a non-zero `importance` weight is enough on its own to
+    /// activate the ranker — the importance signal alone can reorder hits
+    /// even when recency is off.
+    pub fn is_ranker_active(&self) -> bool {
+        self.recency.abs() >= f64::EPSILON || self.importance.abs() >= f64::EPSILON
+    }
+
+    /// Return an error if the weights are outside reasonable bounds. The
+    /// `CompositeRanker` already has internal guards (NaN sorts as Equal,
+    /// non-positive half-life zeros out the recency term) so we wouldn't
+    /// crash — but it's friendlier to return a 400 up-front than to
+    /// silently degrade to the default ordering.
+    ///
+    /// Constraints:
+    /// - no NaN or infinite weights
+    /// - signal weights (`semantic`, `recency`) must be in `[0.0, 100.0]`
+    ///   — negative weights would invert the signal (older = better, less
+    ///   semantic match = better), which is almost certainly a bug, not a
+    ///   feature. The 100.0 ceiling is generous; a real client doesn't
+    ///   need values that large.
+    /// - `recency_half_life_days` must be at least `MIN_HALF_LIFE_DAYS`
+    ///   (≈86 ms) when `recency > 0`. A zero / negative / subnormal
+    ///   half-life with non-zero recency silently degrades the recency
+    ///   term to zero — surface it as a 400 so the client notices.
+    pub fn validate(&self) -> Result<(), AppError> {
+        for (name, value) in [
+            ("semantic", self.semantic),
+            ("recency", self.recency),
+            ("recency_half_life_days", self.recency_half_life_days),
+            ("importance", self.importance),
+        ] {
+            if !value.is_finite() {
+                return Err(AppError::BadRequest(format!(
+                    "scoring_weights.{} must be a finite number (got {})",
+                    name, value
+                )));
+            }
+        }
+        for (name, value) in [
+            ("semantic", self.semantic),
+            ("recency", self.recency),
+            ("importance", self.importance),
+        ] {
+            if !(0.0..=100.0).contains(&value) {
+                return Err(AppError::BadRequest(format!(
+                    "scoring_weights.{} must be in [0.0, 100.0] (got {})",
+                    name, value
+                )));
+            }
+        }
+        if self.recency > 0.0 && self.recency_half_life_days < Self::MIN_HALF_LIFE_DAYS {
+            return Err(AppError::BadRequest(format!(
+                "scoring_weights.recency_half_life_days must be >= {} when \
+                 recency > 0 (got {})",
+                Self::MIN_HALF_LIFE_DAYS,
+                self.recency_half_life_days
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// POST /api/analyze
@@ -515,6 +761,11 @@ pub struct AskRequest {
     pub limit: Option<usize>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights applied to the retrieved
+    /// memories before they're injected into the LLM prompt. Omitted →
+    /// pgvector cosine order. See [`ScoringWeights`].
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
@@ -588,6 +839,26 @@ pub struct HealthResponse {
     /// at startup that they're hitting a benchmark-mode server before
     /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
     pub mode: String,
+    /// MEM-56: the prompt version constants the running binary is using.
+    /// The benchmark harness reads this at run start and pins the
+    /// versions into the result-artifact JSON so a future "score jumped"
+    /// delta is attributable to the prompt change rather than guessed
+    /// at from git history. Both fields are always populated — there is
+    /// no "version unknown" state for a running server.
+    pub prompt_versions: PromptVersions,
+}
+
+/// MEM-56: prompt version constants surfaced on `/health`. See the
+/// `*_PROMPT_VERSION` consts in `services::extractor` and `routes::admin`.
+#[derive(Debug, Serialize)]
+pub struct PromptVersions {
+    /// `FACT_EXTRACTION_PROMPT_VERSION` from `services::extractor` — the
+    /// extractor system prompt used by `/api/analyze` and the
+    /// summarise-long-text path in `/api/remember`.
+    pub extract: String,
+    /// `ASK_SYSTEM_PROMPT_VERSION` from `routes::admin` — the LLM
+    /// system prompt that wraps recalled memories on `/api/ask`.
+    pub ask: String,
 }
 
 /// GET /config response (ENG-1697).
@@ -710,16 +981,18 @@ impl std::fmt::Display for AppError {
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        crate::observability::record_app_error(self.kind());
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Internal(msg) => {
                 // SEC: Never leak internal error details to the client.
-                // Log the full message server-side with a trace ID so
+                // Log the full message server-side with a request ID so
                 // operators can correlate, then return a generic message.
-                let trace_id = uuid::Uuid::new_v4().to_string();
+                let trace_id = crate::observability::current_request_id()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 tracing::error!(
-                    trace_id = %trace_id,
+                    request_id = %trace_id,
                     "Internal server error: {}",
                     msg,
                 );
@@ -735,6 +1008,19 @@ impl axum::response::IntoResponse for AppError {
 
         let body = serde_json::json!({ "error": message });
         (status, axum::Json(body)).into_response()
+    }
+}
+
+impl AppError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AppError::BadRequest(_) => "bad_request",
+            AppError::Unauthorized(_) => "unauthorized",
+            AppError::Internal(_) => "internal",
+            AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::RateLimited(_) => "rate_limited",
+            AppError::QuotaExceeded(_) => "quota_exceeded",
+        }
     }
 }
 
@@ -763,6 +1049,24 @@ mod tests {
         assert_eq!(BLOB_CACHE_KEY_PREFIX, "memwal:blob:v1:");
         assert_eq!(DEFAULT_BLOB_CACHE_TTL_SECS, 14 * 24 * 60 * 60);
         assert_eq!(DEFAULT_BLOB_CACHE_MAX_BYTES, 512 * 1024);
+        assert_eq!(DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS, 150);
+    }
+
+    #[test]
+    fn parse_walrus_aggregator_urls_keeps_primary_first_and_dedupes() {
+        let urls = parse_walrus_aggregator_urls(
+            "https://primary.example",
+            Some(" https://secondary.example,https://primary.example,,https://third.example "),
+        );
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://primary.example".to_string(),
+                "https://secondary.example".to_string(),
+                "https://third.example".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -944,6 +1248,15 @@ mod tests {
         assert_eq!(config.per_hour, 30);
     }
 
+    #[test]
+    fn walrus_storage_epochs_default_by_network() {
+        assert_eq!(default_walrus_storage_epochs_for_network("mainnet"), 3);
+        assert_eq!(
+            default_walrus_storage_epochs_for_network("testnet"),
+            MAX_WALRUS_STORAGE_EPOCHS
+        );
+    }
+
     // ── AppError Display implementations ────────────────────────────────
 
     #[test]
@@ -966,5 +1279,168 @@ mod tests {
         assert!(AppError::QuotaExceeded("x".into())
             .to_string()
             .contains("Quota Exceeded"));
+    }
+
+    // ── ScoringWeights::validate() — full bounds matrix ──────────────────
+
+    /// Build weights from explicit fields so tests don't depend on
+    /// `Default::default()` if someone changes the defaults later.
+    fn w(semantic: f64, recency: f64, half_life: f64) -> ScoringWeights {
+        ScoringWeights {
+            semantic,
+            recency,
+            recency_half_life_days: half_life,
+            importance: 0.0,
+        }
+    }
+
+    fn assert_bad_request_mentions(w: &ScoringWeights, needle: &str) {
+        match w.validate() {
+            Err(AppError::BadRequest(msg)) => assert!(
+                msg.contains(needle),
+                "expected error mentioning {:?}, got: {}",
+                needle,
+                msg
+            ),
+            other => panic!(
+                "expected BadRequest containing {:?}, got: {:?}",
+                needle, other
+            ),
+        }
+    }
+
+    #[test]
+    fn validate_default_is_ok() {
+        ScoringWeights::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_nan_on_each_field() {
+        assert_bad_request_mentions(&w(f64::NAN, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, f64::NAN, 30.0), "recency");
+        assert_bad_request_mentions(&w(1.0, 0.0, f64::NAN), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_infinity_on_each_field() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_bad_request_mentions(&w(v, 0.0, 30.0), "semantic");
+            assert_bad_request_mentions(&w(1.0, v, 30.0), "recency");
+            assert_bad_request_mentions(&w(1.0, 0.0, v), "recency_half_life_days");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_weights() {
+        assert_bad_request_mentions(&w(-0.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, -1.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_rejects_weights_above_100() {
+        assert_bad_request_mentions(&w(100.0001, 0.0, 30.0), "semantic");
+        assert_bad_request_mentions(&w(1.0, 200.0, 30.0), "recency");
+    }
+
+    #[test]
+    fn validate_accepts_exact_boundaries() {
+        // 0.0 and 100.0 are inclusive; half-life only matters when recency > 0.
+        w(0.0, 0.0, 30.0).validate().unwrap();
+        w(100.0, 100.0, 30.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, 0.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_negative_half_life_when_recency_positive() {
+        assert_bad_request_mentions(&w(1.0, 0.5, -1.0), "recency_half_life_days");
+    }
+
+    #[test]
+    fn validate_rejects_subnormal_half_life_when_recency_positive() {
+        // Subnormal would silently collapse `exp(-age * ln(2) / half_life)`
+        // to 0 for any non-zero age — surface as 400 instead of degrading
+        // the recency signal to a constant.
+        assert_bad_request_mentions(&w(1.0, 0.5, f64::MIN_POSITIVE), "recency_half_life_days");
+        // Just below the floor — still rejected.
+        assert_bad_request_mentions(
+            &w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS / 2.0),
+            "recency_half_life_days",
+        );
+    }
+
+    #[test]
+    fn validate_allows_negative_half_life_when_recency_zero() {
+        // Carve-out: half-life is only constrained when recency > 0, so a
+        // client that sets recency=0 can leave half-life at whatever
+        // (the ranker short-circuits anyway). Pinning this keeps the
+        // no-op default path from getting a spurious 400 if a stale SDK
+        // forwards a placeholder half-life.
+        w(1.0, 0.0, -1.0).validate().unwrap();
+        w(1.0, 0.0, 0.0).validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_half_life_at_floor() {
+        // The minimum is inclusive: exactly MIN_HALF_LIFE_DAYS is allowed.
+        w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS)
+            .validate()
+            .unwrap();
+    }
+
+    // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────
+
+    #[test]
+    fn is_ranker_active_false_for_default() {
+        assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_true_for_non_zero_recency() {
+        assert!(w(1.0, 0.2, 30.0).is_ranker_active());
+        assert!(w(1.0, 0.0001, 30.0).is_ranker_active());
+    }
+
+    #[test]
+    fn is_ranker_active_false_for_subepsilon_recency() {
+        // Below EPSILON ≈ 2.22e-16 is treated as zero — the ranker would
+        // short-circuit, so the handler considers itself inactive too.
+        assert!(!w(1.0, f64::EPSILON / 2.0, 30.0).is_ranker_active());
+    }
+
+    // ── Refactor-safety: default short-circuits, wire contract pinned ────
+
+    #[test]
+    fn default_recency_is_zero_so_short_circuit_engages() {
+        // If you change `ScoringWeights::default().recency` away from 0.0,
+        // you change the wire contract on every existing client (the new
+        // `score` field would suddenly appear on every default-weighted
+        // recall response). Failing this test = ack the change.
+        assert_eq!(ScoringWeights::default().recency, 0.0);
+        assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    // ── MEM-56: HealthResponse.prompt_versions wire shape ────────────────
+
+    #[test]
+    fn health_response_serializes_prompt_versions_block() {
+        // The benchmark harness reads exactly these field names — pin the
+        // wire shape so a rename can't silently break the run-artifact
+        // pipeline.
+        let resp = HealthResponse {
+            status: "ok".to_string(),
+            version: "0.1.0".to_string(),
+            mode: "benchmark".to_string(),
+            prompt_versions: PromptVersions {
+                extract: "extract.v1".to_string(),
+                ask: "ask.v1".to_string(),
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
+        assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
     }
 }

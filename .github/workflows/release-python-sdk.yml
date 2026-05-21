@@ -1,0 +1,182 @@
+name: Release Python SDK
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+    paths:
+      - 'packages/python-sdk-memwal/**'
+      - '.github/workflows/release-python-sdk.yml'
+  workflow_dispatch:
+    inputs:
+      release_channel:
+        description: "Release channel to use for a manual run from this ref"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - staging
+          - current
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install -e "packages/python-sdk-memwal[dev]"
+
+      - name: Prepare package version
+        id: version
+        env:
+          RELEASE_CHANNEL: ${{ inputs.release_channel || 'current' }}
+        run: |
+          python <<'PY'
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          package = "memwal"
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          release_channel = os.environ.get("RELEASE_CHANNEL", "current")
+          branch = (
+              release_channel
+              if event_name == "workflow_dispatch" and release_channel != "current"
+              else ref_name
+          )
+          pkg_dir = Path("packages/python-sdk-memwal")
+          pyproject = pkg_dir / "pyproject.toml"
+          init_file = pkg_dir / "memwal" / "__init__.py"
+
+          text = pyproject.read_text()
+          match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+          if not match:
+              raise SystemExit("Could not find project.version in pyproject.toml")
+
+          base_version = match.group(1)
+
+          def pypi_versions() -> list[str]:
+              try:
+                  with urllib.request.urlopen(
+                      f"https://pypi.org/pypi/{package}/json",
+                      timeout=20,
+                  ) as response:
+                      payload = json.load(response)
+              except urllib.error.HTTPError as err:
+                  if err.code == 404:
+                      return []
+                  raise
+              return list(payload.get("releases", {}).keys())
+
+          versions = pypi_versions()
+          publish = branch in {"main", "staging", "dev"}
+
+          if branch == "main":
+              version = base_version
+          elif branch == "staging":
+              pattern = re.compile(rf"^{re.escape(base_version)}rc(\d+)$")
+              latest = max(
+                  (int(m.group(1)) for v in versions if (m := pattern.match(v))),
+                  default=-1,
+              )
+              version = f"{base_version}rc{latest + 1}"
+          elif branch == "dev":
+              pattern = re.compile(rf"^{re.escape(base_version)}\.dev(\d+)$")
+              latest = max(
+                  (int(m.group(1)) for v in versions if (m := pattern.match(v))),
+                  default=-1,
+              )
+              version = f"{base_version}.dev{latest + 1}"
+          else:
+              version = base_version
+
+          exists = version in versions
+
+          pyproject.write_text(
+              re.sub(
+                  r'^version = "[^"]+"',
+                  f'version = "{version}"',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+          )
+          init_file.write_text(
+              re.sub(
+                  r'^__version__ = "[^"]+"',
+                  f'__version__ = "{version}"',
+                  init_file.read_text(),
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+              output.write(f"publish={str(publish).lower()}\n")
+              output.write(f"exists={str(exists).lower()}\n")
+
+          print(
+              f"Prepared {package} {version} "
+              f"(ref={ref_name}, channel={branch}, publish={publish}, exists={exists})"
+          )
+          PY
+
+      - name: Run tests
+        working-directory: packages/python-sdk-memwal
+        run: python -m pytest tests/test_signing.py tests/test_client.py tests/test_middleware.py -q
+
+      - name: Build package
+        working-directory: packages/python-sdk-memwal
+        run: python -m build
+
+      - name: Publish to PyPI
+        if: steps.version.outputs.publish == 'true' && steps.version.outputs.exists != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/python-sdk-memwal/dist
+          print-hash: true
+
+      - name: Skip existing version
+        if: steps.version.outputs.publish == 'true' && steps.version.outputs.exists == 'true'
+        run: echo "memwal ${{ steps.version.outputs.version }} already exists on PyPI; skipping publish"
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' && steps.version.outputs.exists != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const tag = `memwal-python@${version}`;
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              body: `Release memwal Python SDK v${version}`,
+              draft: false,
+              prerelease: false,
+            });

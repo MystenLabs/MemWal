@@ -36,8 +36,6 @@ use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 /// SEAL decrypt-batch chunk size (matches the inlined `recall` value).
 const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
-/// Epoch lifetime requested for blobs uploaded via the manual / job paths.
-const STORE_BLOB_EPOCHS: u64 = 50;
 
 /// Production engine — uploads prepared ciphertext to Walrus, indexes
 /// the row in Postgres, serves reads through the Redis blob cache.
@@ -47,7 +45,6 @@ const STORE_BLOB_EPOCHS: u64 = 50;
 pub struct WalrusSealEngine {
     db: Arc<VectorDb>,
     http_client: reqwest::Client,
-    walrus_client: Arc<walrus_rs::WalrusClient>,
     key_pool: Arc<KeyPool>,
     config: Arc<Config>,
     redis: redis::aio::MultiplexedConnection,
@@ -64,7 +61,6 @@ impl WalrusSealEngine {
     pub fn new(
         db: Arc<VectorDb>,
         http_client: reqwest::Client,
-        walrus_client: Arc<walrus_rs::WalrusClient>,
         key_pool: Arc<KeyPool>,
         config: Arc<Config>,
         redis: redis::aio::MultiplexedConnection,
@@ -74,7 +70,6 @@ impl WalrusSealEngine {
         Self {
             db,
             http_client,
-            walrus_client,
             key_pool,
             config,
             redis,
@@ -193,7 +188,15 @@ impl WalrusSealEngine {
         if let Some(ciphertext) = self.cache_get(blob_id).await {
             return Some((ciphertext, true));
         }
-        match walrus::download_blob(&self.walrus_client, blob_id).await {
+        match walrus::download_blob_from_aggregators(
+            &self.http_client,
+            &self.config.walrus_aggregator_urls,
+            blob_id,
+            self.config.walrus_skip_consistency_check,
+            Duration::from_millis(self.config.walrus_aggregator_race_after_ms),
+        )
+        .await
+        {
             Ok(ciphertext) => {
                 self.cache_put(blob_id, &ciphertext).await;
                 Some((ciphertext, false))
@@ -224,6 +227,7 @@ impl MemoryEngine for WalrusSealEngine {
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
+        importance: f32,
         agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError> {
         // Pick the next Sui key slot (round-robin) so concurrent stores
@@ -244,7 +248,7 @@ impl MemoryEngine for WalrusSealEngine {
             &self.config.sidecar_url,
             self.config.sidecar_secret.as_deref(),
             bytes,
-            STORE_BLOB_EPOCHS,
+            self.config.walrus_storage_epochs as u64,
             owner,
             key_index,
             namespace,
@@ -265,7 +269,7 @@ impl MemoryEngine for WalrusSealEngine {
         let id = uuid::Uuid::new_v4().to_string();
         let blob_size = bytes.len() as i64;
         self.db
-            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size)
+            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size, importance)
             .await?;
 
         Ok(MemoryRef { id, blob_id })
@@ -342,6 +346,11 @@ impl MemoryEngine for WalrusSealEngine {
             blob_id: blob_id.to_string(),
             text,
             distance,
+            // Engine doesn't fetch created_at / importance; the recall
+            // handler zips them on from the SearchHit.
+            // See HydratedMemory docs.
+            created_at: None,
+            importance: None,
         }))
     }
 
@@ -445,6 +454,10 @@ impl MemoryEngine for WalrusSealEngine {
                         blob_id: f.blob_id.clone(),
                         text,
                         distance: f.distance,
+                        // Engine doesn't fetch created_at / importance;
+                        // recall handler zips them on. See HydratedMemory.
+                        created_at: None,
+                        importance: None,
                     }),
                     Err(e) => {
                         tracing::warn!(

@@ -94,4 +94,9 @@ The current relayer only supports a single active package ID at a time. If you d
 
 In the default SDK path, the relayer sees plaintext data because it handles encryption and embedding on your behalf. This is a deliberate trade-off for developer experience — it means Web2 developers don't need to manage cryptographic operations.
 
-If you need to minimize this trust, you can [self-host](/relayer/self-hosting) the relayer or use the [manual client flow](/sdk/usage/memwal-manual) to handle encryption and embedding entirely on the client side. See [Trust & Security Model](/fundamentals/architecture/data-flow-security-model) for the full breakdown.
+If you need to minimize this trust, you can [self-host](/relayer/self-hosting)
+the relayer, run the [TEE deployment pattern](/relayer/nautilus-tee),
+or use the [manual client flow](/sdk/usage/memwal-manual) to handle encryption
+and embedding entirely on the client side. See
+[Trust & Security Model](/fundamentals/architecture/data-flow-security-model)
+for the full breakdown.

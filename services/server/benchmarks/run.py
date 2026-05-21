@@ -407,6 +407,13 @@ def stage_eval(
         overall = {}
         by_category = {}
 
+    # MEM-56: pin the server's prompt versions into the run artifact.
+    # The harness fails fast at startup if these are missing, so by the
+    # time we get here `_server_prompt_versions` is guaranteed present
+    # for any run kicked off via `main()`. The `or {}` guard is just for
+    # the rare case where `stage_eval` is invoked directly from tests.
+    prompt_versions = config.get("_server_prompt_versions") or {}
+
     # Build artifact
     artifact = RunArtifact(
         run_id=run_id,
@@ -414,6 +421,7 @@ def stage_eval(
         git_commit=get_git_commit(),
         benchmark=benchmark_name,
         preset=preset_name,
+        prompt_versions=prompt_versions,
         config={
             "server_url": config.get("server", {}).get("url", ""),
             "scoring_weights": weights.to_dict(),
@@ -641,6 +649,11 @@ def main():
     # servers don't return it. We treat missing-mode as "unknown — proceed
     # with warning" rather than abort, so this check works against both
     # refactored and pre-refactor servers.
+    #
+    # MEM-56: `prompt_versions` is the newer field. It's NOT optional — a
+    # server that doesn't expose it can't produce attributable run
+    # artifacts, so we abort rather than silently recording empty
+    # versions. See the validation gate on MEM-56.
     try:
         health = client.health()
         version = health.get("version", "?")
@@ -659,6 +672,21 @@ def main():
             sys.exit(1)
         else:
             print(f"Server: {server_cfg['url']} ({version}) [mode=benchmark]")
+
+        prompt_versions = health.get("prompt_versions")
+        if not isinstance(prompt_versions, dict) or "extract" not in prompt_versions or "ask" not in prompt_versions:
+            print(
+                "ERROR: Server /health response missing `prompt_versions.extract` "
+                "and/or `prompt_versions.ask`. MEM-56 requires every run artifact "
+                "to pin the prompt versions; aborting rather than recording empty "
+                "metadata. Upgrade the server to a build that exposes these fields."
+            )
+            sys.exit(1)
+        print(f"  prompt versions: extract={prompt_versions['extract']} ask={prompt_versions['ask']}")
+        # Stash on `config` so stage_eval picks it up without a signature change.
+        config["_server_prompt_versions"] = prompt_versions
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"ERROR: Cannot reach server at {server_cfg['url']}: {e}")
         sys.exit(1)
