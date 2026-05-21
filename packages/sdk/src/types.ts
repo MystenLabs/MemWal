@@ -158,9 +158,47 @@ export interface AnalyzeWaitResult extends RememberBulkResult {
 }
 
 /** Server health response */
-export interface HealthResult {
+export interface HealthResult extends Partial<RelayerVersionMetadata> {
     status: string;
+    /** Backward-compatible relayer package version alias. */
     version: string;
+    /** "production" or "benchmark" when returned by modern relayers. */
+    mode?: string;
+    prompt_versions?: {
+        extract: string;
+        ask: string;
+    };
+}
+
+/** Minimum SDK versions accepted by a relayer API contract. */
+export interface MinSupportedSdk {
+    typescript: string;
+    python: string;
+    mcp: string;
+}
+
+/** Public deprecation metadata returned by GET /version and GET /health. */
+export interface RelayerDeprecationNotice {
+    surface: string;
+    deprecatedSince: string;
+    removalApiVersion: string;
+    guidance: string;
+}
+
+/** Public build metadata returned by GET /version and GET /health. */
+export interface RelayerBuildMetadata {
+    commit?: string;
+    buildTimestamp?: string;
+}
+
+/** Runtime compatibility metadata returned by GET /version. */
+export interface RelayerVersionMetadata {
+    relayerVersion: string;
+    apiVersion: string;
+    minSupportedSdk: MinSupportedSdk;
+    featureFlags: Record<string, boolean>;
+    deprecations: RelayerDeprecationNotice[];
+    build: RelayerBuildMetadata;
 }
 
 // ============================================================

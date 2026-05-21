@@ -24,6 +24,7 @@ Quick start::
 
 from .client import (
     MemWal,
+    MemWalCompatibilityError,
     MemWalError,
     MemWalRememberJobFailed,
     MemWalRememberJobNotFound,
@@ -70,6 +71,7 @@ __all__ = [
     "MemWal",
     "MemWalSync",
     "MemWalError",
+    "MemWalCompatibilityError",
     "MemWalRememberJobFailed",
     "MemWalRememberJobNotFound",
     "MemWalRememberJobTimeout",

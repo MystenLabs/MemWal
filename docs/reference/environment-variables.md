@@ -5,6 +5,8 @@ title: "Environment Variables"
 Use this page when you run your own relayer.
 For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting).
 
+Environment variables documented here are public relayer contract items. Renaming, removing, or changing their meaning follows the deprecation process in [Versioning and Compatibility](/relayer/versioning-and-compatibility).
+
 ## Required
 
 | Variable | Notes |
@@ -46,7 +48,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `WALRUS_PACKAGE_ID` | network default | Override the Walrus on-chain package used by the sidecar |
 | `WALRUS_UPLOAD_RELAY_URL` | network default | Override the Walrus upload relay used by the sidecar |
 | `SEAL_SERVER_CONFIGS` | network default | Optional JSON SEAL server config override for independent or committee servers |
-| `SEAL_KEY_SERVERS` | network default | Legacy comma-separated independent SEAL key server override. Used only when `SEAL_SERVER_CONFIGS` is unset |
+| `SEAL_KEY_SERVERS` | network default | Legacy comma-separated independent SEAL key server override. Used only when `SEAL_SERVER_CONFIGS` is unset. Deprecated but supported through relayer API `1.x` |
 | `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
@@ -66,7 +68,7 @@ These are not all enforced at boot, but most real deployments need them.
 - Without `OPENAI_API_KEY`, the server can fall back to mock embeddings. That is useful for local testing, not for normal production behavior.
 - `SUI_NETWORK` drives the default RPC URL, Walrus endpoints, Walrus package ID, and upload relay selection.
 - `SEAL_SERVER_CONFIGS` is a JSON array of `{ objectId, weight, aggregatorUrl?, apiKeyName?, apiKey? }`. Committee key server configs require `aggregatorUrl`.
-- `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset.
+- `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset, is advertised as deprecated in `/version`, and will not be removed before relayer API `2.0.0`.
 - If neither SEAL variable is set, the sidecar uses built-in defaults for `SUI_NETWORK`: Mysten's initial committee aggregator on `testnet`, and the legacy independent key server pair on `mainnet` until an official mainnet committee aggregator is available.
 - Use `SEAL_SERVER_CONFIGS` to override the built-in default with another committee by providing `objectId`, `weight`, and `aggregatorUrl`.
 - Deployments with existing memories encrypted by the previous testnet independent key server defaults should pin `SEAL_KEY_SERVERS=0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75,0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8` until the data is migrated or re-encrypted.

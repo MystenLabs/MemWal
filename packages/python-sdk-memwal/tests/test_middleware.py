@@ -51,8 +51,29 @@ _SERVER = "http://localhost:8000"
 
 _RECALL_URL = f"{_SERVER}/api/recall"
 _ANALYZE_URL = f"{_SERVER}/api/analyze"
+_VERSION_URL = f"{_SERVER}/version"
 _SUI_RPC_URL = "http://localhost:9001"
 _PACKAGE_ID = "0x" + "11" * 32
+
+
+def _mock_version() -> None:
+    respx.get(_VERSION_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "relayerVersion": "0.1.0",
+                "apiVersion": "1.0.0",
+                "minSupportedSdk": {
+                    "typescript": "0.0.4",
+                    "python": "0.1.0",
+                    "mcp": "0.0.1",
+                },
+                "featureFlags": {"runtime.versionEndpoint": True},
+                "deprecations": [],
+                "build": {},
+            },
+        )
+    )
 
 
 def _mock_seal_session_prereqs() -> None:
@@ -66,6 +87,7 @@ def _mock_seal_session_prereqs() -> None:
 
     Mirrors the helper of the same name in ``test_client.py``.
     """
+    _mock_version()
     respx.get(f"{_SERVER}/config").mock(
         return_value=httpx.Response(
             200,

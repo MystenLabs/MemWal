@@ -13,6 +13,11 @@
 
 // Core client (server-mode: server handles SEAL + Walrus + embedding)
 export { MemWal } from "./memwal.js";
+export {
+    MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION,
+    MemWalCompatibilityError,
+    SUPPORTED_RELAYER_API_MAJOR,
+} from "./compatibility.js";
 
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
@@ -38,4 +43,8 @@ export type {
     RememberBulkStatusResult,
     RememberBulkResult,
     RememberBulkItemResult,
+    MinSupportedSdk,
+    RelayerBuildMetadata,
+    RelayerDeprecationNotice,
+    RelayerVersionMetadata,
 } from "./types.js";

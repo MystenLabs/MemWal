@@ -8,6 +8,7 @@ See also:
 
 - [Environment Variables](/reference/environment-variables)
 - [Configuration](/reference/configuration)
+- [Versioning and Compatibility](/relayer/versioning-and-compatibility)
 
 ## Authentication
 
@@ -20,17 +21,25 @@ All `/api/*` routes require signed headers. The SDK handles this automatically.
 | `x-public-key` | Hex-encoded Ed25519 public key (32 bytes) |
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) |
 | `x-timestamp` | Unix timestamp in seconds (5-minute validity window) |
+| `x-nonce` | UUID v4 nonce. The relayer records it in Redis for replay protection |
 
 ### Optional Headers
 
 | Header | Description |
 |--------|-------------|
-| `x-account-id` | MemWalAccount object ID hint — speeds up account resolution when not cached |
-| `x-delegate-key` | Delegate private key (hex) — used by the default SDK for SEAL decrypt flows |
+| `x-account-id` | MemWalAccount object ID hint. Official SDKs always send it and include it in the canonical signature |
+| `x-seal-session` | Base64 exported SEAL SessionKey for relayer-managed decrypt flows. Used by the TypeScript SDK |
+| `x-delegate-key` | Legacy delegate private key credential for relayer-managed decrypt flows. Deprecated; use `x-seal-session` where supported |
 
 ### Signature Format
 
-The signed message is: `{timestamp}.{method}.{path}.{body_sha256}`
+The signed message is:
+
+```text
+{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
+```
+
+For `GET` requests, `body_sha256` is the SHA-256 of an empty byte string. If a raw client omits `x-account-id`, it must sign the empty string in the final `account_id` position. Official SDKs send `x-account-id`.
 
 The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
 
@@ -45,9 +54,34 @@ Service health check. No authentication required.
 ```json
 {
   "status": "ok",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "relayerVersion": "0.1.0",
+  "apiVersion": "1.0.0",
+  "minSupportedSdk": {
+    "typescript": "0.0.4",
+    "python": "0.1.0",
+    "mcp": "0.0.1"
+  },
+  "featureFlags": {
+    "auth.accountBoundNonce": true,
+    "auth.sealSessionHeader": true,
+    "runtime.versionEndpoint": true
+  },
+  "deprecations": [],
+  "build": {},
+  "mode": "production",
+  "prompt_versions": {
+    "extract": "extract.v1",
+    "ask": "ask.v1"
+  }
 }
 ```
+
+### `GET /version`
+
+Stable relayer/API compatibility metadata. No authentication required.
+
+**Response:** the compatibility object documented in [Versioning and Compatibility](/relayer/versioning-and-compatibility#runtime-metadata).
 
 ### `POST /sponsor`
 

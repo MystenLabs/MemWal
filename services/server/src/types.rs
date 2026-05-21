@@ -835,6 +835,8 @@ pub struct StatsResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    #[serde(flatten)]
+    pub compatibility: crate::compatibility::VersionResponse,
     /// "production" or "benchmark" — lets benchmark harness runs verify
     /// at startup that they're hitting a benchmark-mode server before
     /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
@@ -1433,6 +1435,7 @@ mod tests {
         let resp = HealthResponse {
             status: "ok".to_string(),
             version: "0.1.0".to_string(),
+            compatibility: crate::compatibility::version_response(),
             mode: "benchmark".to_string(),
             prompt_versions: PromptVersions {
                 extract: "extract.v1".to_string(),
@@ -1442,5 +1445,14 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
         assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
+        assert_eq!(
+            json["apiVersion"],
+            crate::compatibility::RELAYER_API_VERSION
+        );
+        assert_eq!(json["relayerVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            json["minSupportedSdk"]["typescript"],
+            crate::compatibility::MIN_TYPESCRIPT_SDK_VERSION
+        );
     }
 }

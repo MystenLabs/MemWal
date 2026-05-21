@@ -188,10 +188,10 @@ Create a new async client.
 Every request is signed with Ed25519:
 
 ```
-message = f"{timestamp}.{method}.{path}.{sha256(body)}"
+message = f"{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
 ```
 
-Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-delegate-key`, `x-account-id`.
+Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce`, `x-delegate-key`, `x-account-id`.
 
 ## License
 

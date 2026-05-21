@@ -9,7 +9,7 @@ the MemWal Rust server (TEE).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # ============================================================
 # Config
@@ -136,6 +136,13 @@ class HealthResult:
 
     status: str
     version: str
+    relayer_version: Optional[str] = None
+    api_version: Optional[str] = None
+    min_supported_sdk: Optional[Dict[str, str]] = None
+    feature_flags: Optional[Dict[str, bool]] = None
+    deprecations: Optional[List[Dict[str, Any]]] = None
+    build: Optional[Dict[str, Any]] = None
+    mode: Optional[str] = None
 
 
 @dataclass

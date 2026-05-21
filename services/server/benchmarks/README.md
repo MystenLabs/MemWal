@@ -326,7 +326,7 @@ Variance across runs is ~±2-3 points due to judge non-determinism. Retrieval it
 - The client's request signing is out of date with the server's auth scheme
   (`services/server/src/auth.rs`). `client.py::_sign_request` must send an
   `x-nonce` header (UUIDv4) and sign the 6-field canonical message
-  `{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}`. If you see
+  `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`. If you see
   426 on every request, the harness predates the MED-1 nonce / LOW-23
   account-id-in-message changes — update `_sign_request` to match `auth.rs` and
   `packages/sdk/src/memwal.ts`.

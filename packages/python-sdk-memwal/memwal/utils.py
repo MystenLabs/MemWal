@@ -105,7 +105,7 @@ def build_signature_message(
 
     Current format (matches Rust server ``services/server/src/auth.rs``)::
 
-        "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+        "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
 
     The trailing ``nonce`` was added in MED-1 (replay protection); the
     ``account_id`` was added in LOW-23 so an intermediary can't swap the

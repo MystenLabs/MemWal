@@ -141,7 +141,22 @@ def test_health() -> None:
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
         assert data["status"] == "ok", f"Expected status=ok, got {data}"
+        assert data["apiVersion"], f"Expected apiVersion in health metadata, got {data}"
+        assert data["minSupportedSdk"]["typescript"], f"Expected SDK matrix in health, got {data}"
         print(f"[pass] GET /health → {data}")
+
+
+def test_version() -> None:
+    req = urllib.request.Request(f"{BASE_URL}/version")
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+        assert data["relayerVersion"], f"Expected relayerVersion, got {data}"
+        assert data["apiVersion"], f"Expected apiVersion, got {data}"
+        assert data["minSupportedSdk"]["python"], f"Expected SDK matrix, got {data}"
+        assert data["featureFlags"]["runtime.versionEndpoint"] is True, (
+            f"Expected runtime.versionEndpoint feature flag, got {data}"
+        )
+        print(f"[pass] GET /version → {data}")
 
 
 def test_unsigned_rejected() -> None:
@@ -379,6 +394,7 @@ def main() -> int:
 
     contract_checks = (
         ("health", test_health),
+        ("version", test_version),
         ("unsigned_rejected", test_unsigned_rejected),
         ("wrong_signature_rejected", test_wrong_signature_rejected),
         ("expired_timestamp_rejected", test_expired_timestamp_rejected),

@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
 import httpx
 import nacl.signing
 
+from .compatibility import compatibility_error
 from .types import (
     AnalyzedFact,
     AnalyzeResult,
@@ -134,6 +135,8 @@ class MemWal:
         self._server_config: Optional[Dict[str, str]] = None
         self._session_cache: Optional[Tuple[str, int]] = None
         self._session_build_task: Optional[asyncio.Task[str]] = None
+        self._relayer_version_metadata: Optional[Dict[str, Any]] = None
+        self._compatibility_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     def create(
@@ -652,7 +655,22 @@ class MemWal:
         if response.status_code != 200:
             raise MemWalError(f"Health check failed: {response.status_code}")
         data = response.json()
-        return HealthResult(status=data["status"], version=data["version"])
+        return HealthResult(
+            status=data["status"],
+            version=data["version"],
+            relayer_version=data.get("relayerVersion"),
+            api_version=data.get("apiVersion"),
+            min_supported_sdk=data.get("minSupportedSdk"),
+            feature_flags=data.get("featureFlags"),
+            deprecations=data.get("deprecations"),
+            build=data.get("build"),
+            mode=data.get("mode"),
+        )
+
+    async def compatibility(self) -> Dict[str, Any]:
+        """Fetch and validate the relayer compatibility contract."""
+
+        return await self._ensure_compatible_relayer()
 
     # ============================================================
     # Manual API (user handles SEAL + embedding + Walrus)
@@ -726,6 +744,42 @@ class MemWal:
     # ============================================================
     # Internal: Signed HTTP Requests
     # ============================================================
+
+    async def _ensure_compatible_relayer(self) -> Dict[str, Any]:
+        if self._relayer_version_metadata is not None:
+            return self._relayer_version_metadata
+
+        if self._compatibility_lock is None:
+            self._compatibility_lock = asyncio.Lock()
+
+        async with self._compatibility_lock:
+            if self._relayer_version_metadata is not None:
+                return self._relayer_version_metadata
+
+            version_response = await self._http.get(f"{self._server_url}/version")
+            if version_response.status_code == 200:
+                metadata = version_response.json()
+            elif version_response.status_code in (404, 405):
+                health_response = await self._http.get(f"{self._server_url}/health")
+                if health_response.status_code != 200:
+                    raise MemWalError(
+                        "MemWal compatibility check failed: "
+                        f"GET /version returned {version_response.status_code}, "
+                        f"and GET /health returned {health_response.status_code}"
+                    )
+                metadata = health_response.json()
+            else:
+                raise MemWalError(
+                    "MemWal compatibility check failed: "
+                    f"GET /version returned {version_response.status_code}"
+                )
+
+            error = compatibility_error(metadata, self._server_url)
+            if error is not None:
+                raise MemWalCompatibilityError(error)
+
+            self._relayer_version_metadata = metadata
+            return metadata
 
     async def _fetch_server_config(self) -> Dict[str, str]:
         if self._server_config is not None:
@@ -842,7 +896,7 @@ class MemWal:
         """Make a signed request to the server.
 
         Signature format:
-            ``{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}``
+            ``{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}``
 
         For ``GET`` requests the canonical body string is the empty string,
         and no HTTP request body is sent. This keeps the signed payload hash
@@ -853,11 +907,14 @@ class MemWal:
             - ``x-public-key``: Ed25519 public key hex
             - ``x-signature``: Ed25519 signature hex
             - ``x-timestamp``: Unix seconds string
+            - ``x-nonce``: UUID v4 replay-protection nonce
             - ``x-seal-session``: Base64-encoded exported session envelope
             - ``x-account-id``: MemWalAccount object ID
             - ``Content-Type``: application/json
         """
         import uuid
+
+        await self._ensure_compatible_relayer()
 
         method_upper = method.upper()
         timestamp = str(int(time.time()))
@@ -899,6 +956,12 @@ class MemWal:
 
         if response.status_code not in accepted_statuses:
             err_text = response.text
+            if response.status_code == 426:
+                raise MemWalCompatibilityError(
+                    "MemWal relayer rejected this SDK as unsupported "
+                    f"(HTTP 426 Upgrade Required). Relayer response: "
+                    f"{err_text[:300] or 'upgrade required'}"
+                )
             raise _HttpStatusError(
                 status=response.status_code,
                 body=err_text,
@@ -909,6 +972,12 @@ class MemWal:
 
 class MemWalError(Exception):
     """Exception raised for MemWal API errors."""
+
+    pass
+
+
+class MemWalCompatibilityError(MemWalError):
+    """Raised when the SDK and relayer API contract are incompatible."""
 
     pass
 
@@ -1134,6 +1203,10 @@ class MemWalSync:
     def health(self) -> HealthResult:
         """Synchronous version of :meth:`MemWal.health`."""
         return self._run(self._inner.health())
+
+    def compatibility(self) -> Dict[str, Any]:
+        """Synchronous version of :meth:`MemWal.compatibility`."""
+        return self._run(self._inner.compatibility())
 
     def remember_manual(self, opts: RememberManualOptions) -> RememberManualResult:
         """Synchronous version of :meth:`MemWal.remember_manual`."""
