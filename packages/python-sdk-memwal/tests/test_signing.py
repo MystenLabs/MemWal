@@ -7,18 +7,22 @@ Validates that:
 3. The signature message format matches the server expectation exactly
 """
 
+import base64
 import hashlib
 import json
 
 import nacl.signing
 
 from memwal.utils import (
+    build_seal_session_personal_message,
     build_signature_message,
     build_signing_key,
     bytes_to_hex,
+    encode_sui_private_key,
     hex_to_bytes,
     sha256_hex,
     sign_message,
+    sign_sui_personal_message,
 )
 
 
@@ -242,3 +246,29 @@ class TestDelegateKeyUtils:
         scheme_input = bytes([0x00]) + pub
         expected = "0x" + hashlib.blake2b(scheme_input, digest_size=32).hexdigest()
         assert delegate_key_to_sui_address(self._KEY) == expected
+
+
+class TestSealSessionUtils:
+    def test_encode_sui_private_key(self) -> None:
+        seed = b"\x02" * 32
+        encoded = encode_sui_private_key(seed)
+        assert encoded.startswith("suiprivkey1")
+
+    def test_build_personal_message(self) -> None:
+        message = build_seal_session_personal_message(
+            package_id="0x" + "11" * 32,
+            ttl_min=5,
+            creation_time_ms=1_700_000_000_000,
+            session_public_key_bytes=b"\x03" * 32,
+        )
+        decoded = message.decode("utf-8")
+        assert "Accessing keys of package" in decoded
+        assert "for 5 mins" in decoded
+        assert "session key" in decoded
+
+    def test_sign_sui_personal_message(self) -> None:
+        key = nacl.signing.SigningKey.generate()
+        signature = sign_sui_personal_message(b"hello", key)
+        raw = json.loads(json.dumps(signature))  # assert it's JSON-safe text
+        assert isinstance(raw, str)
+        assert len(base64.b64decode(signature)) == 97
