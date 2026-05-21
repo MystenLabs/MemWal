@@ -181,6 +181,20 @@ async fn update_remember_job_after_wallet_error(
     .await;
 }
 
+async fn mark_remember_job_failed(state: &AppState, remember_job_id: Option<&str>, msg: &str) {
+    let Some(jid) = remember_job_id else {
+        return;
+    };
+
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(msg)
+    .bind(jid)
+    .execute(state.db.pool())
+    .await;
+}
+
 /// A wallet job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletJob {
@@ -379,6 +393,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                         )
                         .await
                         {
+                            let finalize_remember_job_id = remember_job_id.clone();
                             if let Err(enqueue_err) = enqueue_finalize_uploaded_blob(
                                 state,
                                 enqueued_wallet_index,
@@ -392,7 +407,19 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                             )
                             .await
                             {
-                                return Err(enqueue_err.into_apalis_error());
+                                let msg = enqueue_err.to_string();
+                                mark_remember_job_failed(
+                                    state,
+                                    finalize_remember_job_id.as_deref(),
+                                    &msg,
+                                )
+                                .await;
+                                tracing::error!(
+                                    "[wallet-job:set-metadata] job_id={} {}",
+                                    finalize_remember_job_id.as_deref().unwrap_or("-"),
+                                    msg,
+                                );
+                                return Err(WalletJobError::Permanent(msg).into_apalis_error());
                             }
                             tracing::warn!(
                                     "[wallet-job:set-metadata] finalization failed after transfer; enqueued index-only retry: {}",
@@ -722,22 +749,9 @@ async fn execute_upload_and_transfer(
                 .await
             {
                 let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
-                let classified = WalletJobError::classify_sidecar_error(&msg);
-                update_remember_job_after_wallet_error(
-                    state,
-                    recovery_remember_job_id.as_deref(),
-                    &classified,
-                    &msg,
-                )
-                .await;
-                tracing::error!(
-                    "[wallet-job:upload] job_id={} {} classification={} retryable={}",
-                    job_id_for_log,
-                    msg,
-                    classified.kind(),
-                    !classified.is_permanent()
-                );
-                return Err(classified);
+                mark_remember_job_failed(state, recovery_remember_job_id.as_deref(), &msg).await;
+                tracing::error!("[wallet-job:upload] job_id={} {}", job_id_for_log, msg,);
+                return Err(WalletJobError::Permanent(msg));
             }
 
             tracing::info!(
@@ -1022,7 +1036,7 @@ pub async fn execute_remember(
             .await;
 
             let mut storage = state.wallet_storage.clone();
-            storage
+            if let Err(e) = storage
                 .push(WalletJob {
                     wallet_index: key_index,
                     operation: WalletOperation::SetMetadataAndTransfer {
@@ -1044,12 +1058,12 @@ pub async fn execute_remember(
                     },
                 })
                 .await
-                .map_err(|e| {
-                    RememberJobError::Internal(format!(
-                        "failed to enqueue metadata/transfer recovery job: {}",
-                        e
-                    ))
-                })?;
+            {
+                let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
+                tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
+                mark_remember_job_failed(state, Some(&job.job_id), &msg).await;
+                return Err(RememberJobError::Internal(msg));
+            }
 
             tracing::info!(
                 "[remember-job] job_id={} enqueued metadata/transfer recovery for blob_id={} key={}",
