@@ -1308,22 +1308,38 @@ pub async fn execute_bulk_remember(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::OnceLock;
 
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
         classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
     };
-    use crate::storage::db::VectorDb;
+
+    static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
     }
 
-    async fn test_db() -> Arc<VectorDb> {
-        Arc::new(VectorDb::new(&test_database_url()).await.unwrap())
+    async fn test_pool() -> sqlx::PgPool {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+
+        let _guard = DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        sqlx::raw_sql(include_str!("../migrations/005_remember_jobs.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        pool
     }
 
     #[test]
@@ -1409,7 +1425,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_enqueue_failure_marks_remember_job_failed() {
-        let db = test_db().await;
+        let pool = test_pool().await;
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
         let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
 
@@ -1419,13 +1435,12 @@ mod tests {
         .bind(&job_id)
         .bind("0xtest-owner")
         .bind("test-ns")
-        .execute(db.pool())
+        .execute(&pool)
         .await
         .unwrap();
 
         let classified =
-            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
-                .await;
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
 
         match classified {
             WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
@@ -1435,7 +1450,7 @@ mod tests {
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
                 .bind(&job_id)
-                .fetch_one(db.pool())
+                .fetch_one(&pool)
                 .await
                 .unwrap();
 
@@ -1444,13 +1459,13 @@ mod tests {
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
-            .execute(db.pool())
+            .execute(&pool)
             .await;
     }
 
     #[tokio::test]
     async fn terminal_recovery_handoff_failure_overrides_transient_looking_queue_error() {
-        let db = test_db().await;
+        let pool = test_pool().await;
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
         let msg = "failed to enqueue metadata/transfer recovery job: 503 service unavailable";
 
@@ -1460,13 +1475,12 @@ mod tests {
         .bind(&job_id)
         .bind("0xtest-owner")
         .bind("test-ns")
-        .execute(db.pool())
+        .execute(&pool)
         .await
         .unwrap();
 
         let classified =
-            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
-                .await;
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
 
         match classified {
             WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
@@ -1476,7 +1490,7 @@ mod tests {
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
                 .bind(&job_id)
-                .fetch_one(db.pool())
+                .fetch_one(&pool)
                 .await
                 .unwrap();
 
@@ -1485,7 +1499,7 @@ mod tests {
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
-            .execute(db.pool())
+            .execute(&pool)
             .await;
     }
 
@@ -1530,13 +1544,12 @@ mod tests {
 
     #[tokio::test]
     async fn missing_remember_job_keeps_handoff_retryable() {
-        let db = test_db().await;
+        let pool = test_pool().await;
         let job_id = format!("missing-remember-job-{}", uuid::Uuid::new_v4());
         let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
 
         let classified =
-            classify_wallet_remember_handoff_failure(db.pool(), Some(&job_id), msg.to_string())
-                .await;
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
 
         match classified {
             WalletJobError::Transient(got) => {
