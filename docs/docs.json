@@ -91,6 +91,28 @@
         ]
       },
       {
+        "tab": "Python SDK",
+        "groups": [
+          {
+            "group": "Python SDK",
+            "pages": [
+              "python-sdk/quick-start",
+              {
+                "group": "Usage",
+                "root": "python-sdk/usage",
+                "pages": [
+                  "python-sdk/usage/memwal",
+                  "python-sdk/usage/memwal-manual",
+                  "python-sdk/usage/with-memwal"
+                ]
+              },
+              "python-sdk/api-reference",
+              "python-sdk/changelog"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Relayer",
         "groups": [
           {
@@ -99,6 +121,8 @@
               "relayer/overview",
               "relayer/public-relayer",
               "relayer/self-hosting",
+              "relayer/nautilus-tee",
+              "relayer/observability",
               "relayer/api-reference"
             ]
           }
@@ -112,7 +136,9 @@
             "pages": [
               "mcp/overview",
               "mcp/quick-start",
-              "mcp/reference"
+              "mcp/how-it-works",
+              "mcp/reference",
+              "mcp/changelog"
             ]
           }
         ]

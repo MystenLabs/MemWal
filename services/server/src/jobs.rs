@@ -19,8 +19,8 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::walrus::SetMetadataBatchEntry;
-use crate::types::{AppState, BLOB_CACHE_KEY_PREFIX};
+use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
+use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
 // ============================================================
 // WalletJob — unified job type for all wallet-signing operations
@@ -40,6 +40,13 @@ pub enum WalletOperation {
         encrypted_b64: String,
         /// Pre-computed embedding vector (1536-dim).
         vector: Vec<f32>,
+        /// MEM-54: per-fact importance set at extraction time. Persisted
+        /// on `vector_entries.importance` after Walrus upload completes.
+        /// `#[serde(default = "default_importance")]` so legacy job rows
+        /// enqueued before MEM-54 land at the neutral "standard" bucket
+        /// rather than failing deserialisation.
+        #[serde(default = "default_importance")]
+        importance: f32,
         /// MemWal owner address.
         owner: String,
         /// Namespace for isolation.
@@ -67,11 +74,56 @@ pub enum WalletOperation {
         package_id: Option<String>,
         /// Agent / delegate public key.
         agent_id: Option<String>,
+        /// `remember_jobs` row ID to complete after transfer. Present for
+        /// partial upload recovery jobs; absent for legacy transfer-only rows.
+        #[serde(default)]
+        remember_job_id: Option<String>,
+        /// Walrus blob ID to index after transfer succeeds.
+        #[serde(default)]
+        blob_id: Option<String>,
+        /// Pre-computed embedding vector to index after transfer succeeds.
+        #[serde(default)]
+        vector: Option<Vec<f32>>,
+        /// Encrypted blob size to record with the vector row.
+        #[serde(default)]
+        blob_size_bytes: Option<i64>,
+        /// MEM-54: per-fact importance score, indexed alongside the vector
+        /// when this recovery job finalises the upload. Defaulted to
+        /// `IMPORTANCE_STANDARD` so legacy / pre-MEM-54 rows degrade to the
+        /// neutral bucket rather than failing deserialisation.
+        #[serde(default = "default_importance")]
+        importance: f32,
+    },
+    /// Finish a partially recovered upload after metadata+transfer has already
+    /// succeeded. This keeps DB/vector retries from repeating an on-chain
+    /// transfer for an object that may now be owned by the user.
+    FinalizeUploadedBlob {
+        owner: String,
+        namespace: String,
+        #[serde(default)]
+        remember_job_id: Option<String>,
+        blob_id: String,
+        vector: Vec<f32>,
+        blob_size_bytes: i64,
+        /// MEM-54: same as on `UploadAndTransfer` — persisted on the
+        /// `vector_entries.importance` column. Defaulted to
+        /// `IMPORTANCE_STANDARD` for backwards compatibility with in-flight
+        /// recovery jobs enqueued before this field existed.
+        #[serde(default = "default_importance")]
+        importance: f32,
     },
 }
 
 fn default_epochs() -> u32 {
-    50
+    let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+    configured_walrus_storage_epochs(&network)
+}
+
+/// MEM-54: serde default for `WalletOperation::UploadAndTransfer.importance`
+/// so legacy job rows enqueued before this field existed degrade to the
+/// neutral "standard" bucket on dequeue.
+fn default_importance() -> f32 {
+    crate::services::extractor::IMPORTANCE_STANDARD
 }
 
 pub(crate) async fn warm_blob_cache_after_upload(
@@ -100,6 +152,95 @@ pub(crate) async fn warm_blob_cache_after_upload(
         redis.set_ex(cache_key, ciphertext.to_vec(), ttl_secs).await;
     if let Err(e) = result {
         tracing::warn!("blob cache warm failed for {}: {}", blob_id, e);
+    }
+}
+
+async fn update_remember_job_after_wallet_error(
+    state: &AppState,
+    remember_job_id: Option<&str>,
+    error: &WalletJobError,
+    msg: &str,
+) {
+    let Some(jid) = remember_job_id else {
+        return;
+    };
+
+    let status = if error.is_permanent() {
+        "failed"
+    } else {
+        "running"
+    };
+
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3",
+    )
+    .bind(status)
+    .bind(msg)
+    .bind(jid)
+    .execute(state.db.pool())
+    .await;
+}
+
+async fn mark_remember_job_failed(
+    pool: &sqlx::PgPool,
+    remember_job_id: Option<&str>,
+    msg: &str,
+) -> Result<(), sqlx::Error> {
+    let Some(jid) = remember_job_id else {
+        return Ok(());
+    };
+
+    let result = sqlx::query(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(msg)
+    .bind(jid)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    Ok(())
+}
+
+fn remember_job_persist_failure_message(msg: &str, persist_err: &sqlx::Error) -> String {
+    format!(
+        "{}; failed to persist remember_jobs failed status: {}",
+        msg, persist_err
+    )
+}
+
+async fn classify_wallet_remember_handoff_failure(
+    pool: &sqlx::PgPool,
+    remember_job_id: Option<&str>,
+    msg: String,
+) -> WalletJobError {
+    // Recovery handoff failures happen after an external side effect already
+    // succeeded: a Walrus upload and sometimes an on-chain transfer. Once the
+    // polling row is durably terminal, abort retries so clients see `failed`
+    // instead of polling `uploaded` / `running` forever. If that terminal
+    // state cannot be persisted, keep the wallet handler retryable so the row
+    // is not orphaned.
+    match mark_remember_job_failed(pool, remember_job_id, &msg).await {
+        Ok(()) => WalletJobError::Permanent(msg),
+        Err(persist_err) => {
+            WalletJobError::Transient(remember_job_persist_failure_message(&msg, &persist_err))
+        }
+    }
+}
+
+async fn handle_legacy_remember_handoff_failure(
+    pool: &sqlx::PgPool,
+    remember_job_id: &str,
+    msg: String,
+) -> Result<(), RememberJobError> {
+    match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
+        Ok(()) => Ok(()),
+        Err(persist_err) => Err(RememberJobError::Internal(
+            remember_job_persist_failure_message(&msg, &persist_err),
+        )),
     }
 }
 
@@ -222,6 +363,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
         WalletOperation::UploadAndTransfer {
             encrypted_b64,
             vector,
+            importance,
             owner,
             namespace,
             package_id,
@@ -229,13 +371,16 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             remember_job_id,
             epochs,
         } => {
-            let wallet_index = state.key_pool.next_index().ok_or_else(|| {
-                WalletJobError::Permanent(
-                    "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                        .into(),
-                )
-                .into_apalis_error()
-            })?;
+            let wallet_index = match state.key_pool.next_index() {
+                Some(index) => index,
+                None => {
+                    return Err(WalletJobError::Permanent(
+                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                            .into(),
+                    )
+                    .into_apalis_error());
+                }
+            };
             if wallet_index != enqueued_wallet_index {
                 tracing::info!(
                     "[wallet-job:upload] reassigned wallet at execution: enqueued={} executing={}",
@@ -248,6 +393,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 wallet_index,
                 encrypted_b64,
                 vector,
+                importance,
                 owner,
                 namespace,
                 package_id,
@@ -263,15 +409,117 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             namespace,
             package_id,
             agent_id,
+            remember_job_id,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
         } => {
-            execute_set_metadata_and_transfer(
+            let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
                 blob_object_id,
-                owner,
-                namespace,
-                package_id,
-                agent_id,
+                owner.clone(),
+                namespace.clone(),
+                package_id.clone(),
+                agent_id.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(()) => match (blob_id, vector, blob_size_bytes) {
+                    (Some(blob_id), Some(vector), Some(blob_size_bytes)) => {
+                        if let Err(err) = insert_vector_and_mark_remember_done(
+                            state,
+                            remember_job_id.as_deref(),
+                            &owner,
+                            &namespace,
+                            &blob_id,
+                            &vector,
+                            blob_size_bytes,
+                            importance,
+                            enqueued_wallet_index,
+                        )
+                        .await
+                        {
+                            let finalize_remember_job_id = remember_job_id.clone();
+                            if let Err(enqueue_err) = enqueue_finalize_uploaded_blob(
+                                state,
+                                enqueued_wallet_index,
+                                owner,
+                                namespace,
+                                remember_job_id,
+                                blob_id,
+                                vector,
+                                blob_size_bytes,
+                                importance,
+                            )
+                            .await
+                            {
+                                let classified = classify_wallet_remember_handoff_failure(
+                                    state.db.pool(),
+                                    finalize_remember_job_id.as_deref(),
+                                    enqueue_err.to_string(),
+                                )
+                                .await;
+                                tracing::error!(
+                                    "[wallet-job:set-metadata] job_id={} {}",
+                                    finalize_remember_job_id.as_deref().unwrap_or("-"),
+                                    classified,
+                                );
+                                return Err(classified.into_apalis_error());
+                            }
+                            tracing::warn!(
+                                    "[wallet-job:set-metadata] finalization failed after transfer; enqueued index-only retry: {}",
+                                    err
+                                );
+                        }
+                        Ok(())
+                    }
+                    (None, None, None) => Ok(()),
+                    _ => Err(WalletJobError::Permanent(
+                        "metadata transfer recovery job missing finalization fields".into(),
+                    )),
+                },
+                Err(err) => {
+                    let msg = err.to_string();
+                    update_remember_job_after_wallet_error(
+                        state,
+                        remember_job_id.as_deref(),
+                        &err,
+                        &msg,
+                    )
+                    .await;
+                    tracing::error!(
+                        "[wallet-job:set-metadata] job_id={} {} classification={} retryable={}",
+                        remember_job_id.as_deref().unwrap_or("-"),
+                        msg,
+                        err.kind(),
+                        !err.is_permanent()
+                    );
+                    Err(err)
+                }
+            }
+        }
+        WalletOperation::FinalizeUploadedBlob {
+            owner,
+            namespace,
+            remember_job_id,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
+        } => {
+            insert_vector_and_mark_remember_done(
+                state,
+                remember_job_id.as_deref(),
+                &owner,
+                &namespace,
+                &blob_id,
+                &vector,
+                blob_size_bytes,
+                importance,
+                enqueued_wallet_index,
             )
             .await
         }
@@ -331,6 +579,103 @@ async fn execute_set_metadata_and_transfer(
     })
 }
 
+async fn insert_vector_and_mark_remember_done(
+    state: &AppState,
+    remember_job_id: Option<&str>,
+    owner: &str,
+    namespace: &str,
+    blob_id: &str,
+    vector: &[f32],
+    blob_size_bytes: i64,
+    importance: f32,
+    wallet_index: usize,
+) -> Result<(), WalletJobError> {
+    let vector_id = remember_job_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    if let Err(e) = state
+        .db
+        .insert_vector(
+            &vector_id,
+            owner,
+            namespace,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
+        )
+        .await
+    {
+        let msg = format!("insert_vector failed: {}", e);
+        let classified = WalletJobError::classify_sidecar_error(&msg);
+        update_remember_job_after_wallet_error(state, remember_job_id, &classified, &msg).await;
+        tracing::error!(
+            "[wallet-job:upload] job_id={} {} classification={} retryable={}",
+            remember_job_id.unwrap_or("-"),
+            msg,
+            classified.kind(),
+            !classified.is_permanent()
+        );
+        return Err(classified);
+    }
+
+    if let Some(jid) = remember_job_id {
+        let _ = sqlx::query(
+            "UPDATE remember_jobs SET status = 'done', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(blob_id)
+        .bind(jid)
+        .execute(state.db.pool())
+        .await;
+    }
+
+    tracing::info!(
+        "[wallet-job:upload] done job_id={} blob_id={} owner={} ns={} key={}",
+        remember_job_id.unwrap_or("-"),
+        blob_id,
+        &owner[..10.min(owner.len())],
+        namespace,
+        wallet_index,
+    );
+    Ok(())
+}
+
+async fn enqueue_finalize_uploaded_blob(
+    state: &AppState,
+    wallet_index: usize,
+    owner: String,
+    namespace: String,
+    remember_job_id: Option<String>,
+    blob_id: String,
+    vector: Vec<f32>,
+    blob_size_bytes: i64,
+    importance: f32,
+) -> Result<(), WalletJobError> {
+    let mut storage = state.wallet_storage.clone();
+    storage
+        .push(WalletJob {
+            wallet_index,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner,
+                namespace,
+                remember_job_id,
+                blob_id,
+                vector,
+                blob_size_bytes,
+                importance,
+            },
+        })
+        .await
+        .map_err(|e| {
+            WalletJobError::Transient(format!(
+                "failed to enqueue uploaded-blob finalization job: {}",
+                e
+            ))
+        })
+        .map(|_| ())
+}
+
 // ────────────────────────────────────────────────────────────
 // WalletOperation::UploadAndTransfer
 // ────────────────────────────────────────────────────────────
@@ -341,6 +686,7 @@ async fn execute_upload_and_transfer(
     wallet_index: usize,
     encrypted_b64: String,
     vector: Vec<f32>,
+    importance: f32,
     owner: String,
     namespace: String,
     package_id: String,
@@ -351,40 +697,38 @@ async fn execute_upload_and_transfer(
     // ── Mark running ───────────────────────────────────────────
     if let Some(ref jid) = remember_job_id {
         let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'running', updated_at = NOW() WHERE id = $1",
+            "UPDATE remember_jobs SET status = 'running', error_msg = NULL, updated_at = NOW() WHERE id = $1",
         )
         .bind(jid)
         .execute(state.db.pool())
         .await;
     }
 
-    // Helper: mark failed and return Err. Classifies sidecar errors so Apalis
-    // retries transient wallet/RPC conflicts and aborts deterministic failures.
-    let fail = |msg: String| -> WalletJobError {
-        tracing::error!("[wallet-job:upload] {}", msg);
-        WalletJobError::classify_sidecar_error(&msg)
-    };
-
     // ── Decode encrypted bytes ─────────────────────────────────
     let encrypted = match base64::engine::general_purpose::STANDARD.decode(&encrypted_b64) {
         Ok(b) => b,
         Err(e) => {
             let msg = format!("base64 decode failed: {}", e);
-            if let Some(ref jid) = remember_job_id {
-                let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(&msg)
-                .bind(jid)
-                .execute(state.db.pool())
-                .await;
-            }
-            return Err(fail(msg));
+            let classified = WalletJobError::Permanent(msg.clone());
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            tracing::error!(
+                "[wallet-job:upload] job_id={} {}",
+                remember_job_id.as_deref().unwrap_or("-"),
+                msg
+            );
+            return Err(classified);
         }
     };
 
     tracing::info!(
-        "[wallet-job:upload] owner={} ns={} key={} bytes={}",
+        "[wallet-job:upload] job_id={} owner={} ns={} key={} bytes={}",
+        remember_job_id.as_deref().unwrap_or("-"),
         &owner[..10.min(owner.len())],
         namespace,
         wallet_index,
@@ -408,18 +752,90 @@ async fn execute_upload_and_transfer(
 
     let upload = match upload_result {
         Ok(u) => u,
-        Err(e) => {
-            let msg = format!("walrus upload failed: {}", e);
+        Err(UploadBlobError::MetadataTransferFailed {
+            blob_id,
+            object_id,
+            message,
+        }) => {
+            tracing::warn!(
+                "[wallet-job:upload] job_id={} upload succeeded but metadata/transfer failed: {}",
+                remember_job_id.as_deref().unwrap_or("-"),
+                message,
+            );
+
+            warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
+
             if let Some(ref jid) = remember_job_id {
                 let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+                    "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
                 )
-                .bind(&msg)
+                .bind(&blob_id)
                 .bind(jid)
                 .execute(state.db.pool())
                 .await;
             }
-            return Err(fail(msg));
+
+            let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
+            let recovery_remember_job_id = remember_job_id.clone();
+            let mut storage = state.wallet_storage.clone();
+            if let Err(e) = storage
+                .push(WalletJob {
+                    wallet_index,
+                    operation: WalletOperation::SetMetadataAndTransfer {
+                        blob_object_id: object_id,
+                        owner,
+                        namespace,
+                        package_id: Some(package_id),
+                        agent_id: agent_public_key,
+                        remember_job_id,
+                        blob_id: Some(blob_id.clone()),
+                        vector: Some(vector),
+                        blob_size_bytes: Some(encrypted.len() as i64),
+                        importance,
+                    },
+                })
+                .await
+            {
+                let classified = classify_wallet_remember_handoff_failure(
+                    state.db.pool(),
+                    recovery_remember_job_id.as_deref(),
+                    format!("failed to enqueue metadata/transfer recovery job: {}", e),
+                )
+                .await;
+                tracing::error!(
+                    "[wallet-job:upload] job_id={} {}",
+                    job_id_for_log,
+                    classified,
+                );
+                return Err(classified);
+            }
+
+            tracing::info!(
+                "[wallet-job:upload] job_id={} enqueued metadata/transfer recovery for blob_id={} key={}",
+                job_id_for_log,
+                blob_id,
+                wallet_index,
+            );
+            return Ok(());
+        }
+        Err(UploadBlobError::App(e)) => {
+            let msg = format!("walrus upload failed: {}", e);
+            let classified = WalletJobError::classify_sidecar_error(&msg);
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            tracing::error!(
+                "[wallet-job:upload] job_id={} {} classification={} retryable={}",
+                remember_job_id.as_deref().unwrap_or("-"),
+                msg,
+                classified.kind(),
+                !classified.is_permanent()
+            );
+            return Err(classified);
         }
     };
     let blob_id = upload.blob_id.clone();
@@ -428,7 +844,7 @@ async fn execute_upload_and_transfer(
 
     if let Some(ref jid) = remember_job_id {
         let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, updated_at = NOW() WHERE id = $2",
+            "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
         )
         .bind(&blob_id)
         .bind(jid)
@@ -436,51 +852,20 @@ async fn execute_upload_and_transfer(
         .await;
     }
 
-    // ── Insert vector after upload ─────────────────────────────────
-    //
     // The sidecar's `/walrus/upload` endpoint already performs metadata+transfer
     // atomically. A successful upload response means the blob is ready to index.
-    let blob_size = encrypted.len() as i64;
-    let vector_id = remember_job_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if let Err(e) = state
-        .db
-        .insert_vector(&vector_id, &owner, &namespace, &blob_id, &vector, blob_size)
-        .await
-    {
-        let msg = format!("insert_vector failed: {}", e);
-        if let Some(ref jid) = remember_job_id {
-            let _ = sqlx::query(
-                "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(&msg)
-            .bind(jid)
-            .execute(state.db.pool())
-            .await;
-        }
-        return Err(fail(msg));
-    }
-
-    // ── Mark final status ──────────────────────────────────────
-    if let Some(ref jid) = remember_job_id {
-        let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'done', blob_id = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(&blob_id)
-        .bind(jid)
-        .execute(state.db.pool())
-        .await;
-    }
-
-    tracing::info!(
-        "[wallet-job:upload] done blob_id={} owner={} ns={} key={}",
-        blob_id,
-        &owner[..10.min(owner.len())],
-        namespace,
+    insert_vector_and_mark_remember_done(
+        state,
+        remember_job_id.as_deref(),
+        &owner,
+        &namespace,
+        &blob_id,
+        &vector,
+        encrypted.len() as i64,
+        importance,
         wallet_index,
-    );
-    Ok(())
+    )
+    .await
 }
 
 // ============================================================
@@ -494,7 +879,8 @@ async fn execute_upload_and_transfer(
 /// don't burn retry budget on inputs that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
-/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure), except
+///   `balance::split` stale-state failures that can recover after sidecar refresh
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
 /// - `InsufficientGas` / `ObjectNotFound` /
@@ -510,6 +896,13 @@ pub enum WalletJobError {
 }
 
 impl WalletJobError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            WalletJobError::Transient(_) => "transient",
+            WalletJobError::Permanent(_) => "permanent",
+        }
+    }
+
     /// True if the error is `Permanent` — caller should NOT retry.
     pub fn is_permanent(&self) -> bool {
         matches!(self, WalletJobError::Permanent(_))
@@ -520,6 +913,15 @@ impl WalletJobError {
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        if (lower.contains("moveabort") || lower.contains("move abort"))
+            && lower.contains("balance")
+            && lower.contains("split")
+        {
+            return WalletJobError::Transient(msg.to_string());
+        }
+        if lower.contains("moveabort") || lower.contains("move abort") {
+            return WalletJobError::Permanent(msg.to_string());
+        }
         if lower.contains("objectlocked")
             || lower.contains("object_locked")
             || lower.contains("object is locked")
@@ -529,9 +931,6 @@ impl WalletJobError {
             || lower.contains("sponsored transaction has expired")
         {
             return WalletJobError::Transient(msg.to_string());
-        }
-        if lower.contains("moveabort") || lower.contains("move abort") {
-            return WalletJobError::Permanent(msg.to_string());
         }
         WalletJobError::Transient(msg.to_string())
     }
@@ -621,7 +1020,7 @@ pub async fn execute_remember(
 
     // ── Step 1: mark running ──────────────────────────────────────
     let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = 'running', updated_at = NOW() WHERE id = $1",
+        "UPDATE remember_jobs SET status = 'running', error_msg = NULL, updated_at = NOW() WHERE id = $1",
     )
     .bind(&job.job_id)
     .execute(state.db.pool())
@@ -661,7 +1060,7 @@ pub async fn execute_remember(
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
         &encrypted,
-        50,
+        state.config.walrus_storage_epochs as u64,
         &job.owner,
         key_index,
         &job.namespace,
@@ -672,7 +1071,65 @@ pub async fn execute_remember(
 
     let upload = match upload_result {
         Ok(u) => u,
-        Err(e) => fail!(format!("walrus upload failed: {}", e)),
+        Err(UploadBlobError::MetadataTransferFailed {
+            blob_id,
+            object_id,
+            message,
+        }) => {
+            tracing::warn!(
+                "[remember-job] job_id={} upload succeeded but metadata/transfer failed: {}",
+                job.job_id,
+                message,
+            );
+            warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
+
+            let _ = sqlx::query(
+                "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
+            )
+            .bind(&blob_id)
+            .bind(&job.job_id)
+            .execute(state.db.pool())
+            .await;
+
+            let mut storage = state.wallet_storage.clone();
+            if let Err(e) = storage
+                .push(WalletJob {
+                    wallet_index: key_index,
+                    operation: WalletOperation::SetMetadataAndTransfer {
+                        blob_object_id: object_id,
+                        owner: job.owner.clone(),
+                        namespace: job.namespace.clone(),
+                        package_id: Some(job.package_id.clone()),
+                        agent_id: job.agent_public_key.clone(),
+                        remember_job_id: Some(job.job_id.clone()),
+                        blob_id: Some(blob_id.clone()),
+                        vector: Some(job.vector.clone()),
+                        blob_size_bytes: Some(encrypted.len() as i64),
+                        // MEM-54: legacy RememberJob payload predates the
+                        // importance field. Drain the queue at the neutral
+                        // "standard" bucket; new requests go through
+                        // WalletOperation::UploadAndTransfer which carries
+                        // importance through end-to-end.
+                        importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                    },
+                })
+                .await
+            {
+                let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
+                tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
+                return handle_legacy_remember_handoff_failure(state.db.pool(), &job.job_id, msg)
+                    .await;
+            }
+
+            tracing::info!(
+                "[remember-job] job_id={} enqueued metadata/transfer recovery for blob_id={} key={}",
+                job.job_id,
+                blob_id,
+                key_index,
+            );
+            return Ok(());
+        }
+        Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
     };
     let blob_id = upload.blob_id.clone();
 
@@ -690,6 +1147,11 @@ pub async fn execute_remember(
             &blob_id,
             &job.vector,
             blob_size,
+            // MEM-54: legacy RememberJob payload predates the importance
+            // field. Drains the queue at the neutral "standard" bucket;
+            // new requests go through WalletOperation::UploadAndTransfer
+            // which carries importance through end-to-end.
+            crate::services::extractor::IMPORTANCE_STANDARD,
         )
         .await
     {
@@ -698,7 +1160,7 @@ pub async fn execute_remember(
 
     // ── Step 5: mark done ────────────────────────────────────────
     let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = 'done', blob_id = $1, updated_at = NOW() WHERE id = $2",
+        "UPDATE remember_jobs SET status = 'done', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
     )
     .bind(&blob_id)
     .bind(&job.job_id)
@@ -733,6 +1195,12 @@ pub struct BulkRememberItem {
     pub namespace: String,
     /// Wallet index assigned at enqueue time.
     pub wallet_index: usize,
+    /// MEM-54: per-item importance score (defaults to "standard" 0.5 when
+    /// the bulk-remember route doesn't run extraction — e.g. SDK passes
+    /// pre-formed memories). `#[serde(default)]` so legacy bulk job rows
+    /// drain cleanly at the neutral default.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
 }
 
 /// Batch job payload — one BulkRememberJob per POST /api/remember/bulk call.
@@ -809,6 +1277,7 @@ pub async fn execute_bulk_remember(
                 operation: WalletOperation::UploadAndTransfer {
                     encrypted_b64: item.encrypted_b64,
                     vector: item.vector,
+                    importance: item.importance,
                     owner: job.owner.clone(),
                     namespace,
                     package_id: job.package_id.clone(),
@@ -839,7 +1308,39 @@ pub async fn execute_bulk_remember(
 
 #[cfg(test)]
 mod tests {
-    use super::WalletJobError;
+    use std::sync::OnceLock;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::{
+        classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
+    };
+
+    static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    fn test_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
+    }
+
+    async fn test_pool() -> sqlx::PgPool {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+
+        let _guard = DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        sqlx::raw_sql(include_str!("../migrations/005_remember_jobs.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        pool
+    }
 
     #[test]
     fn classify_object_lock_as_transient() {
@@ -872,12 +1373,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_balance_split_move_abort_as_transient() {
+        for msg in [
+            "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
+            "move abort during balance split",
+        ] {
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected transient for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
     fn classify_network_errors_as_transient() {
         for msg in [
             "sidecar timeout",
             "503 service unavailable",
             "ECONNRESET",
             "insufficient gas",
+            "Enoki API error (400): {\"errors\":[{\"code\":\"expired\",\"message\":\"Sponsored transaction has expired\"}]}",
         ] {
             assert!(
                 !WalletJobError::classify_sidecar_error(msg).is_permanent(),
@@ -905,5 +1421,143 @@ mod tests {
     fn transient_errors_remain_retryable() {
         let error = WalletJobError::Transient("timeout".to_string()).into_apalis_error();
         assert!(matches!(error, apalis::prelude::Error::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn recovery_enqueue_failure_marks_remember_job_failed() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'uploaded')",
+        )
+        .bind(&job_id)
+        .bind("0xtest-owner")
+        .bind("test-ns")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let classified =
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+
+        match classified {
+            WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
+            other => panic!("expected permanent handoff error, got {other}"),
+        }
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some(msg));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_handoff_failure_overrides_transient_looking_queue_error() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: 503 service unavailable";
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'uploaded')",
+        )
+        .bind(&job_id)
+        .bind("0xtest-owner")
+        .bind("test-ns")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let classified =
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+
+        match classified {
+            WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
+            other => panic!("expected permanent handoff error, got {other}"),
+        }
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some(msg));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn failed_status_persistence_keeps_wallet_handoff_retryable() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let msg = "failed to enqueue uploaded-blob finalization job: synthetic queue down";
+        let classified =
+            classify_wallet_remember_handoff_failure(&pool, Some("job-closed-pool"), msg.into())
+                .await;
+
+        match classified {
+            WalletJobError::Transient(got) => {
+                assert!(got.contains(msg));
+                assert!(got.contains("failed to persist remember_jobs failed status"));
+            }
+            other => panic!("expected transient handoff error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_remember_job_failed_returns_real_update_error() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let err = mark_remember_job_failed(&pool, Some("job-closed-pool"), "synthetic")
+            .await
+            .expect_err("closed pool should fail");
+
+        assert!(err.to_string().contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn missing_remember_job_keeps_handoff_retryable() {
+        let pool = test_pool().await;
+        let job_id = format!("missing-remember-job-{}", uuid::Uuid::new_v4());
+        let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
+
+        let classified =
+            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+
+        match classified {
+            WalletJobError::Transient(got) => {
+                assert!(got.contains(msg));
+                assert!(got.contains("failed to persist remember_jobs failed status"));
+                assert!(got.contains("no rows returned"));
+            }
+            other => panic!("expected transient handoff error, got {other}"),
+        }
     }
 }

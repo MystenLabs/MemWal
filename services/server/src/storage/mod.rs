@@ -9,8 +9,8 @@
 //! - [`db`] — `VectorDb`: Postgres+pgvector connection pool, migrations,
 //!   vector insert/search, blob-id cleanup, the delegate-key cache, storage
 //!   quota accounting, the benchmark-mode `plaintext` helpers.
-//! - [`walrus`] — Walrus blob upload (via the relay sidecar) + download
-//!   (native `walrus_rs`), on-chain blob metadata/transfer, blob discovery.
+//! - [`walrus`] — Walrus blob upload (via the relay sidecar), HTTP aggregator
+//!   download, on-chain blob metadata/transfer, blob discovery.
 //! - [`seal`] — SEAL threshold encrypt/decrypt (+ batch decrypt) via the
 //!   TS sidecar; the `SealCredential` resolution (session > delegate key >
 //!   server fallback) and `DecryptOutcome` classification.

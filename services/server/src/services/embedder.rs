@@ -58,6 +58,7 @@ impl Embedder for OpenAiEmbedder {
                 // Real embedding via OpenRouter/OpenAI-compatible API
                 let url = format!("{}/embeddings", self.config.openai_api_base);
 
+                let started = std::time::Instant::now();
                 let resp = self
                     .http_client
                     .post(&url)
@@ -70,8 +71,21 @@ impl Embedder for OpenAiEmbedder {
                     .send()
                     .await
                     .map_err(|e| {
+                        crate::observability::observe_external(
+                            "openai",
+                            "embeddings",
+                            "transport_error",
+                            started.elapsed(),
+                        );
                         AppError::Internal(format!("Embedding API request failed: {}", e))
                     })?;
+                let status_label = resp.status().as_u16().to_string();
+                crate::observability::observe_external(
+                    "openai",
+                    "embeddings",
+                    &status_label,
+                    started.elapsed(),
+                );
 
                 if !resp.status().is_success() {
                     let status = resp.status();
