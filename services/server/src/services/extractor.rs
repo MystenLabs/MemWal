@@ -155,8 +155,17 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// 62.7) by giving the extractor stronger signal for "what's new vs
 /// already-known" — letting borderline assistant content be confidently
 /// extracted instead of dropped under the "be concise" rule.
+///
+/// v5 (MEM-59): adds a granularity carve-out to the `<related_memories>`
+/// dedup rules. v4's broad "don't re-extract a paraphrase" instruction
+/// over-suppressed atomic facts (list items, titles, numbers) when a
+/// SUMMARY of the same topic was in the context block — dropping
+/// LME `single_session_assistant` to 57.6. v5 explicitly tells the
+/// extractor that specific atomic facts are NEW even when a summary
+/// exists, and adds a worked summary-vs-atomic example. Preserves v4's
+/// exact-paraphrase dedup (the mechanism behind the LOCOMO win).
 /// Source: `prompts/extract.txt`.
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v4";
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v5";
 
 /// Map a bucket name from the extractor LLM to a numeric importance score.
 /// Unknown / missing buckets default to `IMPORTANCE_STANDARD` so a noisy
@@ -275,9 +284,10 @@ impl Extractor for LlmExtractor {
 
     /// MEM-57: extract with pre-extraction dedup context. Sends two user
     /// messages — first the `<related_memories>` block, then the actual
-    /// input text. The static system prompt (`extract.v4`) explains how
-    /// the LLM should use the block (skip duplicates, anchor borderline
-    /// content, do not auto-merge).
+    /// input text. The static system prompt (see
+    /// [`FACT_EXTRACTION_PROMPT_VERSION`]) explains how the LLM should use
+    /// the block (skip exact-paraphrase duplicates, keep atomic facts even
+    /// under a summary, anchor borderline content, do not auto-merge).
     ///
     /// On empty `related_memories` slice, short-circuits to plain `extract`
     /// — no wasted tokens, no second user message. The empty-namespace
@@ -773,17 +783,35 @@ mod tests {
 
     #[test]
     fn parse_extracted_facts_handles_v4_dedup_extraction() {
-        // Round-trip test: the extract.v4 prompt's worked dedup example
-        // produces this output (from prompts/extract.txt — only the
-        // NEW destination is emitted because the existing peanut-allergy
-        // fact is in the related_memories block). Pin that the parser
-        // accepts the standard-bucket TAB-prefixed output cleanly.
+        // Round-trip test: the prompt's worked dedup example produces this
+        // output (from prompts/extract.txt — only the NEW destination is
+        // emitted because the existing peanut-allergy fact is in the
+        // related_memories block). Pin that the parser accepts the
+        // standard-bucket TAB-prefixed output cleanly.
         let llm_output = "standard\tUser moved from Hanoi to Da Nang last week";
         let parsed = parse_extracted_facts(llm_output);
         assert_eq!(parsed.raw_count, 1);
         assert_eq!(parsed.facts.len(), 1);
         assert_eq!(parsed.facts[0].text, "User moved from Hanoi to Da Nang last week");
         assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
+    }
+
+    #[test]
+    fn parse_extracted_facts_handles_v5_granularity_extraction() {
+        // Round-trip test for the extract.v5 granularity carve-out
+        // (MEM-59): when related_memories holds only a SUMMARY of a list
+        // and the input holds the atomic items, the prompt instructs the
+        // extractor to emit each atomic item (NOT suppress them as
+        // paraphrases of the summary). Pin that the parser cleanly accepts
+        // the multi-line atomic output the v5 worked example produces.
+        let llm_output = "standard\tAssistant recommended \"How to Sit Properly at a Desk to Avoid Back Pain\" by Mayo Clinic\nstandard\tAssistant recommended \"5 Tips for Better Posture\" by Harvard Health";
+        let parsed = parse_extracted_facts(llm_output);
+        assert_eq!(parsed.raw_count, 2);
+        assert_eq!(parsed.facts.len(), 2);
+        assert!(parsed.facts[0].text.contains("How to Sit Properly at a Desk"));
+        assert!(parsed.facts[1].text.contains("5 Tips for Better Posture"));
+        assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
+        assert_eq!(parsed.facts[1].importance, IMPORTANCE_STANDARD);
     }
 
     // ── MEM-57 P0: prompt-injection guard on related_memories content ──
