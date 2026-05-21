@@ -81,7 +81,6 @@ curl http://localhost:8000/health
 - `MEMWAL_PACKAGE_ID`
 - `MEMWAL_REGISTRY_ID`
 - `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
-- `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` — optional SEAL override for encrypt/decrypt. Prefer `SEAL_SERVER_CONFIGS` for custom committees.
 - `SIDECAR_AUTH_TOKEN` — shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it.
 
 ### Recommended
@@ -105,6 +104,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SIDECAR_URL` defaults to `http://localhost:9000`
 - `SUI_NETWORK` defaults to `mainnet`
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
+- `SEAL_SERVER_CONFIGS` and `SEAL_KEY_SERVERS` are optional overrides for encrypt/decrypt; prefer `SEAL_SERVER_CONFIGS` for custom committees
 - `WALRUS_AGGREGATOR_URLS` can add comma-separated proxy/aggregator candidates for cold-read tail racing after Redis cache misses
 - `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted MemWal-written cold reads after accepting the consistency tradeoff
 - The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
