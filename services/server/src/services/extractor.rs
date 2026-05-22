@@ -155,8 +155,17 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// 62.7) by giving the extractor stronger signal for "what's new vs
 /// already-known" — letting borderline assistant content be confidently
 /// extracted instead of dropped under the "be concise" rule.
+///
+/// v5 (MEM-59): adds a granularity carve-out to the `<related_memories>`
+/// dedup rules. v4's broad "don't re-extract a paraphrase" instruction
+/// over-suppressed atomic facts (list items, titles, numbers) when a
+/// SUMMARY of the same topic was in the context block — dropping
+/// LME `single_session_assistant` to 57.6. v5 explicitly tells the
+/// extractor that specific atomic facts are NEW even when a summary
+/// exists, and adds a worked summary-vs-atomic example. Preserves v4's
+/// exact-paraphrase dedup (the mechanism behind the LOCOMO win).
 /// Source: `prompts/extract.txt`.
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v4";
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v5";
 
 /// Map a bucket name from the extractor LLM to a numeric importance score.
 /// Unknown / missing buckets default to `IMPORTANCE_STANDARD` so a noisy
@@ -275,9 +284,10 @@ impl Extractor for LlmExtractor {
 
     /// MEM-57: extract with pre-extraction dedup context. Sends two user
     /// messages — first the `<related_memories>` block, then the actual
-    /// input text. The static system prompt (`extract.v4`) explains how
-    /// the LLM should use the block (skip duplicates, anchor borderline
-    /// content, do not auto-merge).
+    /// input text. The static system prompt (see
+    /// [`FACT_EXTRACTION_PROMPT_VERSION`]) explains how the LLM should use
+    /// the block (skip exact-paraphrase duplicates, keep atomic facts even
+    /// under a summary, anchor borderline content, do not auto-merge).
     ///
     /// On empty `related_memories` slice, short-circuits to plain `extract`
     /// — no wasted tokens, no second user message. The empty-namespace
@@ -476,8 +486,9 @@ mod tests {
     // other items are leaf functions / constants — direct import.
     use super::Extractor;
     use super::{
-        importance_for_bucket, parse_extracted_facts, parse_fact_line, IMPORTANCE_STANDARD,
-        IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL, MAX_ANALYZE_FACTS,
+        importance_for_bucket, parse_extracted_facts, parse_fact_line, FACT_EXTRACTION_PROMPT,
+        FACT_EXTRACTION_PROMPT_VERSION, IMPORTANCE_STANDARD, IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL,
+        MAX_ANALYZE_FACTS,
     };
 
     #[test]
@@ -773,17 +784,74 @@ mod tests {
 
     #[test]
     fn parse_extracted_facts_handles_v4_dedup_extraction() {
-        // Round-trip test: the extract.v4 prompt's worked dedup example
-        // produces this output (from prompts/extract.txt — only the
-        // NEW destination is emitted because the existing peanut-allergy
-        // fact is in the related_memories block). Pin that the parser
-        // accepts the standard-bucket TAB-prefixed output cleanly.
+        // Round-trip test: the prompt's worked dedup example produces this
+        // output (from prompts/extract.txt — only the NEW destination is
+        // emitted because the existing peanut-allergy fact is in the
+        // related_memories block). Pin that the parser accepts the
+        // standard-bucket TAB-prefixed output cleanly.
         let llm_output = "standard\tUser moved from Hanoi to Da Nang last week";
         let parsed = parse_extracted_facts(llm_output);
         assert_eq!(parsed.raw_count, 1);
         assert_eq!(parsed.facts.len(), 1);
         assert_eq!(parsed.facts[0].text, "User moved from Hanoi to Da Nang last week");
         assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
+    }
+
+    #[test]
+    fn parse_extracted_facts_handles_v5_granularity_extraction() {
+        // Round-trip test for the extract.v5 granularity carve-out
+        // (MEM-59): when related_memories holds only a SUMMARY of a list
+        // and the input holds the atomic items, the prompt instructs the
+        // extractor to emit each atomic item (NOT suppress them as
+        // paraphrases of the summary). Pin that the parser cleanly accepts
+        // the multi-line atomic output the v5 worked example produces.
+        let llm_output = "standard\tAssistant recommended \"How to Sit Properly at a Desk to Avoid Back Pain\" by Mayo Clinic\nstandard\tAssistant recommended \"5 Tips for Better Posture\" by Harvard Health";
+        let parsed = parse_extracted_facts(llm_output);
+        assert_eq!(parsed.raw_count, 2);
+        assert_eq!(parsed.facts.len(), 2);
+        assert!(parsed.facts[0].text.contains("How to Sit Properly at a Desk"));
+        assert!(parsed.facts[1].text.contains("5 Tips for Better Posture"));
+        assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
+        assert_eq!(parsed.facts[1].importance, IMPORTANCE_STANDARD);
+    }
+
+    #[test]
+    fn extract_prompt_asset_contains_v5_granularity_carveout() {
+        // The granularity carve-out + worked example ARE extract.v5
+        // (MEM-59). The parser is content-agnostic, so the round-trip test
+        // above cannot catch a future edit that silently deletes the rule
+        // or example from the prompt asset — which would re-introduce the
+        // LME single_session_assistant 57.6 regression with no test signal.
+        // Pin the asset content directly. Strings must match
+        // prompts/extract.txt byte-for-byte.
+        let prompt = FACT_EXTRACTION_PROMPT;
+
+        // The granularity rule (the v5 fix itself).
+        assert!(
+            prompt.contains("contains only a SUMMARY or GENERALISATION"),
+            "extract.v5 granularity rule missing from prompt asset"
+        );
+        // The worked summary-vs-atomic example header.
+        assert!(
+            prompt.contains("Example with related_memories (granularity"),
+            "extract.v5 granularity worked example missing from prompt asset"
+        );
+        // The example's tab-prefixed output line — doubles as a tab-integrity
+        // guard: if the file is re-saved with spaces instead of a real TAB,
+        // this assertion fails (a space would teach the LLM the wrong format).
+        assert!(
+            prompt.contains("standard\tAssistant recommended \"How to Sit Properly at a Desk"),
+            "extract.v5 example output line missing or not TAB-separated"
+        );
+        // v4's exact-paraphrase dedup must be preserved — it is the
+        // mechanism behind the LOCOMO win and v5 must not drop it.
+        assert!(
+            prompt.contains("EXACT match or close paraphrase"),
+            "v4 exact-paraphrase dedup rule must be preserved in extract.v5"
+        );
+        // The version const must track the prompt: if the prompt changes,
+        // the version should not silently stay behind.
+        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v5");
     }
 
     // ── MEM-57 P0: prompt-injection guard on related_memories content ──
