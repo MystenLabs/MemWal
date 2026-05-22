@@ -69,7 +69,7 @@ class MemWalClient:
 
         Canonical message (must match services/server/src/auth.rs and
         packages/sdk/src/memwal.ts):
-            "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+            "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
         Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
 
         `nonce` is a fresh UUIDv4 per call (MED-1 replay protection — the server

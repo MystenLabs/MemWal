@@ -13,6 +13,7 @@
     "dev:docs": "pnpm --filter memwal-docs dev",
     "build:docs": "pnpm --filter memwal-docs build",
     "preview:docs": "pnpm --filter memwal-docs serve",
+    "check:compatibility": "node scripts/check-compatibility-contract.mjs",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules",
     "changeset": "changeset",
     "changeset:add": "changeset add",

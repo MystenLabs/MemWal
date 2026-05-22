@@ -16,7 +16,7 @@ import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalError
+from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
 from memwal.types import RecallManualOptions, RememberManualOptions
 from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
@@ -35,7 +35,35 @@ _TEST_PACKAGE_ID = "0x" + "11" * 32
 _TEST_SUI_RPC = "http://localhost:9001"
 
 
+def _version_payload(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> dict[str, Any]:
+    return {
+        "relayerVersion": "0.1.0",
+        "apiVersion": api_version,
+        "minSupportedSdk": {
+            "typescript": "0.0.4",
+            "python": min_python,
+            "mcp": "0.0.1",
+        },
+        "featureFlags": {"runtime.versionEndpoint": True},
+        "deprecations": [],
+        "build": {},
+    }
+
+
+def _mock_version(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> None:
+    respx.get(f"{_TEST_SERVER}/version").mock(
+        return_value=httpx.Response(200, json=_version_payload(api_version, min_python))
+    )
+
+
 def mock_seal_session_prereqs() -> None:
+    _mock_version()
     respx.get(f"{_TEST_SERVER}/config").mock(
         return_value=httpx.Response(
             200,
@@ -409,10 +437,58 @@ class TestHealth:
         assert result.status == "ok"
         assert result.version == "0.1.0"
 
+    @respx.mock
+    async def test_compatibility(self, memwal_client: MemWal) -> None:
+        _mock_version()
+
+        metadata = await memwal_client.compatibility()
+
+        assert metadata["apiVersion"] == "1.0.0"
+        assert metadata["minSupportedSdk"]["python"] == "0.1.0"
+
+    @respx.mock
+    async def test_compatibility_rejects_unsupported_relayer(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(api_version="2.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="supports relayer API 1.x"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_old_sdk(self, memwal_client: MemWal) -> None:
+        _mock_version(min_python="9.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="requires Python SDK >= 9.0.0"):
+            await memwal_client.recall("test")
+
+    @respx.mock
+    async def test_compatibility_rejects_missing_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        payload = _version_payload()
+        del payload["minSupportedSdk"]["python"]
+        respx.get(f"{_TEST_SERVER}/version").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        with pytest.raises(MemWalCompatibilityError, match="minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_invalid_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(min_python="latest")
+
+        with pytest.raises(MemWalCompatibilityError, match="invalid minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
 
 class TestManualAPI:
     @respx.mock
     async def test_remember_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/remember/manual").mock(
             return_value=httpx.Response(
                 200,
@@ -441,6 +517,7 @@ class TestManualAPI:
 
     @respx.mock
     async def test_recall_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
             return_value=httpx.Response(
                 200,

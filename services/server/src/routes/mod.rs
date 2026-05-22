@@ -5,7 +5,8 @@
 //!   (+ the async prep tasks and the summarize-for-embedding helpers)
 //! - `recall` — `/api/recall`, `/api/recall/manual` (+ the recall-embedding cache)
 //! - `analyze` — `/api/analyze` (fact extraction → store; sync bypass in benchmark mode)
-//! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`, `/health`, `/config`
+//! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
+//!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
@@ -21,7 +22,7 @@ mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
-pub use admin::{ask, forget, get_config, health, restore, stats};
+pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use recall::{recall, recall_manual};
 pub use remember::{

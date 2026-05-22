@@ -51,8 +51,13 @@ import type {
     RememberBulkStatusResult,
     RememberBulkStatusItem,
     RememberBulkItemResult,
+    RelayerVersionMetadata,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import {
+    assertCompatibleRelayer,
+    compatibilityErrorFromStatus,
+} from "./compatibility.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -120,8 +125,11 @@ export class MemWal {
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
     private sessionCache: SessionCacheEntry | null = null;
     private serverConfig: ServerConfig | null = null;
+    private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
+    /** Single-flight guard so concurrent requests share one compatibility probe. */
+    private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -158,6 +166,8 @@ export class MemWal {
         // instance must not leak authorization tokens either.
         this.sessionCache = null;
         this.serverConfig = null;
+        this.relayerVersionMetadata = null;
+        this.compatibilityPromise = null;
     }
 
     // ============================================================
@@ -634,28 +644,21 @@ export class MemWal {
     }
 
     /**
-     * Check server health.
-     *
-     * INFO-7: The health endpoint is currently public/unsigned server-side,
-     * but we send the same signed-request envelope as every other call so
-     * that (a) the channel is authenticated whenever the server opts in, and
-     * (b) a MitM cannot trivially forge a "healthy" response for a client
-     * that has no way to tell. If the server ignores the signature headers
-     * on `/health`, this is still a harmless no-op.
+     * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        try {
-            return await this.signedRequest<HealthResult>("GET", "/health", {});
-        } catch (err) {
-            // Fall back to a plain GET for servers that reject bodies on GET /health.
-            const res = await fetch(`${this.serverUrl}/health`);
-            if (!res.ok) {
-                throw err instanceof Error
-                    ? err
-                    : new Error(`Health check failed: ${res.status}`);
-            }
-            return res.json() as Promise<HealthResult>;
+        const res = await fetch(`${this.serverUrl}/health`);
+        if (!res.ok) {
+            throw new Error(`Health check failed: ${res.status}`);
         }
+        return res.json() as Promise<HealthResult>;
+    }
+
+    /**
+     * Fetch and validate the relayer compatibility contract.
+     */
+    async compatibility(): Promise<RelayerVersionMetadata> {
+        return this.ensureCompatibleRelayer();
     }
 
     /**
@@ -676,6 +679,42 @@ export class MemWal {
             this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
         }
         return this.publicKey;
+    }
+
+    private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
+        if (this.relayerVersionMetadata) return this.relayerVersionMetadata;
+        if (this.compatibilityPromise) return this.compatibilityPromise;
+
+        this.compatibilityPromise = this.fetchCompatibilityMetadata().finally(() => {
+            this.compatibilityPromise = null;
+        });
+        return this.compatibilityPromise;
+    }
+
+    private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        let body: Partial<RelayerVersionMetadata>;
+
+        if (versionRes.ok) {
+            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+        } else if (versionRes.status === 404 || versionRes.status === 405) {
+            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            if (!healthRes.ok) {
+                throw new Error(
+                    `MemWal compatibility check failed: GET /version returned ` +
+                        `${versionRes.status}, and GET /health returned ${healthRes.status}`,
+                );
+            }
+            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+        } else {
+            throw new Error(
+                `MemWal compatibility check failed: GET /version returned ${versionRes.status}`,
+            );
+        }
+
+        assertCompatibleRelayer(body, this.serverUrl);
+        this.relayerVersionMetadata = body;
+        return body;
     }
 
     // ============================================================
@@ -822,7 +861,7 @@ export class MemWal {
      * Make a signed request to the server.
      *
      * Signature format (LOW-23 updated):
-     *   "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+     *   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
      *
      * Headers: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id
      *
@@ -863,6 +902,7 @@ export class MemWal {
         const options = Array.isArray(acceptedStatusesOrOptions)
             ? requestOptions
             : acceptedStatusesOrOptions;
+        await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -911,6 +951,9 @@ export class MemWal {
         if (!acceptedStatuses.includes(res.status)) {
             // LOW-26: sanitize server error bodies before surfacing to callers.
             const raw = await res.text();
+            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+            if (compatibilityError) throw compatibilityError;
+
             const { message, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(message) as Error & {
                 status?: number;

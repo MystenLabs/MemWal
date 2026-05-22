@@ -137,8 +137,18 @@ RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: st
 Check relayer health. No authentication. Raises `MemWalError` on non-200.
 
 ```python
-HealthResult(status: str, version: str)
+HealthResult(
+    status: str,
+    version: str,
+    relayer_version: str | None = None,
+    api_version: str | None = None,
+    min_supported_sdk: dict[str, str] | None = None,
+)
 ```
+
+### `compatibility() -> dict`
+
+Fetch and validate the relayer compatibility contract from `/version`. Protected SDK calls run this check before signing the first request and raise `MemWalCompatibilityError` when the SDK/relayer pair is unsupported.
 
 ### `get_public_key_hex() -> str`
 
@@ -200,7 +210,7 @@ from memwal import delegate_key_to_sui_address, delegate_key_to_public_key
 Every request is signed with Ed25519 (PyNaCl). Canonical message:
 
 ```
-{timestamp}.{method}.{path}.{sha256(body)}.{nonce}.{account_id}
+{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
 
-Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce` (UUID v4), `x-delegate-key`, `x-account-id`. SDKs that omit `x-nonce` are rejected by the server with `426 Upgrade Required`.
+Signed requests send `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce` (UUID v4), and `x-account-id`. Relayer-mode requests also send `x-seal-session`; manual-mode requests omit decrypt credentials. SDKs that omit `x-nonce` are rejected by the server with `426 Upgrade Required`.
