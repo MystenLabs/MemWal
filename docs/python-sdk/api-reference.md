@@ -213,4 +213,4 @@ Every request is signed with Ed25519 (PyNaCl). Canonical message:
 {timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
 
-Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce` (UUID v4), `x-delegate-key`, `x-account-id`. SDKs that omit `x-nonce` are rejected by the server with `426 Upgrade Required`.
+Signed requests send `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce` (UUID v4), and `x-account-id`. Relayer-mode requests also send `x-seal-session`; manual-mode requests omit decrypt credentials. SDKs that omit `x-nonce` are rejected by the server with `426 Upgrade Required`.

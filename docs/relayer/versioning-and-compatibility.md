@@ -26,7 +26,7 @@ Public surfaces include:
 
 | Relayer API | Relayer package | TypeScript SDK | Python SDK | MCP package | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `1.x` | `0.1.x` | `>=0.0.4` | `>=0.1.0` | `>=0.0.1` | Requires `x-nonce`; TypeScript SDK uses `x-seal-session`; Python and MCP still use documented legacy credential paths |
+| `1.x` | `0.1.x` | `>=0.0.4` | `>=0.1.0` | `>=0.0.1` | Requires `x-nonce`; TypeScript and Python SDKs use `x-seal-session` for relayer-mode decrypt flows; MCP uses bearer delegate credentials for SSE |
 
 SDKs and MCP clients read `/version` before protected requests and fail with an explicit compatibility error when the relayer API major or minimum SDK version is unsupported.
 

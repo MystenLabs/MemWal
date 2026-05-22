@@ -28,7 +28,7 @@ All `/api/*` routes require signed headers. The SDK handles this automatically.
 | Header | Description |
 |--------|-------------|
 | `x-account-id` | MemWalAccount object ID hint. Official SDKs always send it and include it in the canonical signature |
-| `x-seal-session` | Base64 exported SEAL SessionKey for relayer-managed decrypt flows. Used by the TypeScript SDK |
+| `x-seal-session` | Base64 exported SEAL SessionKey for relayer-managed decrypt flows. Used by the TypeScript and Python SDKs |
 | `x-delegate-key` | Legacy delegate private key credential for relayer-managed decrypt flows. Deprecated; use `x-seal-session` where supported |
 
 ### Signature Format

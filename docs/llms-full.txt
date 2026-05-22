@@ -341,7 +341,7 @@ The relayer is the backend that turns SDK calls into memory operations:
 | `x-timestamp` | Unix timestamp in seconds (5-minute validity window) |
 | `x-nonce` | UUID v4 nonce for replay protection |
 | `x-account-id` | MemWalAccount object ID hint included in the canonical signature by official SDKs |
-| `x-seal-session` | Exported SEAL SessionKey for TypeScript relayer-mode decrypt flows |
+| `x-seal-session` | Exported SEAL SessionKey for TypeScript and Python relayer-mode decrypt flows |
 | `x-delegate-key` | Legacy decrypt credential; deprecated where `x-seal-session` is supported |
 
 Signature format: `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
