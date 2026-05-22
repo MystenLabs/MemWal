@@ -7,11 +7,12 @@ Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
 
-## Unreleased
+## 0.1.1
 
 ### Added
 
 - Relayer environment presets via `env="prod" | "dev" | "staging" | "local"` on `MemWal.create`, `MemWalSync.create`, `with_memwal_langchain`, and `with_memwal_openai`. Mirrors the TypeScript SDK / MCP package shorthand. Precedence: explicit non-default `server_url` > `env` > default; an unknown preset raises `ValueError`. `ENV_PRESETS` is exported from the package.
+- Added relayer compatibility metadata checks before protected requests, plus `compatibility()` on async and sync clients.
 
 ## 0.1.0.dev1
 
