@@ -140,7 +140,11 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 
 Check relayer health. Does not require authentication.
 
-**Returns:** `{ status: string, version: string }`
+**Returns:** `{ status: string, version: string, relayerVersion?: string, apiVersion?: string, minSupportedSdk?: ... }`
+
+### `compatibility(): Promise<RelayerVersionMetadata>`
+
+Fetch and validate the relayer compatibility contract from `/version`. Protected SDK calls run this check before signing the first request and raise `MemWalCompatibilityError` when the SDK/relayer pair is unsupported.
 
 ### `getPublicKeyHex(): Promise<string>`
 

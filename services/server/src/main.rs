@@ -1,4 +1,5 @@
 mod auth;
+mod compatibility;
 mod engine;
 mod jobs;
 mod mcp_proxy;
@@ -570,6 +571,10 @@ async fn main() {
         .route(
             "/health",
             get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/version",
+            get(routes::version).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/config",

@@ -24,10 +24,12 @@ pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// - `x-public-key`: hex-encoded Ed25519 public key (32 bytes)
 /// - `x-signature`: hex-encoded Ed25519 signature (64 bytes)
 /// - `x-timestamp`: Unix timestamp (seconds)
-/// - `x-account-id` (optional): account object ID hint (skips cache/registry lookup)
+/// - `x-nonce`: UUID v4 replay-protection nonce
+/// - `x-account-id`: account object ID hint included in the canonical signature
 ///
 /// Flow:
-/// 1. Verify Ed25519 signature: `{timestamp}.{method}.{path}.{body_sha256}`
+/// 1. Verify Ed25519 signature:
+///    `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
 /// 2. Resolve account: cache → signed header hint/config fallback → registry scan
 /// 3. Verify onchain: public_key ∈ MemWalAccount.delegate_keys
 /// 4. Cache the mapping for future requests

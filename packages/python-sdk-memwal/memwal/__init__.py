@@ -24,6 +24,7 @@ Quick start::
 
 from .client import (
     MemWal,
+    MemWalCompatibilityError,
     MemWalError,
     MemWalRememberJobFailed,
     MemWalRememberJobNotFound,
@@ -70,6 +71,7 @@ __all__ = [
     "MemWal",
     "MemWalSync",
     "MemWalError",
+    "MemWalCompatibilityError",
     "MemWalRememberJobFailed",
     "MemWalRememberJobNotFound",
     "MemWalRememberJobTimeout",
@@ -110,4 +112,4 @@ __all__ = [
     "RecallManualResult",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

@@ -7,14 +7,16 @@ that the client sends correct headers, body, and handles errors.
 
 from __future__ import annotations
 
+import base64
 import json
+from typing import Any
 
 import httpx
 import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalError
+from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
 from memwal.types import RecallManualOptions, RememberManualOptions
 from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
@@ -29,6 +31,66 @@ _TEST_KEY_HEX = bytes_to_hex(bytes(_TEST_KEY))
 _TEST_PUB_HEX = bytes_to_hex(bytes(_TEST_KEY.verify_key))
 _TEST_ACCOUNT_ID = "0xabc123"
 _TEST_SERVER = "http://localhost:8000"
+_TEST_PACKAGE_ID = "0x" + "11" * 32
+_TEST_SUI_RPC = "http://localhost:9001"
+
+
+def _version_payload(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> dict[str, Any]:
+    return {
+        "relayerVersion": "0.1.0",
+        "apiVersion": api_version,
+        "minSupportedSdk": {
+            "typescript": "0.0.4",
+            "python": min_python,
+            "mcp": "0.0.1",
+        },
+        "featureFlags": {"runtime.versionEndpoint": True},
+        "deprecations": [],
+        "build": {},
+    }
+
+
+def _mock_version(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> None:
+    respx.get(f"{_TEST_SERVER}/version").mock(
+        return_value=httpx.Response(200, json=_version_payload(api_version, min_python))
+    )
+
+
+def mock_seal_session_prereqs() -> None:
+    _mock_version()
+    respx.get(f"{_TEST_SERVER}/config").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "packageId": _TEST_PACKAGE_ID,
+                "network": "testnet",
+                "suiRpcUrl": _TEST_SUI_RPC,
+            },
+        )
+    )
+    respx.post(_TEST_SUI_RPC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "data": {
+                        "version": "1",
+                    }
+                }
+            },
+        )
+    )
+
+
+def decode_seal_session_header(request: httpx.Request) -> dict[str, Any]:
+    header = request.headers["x-seal-session"]
+    return json.loads(base64.b64decode(header).decode("utf-8"))
 
 
 @pytest.fixture
@@ -50,6 +112,7 @@ class TestRemember:
     @respx.mock
     async def test_sends_correct_body(self, memwal_client: MemWal) -> None:
         """remember() should POST to /api/remember with text and namespace."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
                 202,
@@ -73,6 +136,7 @@ class TestRemember:
     @respx.mock
     async def test_sends_correct_headers(self, memwal_client: MemWal) -> None:
         """remember() should include all required auth headers."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
                 202,
@@ -95,13 +159,22 @@ class TestRemember:
         assert "x-timestamp" in headers
         assert headers["x-timestamp"].isdigit()
         assert "x-nonce" in headers
-        assert headers["x-delegate-key"] == _TEST_KEY_HEX
         assert headers["x-account-id"] == _TEST_ACCOUNT_ID
+        assert "x-seal-session" in headers
+        assert "x-delegate-key" not in headers
         assert headers["content-type"] == "application/json"
+
+        session = decode_seal_session_header(request)
+        assert session["address"].startswith("0x")
+        assert session["packageId"] == _TEST_PACKAGE_ID
+        assert session["ttlMin"] == 5
+        assert session["sessionKey"].startswith("suiprivkey")
+        assert session["personalMessageSignature"]
 
     @respx.mock
     async def test_signature_is_verifiable(self, memwal_client: MemWal) -> None:
         """The signature in headers should be verifiable with the public key."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
                 202,
@@ -141,6 +214,7 @@ class TestRemember:
     @respx.mock
     async def test_custom_namespace(self, memwal_client: MemWal) -> None:
         """remember() should use custom namespace when provided."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
                 202,
@@ -168,6 +242,7 @@ class TestRecall:
     @respx.mock
     async def test_sends_correct_body(self, memwal_client: MemWal) -> None:
         """recall() should POST to /api/recall with query, limit, namespace."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
             return_value=httpx.Response(
                 200,
@@ -198,6 +273,7 @@ class TestRecall:
     @respx.mock
     async def test_sends_correct_headers(self, memwal_client: MemWal) -> None:
         """recall() should include all required auth headers."""
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
             return_value=httpx.Response(
                 200,
@@ -211,6 +287,38 @@ class TestRecall:
         assert headers["x-public-key"] == _TEST_PUB_HEX
         assert len(headers["x-signature"]) == 128
         assert headers["x-account-id"] == _TEST_ACCOUNT_ID
+        assert "x-seal-session" in headers
+        assert "x-delegate-key" not in headers
+
+    @respx.mock
+    async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        route = respx.get(f"{_TEST_SERVER}/api/remember/job-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"job_id": "job-1", "status": "done", "blob_id": "b1", "owner": "0xowner"},
+            )
+        )
+
+        result = await memwal_client.wait_for_remember_job("job-1", poll_interval_ms=0, timeout_ms=100)
+
+        request = route.calls[0].request
+        assert request.content == b""
+
+        headers = request.headers
+        message = build_signature_message(
+            timestamp=headers["x-timestamp"],
+            method="GET",
+            path="/api/remember/job-1",
+            body_sha256=sha256_hex(""),
+            nonce=headers["x-nonce"],
+            account_id=headers["x-account-id"],
+        )
+        verify_key = nacl.signing.VerifyKey(bytes.fromhex(headers["x-public-key"]))
+        verify_key.verify(message.encode("utf-8"), bytes.fromhex(headers["x-signature"]))
+        assert result.blob_id == "b1"
 
 
 # ============================================================
@@ -222,6 +330,7 @@ class TestErrorHandling:
     @respx.mock
     async def test_non_200_raises_memwal_error(self, memwal_client: MemWal) -> None:
         """Non-200 responses should raise MemWalError with status and body."""
+        mock_seal_session_prereqs()
         respx.post(f"{_TEST_SERVER}/api/remember").mock(
             return_value=httpx.Response(
                 401,
@@ -235,6 +344,7 @@ class TestErrorHandling:
     @respx.mock
     async def test_500_raises_memwal_error(self, memwal_client: MemWal) -> None:
         """Server errors should raise MemWalError."""
+        mock_seal_session_prereqs()
         respx.post(f"{_TEST_SERVER}/api/recall").mock(
             return_value=httpx.Response(
                 500,
@@ -264,6 +374,7 @@ class TestErrorHandling:
 class TestAnalyze:
     @respx.mock
     async def test_analyze(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
             return_value=httpx.Response(
                 200,
@@ -289,6 +400,7 @@ class TestAnalyze:
 class TestRestore:
     @respx.mock
     async def test_restore(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/restore").mock(
             return_value=httpx.Response(
                 200,
@@ -325,10 +437,58 @@ class TestHealth:
         assert result.status == "ok"
         assert result.version == "0.1.0"
 
+    @respx.mock
+    async def test_compatibility(self, memwal_client: MemWal) -> None:
+        _mock_version()
+
+        metadata = await memwal_client.compatibility()
+
+        assert metadata["apiVersion"] == "1.0.0"
+        assert metadata["minSupportedSdk"]["python"] == "0.1.0"
+
+    @respx.mock
+    async def test_compatibility_rejects_unsupported_relayer(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(api_version="2.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="supports relayer API 1.x"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_old_sdk(self, memwal_client: MemWal) -> None:
+        _mock_version(min_python="9.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="requires Python SDK >= 9.0.0"):
+            await memwal_client.recall("test")
+
+    @respx.mock
+    async def test_compatibility_rejects_missing_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        payload = _version_payload()
+        del payload["minSupportedSdk"]["python"]
+        respx.get(f"{_TEST_SERVER}/version").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        with pytest.raises(MemWalCompatibilityError, match="minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_invalid_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(min_python="latest")
+
+        with pytest.raises(MemWalCompatibilityError, match="invalid minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
 
 class TestManualAPI:
     @respx.mock
     async def test_remember_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/remember/manual").mock(
             return_value=httpx.Response(
                 200,
@@ -348,12 +508,16 @@ class TestManualAPI:
         result = await memwal_client.remember_manual(opts)
 
         body = json.loads(route.calls[0].request.content)
+        headers = route.calls[0].request.headers
         assert body["blob_id"] == "blob-xyz"
         assert body["vector"] == [0.1, 0.2, 0.3]
+        assert "x-seal-session" not in headers
+        assert "x-delegate-key" not in headers
         assert result.blob_id == "blob-xyz"
 
     @respx.mock
     async def test_recall_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
             return_value=httpx.Response(
                 200,
@@ -370,8 +534,11 @@ class TestManualAPI:
         result = await memwal_client.recall_manual(opts)
 
         body = json.loads(route.calls[0].request.content)
+        headers = route.calls[0].request.headers
         assert body["vector"] == [0.1, 0.2, 0.3]
         assert body["limit"] == 5
+        assert "x-seal-session" not in headers
+        assert "x-delegate-key" not in headers
         assert len(result.results) == 1
         assert result.results[0].blob_id == "b1"
 
@@ -386,6 +553,7 @@ class TestPublicKey:
 class TestAsk:
     @respx.mock
     async def test_ask(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/ask").mock(
             return_value=httpx.Response(
                 200,
@@ -413,6 +581,7 @@ class TestAsk:
 
     @respx.mock
     async def test_ask_empty_memories(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
         respx.post(f"{_TEST_SERVER}/api/ask").mock(
             return_value=httpx.Response(
                 200,
@@ -430,6 +599,7 @@ class TestAsk:
 
     @respx.mock
     async def test_ask_custom_namespace(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
         route = respx.post(f"{_TEST_SERVER}/api/ask").mock(
             return_value=httpx.Response(
                 200,
@@ -461,3 +631,19 @@ class TestContextManager:
         ) as client:
             result = await client.health()
             assert result.status == "ok"
+
+
+class TestSealSession:
+    @respx.mock
+    async def test_builds_cached_session_envelope(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+
+        first = await memwal_client._build_seal_session()
+        second = await memwal_client._build_seal_session()
+
+        exported = json.loads(base64.b64decode(first).decode("utf-8"))
+        assert first == second
+        assert exported["packageId"] == _TEST_PACKAGE_ID
+        assert exported["ttlMin"] == 5
+        assert exported["sessionKey"].startswith("suiprivkey")
+        assert exported["personalMessageSignature"]

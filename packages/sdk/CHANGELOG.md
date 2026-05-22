@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal
 
+## 0.0.5
+
+### Added
+
+- Added relayer compatibility metadata checks before protected requests.
+- Added `compatibility()` and exported compatibility types/errors so callers can inspect SDK/relayer support explicitly.
+
 ## 0.0.4
 
 ### Added

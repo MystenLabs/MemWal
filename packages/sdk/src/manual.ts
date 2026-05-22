@@ -35,8 +35,13 @@ import type {
     RecallManualMemory,
     RestoreResult,
     SealServerConfig,
+    RelayerVersionMetadata,
 } from "./types.js";
 import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import {
+    assertCompatibleRelayer,
+    compatibilityErrorFromStatus,
+} from "./compatibility.js";
 
 // ============================================================
 // Constants
@@ -128,6 +133,8 @@ export class MemWalManual {
     private config: MemWalManualConfig;
     private walletSigner: WalletSigner | null;
     private namespace: string;
+    private relayerVersionMetadata: RelayerVersionMetadata | null = null;
+    private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
@@ -178,6 +185,15 @@ export class MemWalManual {
         if (this.delegatePublicKey) {
             this.delegatePublicKey.fill(0);
         }
+        this.relayerVersionMetadata = null;
+        this.compatibilityPromise = null;
+    }
+
+    /**
+     * Fetch and validate the relayer compatibility contract.
+     */
+    async compatibility(): Promise<RelayerVersionMetadata> {
+        return this.ensureCompatibleRelayer();
     }
 
     /** Whether this client uses a connected wallet signer (vs raw keypair) */
@@ -660,6 +676,42 @@ export class MemWalManual {
         return this.delegatePublicKey;
     }
 
+    private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
+        if (this.relayerVersionMetadata) return this.relayerVersionMetadata;
+        if (this.compatibilityPromise) return this.compatibilityPromise;
+
+        this.compatibilityPromise = this.fetchCompatibilityMetadata().finally(() => {
+            this.compatibilityPromise = null;
+        });
+        return this.compatibilityPromise;
+    }
+
+    private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        let body: Partial<RelayerVersionMetadata>;
+
+        if (versionRes.ok) {
+            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+        } else if (versionRes.status === 404 || versionRes.status === 405) {
+            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            if (!healthRes.ok) {
+                throw new Error(
+                    `MemWal compatibility check failed: GET /version returned ` +
+                        `${versionRes.status}, and GET /health returned ${healthRes.status}`,
+                );
+            }
+            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+        } else {
+            throw new Error(
+                `MemWal compatibility check failed: GET /version returned ${versionRes.status}`,
+            );
+        }
+
+        assertCompatibleRelayer(body, this.serverUrl);
+        this.relayerVersionMetadata = body;
+        return body;
+    }
+
     /**
      * Make a signed request to the server.
      *
@@ -673,6 +725,7 @@ export class MemWalManual {
         path: string,
         body: object,
     ): Promise<T> {
+        await this.ensureCompatibleRelayer();
         const ed = await import("@noble/ed25519");
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -707,6 +760,9 @@ export class MemWalManual {
         if (!res.ok) {
             // LOW-26: sanitize server error bodies before re-throwing.
             const raw = await res.text();
+            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+            if (compatibilityError) throw compatibilityError;
+
             const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(sanitized) as Error & {
                 status?: number;

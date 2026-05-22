@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.2
+
+### Added
+
+- Added relayer compatibility metadata checks before opening the MCP bridge.
+
 ## 0.0.1
 
 ### Initial Release

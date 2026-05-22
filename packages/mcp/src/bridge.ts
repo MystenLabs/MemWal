@@ -16,6 +16,7 @@
  */
 import type { MemWalCredentials } from "./auth.js";
 import { clearCreds, credsPath } from "./auth.js";
+import { ensureCompatibleRelayer } from "./compatibility.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
 
@@ -125,6 +126,8 @@ async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
 ): Promise<SseHandshakeResult> {
+    await ensureCompatibleRelayer(relayerUrl);
+
     const url = `${relayerUrl.replace(/\/+$/, "")}/api/mcp/sse`;
     const controller = new AbortController();
 
