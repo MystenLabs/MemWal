@@ -509,7 +509,7 @@ pub struct RecallResult {
     pub score: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
@@ -743,6 +743,16 @@ pub struct RecallManualRequest {
     pub limit: usize,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights. Omitted → results are ordered by
+    /// raw pgvector cosine distance, byte-identical to the pre-ranker
+    /// behaviour. When set, the manual path applies the **same**
+    /// `CompositeRanker` as `/api/recall` and `/api/ask` so all three return
+    /// the same ordering for the same query + weights (ENG-1785). The ranker
+    /// scores the `SearchHit` fields directly (`distance` / `created_at` /
+    /// `importance`) — no Walrus fetch or SEAL decrypt — preserving manual
+    /// recall's "server returns blob ids + distances, client hydrates" contract.
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
