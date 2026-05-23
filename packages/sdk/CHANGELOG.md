@@ -6,6 +6,16 @@
 
 - Added relayer compatibility metadata checks before protected requests.
 - Added `compatibility()` and exported compatibility types/errors so callers can inspect SDK/relayer support explicitly.
+- Added `RecallOptions` for `topK`, namespace override, and `maxDistance`.
+
+### Changed
+
+- Prefer Sui gRPC for SEAL sessions, with JSON-RPC fallback.
+- Updated docs/examples for `MEMWAL_PRIVATE_KEY` and hosted relayer defaults.
+
+### Fixed
+
+- Made `401` relayer errors more actionable.
 
 ## 0.0.4
 
