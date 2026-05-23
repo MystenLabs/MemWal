@@ -12,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:reset": "tsx scripts/reset-db.ts && drizzle-kit push",
+    "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
     "clean": "rm -rf .next out build"
   },
   "dependencies": {

@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     return new ChatbotError("bad_request:api").toResponse();
   }
 
-  const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
+  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
   const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   if (!memwalKey) {
     return new ChatbotError(

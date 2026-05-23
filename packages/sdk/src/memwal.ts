@@ -33,6 +33,7 @@ import type {
     RememberResult,
     RecallResult,
     RecallMemory,
+    RecallOptions,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -112,6 +113,10 @@ function pollingDelayMs(baseMs: number, attempt: number): number {
 
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
+}
+
+function normalizeSuiNetworkForGrpc(network: string): string {
+    return network === "local" ? "localnet" : network;
 }
 
 export class MemWal {
@@ -467,7 +472,7 @@ export class MemWal {
      * verify → embed query → search → Walrus download → decrypt → return plaintext
      *
      * @param query - Search query
-     * @param limit - Max number of results (default: 10)
+     * @param limitOrOptions - Max number of results (default: 10), or recall options
      * @returns RecallResult with decrypted text results
      *
      * @example
@@ -478,15 +483,43 @@ export class MemWal {
      * }
      * ```
      */
-    async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
+    async recall(
+        query: string,
+        limitOrOptions: number | RecallOptions | undefined = 10,
+        namespace?: string,
+    ): Promise<RecallResult> {
+        let options: RecallOptions;
+        if (limitOrOptions == null) {
+            options = { limit: 10, namespace };
+        } else if (typeof limitOrOptions === "number") {
+            options = { limit: limitOrOptions, namespace };
+        } else {
+            options = limitOrOptions;
+        }
+        const limit = options.topK ?? options.limit ?? 10;
+        const resolvedNamespace = options.namespace ?? this.namespace;
+
         const ac = new AbortController();
         const tid = setTimeout(() => ac.abort(), 15000);
         try {
-            return await this.signedRequest<RecallResult>("POST", "/api/recall", {
+            const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
-                namespace: namespace ?? this.namespace,
+                namespace: resolvedNamespace,
             }, { signal: ac.signal });
+
+            if (typeof options.maxDistance === "number") {
+                const filtered = result.results.filter(
+                    (memory) => memory.distance < options.maxDistance!,
+                );
+                return {
+                    ...result,
+                    results: filtered,
+                    total: filtered.length,
+                };
+            }
+
+            return result;
         } finally {
             clearTimeout(tid);
         }
@@ -759,14 +792,29 @@ export class MemWal {
 
     private async buildSealSessionInner(): Promise<string> {
         const cfg = await this.fetchServerConfig();
-        // @mysten/sui renamed/moved `SuiClient` between minor versions:
-        //   - pre-2.6:  `SuiClient` in `@mysten/sui/client`
-        //   - 2.6+:     `SuiJsonRpcClient` in `@mysten/sui/jsonRpc`
-        // Probe both paths so the SDK works across the supported range.
         const sealMod = (await import("@mysten/seal")) as any;
         const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
         const SessionKey = sealMod.SessionKey;
         const Ed25519Keypair = ed25519Mod.Ed25519Keypair;
+
+        const clientCandidates: Array<{ name: string; client: any }> = [];
+
+        // Prefer Sui's gRPC client on modern @mysten/sui versions. Keep the
+        // JSON-RPC probes as compatibility fallbacks for older peer installs.
+        try {
+            const mod = (await import("@mysten/sui/grpc")) as any;
+            if (typeof mod.SuiGrpcClient === "function") {
+                clientCandidates.push({
+                    name: "SuiGrpcClient",
+                    client: new mod.SuiGrpcClient({
+                        network: normalizeSuiNetworkForGrpc(cfg.network),
+                        baseUrl: cfg.suiRpcUrl,
+                    }),
+                });
+            }
+        } catch {
+            /* @mysten/sui/grpc is not present on this version */
+        }
 
         let SuiClient: any = undefined;
         try {
@@ -783,23 +831,45 @@ export class MemWal {
                 /* not present on this version either */
             }
         }
-        if (typeof SuiClient !== "function" || typeof Ed25519Keypair !== "function") {
+        if (typeof SuiClient === "function") {
+            clientCandidates.push({
+                name: "SuiClient",
+                client: new SuiClient({ url: cfg.suiRpcUrl }),
+            });
+        }
+
+        if (clientCandidates.length === 0 || typeof Ed25519Keypair !== "function") {
             throw new Error(
-                "SuiClient/SuiJsonRpcClient or Ed25519Keypair not found in @mysten/sui. " +
+                "SuiGrpcClient/SuiClient or Ed25519Keypair not found in @mysten/sui. " +
                 "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
             );
         }
 
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
-        const suiClient = new SuiClient({ url: cfg.suiRpcUrl });
 
-        const session = await SessionKey.create({
-            address: keypair.getPublicKey().toSuiAddress(),
-            packageId: cfg.packageId,
-            ttlMin: SEAL_SESSION_TTL_MIN,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
+        // gRPC getObject returns { object } whereas legacy JSON-RPC returns
+        // { data }. SessionKey accepts either through the shared core client
+        // interface. If the relayer still serves a JSON-RPC URL in config,
+        // the legacy client remains a runtime fallback.
+        let session: any = undefined;
+        let lastClientError: unknown;
+        for (const candidate of clientCandidates) {
+            try {
+                session = await SessionKey.create({
+                    address: keypair.getPublicKey().toSuiAddress(),
+                    packageId: cfg.packageId,
+                    ttlMin: SEAL_SESSION_TTL_MIN,
+                    signer: keypair,
+                    suiClient: candidate.client as any,
+                });
+                break;
+            } catch (err) {
+                lastClientError = err;
+            }
+        }
+        if (!session) {
+            throw lastClientError;
+        }
 
         // Eagerly sign the personal message so the exported envelope is
         // fully self-contained. `SessionKey.create()` defers this signing

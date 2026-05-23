@@ -41,7 +41,7 @@ export function PDWStatusIndicator() {
             </div>
           </TooltipTrigger>
           <TooltipContent>
-            <p className="text-xs">MemWal not configured (MEMWAL_KEY not set)</p>
+            <p className="text-xs">MemWal not configured (MEMWAL_PRIVATE_KEY not set)</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

@@ -119,6 +119,16 @@ export function sanitizeServerError(
     status: number,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
+    if (status === 401) {
+        return {
+            message:
+                "401 from relayer: typically wrong private key, key not registered on this account, " +
+                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials.",
+            raw: rawBody,
+            serverCode: "AUTH_REJECTED",
+        };
+    }
+
     const MAX = 200;
     let serverCode: string | undefined;
     let text = rawBody;
@@ -192,4 +202,3 @@ export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uin
     const ed = await import("@noble/ed25519");
     return ed.getPublicKeyAsync(hexToBytes(privateKeyHex));
 }
-

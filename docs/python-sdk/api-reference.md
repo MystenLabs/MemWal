@@ -83,9 +83,10 @@ RememberBulkResult(
 
 `remember_bulk_async` + `wait_for_remember_jobs` in one call.
 
-### `recall(query, limit=10, namespace=None) -> RecallResult`
+### `recall(query, limit=10, namespace=None, max_distance=None) -> RecallResult`
 
 Search memories matching a natural-language query, scoped to `owner + namespace`.
+When `max_distance` is set, the client drops weak matches where `distance >= max_distance`.
 
 ```python
 RecallResult(

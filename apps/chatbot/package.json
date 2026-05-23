@@ -15,6 +15,7 @@
     "db:pull": "drizzle-kit pull",
     "db:check": "drizzle-kit check",
     "db:up": "drizzle-kit up",
+    "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
     "playwright:install": "playwright install --with-deps chromium",
     "test:e2e": "PLAYWRIGHT=True playwright test",
     "test:e2e:ui": "PLAYWRIGHT=True playwright test --ui",

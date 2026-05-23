@@ -291,6 +291,31 @@ class TestRecall:
         assert "x-delegate-key" not in headers
 
     @respx.mock
+    async def test_max_distance_filters_results(self, memwal_client: MemWal) -> None:
+        """recall() should filter weak matches when max_distance is provided."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"blob_id": "b1", "text": "I love coffee", "distance": 0.2},
+                        {"blob_id": "b2", "text": "I live in Tokyo", "distance": 0.7},
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        result = await memwal_client.recall("coffee", limit=10, max_distance=0.7)
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["limit"] == 10
+        assert len(result.results) == 1
+        assert result.total == 1
+        assert result.results[0].blob_id == "b1"
+
+    @respx.mock
     async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(
         self, memwal_client: MemWal
     ) -> None:
@@ -340,6 +365,22 @@ class TestErrorHandling:
 
         with pytest.raises(MemWalError, match="401"):
             await memwal_client.remember("test")
+
+    @respx.mock
+    async def test_empty_401_uses_workshop_friendly_message(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Empty-body auth failures should still give actionable guidance."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(401, text="")
+        )
+
+        with pytest.raises(
+            MemWalError,
+            match="wrong private key.*account ID mismatch.*staging/mainnet mismatch",
+        ):
+            await memwal_client.recall("test")
 
     @respx.mock
     async def test_500_raises_memwal_error(self, memwal_client: MemWal) -> None:

@@ -70,7 +70,16 @@ OPENROUTER_API_KEY=...
 
 # App
 NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+# MemWal memory
+MEMWAL_PRIVATE_KEY=...
+MEMWAL_ACCOUNT_ID=0x...
+MEMWAL_SERVER_URL=http://localhost:8000
 ```
+
+`MEMWAL_PRIVATE_KEY` is the delegate private key from the MemWal dashboard and
+must stay server-side. Run `pnpm verify:memwal` before starting the app to
+derive the public key locally and catch obvious credential mismatches.
 
 ### Getting OAuth Credentials
 

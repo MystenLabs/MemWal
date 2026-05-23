@@ -1,9 +1,9 @@
 /**
  * One-time migration script: derives an ed25519 public key from
- * the MEMWAL_KEY env var and assigns it to an existing user record.
+ * the MEMWAL_PRIVATE_KEY env var and assigns it to an existing user record.
  *
  * Usage:
- *   MEMWAL_KEY=<hex-private-key> npx tsx scripts/migrate-user-pubkey.ts [userId]
+ *   MEMWAL_PRIVATE_KEY=<hex-private-key> npx tsx scripts/migrate-user-pubkey.ts [userId]
  *
  * If userId is omitted, lists all users so you can pick the right one.
  */
@@ -39,9 +39,9 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function main() {
-  const privKeyHex = process.env.MEMWAL_KEY;
+  const privKeyHex = process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
   if (!privKeyHex) {
-    console.error("MEMWAL_KEY env var is required");
+    console.error("MEMWAL_PRIVATE_KEY env var is required");
     process.exit(1);
   }
 

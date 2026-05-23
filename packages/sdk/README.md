@@ -26,15 +26,21 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
-  key: "your-delegate-key-hex",
-  accountId: "your-memwal-account-id",
-  serverUrl: "https://your-relayer-url.com",
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
   namespace: "demo",
 });
 
-const job = await memwal.remember("User prefers dark mode and uses TypeScript.");
-await memwal.waitForRememberJob(job.job_id);
-const memories = await memwal.recall("What are the user's preferences?");
+await memwal.rememberAndWait(
+  "User prefers dark mode and uses TypeScript.",
+  undefined,
+  { timeoutMs: 30_000 },
+);
+const memories = await memwal.recall("What are the user's preferences?", {
+  topK: 10,
+  maxDistance: 0.7,
+});
 await memwal.restore("demo");
 ```
 

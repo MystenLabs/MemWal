@@ -55,7 +55,7 @@ export async function POST(req: Request) {
     }
 
     const { key, accountId } = await resolveUserKey(req);
-    if ((!key || !accountId) && (!process.env.MEMWAL_KEY || !process.env.MEMWAL_ACCOUNT_ID)) {
+    if ((!key || !accountId) && (!(process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY) || !process.env.MEMWAL_ACCOUNT_ID)) {
       return Response.json(
         { error: "[MemWal] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env" },
         { status: 401 },

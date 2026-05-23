@@ -71,17 +71,17 @@ export function getArtifactModel() {
 
 /**
  * Wrap a language model with MemWal memory layer.
- * Requires MEMWAL_KEY env var. Falls back to base model if not configured.
+ * Requires MEMWAL_PRIVATE_KEY env var. Falls back to MEMWAL_KEY for older deploys.
  */
 export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccountId?: string) {
   const baseModel = getLanguageModel(modelId);
 
-  const key = memwalKey || process.env.MEMWAL_KEY;
+  const key = memwalKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
   const memwalServerUrl = process.env.MEMWAL_SERVER_URL;
   const accountId = memwalAccountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!key) {
-    console.warn("[MemWal] MEMWAL_KEY not set — memory layer disabled");
+    console.warn("[MemWal] MEMWAL_PRIVATE_KEY not set — memory layer disabled");
     return baseModel;
   }
 
@@ -100,4 +100,3 @@ export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccoun
     debug: true,
   });
 }
-

@@ -30,6 +30,7 @@ export type {
     RememberResult,
     RecallResult,
     RecallMemory,
+    RecallOptions,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
