@@ -28,9 +28,8 @@ export MEMWAL_ACCOUNT_ID="0x-your-memwal-account-id"
 export MEMWAL_SERVER_URL="https://relayer.memwal.ai"
 ```
 
-`MEMWAL_KEY` is still accepted as a backwards-compatibility alias, but new apps
-should use `MEMWAL_PRIVATE_KEY` so it is clear that the delegate private key is
-the server-side secret.
+`MEMWAL_PRIVATE_KEY` is the delegate private key from the MemWal dashboard and
+must stay server-side.
 
 ### Async (recommended)
 

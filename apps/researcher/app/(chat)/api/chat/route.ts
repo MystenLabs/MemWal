@@ -134,7 +134,7 @@ export async function POST(request: Request) {
     const modelMessages = await convertToModelMessages(uiMessages);
 
     // Resolve sprint context — pre-built during preparation and stored on chat record
-    const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+    const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
     const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
     const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
     const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;

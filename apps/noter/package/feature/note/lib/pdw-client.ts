@@ -28,7 +28,7 @@ export function getMemWalClient(
   key?: string | null,
   accountId?: string | null,
 ): MemWal {
-  const resolvedKey = key || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+  const resolvedKey = key || process.env.MEMWAL_PRIVATE_KEY;
   const resolvedAccountId = accountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!resolvedKey) {

@@ -23,12 +23,12 @@ async function loadUserMemwalKey(userId: string) {
   try {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     return {
-      memwalKey: user?.delegatePrivateKey ?? process.env.MEMWAL_PRIVATE_KEY ?? process.env.MEMWAL_KEY ?? null,
+      memwalKey: user?.delegatePrivateKey ?? process.env.MEMWAL_PRIVATE_KEY ?? null,
       memwalAccountId: user?.delegateAccountId ?? process.env.MEMWAL_ACCOUNT_ID ?? null,
     };
   } catch {
     return {
-      memwalKey: process.env.MEMWAL_PRIVATE_KEY ?? process.env.MEMWAL_KEY ?? null,
+      memwalKey: process.env.MEMWAL_PRIVATE_KEY ?? null,
       memwalAccountId: process.env.MEMWAL_ACCOUNT_ID ?? null,
     };
   }
