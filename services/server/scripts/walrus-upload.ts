@@ -123,7 +123,7 @@ async function main() {
 
     // Step 2: Register blob on Sui → returns a Transaction
     // Use signer address as owner so sender = signer (avoids mismatch).
-    // MemWal only needs the blobId to download/decrypt — blob ownership
+    // Walrus Memory only needs the blobId to download/decrypt — blob ownership
     // on Walrus doesn't affect the SEAL encryption/decryption flow.
     const signerAddress = signer.toSuiAddress();
     const registerTx = flow.register({

@@ -1,5 +1,5 @@
 /**
- * MemWal MCP — orchestrator.
+ * Walrus Memory MCP — orchestrator.
  *
  * Boot sequence:
  *   1. If `--logout` flag → wipe credentials.json and exit.
@@ -182,7 +182,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         }
         // TTY = manual invocation. Block on the browser flow as before.
         note(
-            "MemWal MCP is not authorized yet — opening browser to connect your Sui wallet."
+            "Walrus Memory MCP is not authorized yet — opening browser to connect your Sui wallet."
         );
         creds = await loginFlow({ relayerUrl, webUrl, label });
         note(`Authorized as ${creds.walletAddress.slice(0, 10)}...`);
@@ -220,7 +220,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
 function printHelp(): void {
     const help = [
-        "memwal-mcp — MemWal Model Context Protocol client",
+        "memwal-mcp — Walrus Memory Model Context Protocol client",
         "",
         "Usage:",
         "  memwal-mcp                       Run the MCP stdio server (default).",
@@ -243,7 +243,7 @@ function printHelp(): void {
         "                                   Default: https://memwal.ai",
         "  --label <text>                   Friendly delegate-key label",
         "                                   registered on-chain. Default:",
-        '                                   "MemWal MCP"',
+        '                                   "Walrus Memory MCP"',
         "  --namespace <name>               Default memory namespace applied",
         "                                   to memwal_remember / recall /",
         "                                   analyze / restore when the agent",

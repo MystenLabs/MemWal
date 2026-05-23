@@ -117,7 +117,7 @@ export default function LandingPage() {
             <nav className="lp-nav">
                 <div className="lp-nav-inner">
                     <a href="/" className="lp-nav-brand">
-                        <img src={memwalLogo} alt="MemWal" height="28" />
+                        <img src={memwalLogo} alt="Walrus Memory" height="28" />
                     </a>
 
                     <div className="lp-nav-links">
@@ -210,7 +210,7 @@ export default function LandingPage() {
                     <div className="lp-hero-copy">
                         <h1>Long-Term Memory<br />for AI Agents</h1>
                         <p>
-                            MemWal introduces a long-term, verifiable memory layer on
+                            Walrus Memory introduces a long-term, verifiable memory layer on
                             Walrus, allowing agents to remember, share, and reuse
                             information reliably.
                         </p>
@@ -246,7 +246,7 @@ export default function LandingPage() {
                         />
                         <img
                             src="/memwal-mascot.png"
-                            alt="MemWal mascot"
+                            alt="Walrus Memory mascot"
                             className="lp-hero-mascot"
                         />
                     </div>

@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal Chatbot (Next.js) — Dockerfile
+# Walrus Memory Chatbot (Next.js) — Dockerfile
 #
 # ⚠️  BUILD FROM MONOREPO ROOT:
 #     docker build -f apps/chatbot/Dockerfile -t memwal-chatbot .

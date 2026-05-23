@@ -18,33 +18,33 @@ def compatibility_error(metadata: Dict[str, Any], server_url: str) -> Optional[s
 
     if not api_version or not relayer_version or not isinstance(min_supported, dict):
         return (
-            f"MemWal relayer at {server_url} does not expose compatibility metadata. "
+            f"Walrus Memory relayer at {server_url} does not expose compatibility metadata. "
             "Upgrade the relayer to a version that serves GET /version, or use an older SDK."
         )
 
     api_major = _semver_major(str(api_version))
     if api_major is None:
-        return f'MemWal relayer at {server_url} returned invalid apiVersion "{api_version}".'
+        return f'Walrus Memory relayer at {server_url} returned invalid apiVersion "{api_version}".'
 
     if api_major != SUPPORTED_RELAYER_API_MAJOR:
         return (
-            "This MemWal Python SDK supports relayer API "
+            "This Walrus Memory Python SDK supports relayer API "
             f"{SUPPORTED_RELAYER_API_MAJOR}.x, but {server_url} reports apiVersion "
             f"{api_version}. Upgrade or downgrade the SDK/relayer pair."
         )
 
     min_python = min_supported.get("python")
     if not isinstance(min_python, str):
-        return f"MemWal relayer at {server_url} did not report minSupportedSdk.python."
+        return f"Walrus Memory relayer at {server_url} did not report minSupportedSdk.python."
     if _parse_semver(min_python) is None:
         return (
-            f'MemWal relayer at {server_url} returned invalid '
+            f'Walrus Memory relayer at {server_url} returned invalid '
             f'minSupportedSdk.python "{min_python}".'
         )
 
     if _compare_semver(MEMWAL_PYTHON_COMPATIBILITY_VERSION, min_python) < 0:
         return (
-            f"MemWal relayer at {server_url} requires Python SDK >= {min_python}, "
+            f"Walrus Memory relayer at {server_url} requires Python SDK >= {min_python}, "
             f"but this package supports the {MEMWAL_PYTHON_COMPATIBILITY_VERSION} "
             "compatibility baseline. Upgrade memwal or use an older compatible relayer."
         )

@@ -1,11 +1,11 @@
 /**
- * memwal — Manual Client (Full Client-Side)
+ * Walrus Memory — Manual Client (Full Client-Side)
  *
  * User-side flow where the SDK handles everything locally:
  * - SEAL encrypt/decrypt via @mysten/seal (user's own Sui wallet)
  * - Walrus upload/download via @mysten/walrus
  * - Embedding via OpenAI-compatible API (user's own key)
- * - Vector registration via MemWal server (Ed25519 signed)
+ * - Vector registration via Walrus Memory server (Ed25519 signed)
  *
  * @example
  * ```typescript
@@ -167,8 +167,8 @@ export class MemWalManual {
      * @param config.suiPrivateKey - Sui private key (bech32) for SEAL + Walrus (OR walletSigner)
      * @param config.walletSigner - Connected wallet signer from dapp-kit (OR suiPrivateKey)
      * @param config.embeddingApiKey - OpenAI/OpenRouter API key for embeddings
-     * @param config.packageId - MemWal contract package ID
-     * @param config.accountId - MemWalAccount object ID (for SEAL seal_approve)
+     * @param config.packageId - Walrus Memory contract package ID
+     * @param config.accountId - Walrus Memory account object ID (for SEAL seal_approve)
      */
     static create(config: MemWalManualConfig): MemWalManual {
         return new MemWalManual(config);
@@ -696,14 +696,14 @@ export class MemWalManual {
             const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
             if (!healthRes.ok) {
                 throw new Error(
-                    `MemWal compatibility check failed: GET /version returned ` +
+                    `Walrus Memory compatibility check failed: GET /version returned ` +
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`,
                 );
             }
             body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
         } else {
             throw new Error(
-                `MemWal compatibility check failed: GET /version returned ${versionRes.status}`,
+                `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
             );
         }
 

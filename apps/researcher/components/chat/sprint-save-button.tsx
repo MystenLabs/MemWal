@@ -43,7 +43,7 @@ export function SprintSaveButton({
       <TooltipContent>
         {hasSprint
           ? `Sprint saved: "${sprintTitle}"`
-          : "Save research findings to MemWal"}
+          : "Save research findings to Walrus Memory"}
       </TooltipContent>
     </Tooltip>
   );

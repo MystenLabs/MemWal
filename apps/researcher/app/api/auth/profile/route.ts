@@ -1,7 +1,7 @@
 import { getSession } from "@/lib/auth/session";
 import { getUserById } from "@/lib/db/queries";
 
-/** GET /api/auth/profile — Returns the authenticated user's profile data including auth method and MemWal account info. */
+/** GET /api/auth/profile — Returns the authenticated user's profile data including auth method and Walrus Memory account info. */
 export async function GET() {
   const session = await getSession();
   if (!session?.user) {

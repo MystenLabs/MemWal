@@ -95,7 +95,7 @@ def decode_seal_session_header(request: httpx.Request) -> dict[str, Any]:
 
 @pytest.fixture
 def memwal_client() -> MemWal:
-    """Create a MemWal client with a test key."""
+    """Create a Walrus Memory client with a test key."""
     return MemWal.create(
         key=_TEST_KEY_HEX,
         account_id=_TEST_ACCOUNT_ID,

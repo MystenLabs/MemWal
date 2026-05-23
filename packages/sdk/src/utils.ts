@@ -1,5 +1,5 @@
 /**
- * memwal — Shared Utilities
+ * Walrus Memory — Shared Utilities
  *
  * Common crypto and encoding helpers used across the SDK.
  */
@@ -150,7 +150,7 @@ export function sanitizeServerError(
     const stripped = text.replace(/[\u0000-\u001F\u007F]/g, " ").trim();
     const truncated =
         stripped.length > MAX ? `${stripped.slice(0, MAX)}...` : stripped;
-    const message = `MemWal server error (${status}): ${truncated || "<no message>"}`;
+    const message = `Walrus Memory server error (${status}): ${truncated || "<no message>"}`;
     return { message, raw: rawBody, serverCode };
 }
 

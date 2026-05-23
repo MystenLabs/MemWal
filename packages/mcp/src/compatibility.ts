@@ -35,14 +35,14 @@ async function fetchAndValidate(relayerUrl: string): Promise<void> {
         const healthResp = await fetch(`${base}/health`, { method: "GET" });
         if (!healthResp.ok) {
             throw new Error(
-                `MemWal MCP compatibility check failed: GET /version returned ` +
+                `Walrus Memory MCP compatibility check failed: GET /version returned ` +
                     `${versionResp.status}, and GET /health returned ${healthResp.status}`
             );
         }
         metadata = (await healthResp.json()) as RelayerVersionMetadata;
     } else {
         throw new Error(
-            `MemWal MCP compatibility check failed: GET /version returned ${versionResp.status}`
+            `Walrus Memory MCP compatibility check failed: GET /version returned ${versionResp.status}`
         );
     }
 
@@ -59,7 +59,7 @@ function assertCompatible(metadata: RelayerVersionMetadata, relayerUrl: string):
         typeof metadata.minSupportedSdk !== "object"
     ) {
         throw new Error(
-            `MemWal relayer at ${relayerUrl} does not expose compatibility metadata. ` +
+            `Walrus Memory relayer at ${relayerUrl} does not expose compatibility metadata. ` +
                 "Upgrade the relayer to a version that serves GET /version, or use an older MCP package."
         );
     }
@@ -67,14 +67,14 @@ function assertCompatible(metadata: RelayerVersionMetadata, relayerUrl: string):
     const apiMajor = semverMajor(metadata.apiVersion);
     if (apiMajor === null) {
         throw new Error(
-            `MemWal relayer at ${relayerUrl} returned invalid apiVersion ` +
+            `Walrus Memory relayer at ${relayerUrl} returned invalid apiVersion ` +
                 `"${metadata.apiVersion}".`
         );
     }
 
     if (apiMajor !== SUPPORTED_RELAYER_API_MAJOR) {
         throw new Error(
-            `This MemWal MCP package supports relayer API ` +
+            `This Walrus Memory MCP package supports relayer API ` +
                 `${SUPPORTED_RELAYER_API_MAJOR}.x, but ${relayerUrl} reports ` +
                 `apiVersion ${metadata.apiVersion}. Upgrade or downgrade the MCP package/relayer pair.`
         );
@@ -83,17 +83,17 @@ function assertCompatible(metadata: RelayerVersionMetadata, relayerUrl: string):
     const minMcp = metadata.minSupportedSdk.mcp;
     if (!minMcp) {
         throw new Error(
-            `MemWal relayer at ${relayerUrl} did not report minSupportedSdk.mcp.`
+            `Walrus Memory relayer at ${relayerUrl} did not report minSupportedSdk.mcp.`
         );
     }
     if (semverMajor(minMcp) === null) {
         throw new Error(
-            `MemWal relayer at ${relayerUrl} returned invalid minSupportedSdk.mcp "${minMcp}".`
+            `Walrus Memory relayer at ${relayerUrl} returned invalid minSupportedSdk.mcp "${minMcp}".`
         );
     }
     if (compareSemver(MEMWAL_MCP_COMPATIBILITY_VERSION, minMcp) < 0) {
         throw new Error(
-            `MemWal relayer at ${relayerUrl} requires MCP package >= ${minMcp}, ` +
+            `Walrus Memory relayer at ${relayerUrl} requires MCP package >= ${minMcp}, ` +
                 `but this package supports the ${MEMWAL_MCP_COMPATIBILITY_VERSION} ` +
                 "compatibility baseline. Upgrade " +
                 "@mysten-incubation/memwal-mcp or use an older compatible relayer."

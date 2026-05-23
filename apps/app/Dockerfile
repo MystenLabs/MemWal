@@ -1,5 +1,5 @@
 # ============================================================
-# memwal App — Dockerfile
+# Walrus Memory App — Dockerfile
 # Vite React SPA — build + serve static files
 # Build context: repo root (Railway Root Directory = /)
 # ============================================================

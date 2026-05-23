@@ -414,7 +414,7 @@ function printBatchTable(batches: BatchResult[], col: boolean): void {
 
 function buildMarkdown(batches: BatchResult[]): string {
   const lines = [
-    "## MemWal Live Benchmark — ENG-1405",
+    "## Walrus Memory Live Benchmark — ENG-1405",
     "",
     "| phase | endpoint | runs | p50 | p95 | p99 | mean | min | max | fail% |",
     "|-------|----------|------|-----|-----|-----|------|-----|-----|-------|",

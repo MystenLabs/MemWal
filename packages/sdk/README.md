@@ -1,8 +1,8 @@
 # @mysten-incubation/memwal
 
-Privacy-first AI memory SDK for storing encrypted memories on Walrus and retrieving them with semantic search.
+Walrus Memory SDK for storing encrypted AI memories on Walrus and retrieving them with semantic search.
 
-> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
+> Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Documentation
 

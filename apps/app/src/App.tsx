@@ -1,5 +1,5 @@
 /**
- * memwal — Web App
+ * Walrus Memory — Web App
  *
  * Enoki zkLogin integration with @mysten/dapp-kit
  * Flow: Landing → Sign in with Google (Enoki) → Setup Wizard → Dashboard
@@ -49,7 +49,7 @@ interface DelegateKeyState {
   delegateKey: string | null
   /** Ed25519 delegate public key (hex) */
   delegatePublicKey: string | null
-  /** Onchain MemWalAccount object ID */
+  /** Onchain Walrus Memory account object ID */
   accountObjectId: string | null
 }
 

@@ -9,7 +9,7 @@ Covers:
   - _format_memories: output format
   - _inject_openai_memory: insertion position
 
-No actual LLM or MemWal server calls are made — all network traffic is mocked
+No actual LLM or Walrus Memory server calls are made — all network traffic is mocked
 with ``respx`` and all LLM responses are mocked with ``unittest.mock``.
 """
 

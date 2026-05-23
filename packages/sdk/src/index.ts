@@ -4,7 +4,7 @@
  * Privacy-first AI memory SDK.
  * Ed25519 delegate key auth + server-side TEE processing.
  *
- * This is the default entry point — MemWal client + types only.
+ * This is the default entry point — Walrus Memory client + types only.
  * Does NOT import account.js (which requires @mysten/sui).
  *
  * For account management, import from "@mysten-incubation/memwal/account".

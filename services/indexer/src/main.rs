@@ -1,6 +1,6 @@
-/// MemWal Indexer
+/// Walrus Memory Indexer
 ///
-/// Polls Sui blockchain events and indexes MemWal accounts into PostgreSQL.
+/// Polls Sui blockchain events and indexes Walrus Memory accounts into PostgreSQL.
 /// This eliminates the need for the server to scan the on-chain registry
 /// during auth, providing O(1) account lookups instead.
 ///
@@ -103,7 +103,7 @@ async fn main() {
         .init();
 
     let config = Config::from_env();
-    tracing::info!("starting memwal indexer");
+    tracing::info!("starting Walrus Memory indexer");
     tracing::info!("  database: {}", redact_url(&config.database_url));
     tracing::info!("  sui rpc: {}", config.sui_rpc_url);
     tracing::info!("  package: {}", config.package_id);

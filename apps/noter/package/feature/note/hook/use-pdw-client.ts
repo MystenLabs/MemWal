@@ -3,7 +3,7 @@
 /**
  * memwal Status Hook
  *
- * Simple hook to check if MemWal is configured (MEMWAL_PRIVATE_KEY set).
+ * Simple hook to check if Walrus Memory is configured (MEMWAL_PRIVATE_KEY set).
  * No client-side SDK needed — all operations go through server.
  */
 
@@ -13,7 +13,7 @@ export function useMemWalStatus() {
   const [isConfigured, setIsConfigured] = useState(false);
 
   useEffect(() => {
-    // Check server health to see if MemWal is configured
+    // Check server health to see if Walrus Memory is configured
     fetch("/api/memory/health")
       .then((res) => {
         setIsConfigured(res.ok);

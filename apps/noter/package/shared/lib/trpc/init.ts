@@ -8,9 +8,9 @@ import { eq } from "drizzle-orm";
 export type Context = {
   db: typeof db;
   userId: string | null;
-  /** Per-user MemWal delegate key (null if user has no stored key). */
+  /** Per-user Walrus Memory delegate key (null if user has no stored key). */
   memwalKey: string | null;
-  /** Per-user MemWal account ID (null if user has no stored account). */
+  /** Per-user Walrus Memory account ID (null if user has no stored account). */
   memwalAccountId: string | null;
 };
 
@@ -18,7 +18,7 @@ function getSessionIdFromRequest(req: Request): string | null {
   return req.headers.get("x-session-id");
 }
 
-/** Load user's MemWal delegate key from the users table. Falls back to env vars. */
+/** Load user's Walrus Memory delegate key from the users table. Falls back to env vars. */
 async function loadUserMemwalKey(userId: string) {
   try {
     const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);

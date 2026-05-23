@@ -6,7 +6,7 @@ import { getSprintsByIds } from "@/lib/db/queries";
  * Builds a lightweight sprint briefing for the system prompt.
  *
  * Only metadata goes here (title, summary, source list, tags).
- * The full report content lives in MemWal and is retrieved on-demand
+ * The full report content lives in Walrus Memory and is retrieved on-demand
  * via the recallSprint tool.
  */
 export async function buildSprintContext({
@@ -54,7 +54,7 @@ export async function buildSprintContext({
     "## Previous Research Sprints",
     "",
     "The user has selected the following previous research sprints as context for this conversation.",
-    "These are **metadata briefings only** — the full reports and detailed findings are stored in long-term memory (MemWal).",
+    "These are **metadata briefings only** — the full reports and detailed findings are stored in long-term memory (Walrus Memory).",
     "You MUST use the **recallSprint** tool to retrieve specific content, quotes, data points, or citations from these sprints.",
     "",
     ...blocks,

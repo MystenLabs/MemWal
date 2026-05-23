@@ -22,7 +22,7 @@ Env vars:
   TEST_DELEGATE_KEY    hex-encoded Ed25519 secret (32 bytes → 64 hex chars)
                        of a delegate key registered on-chain. If unset,
                        remember/recall is skipped.
-  TEST_ACCOUNT_ID      MemWalAccount object ID (0x... Sui address). Only
+  TEST_ACCOUNT_ID      Walrus Memory account object ID (0x... Sui address). Only
                        used informationally; auth middleware resolves the
                        account from the delegate key.
 
@@ -246,7 +246,7 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
     """Signed /api/remember → /api/recall with a pre-registered delegate key.
 
     Requires real Walrus + SEAL + Sui + funded server wallet + delegate key
-    registered on-chain in the MemWalAccount identified by account_id.
+    registered on-chain in the Walrus Memory account identified by account_id.
     """
     remember_body = {
         "text": "The capital of France is Paris.",

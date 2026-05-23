@@ -1,6 +1,6 @@
-/// MemWal — Account & SEAL Access Control
+/// Walrus Memory — Account & SEAL Access Control
 ///
-/// Core on-chain module for managing MemWal accounts and delegate keys.
+/// Core on-chain module for managing Walrus Memory accounts and delegate keys.
 /// Delegate keys are Ed25519 Sui keypairs that can sign transactions
 /// and are authorized for SEAL decryption.
 ///

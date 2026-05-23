@@ -39,7 +39,7 @@ async function main() {
         }
     }
 
-    console.log("MemWal credentials look parseable.");
+    console.log("Walrus Memory credentials look parseable.");
     console.log(`Derived delegate public key: ${derivedPublicKey}`);
     if (accountId) console.log(`Account ID: ${accountId}`);
     if (serverUrl) console.log(`Relayer URL: ${serverUrl}`);

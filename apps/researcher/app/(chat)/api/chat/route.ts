@@ -143,7 +143,7 @@ export async function POST(request: Request) {
 
     let systemPrompt = researchPrompt;
     if (prebuiltSprintContext) {
-      // Use pre-built context from sprint preparation (LLM-generated queries → MemWal recall)
+      // Use pre-built context from sprint preparation (LLM-generated queries → Walrus Memory recall)
       systemPrompt = getSprintResumePrompt(prebuiltSprintContext);
       console.log(`[sprint:context] Using pre-built sprint context: ${prebuiltSprintContext.length} chars`);
       console.log(`[sprint:context] Final system prompt length=${systemPrompt.length} chars (base=${researchPrompt.length}, sprint addition=${systemPrompt.length - researchPrompt.length})`);

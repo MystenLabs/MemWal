@@ -63,7 +63,7 @@ pub struct OnChainBlob {
     pub object_id: String,
     /// Namespace from on-chain metadata
     pub namespace: String,
-    /// MemWal package ID from on-chain metadata
+    /// Walrus Memory package ID from on-chain metadata
     #[serde(rename = "packageId", default)]
     pub package_id: String,
 }
@@ -454,7 +454,7 @@ pub async fn query_blobs_by_owner(
 /// the existing single-aggregator behavior when no extra URL is configured.
 ///
 /// `skip_consistency_check` is intentionally caller-controlled because it
-/// should only be enabled for trusted, MemWal-written blobs.
+/// should only be enabled for trusted blobs written by Walrus Memory.
 pub async fn download_blob_from_aggregators(
     client: &reqwest::Client,
     aggregator_urls: &[String],

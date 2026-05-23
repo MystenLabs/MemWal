@@ -102,7 +102,7 @@ class BenchmarkAdapter(ABC):
         """
         Helper: emit one ingest chunk per turn.
 
-        This matches how the MemWal SDK wrapper (withMemWal) actually
+        This matches how the Walrus Memory SDK wrapper (withMemWal) actually
         drives /api/analyze in production — one call per user message —
         and how Mem0 runs its own LOCOMO evaluation (turn-by-turn replay
         through their sliding-window context manager).

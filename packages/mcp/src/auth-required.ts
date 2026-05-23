@@ -8,7 +8,7 @@
  * minimal MCP server that:
  *
  *   - Responds to `initialize` so the client sees a healthy server.
- *   - Advertises the 4 real MemWal tools + a 5th `memwal_login` tool in
+ *   - Advertises the 4 real Walrus Memory tools + a 5th `memwal_login` tool in
  *     `tools/list` so the agent knows what's available.
  *   - On `tools/call memwal_login`: invokes the browser-based wallet login
  *     flow inline so the user never has to leave their MCP client. Eliminates
@@ -37,7 +37,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_remember",
         description:
-            "Save a fact to the user's MemWal personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+            "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
         inputSchema: {
             type: "object",
             properties: {
@@ -51,7 +51,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_recall",
         description:
-            "Search the user's MemWal memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+            "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
         inputSchema: {
             type: "object",
             properties: {
@@ -66,7 +66,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_analyze",
         description:
-            "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate MemWal memory.",
+            "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory.",
         inputSchema: {
             type: "object",
             properties: {
@@ -94,7 +94,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_login",
         description:
-            "Sign this MCP client into your MemWal account by opening a browser. Run once when the agent reports MemWal is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
+            "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -113,7 +113,7 @@ const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
 const LOGIN_INSTRUCTION = [
-    "❌ MemWal isn't signed in yet.",
+    "❌ Walrus Memory isn't signed in yet.",
     "",
     "**Easiest fix — call the `memwal_login` tool from this client.** It opens a browser,",
     "you approve the wallet sign-in, and on the next tool call this server picks up the",
@@ -226,7 +226,7 @@ async function handleLoginToolCall(
                 resolve(url);
                 // Also push to log notification — clients that surface these
                 // (Cursor) get a second visible copy of the URL.
-                sendLogMessage("info", `MemWal MCP login URL: ${url}`);
+                sendLogMessage("info", `Walrus Memory MCP login URL: ${url}`);
             },
         })
             .then((creds) => {
@@ -260,7 +260,7 @@ async function handleLoginToolCall(
         return {
             isError: true,
             text: [
-                `❌ Failed to start MemWal login: ${msg}`,
+                `❌ Failed to start Walrus Memory login: ${msg}`,
                 "",
                 "Try the CLI fallback:",
                 "",
@@ -286,7 +286,7 @@ async function handleLoginToolCall(
             url,
             `\`\`\``,
             ``,
-            `[Click here to open MemWal sign-in](${url})`,
+            `[Click here to open Walrus Memory sign-in](${url})`,
             ``,
             `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
             `The user CANNOT proceed without seeing the exact URL. Surface it verbatim`,

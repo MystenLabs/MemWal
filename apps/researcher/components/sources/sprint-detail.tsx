@@ -80,7 +80,7 @@ function PureSprintDetail({
           {sprint.memoryCount != null && sprint.memoryCount > 0 && (
             <span className="flex items-center gap-1">
               <BrainIcon className="size-3" />
-              Saved to MemWal
+              Saved to Walrus Memory
             </span>
           )}
         </div>

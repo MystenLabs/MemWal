@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration tests for the MemWal Python SDK against a live server.
+Integration tests for the Walrus Memory Python SDK against a live server.
 
 Targets MEMWAL_SERVER_URL (default: https://relayer.dev.memwal.ai).
 

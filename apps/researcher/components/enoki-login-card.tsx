@@ -47,7 +47,7 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 }
 
 /**
- * Execute a transaction via Enoki gas sponsorship through the MemWal relayer.
+ * Execute a transaction via Enoki gas sponsorship through the Walrus Memory relayer.
  * Builds TX kind bytes, requests sponsorship, signs with user wallet, then executes.
  * @param transaction - The Sui transaction to execute
  * @param sender - The sender's Sui address (Enoki zkLogin address)
@@ -191,7 +191,7 @@ export function EnokiLoginCard() {
 
         let knownAccountId: string | null = null;
 
-        // Check if MemWal account already exists for this address
+        // Check if a Walrus Memory account already exists for this address
         try {
           const registryObj = await suiClient.getObject({
             id: enokiConfig.memwalRegistryId,

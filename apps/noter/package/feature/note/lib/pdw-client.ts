@@ -1,7 +1,7 @@
 /**
- * MemWal CLIENT — Server-side MemWal SDK wrapper
+ * Walrus Memory CLIENT — Server-side SDK wrapper
  *
- * Creates per-request MemWal instances using the authenticated user's
+ * Creates per-request Walrus Memory clients using the authenticated user's
  * delegate key (from tRPC context). Falls back to env vars for backward
  * compatibility.
  */
@@ -9,7 +9,7 @@
 import { MemWal } from "@mysten-incubation/memwal";
 
 /**
- * Create a MemWal client for a specific user's delegate key.
+ * Create a Walrus Memory client for a specific user's delegate key.
  * Called per-request with credentials from tRPC context.
  */
 export function createMemWalClient(key: string, accountId: string): MemWal {
@@ -21,7 +21,7 @@ export function createMemWalClient(key: string, accountId: string): MemWal {
 }
 
 /**
- * Get a MemWal client using provided credentials or env var fallback.
+ * Get a Walrus Memory client using provided credentials or env var fallback.
  * Throws if no key is available.
  */
 export function getMemWalClient(
@@ -32,16 +32,16 @@ export function getMemWalClient(
   const resolvedAccountId = accountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!resolvedKey) {
-    throw new Error("[MemWal] No key configured — sign in with Enoki or set MEMWAL_PRIVATE_KEY in .env");
+    throw new Error("[Walrus Memory] No key configured — sign in with Enoki or set MEMWAL_PRIVATE_KEY in .env");
   }
   if (!resolvedAccountId) {
-    throw new Error("[MemWal] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env");
+    throw new Error("[Walrus Memory] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env");
   }
 
   return createMemWalClient(resolvedKey, resolvedAccountId);
 }
 
-/** Extract memories from text using MemWal analyze endpoint. */
+/** Extract memories from text using Walrus Memory analyze endpoint. */
 export async function extractMemories(
   _userId: string,
   text: string,

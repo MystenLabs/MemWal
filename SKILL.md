@@ -2,20 +2,21 @@
 name: memwal
 version: 0.0.1
 description: |
-  Privacy-first AI memory SDK for decentralized storage on Sui blockchain with Walrus.
+  Walrus Memory SDK for privacy-first AI memory on Sui blockchain with Walrus.
 
   Use when users say:
   - "add memory to my app"
   - "store encrypted memories"
-  - "integrate MemWal"
+  - "integrate Walrus Memory"
   - "AI agent memory"
   - "persistent memory SDK"
   - "Walrus memory storage"
-  - "setup MemWal"
+  - "setup Walrus Memory"
   - "recall memories"
 
 keywords:
   - memwal
+  - walrus memory
   - memory sdk
   - ai memory
   - encrypted memory
@@ -26,15 +27,15 @@ keywords:
   - vercel ai sdk
 ---
 
-# MemWal — Privacy-First AI Memory SDK
+# Walrus Memory — Privacy-First AI Memory SDK
 
-MemWal is a TypeScript SDK for persistent, encrypted AI memory. It stores memories on Walrus (decentralized storage), encrypts them with SEAL, enforces ownership onchain via Sui smart contracts, and retrieves them with semantic (vector) search. Memories are scoped by `owner + namespace` — each namespace is an isolated memory space.
+Walrus Memory is a TypeScript SDK for persistent, encrypted AI memory. It stores memories on Walrus (decentralized storage), encrypts them with SEAL, enforces ownership onchain via Sui smart contracts, and retrieves them with semantic (vector) search. Memories are scoped by `owner + namespace` — each namespace is an isolated memory space.
 
 ---
 
 ## When to Use
 
-Use MemWal when your app or agent needs:
+Use Walrus Memory when your app or agent needs:
 
 - **Persistent memory** across sessions, devices, or restarts
 - **Encrypted storage** — end-to-end encryption, only the owner and authorized delegates can decrypt
@@ -48,7 +49,7 @@ Use MemWal when your app or agent needs:
 ## When NOT to Use
 
 - Temporary conversation context that only matters in the current session
-- Large file storage (MemWal is optimized for text memories)
+- Large file storage (Walrus Memory is optimized for text memories)
 - Use cases that don't need encryption or decentralization
 
 ---
@@ -72,7 +73,7 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus
 
 ### 1. Get Your Credentials
 
-You need a **delegate key** (Ed25519 private key) and **account ID** (MemWalAccount object ID on Sui).
+You need a **delegate key** (Ed25519 private key) and **account ID** (Walrus Memory account object ID on Sui).
 
 Generate them at:
 - Production: https://memwal.ai or https://memwal.wal.app
@@ -347,7 +348,7 @@ const relevant = memories.results.filter((memory) => memory.distance < 0.7);
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
-| `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
+| `accountId` | `string` | Yes | — | Walrus Memory account object ID on Sui |
 | `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
@@ -361,7 +362,7 @@ const relevant = memories.results.filter((memory) => memory.distance < 0.7);
 ### Framework and Key Handling
 
 Delegate private keys belong on the server only. In Next.js App Router, call
-MemWal from server actions, route handlers, or other server-only modules that
+Walrus Memory from server actions, route handlers, or other server-only modules that
 read `MEMWAL_PRIVATE_KEY` from server env.
 
 `"use server"` files can only export async functions; keep constants, schemas,
