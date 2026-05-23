@@ -1,5 +1,5 @@
 """
-memwal — Privacy-first AI memory SDK
+Walrus Memory — Privacy-first AI memory SDK
 
 Ed25519 delegate key auth + server-side TEE processing.
 

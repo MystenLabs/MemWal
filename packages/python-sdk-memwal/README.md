@@ -1,6 +1,6 @@
-# memwal
+# Walrus Memory Python SDK
 
-Python SDK for [MemWal](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
+Python SDK for [Walrus Memory](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
 
 All data processing (encryption, embedding, Walrus storage) happens server-side in a TEE. The SDK signs requests with your Ed25519 delegate key and sends text over HTTPS.
 
@@ -24,11 +24,11 @@ Set your environment variables first:
 
 ```bash
 export MEMWAL_PRIVATE_KEY="your-ed25519-delegate-private-key-hex"
-export MEMWAL_ACCOUNT_ID="0x-your-memwal-account-id"
+export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
 export MEMWAL_SERVER_URL="https://relayer.memwal.ai"
 ```
 
-`MEMWAL_PRIVATE_KEY` is the delegate private key from the MemWal dashboard and
+`MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
 must stay server-side.
 
 ### Async (recommended)

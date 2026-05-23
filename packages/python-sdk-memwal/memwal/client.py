@@ -1,7 +1,7 @@
 """
-memwal — SDK Client
+Walrus Memory — SDK Client
 
-Ed25519 delegate key based client that communicates with the MemWal
+Ed25519 delegate key based client that communicates with the Walrus Memory
 Rust server (TEE). All data processing (encryption, embedding, Walrus)
 happens server-side -- the SDK just signs requests and sends text.
 
@@ -124,7 +124,7 @@ def _is_transient_polling_status(status: int) -> bool:
 
 
 class MemWal:
-    """Async-native MemWal client.
+    """Async-native Walrus Memory client.
 
     All API methods are ``async``. For synchronous usage, wrap calls with
     ``asyncio.run()`` or use the :class:`MemWalSync` convenience wrapper.
@@ -152,11 +152,11 @@ class MemWal:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWal":
-        """Create a new MemWal client instance.
+        """Create a new Walrus Memory client instance.
 
         Args:
             key: Ed25519 private key hex string (the delegate key).
-            account_id: MemWalAccount object ID on Sui.
+            account_id: Walrus Memory account object ID on Sui.
             server_url: Server URL (default: ``http://localhost:8000``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
             env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
@@ -774,14 +774,14 @@ class MemWal:
                 health_response = await self._http.get(f"{self._server_url}/health")
                 if health_response.status_code != 200:
                     raise MemWalError(
-                        "MemWal compatibility check failed: "
+                        "Walrus Memory compatibility check failed: "
                         f"GET /version returned {version_response.status_code}, "
                         f"and GET /health returned {health_response.status_code}"
                     )
                 metadata = health_response.json()
             else:
                 raise MemWalError(
-                    "MemWal compatibility check failed: "
+                    "Walrus Memory compatibility check failed: "
                     f"GET /version returned {version_response.status_code}"
                 )
 
@@ -920,7 +920,7 @@ class MemWal:
             - ``x-timestamp``: Unix seconds string
             - ``x-nonce``: UUID v4 replay-protection nonce
             - ``x-seal-session``: Base64-encoded exported session envelope
-            - ``x-account-id``: MemWalAccount object ID
+            - ``x-account-id``: Walrus Memory account object ID
             - ``Content-Type``: application/json
         """
         import uuid
@@ -969,7 +969,7 @@ class MemWal:
             err_text = response.text
             if response.status_code == 426:
                 raise MemWalCompatibilityError(
-                    "MemWal relayer rejected this SDK as unsupported "
+                    "Walrus Memory relayer rejected this SDK as unsupported "
                     f"(HTTP 426 Upgrade Required). Relayer response: "
                     f"{err_text[:300] or 'upgrade required'}"
                 )
@@ -982,7 +982,7 @@ class MemWal:
 
 
 class MemWalError(Exception):
-    """Exception raised for MemWal API errors."""
+    """Exception raised for Walrus Memory API errors."""
 
     pass
 
@@ -1005,7 +1005,7 @@ class _HttpStatusError(MemWalError):
         if status == 401:
             super().__init__(AUTH_REJECTED_MESSAGE)
         else:
-            super().__init__(f"MemWal API error ({status}): {body}")
+            super().__init__(f"Walrus Memory API error ({status}): {body}")
         self.status = status
         self.body = body
 
@@ -1068,7 +1068,7 @@ class MemWalSync:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWalSync":
-        """Create a synchronous MemWal client.
+        """Create a synchronous Walrus Memory client.
 
         Same parameters as :meth:`MemWal.create` (including the ``env``
         relayer preset).

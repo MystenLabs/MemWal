@@ -31,7 +31,7 @@ tokio::task_local! {
 static HTTP_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "memwal_http_requests_total",
-        "Total HTTP requests handled by the MemWal relayer.",
+        "Total HTTP requests handled by the Walrus Memory relayer.",
         &["method", "route", "status"]
     )
     .expect("register memwal_http_requests_total")
@@ -54,7 +54,7 @@ static HTTP_REQUEST_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| 
 static HTTP_REQUESTS_IN_FLIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
     prometheus::register_int_gauge!(
         "memwal_http_requests_in_flight",
-        "HTTP requests currently being handled by the MemWal relayer."
+        "HTTP requests currently being handled by the Walrus Memory relayer."
     )
     .expect("register memwal_http_requests_in_flight")
 });
@@ -62,7 +62,7 @@ static HTTP_REQUESTS_IN_FLIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
 static ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "memwal_errors_total",
-        "Application errors returned by the MemWal relayer.",
+        "Application errors returned by the Walrus Memory relayer.",
         &["kind", "route"]
     )
     .expect("register memwal_errors_total")

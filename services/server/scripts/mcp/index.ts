@@ -1,6 +1,6 @@
 /**
  * =============================================================================
- * MemWal MCP — Express mount
+ * Walrus Memory MCP — Express mount
  * =============================================================================
  * Exposes `mountMcpRoutes(app)` which attaches `/mcp/sse` + `/mcp/messages`
  * to the sidecar's existing express app. The Rust relayer proxies external
@@ -248,7 +248,7 @@ async function handleStreamableHttp(
 ): Promise<void> {
     // 1) Auth — bearer + accountId same as SSE path. Cheap to re-run per
     //    request; resolveAuth's on-chain lookup is cached by the SDK once
-    //    we mint the MemWal client per session.
+    //    we mint the Walrus Memory client per session.
     let auth: AuthResolution;
     try {
         auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);

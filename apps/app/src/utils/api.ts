@@ -2,7 +2,7 @@
  * API Client — Ed25519-signed HTTP requests
  *
  * Reusable utilities for making authenticated API calls
- * to the MemWal server. Used by both Playground and any
+ * to the Walrus Memory server. Used by both Playground and any
  * future client-side integrations.
  */
 
@@ -48,7 +48,7 @@ export async function signRequest(
 }
 
 /**
- * Make an authenticated API call to the MemWal server.
+ * Make an authenticated API call to the Walrus Memory server.
  *
  * Automatically signs the request with the delegate key
  * and includes the account object ID header if provided.

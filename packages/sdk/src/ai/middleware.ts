@@ -1,5 +1,5 @@
 /**
- * MemWal AI SDK Integration — withMemWal Middleware
+ * Walrus Memory AI SDK Integration — withMemWal Middleware
  *
  * Wraps any AI SDK model with automatic memory management.
  *
@@ -55,7 +55,7 @@ export interface WithMemWalOptions extends MemWalConfig {
 // ============================================================
 
 /**
- * Wrap an AI SDK model with MemWal memory management
+ * Wrap an AI SDK model with Walrus Memory management
  *
  * BEFORE each LLM call:
  * - Uses the last user message as a search query
@@ -77,7 +77,7 @@ export function withMemWal(
     const debug = options.debug ?? false;
 
     const log = debug
-        ? (...args: unknown[]) => console.warn("[MemWal]", ...args)
+        ? (...args: unknown[]) => console.warn("[Walrus Memory]", ...args)
         : () => { };
 
     return (wrapLanguageModel as any)({

@@ -28,7 +28,7 @@ export const saveMemory = ({
         return {
           saved: false,
           text,
-          error: "MemWal not configured — MEMWAL_PRIVATE_KEY or MEMWAL_ACCOUNT_ID missing",
+          error: "Walrus Memory not configured — MEMWAL_PRIVATE_KEY or MEMWAL_ACCOUNT_ID missing",
         };
       }
 

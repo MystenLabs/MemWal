@@ -1,6 +1,6 @@
 /**
  * MEMORY DETECTOR — AI-powered memory extraction
- * Uses MemWal SDK analyze endpoint for detection.
+ * Uses Walrus Memory SDK analyze endpoint for detection.
  * Server handles: LLM extraction → embed → encrypt → Walrus → store.
  */
 
@@ -19,7 +19,7 @@ export type PreparedMemory = {
 
 /**
  * Detect and prepare memories from note content.
- * Uses MemWal analyze (server-side LLM extraction + auto-store).
+ * Uses Walrus Memory analyze (server-side LLM extraction + auto-store).
  */
 export async function detectAndPrepareMemories(
   userId: string,

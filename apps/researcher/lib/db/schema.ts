@@ -124,7 +124,7 @@ export const sourceChunk = pgTable("SourceChunk", {
 
 export type SourceChunk = InferSelectModel<typeof sourceChunk>;
 
-/** Research blob index (My Stuff) — references blobs stored in MemWal/Walrus */
+/** Research blob index (My Stuff) — references blobs stored in Walrus Memory/Walrus */
 export const researchBlob = pgTable("ResearchBlob", {
   id: uuid("id").primaryKey().notNull().defaultRandom(),
   blobId: text("blobId").unique().notNull(),

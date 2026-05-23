@@ -6,7 +6,7 @@
  * Full-featured Lexical editor for note-taking.
  * Includes auto-save and rich text editing.
  * Changes are auto-saved. The Save button persists immediately, then analyzes
- * the note for MemWal when memory credentials are configured.
+ * the note for Walrus Memory when memory credentials are configured.
  */
 
 import { CodeHighlightNode, CodeNode } from "@lexical/code";
@@ -131,7 +131,7 @@ function SaveNoteButton({ onSaveToDb }: SaveNoteButtonProps) {
 
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || "Failed to save to MemWal");
+          throw new Error(data.error || "Failed to save to Walrus Memory");
         }
       }
 

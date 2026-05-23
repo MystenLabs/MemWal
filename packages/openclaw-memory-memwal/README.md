@@ -1,7 +1,7 @@
 <h1 align="center">@mysten-incubation/oc-memwal</h1>
 
 <p align="center">
-  Cloud-based long-term memory plugin for NemoClaw/OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>MemWal</strong>.
+  Cloud-based long-term memory plugin for NemoClaw/OpenClaw — gives your AI agents persistent, encrypted, cross-session memory powered by <strong>Walrus Memory</strong>.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 Replaces OpenClaw's default file-based memory with a **remote memory backend**. After setup, the plugin runs silently — your agent remembers things from past conversations and learns new facts automatically, with no user intervention required.
 
-Memories are **encrypted** and stored on **MemWal**, a privacy-preserving memory protocol built on Walrus decentralized storage. Each user owns their memories via an **Ed25519 key** — no platform can access them without it.
+Memories are **encrypted** and stored on **Walrus Memory**, a privacy-preserving memory protocol built on Walrus decentralized storage. Each user owns their memories via an **Ed25519 key** — no platform can access them without it.
 
 **Features:**
 - **Auto-recall** — relevant memories injected before each conversation turn
@@ -32,19 +32,19 @@ Memories are **encrypted** and stored on **MemWal**, a privacy-preserving memory
 
 You need [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running, and a package manager ([bun](https://bun.sh), pnpm, or npm).
 
-### MemWal Setup
+### Walrus Memory Setup
 
-**MemWal** is an open-source, self-hostable memory infrastructure kit for encrypted, decentralized storage. You can run your own relayer or use a managed endpoint.
+**Walrus Memory** is an open-source, self-hostable memory infrastructure kit for encrypted, decentralized storage. You can run your own relayer or use a managed endpoint.
 
 The plugin needs three values:
 
 | Value | What it is |
 |-------|-----------|
 | **Delegate Key** | Private key (64-char hex) used to sign requests and encrypt memories |
-| **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
-| **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
+| **Account ID** | Your Walrus Memory account object ID on Sui (`0x...`) |
+| **Relayer URL** | The Walrus Memory relayer endpoint that handles search, storage, and encryption |
 
-Get your delegate key and account ID from the [MemWal dashboard](https://memwal.ai), or see the [Quick Start guide](https://docs.memwal.ai/getting-started/quick-start) for detailed setup.
+Get your delegate key and account ID from the [Walrus Memory dashboard](https://memwal.ai), or see the [Quick Start guide](https://docs.memwal.ai/getting-started/quick-start) for detailed setup.
 
 For the relayer, use a managed endpoint or [self-host your own](https://docs.memwal.ai/relayer/self-hosting):
 
@@ -164,7 +164,7 @@ If all three steps work, the plugin is fully operational.
 
 ## How it works
 
-The plugin sits between OpenClaw's gateway and the MemWal server. It operates through **hooks** — automatic callbacks that run on every conversation turn. The LLM never sees them, doesn't trigger them, and can't prevent them.
+The plugin sits between OpenClaw's gateway and the Walrus Memory server. It operates through **hooks** — automatic callbacks that run on every conversation turn. The LLM never sees them, doesn't trigger them, and can't prevent them.
 
 ```mermaid
 graph TB
@@ -178,7 +178,7 @@ graph TB
         LLM_PROC["Language Model"]
     end
 
-    subgraph "MemWal Server"
+    subgraph "Walrus Memory Server"
         SEARCH["Vector Search"]
         ANALYZE["Fact Extraction"]
         STORE["Encrypted Storage"]
@@ -205,9 +205,9 @@ graph TB
 
 Every conversation turn goes through two phases:
 
-- **Auto-recall** — before the LLM sees the user's message, the plugin searches MemWal for relevant memories and injects them into the prompt as context. The LLM sees these as background knowledge — it doesn't know they were injected.
+- **Auto-recall** — before the LLM sees the user's message, the plugin searches Walrus Memory for relevant memories and injects them into the prompt as context. The LLM sees these as background knowledge — it doesn't know they were injected.
 
-- **Auto-capture** — after the LLM responds, the plugin extracts the conversation, filters out trivial content (filler responses, emoji, etc.), and sends it to the MemWal server. The server-side LLM extracts individual facts and stores them as encrypted blobs on Walrus.
+- **Auto-capture** — after the LLM responds, the plugin extracts the conversation, filters out trivial content (filler responses, emoji, etc.), and sends it to the Walrus Memory server. The server-side LLM extracts individual facts and stores them as encrypted blobs on Walrus.
 
 The plugin also registers two optional **tools** (`memory_search` and `memory_store`) that give the LLM explicit control over memory operations. These require `tools.allow` in the agent profile and are a power-user feature — hooks handle the common case automatically.
 

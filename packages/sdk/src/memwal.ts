@@ -1,7 +1,7 @@
 /**
- * memwal — SDK Client
+ * Walrus Memory — SDK Client
  *
- * Ed25519 delegate key based client that communicates with the MemWal
+ * Ed25519 delegate key based client that communicates with the Walrus Memory
  * Rust server (TEE). All data processing (encryption, embedding, Walrus)
  * happens server-side — the SDK just signs requests and sends text.
  *
@@ -15,7 +15,7 @@
  *
  * const memwal = MemWal.create({
  *     key: process.env.MEMWAL_PRIVATE_KEY,  // Ed25519 private key (hex)
- *     accountId: process.env.MEMWAL_ACCOUNT_ID, // MemWalAccount object ID
+ *     accountId: process.env.MEMWAL_ACCOUNT_ID, // Walrus Memory account object ID
  * })
  *
  * // Remember — returns an accepted background job immediately
@@ -147,7 +147,7 @@ export class MemWal {
     }
 
     /**
-     * Create a new MemWal client instance.
+     * Create a new Walrus Memory client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
      * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
@@ -734,14 +734,14 @@ export class MemWal {
             const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
             if (!healthRes.ok) {
                 throw new Error(
-                    `MemWal compatibility check failed: GET /version returned ` +
+                    `Walrus Memory compatibility check failed: GET /version returned ` +
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`,
                 );
             }
             body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
         } else {
             throw new Error(
-                `MemWal compatibility check failed: GET /version returned ${versionRes.status}`,
+                `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
             );
         }
 

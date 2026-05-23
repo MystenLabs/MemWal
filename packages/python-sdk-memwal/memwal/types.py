@@ -1,9 +1,9 @@
 """
-memwal — Core Types
+Walrus Memory — Core Types
 
 Dataclasses for all API request options and response types.
 Ed25519 delegate key based SDK that communicates with
-the MemWal Rust server (TEE).
+the Walrus Memory Rust server (TEE).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ DEFAULT_SERVER_URL = "http://localhost:8000"
 
 #: Named relayer environments. Mirrors the TypeScript SDK / MCP package
 #: ``--prod`` / ``--dev`` / ``--staging`` / ``--local`` presets so the same
-#: shorthand works across every MemWal client.
+#: shorthand works across every Walrus Memory client.
 ENV_PRESETS = {
     "prod": "https://relayer.memwal.ai",
     "dev": "https://relayer.dev.memwal.ai",
@@ -33,11 +33,11 @@ ENV_PRESETS = {
 
 @dataclass
 class MemWalConfig:
-    """Configuration for creating a MemWal client.
+    """Configuration for creating a Walrus Memory client.
 
     Attributes:
-        key: Ed25519 private key (hex string). This is the delegate key from app.memwal.com.
-        account_id: MemWalAccount object ID on Sui.
+        key: Ed25519 private key (hex string). This is the delegate key from the Walrus Memory dashboard.
+        account_id: Walrus Memory account object ID on Sui.
         server_url: Server URL (default: http://localhost:8000). An explicit
             non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").

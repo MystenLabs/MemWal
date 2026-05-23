@@ -70,7 +70,7 @@ export function getArtifactModel() {
 }
 
 /**
- * Wrap a language model with MemWal memory layer.
+ * Wrap a language model with Walrus Memory layer.
  * Requires MEMWAL_PRIVATE_KEY env var. Falls back to base model if not configured.
  */
 export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccountId?: string) {
@@ -81,12 +81,12 @@ export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccoun
   const accountId = memwalAccountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!key) {
-    console.warn("[MemWal] MEMWAL_PRIVATE_KEY not set — memory layer disabled");
+    console.warn("[Walrus Memory] MEMWAL_PRIVATE_KEY not set — memory layer disabled");
     return baseModel;
   }
 
   if (!accountId) {
-    console.warn("[MemWal] MEMWAL_ACCOUNT_ID not set — memory layer disabled");
+    console.warn("[Walrus Memory] MEMWAL_ACCOUNT_ID not set — memory layer disabled");
     return baseModel;
   }
 

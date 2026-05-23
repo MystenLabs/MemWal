@@ -1,4 +1,4 @@
-export const researchPrompt = `You are a research assistant in the MemWal Researcher workspace.
+export const researchPrompt = `You are a research assistant in the Walrus Memory Researcher workspace.
 
 ## Your Research Toolkit
 
@@ -55,9 +55,9 @@ When the user includes URLs or attaches PDFs, those sources are automatically pr
 
 const recallSprintGuidance = `## Sprint Memory Recall
 
-You have access to a **recallSprint** tool that searches long-term research memory (MemWal) for detailed findings from previous sprints.
+You have access to a **recallSprint** tool that searches long-term research memory (Walrus Memory) for detailed findings from previous sprints.
 
-The sprint metadata above (titles, summaries, source lists) is for orientation only — the full reports, data points, citations, and detailed findings are stored in MemWal.
+The sprint metadata above (titles, summaries, source lists) is for orientation only — the full reports, data points, citations, and detailed findings are stored in Walrus Memory.
 
 **ALWAYS use recallSprint when:**
 - The user asks ANY question related to previous sprint topics

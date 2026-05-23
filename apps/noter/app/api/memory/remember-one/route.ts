@@ -1,5 +1,5 @@
 /**
- * Memory Remember One API — saves a single approved memory text to MemWal.
+ * Memory Remember One API — saves a single approved memory text to Walrus Memory.
  * Used by the memory panel's "Approve" flow (individual memory saves).
  * Returns { id, blob_id, owner, namespace } for blockchain data display.
  */
@@ -57,7 +57,7 @@ export async function POST(req: Request) {
     const { key, accountId } = await resolveUserKey(req);
     if ((!key || !accountId) && (!process.env.MEMWAL_PRIVATE_KEY || !process.env.MEMWAL_ACCOUNT_ID)) {
       return Response.json(
-        { error: "[MemWal] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env" },
+        { error: "[Walrus Memory] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env" },
         { status: 401 },
       );
     }

@@ -1,5 +1,5 @@
 /**
- * Memory Remember API — analyzes note text and extracts facts to MemWal.
+ * Memory Remember API — analyzes note text and extracts facts to Walrus Memory.
  * Uses the authenticated user's delegate key from their session.
  */
 
@@ -8,7 +8,7 @@ import { db } from "@/shared/lib/db";
 import { zkLoginSessions, walletSessions, users } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
-/** Resolve user's MemWal key from session header. */
+/** Resolve user's Walrus Memory key from session header. */
 async function resolveUserKey(req: Request) {
   const sessionId = req.headers.get("x-session-id");
   if (!sessionId) return { key: null, accountId: null };

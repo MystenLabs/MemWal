@@ -47,7 +47,7 @@ def main() -> None:
             "You may have pasted a public key or a key from another account."
         )
 
-    print("MemWal credentials look parseable.")
+    print("Walrus Memory credentials look parseable.")
     print(f"Derived delegate public key: {derived_public_key}")
     if account_id:
         print(f"Account ID: {account_id}")

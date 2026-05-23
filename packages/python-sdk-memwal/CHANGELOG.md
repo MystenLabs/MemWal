@@ -10,6 +10,7 @@
 ### Changed
 
 - Updated docs/examples to use `MEMWAL_PRIVATE_KEY`.
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ### Fixed
 

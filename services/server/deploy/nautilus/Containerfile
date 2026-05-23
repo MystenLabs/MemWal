@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# TEE wrapper image for the MemWal relayer.
+# TEE wrapper image for the Walrus Memory relayer.
 #
 # Build the base runtime image first:
 #   docker build -f services/server/Dockerfile -t memwal-relayer:runtime services/server

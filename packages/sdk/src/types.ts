@@ -1,8 +1,8 @@
 /**
- * memwal — Core Types
+ * Walrus Memory — Core Types
  *
  * Ed25519 delegate key based SDK that communicates with
- * the MemWal Rust server (TEE).
+ * the Walrus Memory Rust server (TEE).
  */
 
 // ============================================================
@@ -10,9 +10,9 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string or Uint8Array). This is the delegate key from app.memwal.com */
+    /** Ed25519 private key (hex string or Uint8Array). This is the Walrus Memory delegate key. */
     key: string | Uint8Array;
-    /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
+    /** Walrus Memory account object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
     /** Server URL (default: https://relayer.memwal.ai) */
     serverUrl?: string;
@@ -307,9 +307,9 @@ export interface MemWalManualConfig {
     embeddingApiBase?: string;
     /** Embedding model name (default: text-embedding-3-small) */
     embeddingModel?: string;
-    /** MemWal contract package ID on Sui */
+    /** Walrus Memory contract package ID on Sui */
     packageId: string;
-    /** MemWalAccount object ID (for SEAL seal_approve) */
+    /** Walrus Memory account object ID (for SEAL seal_approve) */
     accountId: string;
     /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
@@ -376,7 +376,7 @@ export interface RecallManualResult {
 
 /** Base options for on-chain account transactions */
 interface AccountTxOpts {
-    /** MemWal contract package ID on Sui */
+    /** Walrus Memory contract package ID on Sui */
     packageId: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for signing.
@@ -405,7 +405,7 @@ export interface CreateAccountOpts extends AccountTxOpts {
 
 /** Result from createAccount() */
 export interface CreateAccountResult {
-    /** Created MemWalAccount object ID */
+    /** Created Walrus Memory account object ID */
     accountId: string;
     /** Owner Sui address */
     owner: string;
@@ -415,7 +415,7 @@ export interface CreateAccountResult {
 
 /** Options for addDelegateKey() */
 export interface AddDelegateKeyOpts extends AccountTxOpts {
-    /** MemWalAccount object ID */
+    /** Walrus Memory account object ID */
     accountId: string;
     /** Ed25519 public key (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
@@ -435,7 +435,7 @@ export interface AddDelegateKeyResult {
 
 /** Options for removeDelegateKey() */
 export interface RemoveDelegateKeyOpts extends AccountTxOpts {
-    /** MemWalAccount object ID */
+    /** Walrus Memory account object ID */
     accountId: string;
     /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
