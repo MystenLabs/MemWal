@@ -27,7 +27,7 @@ DIM    = "\033[2m"
 RESET  = "\033[0m"
 
 SERVER_URL  = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.dev.memwal.ai")
-PRIVATE_KEY = os.environ.get("MEMWAL_PRIVATE_KEY") or os.environ.get("MEMWAL_KEY", "")
+PRIVATE_KEY = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID  = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 HAS_KEY     = bool(PRIVATE_KEY and ACCOUNT_ID)
 

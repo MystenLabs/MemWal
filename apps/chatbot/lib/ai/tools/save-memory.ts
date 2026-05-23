@@ -20,7 +20,7 @@ export const saveMemory = ({
         ),
     }),
     execute: async ({ text }) => {
-      const key = memwalKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+      const key = memwalKey || process.env.MEMWAL_PRIVATE_KEY;
       const accountId = memwalAccountId || process.env.MEMWAL_ACCOUNT_ID;
       const serverUrl = process.env.MEMWAL_SERVER_URL || "http://localhost:8000";
 

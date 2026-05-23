@@ -66,7 +66,7 @@ def _ms(start: float) -> int:
 
 async def main() -> None:
     server_url = os.environ.get("MEMWAL_SERVER_URL", "http://localhost:8000")
-    key = os.environ.get("MEMWAL_PRIVATE_KEY") or os.environ.get("MEMWAL_KEY")
+    key = os.environ.get("MEMWAL_PRIVATE_KEY")
     account_id = os.environ.get("MEMWAL_ACCOUNT_ID")
     namespace = os.environ.get("MEMWAL_NAMESPACE", "python-sdk-example")
 

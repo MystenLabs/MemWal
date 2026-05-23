@@ -10,8 +10,7 @@ function normalizeHex(value: string): string {
 }
 
 async function main() {
-    const privateKey =
-        process.env.MEMWAL_PRIVATE_KEY ?? process.env.MEMWAL_KEY ?? "";
+    const privateKey = process.env.MEMWAL_PRIVATE_KEY ?? "";
     const accountId = process.env.MEMWAL_ACCOUNT_ID ?? "";
     const expectedPublicKey = process.env.MEMWAL_DELEGATE_PUBLIC_KEY ?? "";
     const serverUrl = process.env.MEMWAL_SERVER_URL ?? "";
