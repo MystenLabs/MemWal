@@ -83,7 +83,7 @@ Config:
 |---|---|---|---|---|
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | `http://localhost:8000` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 ### `remember(text, namespace?): Promise<RememberAcceptedResult>`
@@ -100,11 +100,13 @@ Returns:
 
 Use `rememberAndWait(text, namespace?, opts?)` or `waitForRememberJob(job_id, opts?)` to resolve the completed `{ id, job_id, blob_id, owner, namespace }` result.
 
-### `recall(query, limit?, namespace?): Promise<RecallResult>`
+### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limit` defaults to `10`
+- `limitOrOptions` defaults to `10`
+- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 Returns:
 ```ts
@@ -290,7 +292,7 @@ Used by `MemWal.create(config)` and `withMemWal(model, options)`.
 |---|---|---|
 | `key` | yes | Delegate private key in hex |
 | `accountId` | yes | MemWalAccount object ID on Sui |
-| `serverUrl` | no | Relayer URL. Default: `http://localhost:8000` |
+| `serverUrl` | no | Relayer URL. Default: `https://relayer.memwal.ai` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
 
 ### MemWalManualConfig

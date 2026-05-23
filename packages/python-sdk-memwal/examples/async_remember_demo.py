@@ -65,13 +65,13 @@ def _ms(start: float) -> int:
 
 
 async def main() -> None:
-    server_url = os.environ.get("MEMWAL_SERVER_URL", "http://localhost:3001")
-    key = os.environ.get("MEMWAL_KEY")
+    server_url = os.environ.get("MEMWAL_SERVER_URL", "http://localhost:8000")
+    key = os.environ.get("MEMWAL_PRIVATE_KEY") or os.environ.get("MEMWAL_KEY")
     account_id = os.environ.get("MEMWAL_ACCOUNT_ID")
     namespace = os.environ.get("MEMWAL_NAMESPACE", "python-sdk-example")
 
     if not key or not account_id:
-        print("ERROR: set MEMWAL_KEY + MEMWAL_ACCOUNT_ID in examples/.env")
+        print("ERROR: set MEMWAL_PRIVATE_KEY + MEMWAL_ACCOUNT_ID in examples/.env")
         sys.exit(2)
 
     print(f"server      : {server_url}")

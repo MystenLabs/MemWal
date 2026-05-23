@@ -10,7 +10,7 @@
  * import { openai } from "@ai-sdk/openai"
  *
  * const model = withMemWal(openai("gpt-4o"), {
- *   key: process.env.MEMWAL_KEY,  // Ed25519 delegate key (hex)
+ *   key: process.env.MEMWAL_PRIVATE_KEY,  // Ed25519 delegate private key (hex)
  * })
  *
  * const result = await generateText({

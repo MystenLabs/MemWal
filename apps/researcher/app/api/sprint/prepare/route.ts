@@ -45,7 +45,7 @@ export async function POST(request: Request) {
   }
 
   const { chatId, sprintIds, visibility = "private" } = body;
-  const memwalKey = session.user.privateKey || process.env.MEMWAL_KEY;
+  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
   const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   const userId = session.user.id;
 

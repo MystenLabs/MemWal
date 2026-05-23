@@ -14,7 +14,7 @@ export interface MemWalConfig {
     key: string | Uint8Array;
     /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
-    /** Server URL (default: http://localhost:8000) */
+    /** Server URL (default: https://relayer.memwal.ai) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
@@ -62,6 +62,18 @@ export interface RecallMemory {
 export interface RecallResult {
     results: RecallMemory[];
     total: number;
+}
+
+/** Options for recall(). */
+export interface RecallOptions {
+    /** Max number of nearest memories to request from the relayer (default: 10). */
+    limit?: number;
+    /** Alias for limit, useful when describing top-K search behaviour. */
+    topK?: number;
+    /** Namespace override (default: config namespace or "default"). */
+    namespace?: string;
+    /** Drop memories whose distance is greater than or equal to this value. */
+    maxDistance?: number;
 }
 
 /** Result from rememberBulk() / rememberBulkAsync() */
@@ -270,7 +282,7 @@ export interface SealServerConfig {
 export interface MemWalManualConfig {
     /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
     key: string | Uint8Array;
-    /** Server URL (default: http://localhost:8000) */
+    /** Server URL (default: https://relayer.memwal.ai) */
     serverUrl?: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for SEAL + Walrus signing.

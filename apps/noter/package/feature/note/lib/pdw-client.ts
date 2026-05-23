@@ -28,11 +28,11 @@ export function getMemWalClient(
   key?: string | null,
   accountId?: string | null,
 ): MemWal {
-  const resolvedKey = key || process.env.MEMWAL_KEY;
+  const resolvedKey = key || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
   const resolvedAccountId = accountId || process.env.MEMWAL_ACCOUNT_ID;
 
   if (!resolvedKey) {
-    throw new Error("[MemWal] No key configured — sign in with Enoki or set MEMWAL_KEY in .env");
+    throw new Error("[MemWal] No key configured — sign in with Enoki or set MEMWAL_PRIVATE_KEY in .env");
   }
   if (!resolvedAccountId) {
     throw new Error("[MemWal] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env");

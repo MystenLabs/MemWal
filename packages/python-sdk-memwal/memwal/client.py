@@ -79,6 +79,11 @@ from .utils import (
 T = TypeVar("T")
 SEAL_SESSION_TTL_MIN = 5
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
+AUTH_REJECTED_MESSAGE = (
+    "401 from relayer: typically wrong private key, key not registered on this "
+    "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
+    "and dashboard credentials."
+)
 
 
 # ============================================================
@@ -472,6 +477,7 @@ class MemWal:
         query: str,
         limit: int = 10,
         namespace: Optional[str] = None,
+        max_distance: Optional[float] = None,
     ) -> RecallResult:
         """Recall memories similar to a query.
 
@@ -481,6 +487,8 @@ class MemWal:
             query: Search query.
             limit: Max number of results (default: 10).
             namespace: Override the default namespace.
+            max_distance: Optional client-side relevance threshold. Memories with
+                ``distance >= max_distance`` are dropped.
 
         Returns:
             :class:`RecallResult` with decrypted text results.
@@ -498,6 +506,9 @@ class MemWal:
             )
             for m in data.get("results", [])
         ]
+        if max_distance is not None:
+            memories = [m for m in memories if m.distance < max_distance]
+            return RecallResult(results=memories, total=len(memories))
         return RecallResult(results=memories, total=data.get("total", len(memories)))
 
     async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
@@ -991,7 +1002,10 @@ class _HttpStatusError(MemWalError):
     """
 
     def __init__(self, status: int, body: str) -> None:
-        super().__init__(f"MemWal API error ({status}): {body}")
+        if status == 401:
+            super().__init__(AUTH_REJECTED_MESSAGE)
+        else:
+            super().__init__(f"MemWal API error ({status}): {body}")
         self.status = status
         self.body = body
 
@@ -1170,10 +1184,14 @@ class MemWalSync:
         return self._run(self._inner.remember_bulk_and_wait(items, opts))
 
     def recall(
-        self, query: str, limit: int = 10, namespace: Optional[str] = None
+        self,
+        query: str,
+        limit: int = 10,
+        namespace: Optional[str] = None,
+        max_distance: Optional[float] = None,
     ) -> RecallResult:
         """Synchronous version of :meth:`MemWal.recall`."""
-        return self._run(self._inner.recall(query, limit, namespace))
+        return self._run(self._inner.recall(query, limit, namespace, max_distance))
 
     def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""

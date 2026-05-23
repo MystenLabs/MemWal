@@ -659,7 +659,7 @@ function PureMemWalButton({
             )}
             onClick={() => setShowKeyInput(!showKeyInput)}
             variant="ghost"
-            title={hasKey ? "Key configured" : "Set your MEMWAL key"}
+            title={hasKey ? "Private key configured" : "Set MEMWAL_PRIVATE_KEY"}
           >
             <KeyIcon className="size-3" />
           </Button>
@@ -681,14 +681,14 @@ function PureMemWalButton({
         >
           <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
             <KeyIcon className="size-3" />
-            memwal key (ed25519 private key hex)
+            MEMWAL_PRIVATE_KEY (ed25519 private key hex)
           </div>
           <div className="flex gap-1.5 mb-2">
             <input
               type="password"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
-              placeholder="Enter your delegate key..."
+              placeholder="Enter your delegate private key..."
               className="flex-1 rounded-md border border-border bg-muted px-2 py-1.5 text-xs font-mono outline-none focus:border-primary"
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
