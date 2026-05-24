@@ -22,7 +22,7 @@ export {
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 
-// Types (server-mode only — no manual types here)
+// Types for the default client, including its lightweight manual endpoints.
 export type {
     MemWalConfig,
     RememberAcceptedResult,
@@ -31,6 +31,7 @@ export type {
     RecallResult,
     RecallMemory,
     RecallOptions,
+    ScoringWeights,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -44,6 +45,11 @@ export type {
     RememberBulkStatusResult,
     RememberBulkResult,
     RememberBulkItemResult,
+    RememberManualOptions,
+    RememberManualResult,
+    RecallManualOptions,
+    RecallManualResult,
+    RecallManualHit,
     MinSupportedSdk,
     RelayerBuildMetadata,
     RelayerDeprecationNotice,

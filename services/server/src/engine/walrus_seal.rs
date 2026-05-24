@@ -269,7 +269,9 @@ impl MemoryEngine for WalrusSealEngine {
         let id = uuid::Uuid::new_v4().to_string();
         let blob_size = bytes.len() as i64;
         self.db
-            .insert_vector(&id, owner, namespace, &blob_id, vector, blob_size, importance)
+            .insert_vector(
+                &id, owner, namespace, &blob_id, vector, blob_size, importance,
+            )
             .await?;
 
         Ok(MemoryRef { id, blob_id })
