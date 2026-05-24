@@ -299,7 +299,22 @@ impl Config {
             slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL")
                 .ok()
                 .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
+                .filter(|v| !v.is_empty())
+                .map(|v| {
+                    // Fail fast on obviously-wrong configs so a deploy-time
+                    // typo surfaces in startup logs instead of staying silent
+                    // until the first real failure event.
+                    if !crate::slack::looks_like_slack_webhook(&v) {
+                        panic!(
+                            "SLACK_WEBHOOK_URL does not look like a Slack incoming \
+                             webhook (expected https://hooks.slack.com/services/...): {}",
+                            // Don't echo the full URL into the panic — it
+                            // would land in process-restart logs.
+                            v.chars().take(40).collect::<String>()
+                        );
+                    }
+                    v
+                }),
             env_label: std::env::var("MEMWAL_ENV")
                 .ok()
                 .map(|v| v.trim().to_string())

@@ -165,20 +165,63 @@ async fn update_remember_job_after_wallet_error(
         return;
     };
 
-    let status = if error.is_permanent() {
-        "failed"
-    } else {
-        "running"
-    };
+    let is_permanent = error.is_permanent();
+    let status = if is_permanent { "failed" } else { "running" };
 
-    let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3",
+    // ENG-1784: when this UPDATE flips a row to `failed` we also want to
+    // page on-call. `RETURNING owner, namespace` lets us hydrate the
+    // alert from the same statement that persists the terminal state, no
+    // extra SELECT round-trip. For the transient (`running`) branch the
+    // RETURNING is wasted but harmless — Postgres returns the row either
+    // way and the wallet job is about to be retried, so the latency
+    // difference is noise.
+    let row: Result<Option<(String, String)>, sqlx::Error> = sqlx::query_as(
+        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() \
+         WHERE id = $3 RETURNING owner, namespace",
     )
     .bind(status)
     .bind(msg)
     .bind(jid)
-    .execute(state.db.pool())
+    .fetch_optional(state.db.pool())
     .await;
+
+    if !is_permanent {
+        // Transient: row stays `running`, wallet job will retry. No alert.
+        return;
+    }
+
+    // Permanent + persistence outcome decides what we send to Slack. We
+    // page on-call regardless of whether the UPDATE was acknowledged —
+    // an Enoki / Walrus retry exhaustion is a real incident, and missing
+    // metadata is a smaller problem than missing the page entirely.
+    let metadata = match row {
+        Ok(Some((owner, namespace))) => Some(RememberJobMetadata { owner, namespace }),
+        Ok(None) => {
+            tracing::warn!(
+                "remember job {} not found while marking failed — DB out of sync",
+                jid
+            );
+            None
+        }
+        Err(persist_err) => {
+            tracing::error!(
+                "failed to persist failed status for remember job {}: {}",
+                jid,
+                persist_err
+            );
+            None
+        }
+    };
+
+    spawn_slack_remember_failed_alert(
+        state.slack.as_ref(),
+        Some(jid),
+        metadata.as_ref(),
+        msg,
+        crate::slack::FailureKind::WalletRetriesExhausted {
+            attempts: MAX_ATTEMPTS,
+        },
+    );
 }
 
 /// Metadata returned by a successful `mark_remember_job_failed` so the
@@ -227,14 +270,22 @@ fn remember_job_persist_failure_message(msg: &str, persist_err: &sqlx::Error) ->
 ///
 /// Spawned in the background so a slow Slack POST cannot block the wallet
 /// worker, and a Slack-side failure cannot fail the wallet job. The Slack
-/// client carries its own 5-minute dedup window so an Enoki / sidecar
-/// incident that fans out into dozens of identical failures only pages the
-/// channel once per window.
+/// client carries its own 5-minute dedup window AND a global 60-second
+/// cap, so an Enoki / sidecar incident that fans out into dozens of
+/// identical failures only pages the channel once per window, and a
+/// diverse-error storm can't flood the channel either.
+///
+/// `kind` is what makes the alert headline accurate — pass
+/// `WalletRetriesExhausted` for path A (real upload/transfer permanent
+/// failure) and `HandoffEnqueueFailure` for path B (queue layer down
+/// after upload succeeded). The two scenarios get distinct Slack
+/// headlines so on-call can route response without reading the body.
 fn spawn_slack_remember_failed_alert(
     slack: Option<&Arc<crate::slack::SlackClient>>,
     remember_job_id: Option<&str>,
     metadata: Option<&RememberJobMetadata>,
     msg: &str,
+    kind: crate::slack::FailureKind,
 ) {
     let Some(client) = slack else {
         return;
@@ -245,17 +296,14 @@ fn spawn_slack_remember_failed_alert(
     let namespace = metadata.map(|m| m.namespace.clone());
     let msg = msg.to_string();
     tokio::spawn(async move {
-        if let Err(err) = client
-            .notify_remember_job_failed(
-                job_id.as_deref(),
-                owner.as_deref(),
-                namespace.as_deref(),
-                MAX_ATTEMPTS,
-                MAX_ATTEMPTS,
-                &msg,
-            )
-            .await
-        {
+        let alert = crate::slack::RememberJobFailedAlert {
+            job_id: job_id.as_deref(),
+            owner: owner.as_deref(),
+            namespace: namespace.as_deref(),
+            error_msg: &msg,
+            kind,
+        };
+        if let Err(err) = client.notify_remember_job_failed(alert).await {
             tracing::warn!("Slack remember-failed alert failed: {}", err);
         }
     });
@@ -275,7 +323,13 @@ async fn classify_wallet_remember_handoff_failure(
     // is not orphaned.
     match mark_remember_job_failed(pool, remember_job_id, &msg).await {
         Ok(metadata) => {
-            spawn_slack_remember_failed_alert(slack, remember_job_id, metadata.as_ref(), &msg);
+            spawn_slack_remember_failed_alert(
+                slack,
+                remember_job_id,
+                metadata.as_ref(),
+                &msg,
+                crate::slack::FailureKind::HandoffEnqueueFailure,
+            );
             WalletJobError::Permanent(msg)
         }
         Err(persist_err) => {
@@ -292,7 +346,13 @@ async fn handle_legacy_remember_handoff_failure(
 ) -> Result<(), RememberJobError> {
     match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
         Ok(metadata) => {
-            spawn_slack_remember_failed_alert(slack, Some(remember_job_id), metadata.as_ref(), &msg);
+            spawn_slack_remember_failed_alert(
+                slack,
+                Some(remember_job_id),
+                metadata.as_ref(),
+                &msg,
+                crate::slack::FailureKind::HandoffEnqueueFailure,
+            );
             Ok(())
         }
         Err(persist_err) => Err(RememberJobError::Internal(

@@ -1,27 +1,42 @@
 //! Slack notification client for terminal job failures.
 //!
-//! ENG-1784: Push alerts to a Slack Incoming Webhook when a remember job
-//! fails after wallet rotation has exhausted all retries (i.e. every wallet
-//! in the pool returned a non-retryable error).
+//! ENG-1784: push alerts to a Slack Incoming Webhook when a remember job
+//! reaches a terminal failure state, so on-call sees the incident without
+//! having to tail logs.
 //!
-//! Design (mirrors `x-wallet/backend/src/clients/slack.rs`):
+//! Two failure shapes are surfaced today:
 //!
-//! * **Optional**: `SlackClient` is constructed only when `SLACK_WEBHOOK_URL`
-//!   is set. When absent the alerter is `None` and every notify call is a
-//!   no-op; the rest of the server is unaware.
+//! 1. **Wallet retries exhausted** — the wallet pool tried every key in
+//!    rotation up to `MAX_ATTEMPTS` and every attempt returned a
+//!    permanent error (e.g. Enoki `balance::split` MoveAbort, Walrus 4xx,
+//!    sidecar timeout reclassified as Permanent). This is the scenario
+//!    Henry described in the ENG-1784 brief.
+//! 2. **Post-upload handoff enqueue failure** — Walrus upload (and maybe
+//!    on-chain transfer) succeeded, but the follow-up recovery / index
+//!    job could not be enqueued because Apalis / Redis itself rejected
+//!    the push. The wallet pool was not involved.
+//!
+//! Pattern mirrors `x-wallet/backend/src/clients/slack.rs`:
+//!
+//! * **Optional**: the client is constructed only when `SLACK_WEBHOOK_URL`
+//!   is set. Absent → alerter is `None` → every notify call is a no-op.
 //! * **Fire-and-forget**: callers spawn the notify future and ignore the
 //!   result. A failed Slack POST must never fail the wallet job.
-//! * **In-memory dedup**: Enoki / sidecar incidents can fan out into dozens
-//!   of identical failures within seconds. We hash the error message and
-//!   suppress duplicates within a 5-minute window so the on-call channel
-//!   isn't flooded; suppressions are logged for visibility.
+//! * **Multi-layer rate control**:
+//!     - 5-minute in-memory dedup by SHA-256 of the error message →
+//!       protects against a single fan-out incident (one upstream
+//!       failure mode replicated across many jobs).
+//!     - Sliding 60-second window global cap of 30 messages →
+//!       protects against diverse-error storms that bypass dedup.
+//!     - Single retry on Slack 429 / 5xx, then drop with a tracing
+//!       warning so we don't infinite-loop on a Slack-side outage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error as StdError;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -31,14 +46,84 @@ use tracing::{info, warn};
 pub type SlackError = Box<dyn StdError + Send + Sync + 'static>;
 pub type SlackResult<T> = std::result::Result<T, SlackError>;
 
-/// Cool-down for identical error signatures. An Enoki outage typically
-/// produces the same `dry_run_failed: balance::split` message on every
-/// retry; without this window a 30-minute incident posts hundreds of
-/// near-identical messages.
+/// Identical errors arriving inside this window are suppressed. Enoki and
+/// sidecar incidents typically produce the same message on every retry;
+/// without this, a 30-minute incident posts hundreds of near-identical
+/// messages.
 const DEDUP_WINDOW: Duration = Duration::from_secs(5 * 60);
 
-/// `text` block is the fallback Slack uses for notifications + accessibility.
-/// `blocks` carries the rich layout shown in the channel.
+/// Sliding-window global cap. Even with dedup, a single relayer-wide
+/// failure can produce a diverse error storm (different request IDs,
+/// timestamps, blob IDs) that defeats per-error dedup. This cap protects
+/// the channel from outright flooding.
+const GLOBAL_RATE_WINDOW: Duration = Duration::from_secs(60);
+const GLOBAL_RATE_MAX: usize = 30;
+
+/// HTTP timeout for the webhook POST. Slack normally responds in well
+/// under a second; anything beyond a few seconds is almost certainly an
+/// upstream outage. Capping the timeout prevents long-running tasks
+/// accumulating during a Slack-side incident.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Retry delay when Slack returns 429 / 5xx. Single retry only — if the
+/// retry also fails we drop the alert; the wallet job's terminal status
+/// is already persisted in `remember_jobs`, so on-call can still find
+/// the failure via the DB.
+const RETRY_DELAY: Duration = Duration::from_millis(750);
+
+/// Why this remember job is in a terminal failed state. Pick the variant
+/// that matches your code path so the Slack message wording is accurate.
+#[derive(Debug, Clone, Copy)]
+pub enum FailureKind {
+    /// The wallet pool rotated through every key it had and every attempt
+    /// returned a permanent error. This is the "Enoki down across all
+    /// wallets" scenario from the ENG-1784 brief.
+    WalletRetriesExhausted {
+        /// Configured maximum attempts (e.g. `MAX_ATTEMPTS = 3`). The
+        /// alert reads `{attempts}/{attempts} exhausted` because the
+        /// only way we land in this branch is by burning all of them.
+        attempts: u32,
+    },
+    /// Upload succeeded but the follow-up workflow couldn't be enqueued
+    /// because the job queue (Apalis / Redis) rejected the push. The
+    /// wallet pool itself was healthy — the queue layer wasn't.
+    HandoffEnqueueFailure,
+}
+
+impl FailureKind {
+    fn label(&self) -> String {
+        match self {
+            FailureKind::WalletRetriesExhausted { attempts } => {
+                format!("{} / {} wallet retries exhausted", attempts, attempts)
+            }
+            FailureKind::HandoffEnqueueFailure => {
+                "post-upload handoff enqueue failed (job queue infra)".to_string()
+            }
+        }
+    }
+
+    fn headline(&self) -> &'static str {
+        match self {
+            FailureKind::WalletRetriesExhausted { .. } => {
+                "🔴 MemWal — Remember Job Failed (wallet retries exhausted)"
+            }
+            FailureKind::HandoffEnqueueFailure => {
+                "🔴 MemWal — Remember Job Failed (queue handoff)"
+            }
+        }
+    }
+}
+
+/// All inputs to a single Slack alert. Grouping into a struct keeps the
+/// call sites readable as we add fields (e.g. blob_id, attempt count).
+pub struct RememberJobFailedAlert<'a> {
+    pub job_id: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub namespace: Option<&'a str>,
+    pub error_msg: &'a str,
+    pub kind: FailureKind,
+}
+
 #[derive(Debug, Serialize)]
 struct SlackMessage {
     text: String,
@@ -65,121 +150,154 @@ struct SlackText {
     text: String,
 }
 
-/// Slack notifier. Cheap to clone — wraps `reqwest::Client` which is
-/// internally `Arc`-counted, and an `Arc<Mutex<...>>` dedup map.
+/// Inner state guarded by a single sync mutex. We hold the lock only
+/// across in-memory map / queue operations (no `.await` inside the lock
+/// scope), so `std::sync::Mutex` is correct here and avoids the
+/// `tokio::sync::Mutex` await-friendly version.
+struct RateState {
+    /// `error_signature → last_sent_at`.
+    dedup: HashMap<String, Instant>,
+    /// Sliding-window timestamps of sends in the last `GLOBAL_RATE_WINDOW`.
+    /// `VecDeque` so we can pop expired entries in O(1) per stale element.
+    recent_sends: VecDeque<Instant>,
+}
+
 #[derive(Clone)]
 pub struct SlackClient {
     http: Client,
     webhook_url: String,
-    /// `error_signature → last_sent_at`. We log + skip when the same
-    /// signature re-appears within `DEDUP_WINDOW`.
-    dedup: std::sync::Arc<Mutex<HashMap<String, Instant>>>,
+    state: std::sync::Arc<Mutex<RateState>>,
     /// Identifies the running relayer in the alert footer
     /// (e.g. `prod` / `staging` / `dev` from `MEMWAL_ENV`).
     env_label: String,
-    /// Optional git SHA / build identifier, surfaced in the footer.
+    /// Optional short git SHA for the footer.
     server_commit: Option<String>,
 }
 
 impl SlackClient {
     pub fn new(webhook_url: String, env_label: String, server_commit: Option<String>) -> Self {
+        let http = Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            // `Client::builder()` only fails if the system has no working
+            // TLS backend — at which point the rest of the relayer is
+            // dead anyway, so a panic here is safe and surfaces it loudly.
+            .expect("reqwest client should build (TLS backend required)");
         Self {
-            http: Client::new(),
+            http,
             webhook_url,
-            dedup: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            state: std::sync::Arc::new(Mutex::new(RateState {
+                dedup: HashMap::new(),
+                recent_sends: VecDeque::new(),
+            })),
             env_label,
             server_commit,
         }
     }
 
-    /// Notify Slack that a remember job has terminally failed after the
-    /// wallet pool exhausted retries. Returns `Ok(())` on success, or after
-    /// suppression. Network errors are surfaced for caller logging but the
-    /// recommended use is fire-and-forget via `tokio::spawn`.
+    /// Notify Slack that a remember job has terminally failed. The Slack
+    /// POST is rate-limited by error-signature dedup AND by a global
+    /// 60-second cap; suppressed alerts return `Ok(())` so fire-and-forget
+    /// callers don't log a false "Slack failed" warning.
     pub async fn notify_remember_job_failed(
         &self,
-        job_id: Option<&str>,
-        owner: Option<&str>,
-        namespace: Option<&str>,
-        wallet_attempts: u32,
-        max_attempts: u32,
-        error_msg: &str,
+        alert: RememberJobFailedAlert<'_>,
     ) -> SlackResult<()> {
-        if self.should_suppress(error_msg) {
+        let sanitized = sanitize_for_slack(alert.error_msg);
+
+        if self.should_suppress(&sanitized) {
             info!(
-                error_signature = %short_hash(error_msg),
-                "Slack alert suppressed (within dedup window)"
+                error_signature = %short_hash(&sanitized),
+                "Slack alert suppressed (dedup or global rate cap)"
             );
             return Ok(());
         }
 
-        let payload = self.build_remember_failed_payload(
-            job_id,
-            owner,
-            namespace,
-            wallet_attempts,
-            max_attempts,
-            error_msg,
-        );
-        self.send_payload(&payload).await
+        let payload = self.build_payload(&alert, &sanitized);
+        self.send_with_retry(&payload).await
     }
 
-    /// Send a raw text-only notification. Helpful for ad-hoc one-off alerts
-    /// and unit tests; the typed `notify_*` helpers should be preferred for
-    /// production paths so the format stays consistent.
+    /// Send a simple text notification. Retained for unit tests and any
+    /// one-off operator-driven message; production paths should use the
+    /// typed helpers so the format stays consistent across alerts.
     #[allow(dead_code)]
     pub async fn send_notification(&self, text: &str) -> SlackResult<()> {
-        self.send_payload(&SlackMessage {
+        self.send_with_retry(&SlackMessage {
             text: text.to_string(),
             blocks: None,
         })
         .await
     }
 
-    /// Returns `true` if an identical `error_msg` has been alerted within
-    /// the dedup window. Updates the timestamp atomically when we DO send.
-    fn should_suppress(&self, error_msg: &str) -> bool {
-        let key = hash_error(error_msg);
+    /// Returns `true` if this signature has been alerted within
+    /// `DEDUP_WINDOW`, OR if the global rate cap is exhausted. Both
+    /// checks happen under one lock so a burst can't slip past both.
+    fn should_suppress(&self, sanitized_error_msg: &str) -> bool {
+        let key = hash_error(sanitized_error_msg);
         let now = Instant::now();
 
-        let mut map = match self.dedup.lock() {
+        let mut state = match self.state.lock() {
             Ok(guard) => guard,
-            // Poisoned mutex: better to send the alert than swallow it.
+            // Poisoned mutex: prefer to send the alert than swallow it.
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        if let Some(last) = map.get(&key) {
+        // GC expired dedup keys to bound map size.
+        state
+            .dedup
+            .retain(|_, ts| now.duration_since(*ts) < DEDUP_WINDOW);
+        // GC expired global-window timestamps.
+        while state
+            .recent_sends
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= GLOBAL_RATE_WINDOW)
+        {
+            state.recent_sends.pop_front();
+        }
+
+        // Per-error dedup: if we already alerted on this signature within
+        // the window, suppress regardless of global budget.
+        if let Some(last) = state.dedup.get(&key) {
             if now.duration_since(*last) < DEDUP_WINDOW {
                 return true;
             }
         }
-        map.insert(key, now);
 
-        // Best-effort GC of expired entries so the map doesn't grow
-        // unbounded across long-running processes.
-        map.retain(|_, ts| now.duration_since(*ts) < DEDUP_WINDOW);
+        // Global cap: if we've already sent `GLOBAL_RATE_MAX` in the last
+        // window, drop this one too (caller will see Ok and the failure
+        // is still in the DB).
+        if state.recent_sends.len() >= GLOBAL_RATE_MAX {
+            warn!(
+                cap = GLOBAL_RATE_MAX,
+                window_secs = GLOBAL_RATE_WINDOW.as_secs(),
+                "Slack global rate cap reached — dropping alert"
+            );
+            return true;
+        }
+
+        // Record the send intent. We do this under the same lock so two
+        // simultaneous callers can't both see "below cap" and both send,
+        // exceeding the cap by one or two messages.
+        state.dedup.insert(key, now);
+        state.recent_sends.push_back(now);
         false
     }
 
-    fn build_remember_failed_payload(
+    fn build_payload(
         &self,
-        job_id: Option<&str>,
-        owner: Option<&str>,
-        namespace: Option<&str>,
-        wallet_attempts: u32,
-        max_attempts: u32,
-        error_msg: &str,
+        alert: &RememberJobFailedAlert<'_>,
+        sanitized_error: &str,
     ) -> SlackMessage {
         let fallback_text = format!(
-            "🔴 MemWal: remember job failed (all wallets exhausted) — {}",
-            truncate(error_msg, 120)
+            "🔴 MemWal: remember job failed — {}",
+            truncate(sanitized_error, 120)
         );
 
         let header = SlackBlock {
             block_type: "header".to_string(),
             text: Some(SlackText {
                 text_type: "plain_text".to_string(),
-                text: "🔴 MemWal — Remember Job Failed".to_string(),
+                text: alert.kind.headline().to_string(),
             }),
             fields: None,
             elements: None,
@@ -192,22 +310,25 @@ impl SlackClient {
             fields: Some(vec![
                 SlackText {
                     text_type: "mrkdwn".to_string(),
-                    text: format!("*Job ID:*\n`{}`", job_id.unwrap_or("-")),
+                    text: format!("*Job ID:*\n`{}`", alert.job_id.unwrap_or("-")),
                 },
                 SlackText {
                     text_type: "mrkdwn".to_string(),
-                    text: format!("*Namespace:*\n`{}`", namespace.unwrap_or("-")),
-                },
-                SlackText {
-                    text_type: "mrkdwn".to_string(),
-                    text: format!("*Owner:*\n`{}`", owner.map(shorten_owner).unwrap_or_else(|| "-".to_string())),
+                    text: format!("*Namespace:*\n`{}`", alert.namespace.unwrap_or("-")),
                 },
                 SlackText {
                     text_type: "mrkdwn".to_string(),
                     text: format!(
-                        "*Wallet attempts:*\n{} / {} exhausted",
-                        wallet_attempts, max_attempts
+                        "*Owner:*\n`{}`",
+                        alert
+                            .owner
+                            .map(shorten_owner)
+                            .unwrap_or_else(|| "-".to_string())
                     ),
+                },
+                SlackText {
+                    text_type: "mrkdwn".to_string(),
+                    text: format!("*Failure mode:*\n{}", alert.kind.label()),
                 },
             ]),
         };
@@ -218,10 +339,10 @@ impl SlackClient {
             fields: None,
             text: Some(SlackText {
                 text_type: "mrkdwn".to_string(),
-                // Triple-backtick code fence renders Slack `code block`.
-                // Truncate so a multi-paragraph traceback doesn't blow past
-                // Slack's 3000-char per-text limit.
-                text: format!("*Error:*\n```{}```", truncate(error_msg, 2400)),
+                // Triple-backtick fence + truncation to stay under
+                // Slack's 3000-char per-text limit even after multiline
+                // tracebacks.
+                text: format!("*Error:*\n```{}```", truncate(sanitized_error, 2400)),
             }),
         };
 
@@ -245,29 +366,76 @@ impl SlackClient {
         }
     }
 
-    async fn send_payload(&self, payload: &SlackMessage) -> SlackResult<()> {
+    async fn send_with_retry(&self, payload: &SlackMessage) -> SlackResult<()> {
+        match self.send_once(payload).await {
+            Ok(()) => Ok(()),
+            Err(SendError::Transient { status, body }) => {
+                warn!(
+                    status = %status,
+                    "Slack webhook returned transient error — retrying once after {}ms",
+                    RETRY_DELAY.as_millis()
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+                match self.send_once(payload).await {
+                    Ok(()) => Ok(()),
+                    Err(retry_err) => Err(format!(
+                        "Slack send failed twice: first={} {}, retry={}",
+                        status, body, retry_err
+                    )
+                    .into()),
+                }
+            }
+            Err(SendError::Permanent(msg)) => Err(msg.into()),
+        }
+    }
+
+    async fn send_once(&self, payload: &SlackMessage) -> std::result::Result<(), SendError> {
         let response = self
             .http
             .post(&self.webhook_url)
             .json(payload)
             .send()
             .await
-            .map_err(|e| -> SlackError { format!("Failed to POST Slack webhook: {}", e).into() })?;
+            .map_err(|e| SendError::Permanent(format!("HTTP send failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            warn!(
-                status = %status,
-                body = %body,
-                "Slack webhook returned non-success status"
-            );
-            return Err(format!("Slack webhook failed with status {}: {}", status, body).into());
+        let status = response.status();
+        if status.is_success() {
+            info!("Slack notification delivered");
+            return Ok(());
         }
 
-        info!("Slack notification delivered");
-        Ok(())
+        let body = response.text().await.unwrap_or_default();
+        if is_retryable(status) {
+            Err(SendError::Transient { status, body })
+        } else {
+            Err(SendError::Permanent(format!(
+                "Slack webhook failed with status {}: {}",
+                status, body
+            )))
+        }
     }
+}
+
+enum SendError {
+    /// Slack returned a status that indicates a temporary issue
+    /// (429 rate-limited or 5xx upstream). One retry is worth attempting.
+    Transient { status: StatusCode, body: String },
+    /// Slack rejected the request for a reason that won't get better on
+    /// retry (4xx other than 429, or a transport error).
+    Permanent(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::Transient { status, body } => write!(f, "transient {}: {}", status, body),
+            SendError::Permanent(msg) => write!(f, "permanent: {}", msg),
+        }
+    }
+}
+
+fn is_retryable(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 // ============================================================
@@ -283,6 +451,9 @@ fn short_hash(msg: &str) -> String {
     hash_error(msg)
 }
 
+/// Truncate by char count (not byte), appending an ellipsis when over.
+/// Char-based slicing keeps multi-byte UTF-8 (emoji in error messages,
+/// non-ASCII namespace names) from panicking.
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -291,16 +462,80 @@ fn truncate(s: &str, max_chars: usize) -> String {
     format!("{}…", taken)
 }
 
+/// Display a Sui address as `0x12345678…abcd` so on-call can identify
+/// accounts without copy/pasting 66-character strings. Uses char-based
+/// slicing instead of byte slicing so non-ASCII strings (shouldn't occur
+/// for Sui addresses but defense-in-depth) don't panic.
 fn shorten_owner(owner: &str) -> String {
-    // 0x1234...abcd style display so on-call can identify accounts without
-    // copy/pasting 66-character addresses out of Slack.
-    let len = owner.len();
-    if len <= 12 {
+    let char_count = owner.chars().count();
+    if char_count <= 12 {
         return owner.to_string();
     }
-    let head = &owner[..8];
-    let tail = &owner[len.saturating_sub(4)..];
+    let head: String = owner.chars().take(8).collect();
+    let tail: String = owner.chars().skip(char_count - 4).collect();
     format!("{}…{}", head, tail)
+}
+
+/// Strip embedded credentials from a message before we post it to a
+/// shared Slack channel.
+///
+/// Concrete vectors this catches:
+///
+/// * Connection URLs in error display impls:
+///   `redis://memwal:hunter2@host:6379` → `redis://***@host:6379`
+/// * Postgres connection errors:
+///   `postgresql://app:s3cret@db.host:5432/memwal` → `postgresql://***@db.host:5432/memwal`
+///
+/// Best-effort only. We never want to add complex regex / parsing that
+/// could itself fail; if the upstream error format changes and starts
+/// leaking secrets in a different shape, that's a separate ticket.
+fn sanitize_for_slack(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut cursor = 0;
+    let bytes = msg.as_bytes();
+    while cursor < bytes.len() {
+        // Look for a scheme-separator `://` starting at `cursor`.
+        if let Some(scheme_end) = find_subsequence(&bytes[cursor..], b"://") {
+            let absolute_scheme_end = cursor + scheme_end + 3;
+            // Look for `@` between scheme end and the next whitespace/end.
+            let tail = &bytes[absolute_scheme_end..];
+            let scan_limit = tail
+                .iter()
+                .position(|b| matches!(*b, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'?' | b'#'))
+                .unwrap_or(tail.len());
+            if let Some(at_pos) = tail[..scan_limit].iter().position(|b| *b == b'@') {
+                // Found `scheme://user:pass@`. Append the scheme prefix,
+                // then `***@`, then continue past the `@`.
+                out.push_str(&msg[cursor..absolute_scheme_end]);
+                out.push_str("***@");
+                cursor = absolute_scheme_end + at_pos + 1;
+                continue;
+            }
+        }
+
+        // No more credential patterns; flush the rest.
+        out.push_str(&msg[cursor..]);
+        break;
+    }
+    out
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Validate `SLACK_WEBHOOK_URL` looks like a Slack incoming webhook so a
+/// typo at deploy time fails fast (visible in startup logs) instead of at
+/// first failure event (silent when nobody's looking).
+pub fn looks_like_slack_webhook(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.starts_with("https://hooks.slack.com/services/")
+        // Reasonable lower bound on the path-after-services length so we
+        // catch `https://hooks.slack.com/services/` alone as invalid.
+        && trimmed.len() > "https://hooks.slack.com/services/".len() + 5
 }
 
 #[cfg(test)]
@@ -309,11 +544,15 @@ mod tests {
 
     fn new_client() -> SlackClient {
         SlackClient::new(
-            "https://hooks.slack.com/services/TEST".to_string(),
+            "https://hooks.slack.com/services/TEST/CHANNEL/TOKEN".to_string(),
             "test".to_string(),
             Some("abcdef1".to_string()),
         )
     }
+
+    // ============================================================
+    // Dedup + global rate cap
+    // ============================================================
 
     #[test]
     fn dedup_suppresses_same_error_within_window() {
@@ -332,6 +571,28 @@ mod tests {
     }
 
     #[test]
+    fn global_rate_cap_stops_diverse_error_storm() {
+        let client = new_client();
+        // 30 distinct errors all go through (under the cap of 30).
+        for i in 0..GLOBAL_RATE_MAX {
+            assert!(
+                !client.should_suppress(&format!("error storm #{}", i)),
+                "burst entry #{} should not be suppressed",
+                i
+            );
+        }
+        // The 31st distinct error is suppressed by the global cap.
+        assert!(
+            client.should_suppress("error storm #31 (over cap)"),
+            "31st distinct error in the burst should be suppressed"
+        );
+    }
+
+    // ============================================================
+    // Owner / truncation safety
+    // ============================================================
+
+    #[test]
     fn shorten_owner_keeps_short_addresses_intact() {
         assert_eq!(shorten_owner("short"), "short");
         assert_eq!(shorten_owner("0xabcdef12"), "0xabcdef12");
@@ -344,45 +605,190 @@ mod tests {
     }
 
     #[test]
+    fn shorten_owner_does_not_panic_on_multibyte_chars() {
+        // Three-byte UTF-8 chars (Japanese characters). If we sliced
+        // by bytes this would panic at a non-char-boundary; char-based
+        // slicing handles it safely.
+        let exotic = "メメメメメメメメメメメメメメメメ";
+        let result = shorten_owner(exotic);
+        // Should produce `<first 8 chars>…<last 4 chars>` without panic.
+        assert!(result.contains('…'));
+    }
+
+    #[test]
     fn truncate_appends_ellipsis_when_over_limit() {
         assert_eq!(truncate("abc", 10), "abc");
         assert_eq!(truncate("abcdefghij", 5), "abcde…");
     }
 
     #[test]
-    fn payload_includes_all_known_fields() {
+    fn truncate_does_not_split_multibyte_chars() {
+        // 5 four-byte emoji chars + cap of 3.
+        let s = "🦀🦀🦀🦀🦀";
+        assert_eq!(truncate(s, 3), "🦀🦀🦀…");
+    }
+
+    // ============================================================
+    // Credential sanitization
+    // ============================================================
+
+    #[test]
+    fn sanitize_strips_basic_auth_in_redis_url() {
+        let leak = "failed: cannot connect to redis://memwal:hunter2@127.0.0.1:6379 — io error";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("hunter2"), "password must be stripped");
+        assert!(!cleaned.contains("memwal:"), "username must be stripped");
+        assert!(cleaned.contains("redis://***@127.0.0.1:6379"));
+        assert!(cleaned.contains("io error"), "non-credential text preserved");
+    }
+
+    #[test]
+    fn sanitize_strips_basic_auth_in_postgres_url() {
+        let leak = "Database(sqlx error) at postgresql://app:s3cret@db.host:5432/memwal";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("s3cret"));
+        assert!(!cleaned.contains("app:"));
+        assert!(cleaned.contains("postgresql://***@db.host:5432/memwal"));
+    }
+
+    #[test]
+    fn sanitize_strips_multiple_credentials() {
+        let leak = "primary redis://a:b@h1:6379 secondary postgresql://x:y@h2:5432/db down";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("a:b"));
+        assert!(!cleaned.contains("x:y"));
+        assert_eq!(cleaned.matches("***@").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_is_noop_for_clean_messages() {
+        let clean = "Enoki API error: balance::split MoveAbort at module 0x2::balance";
+        assert_eq!(sanitize_for_slack(clean), clean);
+    }
+
+    #[test]
+    fn sanitize_skips_url_with_no_credentials() {
+        let no_creds = "fetched https://hooks.slack.com/services/T0/B0/TOKEN successfully";
+        assert_eq!(sanitize_for_slack(no_creds), no_creds);
+    }
+
+    // ============================================================
+    // URL validation
+    // ============================================================
+
+    #[test]
+    fn looks_like_slack_webhook_accepts_valid_urls() {
+        assert!(looks_like_slack_webhook(
+            "https://hooks.slack.com/services/T012/B345/abcdef"
+        ));
+        assert!(looks_like_slack_webhook(
+            " https://hooks.slack.com/services/T012/B345/abcdef "
+        ));
+    }
+
+    #[test]
+    fn looks_like_slack_webhook_rejects_bogus_urls() {
+        assert!(!looks_like_slack_webhook("not a url"));
+        assert!(!looks_like_slack_webhook("https://example.com/whatever"));
+        assert!(!looks_like_slack_webhook("http://hooks.slack.com/services/x"));
+        assert!(!looks_like_slack_webhook("https://hooks.slack.com/services/"));
+        assert!(!looks_like_slack_webhook("https://hooks.slack.com/services/x"));
+    }
+
+    // ============================================================
+    // Payload shape
+    // ============================================================
+
+    fn alert<'a>(kind: FailureKind, error_msg: &'a str) -> RememberJobFailedAlert<'a> {
+        RememberJobFailedAlert {
+            job_id: Some("job-123"),
+            owner: Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
+            namespace: Some("default"),
+            error_msg,
+            kind,
+        }
+    }
+
+    #[test]
+    fn payload_for_wallet_retry_exhaustion_includes_attempt_count() {
         let client = new_client();
-        let payload = client.build_remember_failed_payload(
-            Some("job-123"),
-            Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
-            Some("default"),
-            3,
-            3,
+        let a = alert(
+            FailureKind::WalletRetriesExhausted { attempts: 3 },
             "balance::split MoveAbort",
         );
-
+        let sanitized = sanitize_for_slack(a.error_msg);
+        let payload = client.build_payload(&a, &sanitized);
         let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains("Remember Job Failed"));
+
+        assert!(json.contains("wallet retries exhausted"));
+        assert!(json.contains("3 / 3"));
         assert!(json.contains("job-123"));
         assert!(json.contains("0xe5c911"));
-        assert!(json.contains("3 / 3 exhausted"));
         assert!(json.contains("balance::split MoveAbort"));
         assert!(json.contains("env `test`"));
         assert!(json.contains("server commit `abcdef1`"));
     }
 
     #[test]
+    fn payload_for_handoff_uses_distinct_headline() {
+        let client = new_client();
+        let a = alert(FailureKind::HandoffEnqueueFailure, "queue down");
+        let sanitized = sanitize_for_slack(a.error_msg);
+        let payload = client.build_payload(&a, &sanitized);
+        let json = serde_json::to_string(&payload).unwrap();
+
+        // Distinct headline so on-call can tell the two scenarios apart.
+        assert!(json.contains("queue handoff"));
+        assert!(!json.contains("wallet retries exhausted"));
+        assert!(json.contains("post-upload handoff enqueue failed"));
+    }
+
+    #[test]
     fn payload_omits_commit_footer_when_absent() {
         let client = SlackClient::new(
-            "https://hooks.slack.com/services/TEST".to_string(),
+            "https://hooks.slack.com/services/TEST/CHANNEL/TOKEN".to_string(),
             "dev".to_string(),
             None,
         );
-        let payload = client.build_remember_failed_payload(
-            None, None, None, 0, 0, "boom",
-        );
+        let a = alert(FailureKind::HandoffEnqueueFailure, "boom");
+        let sanitized = sanitize_for_slack(a.error_msg);
+        let payload = client.build_payload(&a, &sanitized);
         let json = serde_json::to_string(&payload).unwrap();
         assert!(!json.contains("server commit"));
         assert!(json.contains("env `dev`"));
+    }
+
+    #[test]
+    fn payload_sanitizes_credentials_in_error() {
+        let client = new_client();
+        let a = alert(
+            FailureKind::HandoffEnqueueFailure,
+            "cannot connect to redis://app:hunter2@host:6379",
+        );
+        let sanitized = sanitize_for_slack(a.error_msg);
+        let payload = client.build_payload(&a, &sanitized);
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("hunter2"));
+        assert!(json.contains("redis://***@host:6379"));
+    }
+
+    // ============================================================
+    // Retry classification
+    // ============================================================
+
+    #[test]
+    fn retryable_statuses_cover_429_and_5xx() {
+        assert!(is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable(StatusCode::GATEWAY_TIMEOUT));
+    }
+
+    #[test]
+    fn non_retryable_4xx_does_not_trigger_retry() {
+        assert!(!is_retryable(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable(StatusCode::FORBIDDEN));
+        assert!(!is_retryable(StatusCode::NOT_FOUND));
     }
 }
