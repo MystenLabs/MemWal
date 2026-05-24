@@ -36,9 +36,11 @@ use std::error::Error as StdError;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use tracing::{info, warn};
 
 /// Boxed error for fire-and-forget callers; the alerter never has a typed
@@ -75,13 +77,17 @@ const RETRY_DELAY: Duration = Duration::from_millis(750);
 /// that matches your code path so the Slack message wording is accurate.
 #[derive(Debug, Clone, Copy)]
 pub enum FailureKind {
-    /// The wallet pool rotated through every key it had and every attempt
-    /// returned a permanent error. This is the "Enoki down across all
-    /// wallets" scenario from the ENG-1784 brief.
-    WalletRetriesExhausted {
-        /// Configured maximum attempts (e.g. `MAX_ATTEMPTS = 3`). The
-        /// alert reads `{attempts}/{attempts} exhausted` because the
-        /// only way we land in this branch is by burning all of them.
+    /// The wallet retry budget (Apalis `MAX_ATTEMPTS`) was burned and
+    /// every attempt — each running on a fresh `key_pool.next_index()`
+    /// wallet — returned a permanent error. Note the wording: this
+    /// means the *retry budget* was exhausted, NOT necessarily every
+    /// wallet in the pool (the pool can have more wallets than the
+    /// retry count). Typical cause: Enoki API error across multiple
+    /// wallets, Walrus 4xx persistent, sidecar permanent rejection.
+    TerminalWalletFailure {
+        /// `MAX_ATTEMPTS` from the apalis worker config. The alert
+        /// surfaces this as "permanent failure after N retry attempts"
+        /// so on-call knows exactly how much we tried before giving up.
         attempts: u32,
     },
     /// Upload succeeded but the follow-up workflow couldn't be enqueued
@@ -93,8 +99,8 @@ pub enum FailureKind {
 impl FailureKind {
     fn label(&self) -> String {
         match self {
-            FailureKind::WalletRetriesExhausted { attempts } => {
-                format!("{} / {} wallet retries exhausted", attempts, attempts)
+            FailureKind::TerminalWalletFailure { attempts } => {
+                format!("permanent wallet failure after {} retry attempts", attempts)
             }
             FailureKind::HandoffEnqueueFailure => {
                 "post-upload handoff enqueue failed (job queue infra)".to_string()
@@ -104,8 +110,8 @@ impl FailureKind {
 
     fn headline(&self) -> &'static str {
         match self {
-            FailureKind::WalletRetriesExhausted { .. } => {
-                "🔴 MemWal — Remember Job Failed (wallet retries exhausted)"
+            FailureKind::TerminalWalletFailure { .. } => {
+                "🔴 MemWal — Remember Job Failed (terminal wallet failure)"
             }
             FailureKind::HandoffEnqueueFailure => {
                 "🔴 MemWal — Remember Job Failed (queue handoff)"
@@ -476,55 +482,62 @@ fn shorten_owner(owner: &str) -> String {
     format!("{}…{}", head, tail)
 }
 
+/// Compiled once at first sanitize call. `LazyLock` over `OnceLock` so
+/// callers don't have to plumb the result through an `Option` everywhere.
+///
+/// Each pattern targets a known leak vector:
+///
+/// * `URL_BASIC_AUTH` — `scheme://user:pass@host` → `scheme://***@host`.
+///   Catches Redis / Postgres / HTTP connection errors that print the
+///   full URL with embedded credentials.
+/// * `BEARER` — `Bearer <token>` (case-insensitive) → `Bearer ***`.
+///   Catches OAuth / API authorization header echoes.
+/// * `KV_SECRET` — `keyword[=:]<value>` (case-insensitive) for the
+///   keywords below → `keyword=***`. Catches JSON-like or query-string
+///   echoes such as `api_key=sk-...`, `"password": "..."`, etc.
+static URL_BASIC_AUTH: LazyLock<Regex> = LazyLock::new(|| {
+    // `\w+://` scheme, then any chars up to the first `@` that is NOT
+    // preceded by another `://` (so we don't accidentally chew across
+    // multiple URLs in one message).
+    Regex::new(r"(\w+://)[^/@\s]+@").expect("URL_BASIC_AUTH regex must compile")
+});
+static BEARER: LazyLock<Regex> = LazyLock::new(|| {
+    // `Bearer` (case-insensitive) followed by 1+ space then a non-space
+    // token. The token may contain `.` `-` `_` (typical JWT charset).
+    Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]+")
+        .expect("BEARER regex must compile")
+});
+static KV_SECRET: LazyLock<Regex> = LazyLock::new(|| {
+    // Match `<keyword>[=:]<value>` for any secret-bearing keyword,
+    // handling four common shapes:
+    //
+    //   token=abc          (bare KV)
+    //   token: abc         (colon separator with whitespace)
+    //   "token": "abc"     (JSON object — keyword AND value quoted)
+    //   "api-key": abc     (JSON object — keyword quoted, value bare)
+    //
+    // `"?\b ... \b"?` lets the keyword carry optional quote marks; the
+    // value uses the same trick so a quoted value's closing quote is
+    // consumed by the match (and therefore replaced) instead of being
+    // left dangling next to the redaction.
+    Regex::new(
+        r#"(?i)"?\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|client[_-]?secret|private[_-]?key)\b"?\s*[=:]\s*"?([^\s",}\)]+)"?"#,
+    )
+    .expect("KV_SECRET regex must compile")
+});
+
 /// Strip embedded credentials from a message before we post it to a
-/// shared Slack channel.
-///
-/// Concrete vectors this catches:
-///
-/// * Connection URLs in error display impls:
-///   `redis://memwal:hunter2@host:6379` → `redis://***@host:6379`
-/// * Postgres connection errors:
-///   `postgresql://app:s3cret@db.host:5432/memwal` → `postgresql://***@db.host:5432/memwal`
-///
-/// Best-effort only. We never want to add complex regex / parsing that
-/// could itself fail; if the upstream error format changes and starts
-/// leaking secrets in a different shape, that's a separate ticket.
+/// shared Slack channel. Best-effort — if upstream error format changes
+/// and leaks a secret in a new shape, that's a separate ticket; this
+/// covers the patterns we've actually seen in practice.
 fn sanitize_for_slack(msg: &str) -> String {
-    let mut out = String::with_capacity(msg.len());
-    let mut cursor = 0;
-    let bytes = msg.as_bytes();
-    while cursor < bytes.len() {
-        // Look for a scheme-separator `://` starting at `cursor`.
-        if let Some(scheme_end) = find_subsequence(&bytes[cursor..], b"://") {
-            let absolute_scheme_end = cursor + scheme_end + 3;
-            // Look for `@` between scheme end and the next whitespace/end.
-            let tail = &bytes[absolute_scheme_end..];
-            let scan_limit = tail
-                .iter()
-                .position(|b| matches!(*b, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'?' | b'#'))
-                .unwrap_or(tail.len());
-            if let Some(at_pos) = tail[..scan_limit].iter().position(|b| *b == b'@') {
-                // Found `scheme://user:pass@`. Append the scheme prefix,
-                // then `***@`, then continue past the `@`.
-                out.push_str(&msg[cursor..absolute_scheme_end]);
-                out.push_str("***@");
-                cursor = absolute_scheme_end + at_pos + 1;
-                continue;
-            }
-        }
-
-        // No more credential patterns; flush the rest.
-        out.push_str(&msg[cursor..]);
-        break;
-    }
-    out
-}
-
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
+    // Order matters: URL_BASIC_AUTH first so we don't accidentally
+    // re-treat the redacted `***@host` as a KV match. Then Bearer
+    // (more specific than the generic KV regex), then the catch-all KV.
+    let step1 = URL_BASIC_AUTH.replace_all(msg, "${1}***@");
+    let step2 = BEARER.replace_all(&step1, "Bearer ***");
+    let step3 = KV_SECRET.replace_all(&step2, "${1}=***");
+    step3.into_owned()
 }
 
 /// Validate `SLACK_WEBHOOK_URL` looks like a Slack incoming webhook so a
@@ -672,6 +685,73 @@ mod tests {
         assert_eq!(sanitize_for_slack(no_creds), no_creds);
     }
 
+    // Reviewer requirement #5: extend sanitizer to cover common token
+    // patterns beyond URL basic-auth.
+
+    #[test]
+    fn sanitize_strips_bearer_tokens() {
+        let leak = "request failed: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(cleaned.contains("Bearer ***"));
+    }
+
+    #[test]
+    fn sanitize_strips_bearer_case_insensitive() {
+        let leak = "bearer my-token-here failed";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("my-token-here"));
+        assert!(cleaned.to_lowercase().contains("bearer ***"));
+    }
+
+    #[test]
+    fn sanitize_strips_api_key_kv() {
+        let leak = "openai 401: api_key=sk-proj-1234567890abcdef invalid";
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("sk-proj-1234567890abcdef"));
+        assert!(cleaned.contains("api_key=***"));
+    }
+
+    #[test]
+    fn sanitize_strips_token_password_secret_kv() {
+        let leak = "config: token=abc123 password=hunter2 secret=mysecret access_token=xyz";
+        let cleaned = sanitize_for_slack(leak);
+        for forbidden in ["abc123", "hunter2", "mysecret", "xyz"] {
+            assert!(!cleaned.contains(forbidden), "{} not stripped: {}", forbidden, cleaned);
+        }
+        assert!(cleaned.contains("token=***"));
+        assert!(cleaned.contains("password=***"));
+        assert!(cleaned.contains("secret=***"));
+        assert!(cleaned.contains("access_token=***"));
+    }
+
+    #[test]
+    fn sanitize_strips_kv_with_colon_separator() {
+        let leak = r#"{"api_key": "sk-1234", "password": "hunter2"}"#;
+        let cleaned = sanitize_for_slack(leak);
+        assert!(!cleaned.contains("sk-1234"));
+        assert!(!cleaned.contains("hunter2"));
+        assert!(cleaned.contains("api_key=***"));
+        assert!(cleaned.contains("password=***"));
+    }
+
+    #[test]
+    fn sanitize_strips_apikey_camel_and_kebab_variants() {
+        let leak = "headers: apiKey=AAA, api-key=BBB, accessToken=CCC, client_secret=DDD";
+        let cleaned = sanitize_for_slack(leak);
+        for forbidden in ["AAA", "BBB", "CCC", "DDD"] {
+            assert!(!cleaned.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn sanitize_leaves_non_secret_kv_pairs_alone() {
+        // Keywords that should NOT trigger redaction.
+        let safe = "count=42 namespace=default endpoint=https://relayer/api";
+        let cleaned = sanitize_for_slack(safe);
+        assert_eq!(cleaned, safe);
+    }
+
     // ============================================================
     // URL validation
     // ============================================================
@@ -710,23 +790,54 @@ mod tests {
     }
 
     #[test]
-    fn payload_for_wallet_retry_exhaustion_includes_attempt_count() {
+    fn payload_for_terminal_wallet_failure_includes_attempt_count() {
         let client = new_client();
         let a = alert(
-            FailureKind::WalletRetriesExhausted { attempts: 3 },
+            FailureKind::TerminalWalletFailure { attempts: 3 },
             "balance::split MoveAbort",
         );
         let sanitized = sanitize_for_slack(a.error_msg);
         let payload = client.build_payload(&a, &sanitized);
         let json = serde_json::to_string(&payload).unwrap();
 
-        assert!(json.contains("wallet retries exhausted"));
-        assert!(json.contains("3 / 3"));
+        assert!(json.contains("terminal wallet failure"));
+        assert!(json.contains("permanent wallet failure after 3 retry attempts"));
         assert!(json.contains("job-123"));
         assert!(json.contains("0xe5c911"));
         assert!(json.contains("balance::split MoveAbort"));
         assert!(json.contains("env `test`"));
         assert!(json.contains("server commit `abcdef1`"));
+    }
+
+    /// Reviewer requirement #4: the alert text must not claim "all
+    /// wallets exhausted" or similar misleading wording when only the
+    /// retry budget was burned. The wallet pool may contain more
+    /// wallets than `MAX_ATTEMPTS`; we don't try them all.
+    #[test]
+    fn payload_for_terminal_wallet_failure_does_not_claim_all_wallets_exhausted() {
+        let client = new_client();
+        let a = alert(
+            FailureKind::TerminalWalletFailure { attempts: 3 },
+            "any error",
+        );
+        let sanitized = sanitize_for_slack(a.error_msg);
+        let payload = client.build_payload(&a, &sanitized);
+        let json = serde_json::to_string(&payload).unwrap();
+
+        // Forbidden phrases the first cut accidentally used.
+        for forbidden in [
+            "all wallets exhausted",
+            "wallet pool exhausted",
+            "every wallet",
+            "wallet retries exhausted", // the old wording — must be gone
+        ] {
+            assert!(
+                !json.contains(forbidden),
+                "alert text must not contain {:?}: {}",
+                forbidden,
+                json
+            );
+        }
     }
 
     #[test]
@@ -739,7 +850,7 @@ mod tests {
 
         // Distinct headline so on-call can tell the two scenarios apart.
         assert!(json.contains("queue handoff"));
-        assert!(!json.contains("wallet retries exhausted"));
+        assert!(!json.contains("terminal wallet failure"));
         assert!(json.contains("post-upload handoff enqueue failed"));
     }
 
@@ -790,5 +901,334 @@ mod tests {
         assert!(!is_retryable(StatusCode::BAD_REQUEST));
         assert!(!is_retryable(StatusCode::FORBIDDEN));
         assert!(!is_retryable(StatusCode::NOT_FOUND));
+    }
+
+    // ============================================================
+    // Reviewer requirement #8 — actual retry loop exercised against
+    // a mock server, not just classification helpers. Covers:
+    //   - 429 then 200 → 1 retry, success, exactly 2 hits
+    //   - 503 then 200 → 1 retry, success, exactly 2 hits
+    //   - 400 → no retry, Err, exactly 1 hit
+    //   - 500 then 500 → 1 retry, give up Err, exactly 2 hits
+    // ============================================================
+
+    /// Spawn an axum mock that pops a status code per request from a
+    /// shared queue. Records every request body for inspection. Returns
+    /// the URL + body recorder + a hit counter.
+    async fn spawn_mock_with_status_sequence(
+        statuses: Vec<u16>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use axum::http::StatusCode as AxStatus;
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            statuses,
+        )));
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let received_for_handler = received.clone();
+        let queue_for_handler = queue.clone();
+        let hits_for_handler = hits.clone();
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let received = received_for_handler.clone();
+                    let queue = queue_for_handler.clone();
+                    let hits = hits_for_handler.clone();
+                    async move {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        received.lock().unwrap().push(body);
+                        let next = queue.lock().unwrap().pop_front().unwrap_or(200);
+                        let status = AxStatus::from_u16(next).unwrap_or(AxStatus::OK);
+                        (status, "mock-response-body")
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (format!("http://{}/webhook", addr), received, hits)
+    }
+
+    fn client_for_mock(url: String) -> SlackClient {
+        SlackClient::new(url, "test".to_string(), Some("sha".to_string()))
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_when_first_call_is_429() {
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![429, 200]).await;
+        let client = client_for_mock(url);
+        client
+            .send_notification("429-then-200 path")
+            .await
+            .expect("retry should recover from 429");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_when_first_call_is_503() {
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![503, 200]).await;
+        let client = client_for_mock(url);
+        client
+            .send_notification("503-then-200 path")
+            .await
+            .expect("retry should recover from 5xx");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn no_retry_on_400() {
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![400, 200]).await;
+        let client = client_for_mock(url);
+        let err = client
+            .send_notification("400 should fail fast")
+            .await
+            .expect_err("400 must surface as Err without retry");
+        // Single hit means we did NOT retry the 400.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(err.to_string().contains("400"));
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_second_5xx() {
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![500, 500]).await;
+        let client = client_for_mock(url);
+        let err = client
+            .send_notification("500-then-500 path")
+            .await
+            .expect_err("two consecutive 5xx must surface as Err");
+        // Exactly two hits — original + one retry, then we stop.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(err.to_string().contains("twice"));
+    }
+
+    /// Reviewer requirement #4 / #8 combined: a 200 succeeds on first
+    /// try, no retry.
+    #[tokio::test]
+    async fn success_does_not_trigger_retry() {
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![200]).await;
+        let client = client_for_mock(url);
+        client
+            .send_notification("clean 200")
+            .await
+            .expect("clean 200 must succeed");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // ============================================================
+    // Live demo — pings a real Slack webhook so a human can eyeball
+    // every scenario the alerter has to handle. `#[ignore]` so CI
+    // never runs it. Run on-demand with:
+    //
+    //   SLACK_WEBHOOK_URL=https://hooks.slack.com/... \
+    //     cargo test slack::tests::live_demo_walks_every_alert_scenario \
+    //     --bin memwal-server -- --ignored --nocapture
+    //
+    // The test pauses between scenarios so the channel reads in order
+    // and a reviewer can match each Slack message to the scenario name
+    // logged in the run output.
+    // ============================================================
+
+    fn make_live_client(env_label: &str) -> Option<SlackClient> {
+        let url = std::env::var("SLACK_WEBHOOK_URL").ok()?;
+        let trimmed = url.trim().to_string();
+        if !looks_like_slack_webhook(&trimmed) {
+            return None;
+        }
+        Some(SlackClient::new(
+            trimmed,
+            format!("live-test-{}", env_label),
+            Some("eng1784".to_string()),
+        ))
+    }
+
+    async fn pause(label: &str, secs: u64) {
+        println!("  ⏳ pausing {}s before next scenario ({})", secs, label);
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "live test — hits real Slack; run with --ignored"]
+    async fn live_demo_walks_every_alert_scenario() {
+        let _ = tracing_subscriber::fmt::try_init();
+        println!("\n🚀 ENG-1784 Slack alerter live demo");
+
+        // ── Scenario 1: TerminalWalletFailure with realistic Enoki error ──
+        println!("\n[1/6] TerminalWalletFailure — Enoki balance::split MoveAbort");
+        let client = make_live_client("scenario-1-walret").expect(
+            "SLACK_WEBHOOK_URL must be set + valid for this test (see test docstring)",
+        );
+        client
+            .notify_remember_job_failed(RememberJobFailedAlert {
+                job_id: Some("live-demo-job-001"),
+                owner: Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
+                namespace: Some("live-test"),
+                error_msg: "walrus upload failed: Internal Error: walrus upload failed: \
+                    Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\
+                    \"message\":\"Dry run failed, could not automatically determine a \
+                    budget: MoveAbort(MoveLocation { module: 0x2::balance, function: 7, \
+                    instruction: 10, function_name: split }, 2) in command 4\"}]}",
+                kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+            })
+            .await
+            .expect("scenario 1 should deliver");
+        pause("scenario 2", 3).await;
+
+        // ── Scenario 2: HandoffEnqueueFailure (distinct headline) ──
+        println!("\n[2/6] HandoffEnqueueFailure — queue layer down after upload succeeded");
+        let client = make_live_client("scenario-2-handoff").unwrap();
+        client
+            .notify_remember_job_failed(RememberJobFailedAlert {
+                job_id: Some("live-demo-job-002"),
+                owner: Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
+                namespace: Some("live-test"),
+                error_msg: "failed to enqueue metadata/transfer recovery job: \
+                    apalis-postgres push failed: db connection terminated",
+                kind: FailureKind::HandoffEnqueueFailure,
+            })
+            .await
+            .expect("scenario 2 should deliver");
+        pause("scenario 3", 3).await;
+
+        // ── Scenario 3: dedup ──
+        // Same SlackClient, same error twice. Second call should be
+        // suppressed (returns Ok with no Slack POST). Channel should
+        // see exactly ONE message.
+        println!("\n[3/6] Dedup — send same error twice on same client; channel should see ONE");
+        let client = make_live_client("scenario-3-dedup").unwrap();
+        let dup_alert = || RememberJobFailedAlert {
+            job_id: Some("live-demo-job-003"),
+            owner: Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
+            namespace: Some("live-test"),
+            error_msg: "DEDUP TEST: identical error message repeated within 5min window",
+            kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+        };
+        client.notify_remember_job_failed(dup_alert()).await.unwrap();
+        println!("    → first send (should appear in Slack)");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        client.notify_remember_job_failed(dup_alert()).await.unwrap();
+        println!("    → second send (should be suppressed by dedup, NO Slack message)");
+        pause("scenario 4", 3).await;
+
+        // ── Scenario 4: credential sanitization ──
+        // Slack message must show `redis://***@host` not the plaintext
+        // username/password.
+        println!("\n[4/6] Sanitization — error string contains redis://user:pass@host");
+        let client = make_live_client("scenario-4-sanitize").unwrap();
+        client
+            .notify_remember_job_failed(RememberJobFailedAlert {
+                job_id: Some("live-demo-job-004"),
+                owner: Some("0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994"),
+                namespace: Some("live-test"),
+                error_msg: "SANITIZE TEST: failed to enqueue: cannot connect to \
+                    redis://memwal:hunter2@127.0.0.1:6379 — io error \
+                    (secondary postgresql://app:s3cret@db.host:5432/memwal also down)",
+                kind: FailureKind::HandoffEnqueueFailure,
+            })
+            .await
+            .expect("scenario 4 should deliver");
+        println!("    → Slack should show `redis://***@127.0.0.1:6379` and `postgresql://***@db.host...`");
+        pause("scenario 5", 3).await;
+
+        // ── Scenario 5: multi-byte UTF-8 in owner + error ──
+        // Defense-in-depth: shorten_owner + truncate use char-based
+        // slicing, so non-ASCII can't panic the spawn future.
+        println!("\n[5/6] Multi-byte UTF-8 — Japanese chars in owner & error message");
+        let client = make_live_client("scenario-5-utf8").unwrap();
+        client
+            .notify_remember_job_failed(RememberJobFailedAlert {
+                job_id: Some("live-demo-job-005-メメメメ"),
+                // Synthetic owner with 16 multi-byte chars (would panic
+                // with byte-slice shortener).
+                owner: Some("メメメメメメメメメメメメメメメメ"),
+                namespace: Some("研究"),
+                error_msg: "UTF-8 TEST: Walrus アップロード failed — endpoint \
+                    返ってきたエラー: タイムアウト 🦀🦀🦀",
+                kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+            })
+            .await
+            .expect("scenario 5 should deliver");
+        println!("    → Slack should render JP chars + 🦀 emoji, no panic");
+        pause("scenario 6", 3).await;
+
+        // ── Scenario 6: global rate cap (30/min) ──
+        // Fire 35 DISTINCT errors back-to-back on a fresh client. First
+        // 30 should reach Slack, last 5 should be dropped by the global
+        // cap (per-error dedup wouldn't help — every error has a unique
+        // ID embedded). To avoid actually flooding the channel during
+        // demo we send only ONE header "rate cap demo starting" message
+        // here and tag each as part of the demo.
+        println!("\n[6/6] Global rate cap — 35 distinct errors, expect 30 Slack + 5 dropped");
+        let client = make_live_client("scenario-6-ratecap").unwrap();
+        // Send a heads-up first so reviewers know what they're about to see.
+        client
+            .send_notification(
+                "🧪 RATE-CAP DEMO INCOMING: about to fire 35 distinct error alerts. \
+                 Expect 30 in this channel + 5 dropped by global cap. Footer says \
+                 `live-test-scenario-6-ratecap`.",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let mut delivered_count = 0;
+        let mut suppressed_count = 0;
+        for i in 0..35 {
+            // Each message has a unique number so per-error dedup can't
+            // collapse them — only the global cap should stop them.
+            let res = client
+                .notify_remember_job_failed(RememberJobFailedAlert {
+                    job_id: Some("live-demo-job-006"),
+                    owner: Some(
+                        "0xe5c91145cb92ac82df7285022ee4f73c40be5c995d632c74700b1fc04e5f4994",
+                    ),
+                    namespace: Some("live-test"),
+                    error_msg: &format!(
+                        "RATE-CAP TEST #{:02}/35 — unique storm entry (different msg \
+                         per iteration so per-error dedup does NOT apply)",
+                        i + 1
+                    ),
+                    kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+                })
+                .await;
+            match res {
+                Ok(()) => {
+                    // notify_remember_job_failed returns Ok in both
+                    // "delivered" and "suppressed" cases. We can't tell
+                    // from the return value alone; should_suppress
+                    // logging at info level discloses it. Count both
+                    // outcomes here just to confirm none errored.
+                    delivered_count += 1;
+                }
+                Err(e) => {
+                    suppressed_count += 1;
+                    println!("    → entry {} returned Err: {}", i + 1, e);
+                }
+            }
+            // Tight loop — we want all 35 inside the global window.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        println!(
+            "    → loop done: {} Ok, {} Err (expect ~30 actual Slack messages — \
+             check channel; suppressions are logged at INFO via tracing)",
+            delivered_count, suppressed_count
+        );
+
+        println!("\n✅ Live demo complete. Verify in #target-channel that you see:");
+        println!("   1× scenario 1 (wallet retries exhausted, Enoki)");
+        println!("   1× scenario 2 (handoff enqueue failed)");
+        println!("   1× scenario 3 (dedup — only one despite 2 sends)");
+        println!("   1× scenario 4 (sanitized credentials — no passwords)");
+        println!("   1× scenario 5 (UTF-8 — Japanese + emoji)");
+        println!("   1× scenario 6 header + ~30× rate-cap entries (35 sent, 5 dropped)");
     }
 }

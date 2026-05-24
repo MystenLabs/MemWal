@@ -156,7 +156,8 @@ pub(crate) async fn warm_blob_cache_after_upload(
 }
 
 async fn update_remember_job_after_wallet_error(
-    state: &AppState,
+    pool: &sqlx::PgPool,
+    slack: Option<&Arc<crate::slack::SlackClient>>,
     remember_job_id: Option<&str>,
     error: &WalletJobError,
     msg: &str,
@@ -182,7 +183,7 @@ async fn update_remember_job_after_wallet_error(
     .bind(status)
     .bind(msg)
     .bind(jid)
-    .fetch_optional(state.db.pool())
+    .fetch_optional(pool)
     .await;
 
     if !is_permanent {
@@ -214,11 +215,11 @@ async fn update_remember_job_after_wallet_error(
     };
 
     spawn_slack_remember_failed_alert(
-        state.slack.as_ref(),
+        slack,
         Some(jid),
         metadata.as_ref(),
         msg,
-        crate::slack::FailureKind::WalletRetriesExhausted {
+        crate::slack::FailureKind::TerminalWalletFailure {
             attempts: MAX_ATTEMPTS,
         },
     );
@@ -602,7 +603,8 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 Err(err) => {
                     let msg = err.to_string();
                     update_remember_job_after_wallet_error(
-                        state,
+                        state.db.pool(),
+                        state.slack.as_ref(),
                         remember_job_id.as_deref(),
                         &err,
                         &msg,
@@ -727,7 +729,14 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(state, remember_job_id, &classified, &msg).await;
+        update_remember_job_after_wallet_error(
+            state.db.pool(),
+            state.slack.as_ref(),
+            remember_job_id,
+            &classified,
+            &msg,
+        )
+        .await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -829,7 +838,8 @@ async fn execute_upload_and_transfer(
             let msg = format!("base64 decode failed: {}", e);
             let classified = WalletJobError::Permanent(msg.clone());
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
+                state.slack.as_ref(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -941,7 +951,8 @@ async fn execute_upload_and_transfer(
             let msg = format!("walrus upload failed: {}", e);
             let classified = WalletJobError::classify_sidecar_error(&msg);
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
+                state.slack.as_ref(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -1432,12 +1443,13 @@ pub async fn execute_bulk_remember(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
+        classify_wallet_remember_handoff_failure, mark_remember_job_failed,
+        update_remember_job_after_wallet_error, WalletJobError,
     };
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -1719,5 +1731,231 @@ mod tests {
             }
             other => panic!("expected transient handoff error, got {other}"),
         }
+    }
+
+    // ============================================================
+    // ENG-1784 / Reviewer requirement #1 + #2 + #4
+    //
+    // The wallet-error path (`update_remember_job_after_wallet_error`)
+    // is what fires for the scenario Henry actually asked about: a
+    // remember job that fails after the Apalis retry budget is burned
+    // across the wallet pool. These tests prove:
+    //
+    //   #1 PERMANENT branch → exactly one Slack alert is fired, AND
+    //      the remember_jobs row is flipped to `failed`. The Slack
+    //      message must carry the wallet-failure headline and the
+    //      hydrated owner / namespace from the same UPDATE.
+    //   #2 TRANSIENT branch → NO Slack alert (the wallet job is about
+    //      to be retried), AND the row stays `running`.
+    //
+    // We use an inline axum mock server (same pattern as
+    // routes/remember.rs unit tests) so we don't need wiremock as a
+    // dev-dep and we don't have to refactor SlackClient into a trait
+    // just for testability.
+    // ============================================================
+
+    /// Spawn a mock Slack webhook on `127.0.0.1:0`. Returns the URL to
+    /// give to `SlackClient::new` plus a handle to inspect every body
+    /// the mock received. Each request returns `200 OK` (no retry
+    /// behavior — those tests live in slack::tests).
+    async fn spawn_mock_slack() -> (String, std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let received_for_handler = std::sync::Arc::clone(&received);
+
+        let app = axum::Router::new().route(
+            "/webhook",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let received = std::sync::Arc::clone(&received_for_handler);
+                    async move {
+                        received.lock().unwrap().push(body);
+                        "ok"
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // Give the listener a beat to start accepting.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (format!("http://{}/webhook", addr), received)
+    }
+
+    /// Reviewer requirement #1 — THE blocker. PERMANENT wallet error
+    /// flips the row to `failed` AND fires exactly one Slack alert
+    /// containing the wallet-failure headline + hydrated metadata.
+    #[tokio::test]
+    async fn update_after_wallet_error_permanent_alerts_slack_and_marks_failed() {
+        let pool = test_pool().await;
+        let (mock_url, received) = spawn_mock_slack().await;
+        let slack = Arc::new(crate::slack::SlackClient::new(
+            mock_url,
+            "test-env".to_string(),
+            Some("testsha".to_string()),
+        ));
+
+        let job_id = format!("perm-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'running')",
+        )
+        .bind(&job_id)
+        .bind("0xowner-permanent-test")
+        .bind("ns-permanent-test")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = WalletJobError::Permanent("Enoki balance::split MoveAbort".to_string());
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(&slack),
+            Some(&job_id),
+            &err,
+            "Enoki balance::split MoveAbort",
+        )
+        .await;
+
+        // The Slack POST is spawned fire-and-forget. Give it a beat to
+        // land on the mock server, then snapshot what we saw.
+        for _ in 0..40 {
+            if received.lock().unwrap().len() >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // DB assertion (#1.a): row terminated with `failed`.
+        let (status, error_msg): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(error_msg.as_deref(), Some("Enoki balance::split MoveAbort"));
+
+        // Slack assertion (#1.b): exactly one POST, correct headline,
+        // owner + namespace hydrated from the RETURNING UPDATE.
+        let snapshot = received.lock().unwrap().clone();
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "expected exactly one Slack alert, saw {}: {:?}",
+            snapshot.len(),
+            snapshot
+        );
+        let body = &snapshot[0];
+        let json = body.to_string();
+        assert!(
+            json.contains("terminal wallet failure"),
+            "headline must say 'terminal wallet failure': {}",
+            json
+        );
+        assert!(
+            json.contains("permanent wallet failure after 3 retry attempts"),
+            "body must surface MAX_ATTEMPTS as retry-attempt count: {}",
+            json
+        );
+        assert!(json.contains(&job_id), "job_id must be present: {}", json);
+        // Owner is rendered via `shorten_owner` (first 8 chars + "…" +
+        // last 4) so the channel doesn't get a 66-char Sui address
+        // wrapped onto multiple lines. Assert on a substring of the
+        // shortened form rather than the full input.
+        assert!(
+            json.contains("0xowner-"),
+            "owner prefix from RETURNING must be in alert: {}",
+            json
+        );
+        assert!(
+            json.contains("test"),
+            "owner suffix from RETURNING must be in alert: {}",
+            json
+        );
+        assert!(
+            json.contains("ns-permanent-test"),
+            "namespace from RETURNING must be in alert: {}",
+            json
+        );
+        assert!(
+            json.contains("Enoki balance::split MoveAbort"),
+            "error message must be in alert: {}",
+            json
+        );
+        assert!(json.contains("env `test-env`"));
+        assert!(json.contains("server commit `testsha`"));
+
+        // Cleanup
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Reviewer requirement #2: TRANSIENT wallet errors must NOT alert
+    /// Slack — the wallet job is about to be retried by Apalis and
+    /// paging on-call every transient blip would defeat the alerter.
+    /// The row must stay `running` so the retry can move forward.
+    #[tokio::test]
+    async fn update_after_wallet_error_transient_does_not_alert_slack() {
+        let pool = test_pool().await;
+        let (mock_url, received) = spawn_mock_slack().await;
+        let slack = Arc::new(crate::slack::SlackClient::new(
+            mock_url,
+            "test-env".to_string(),
+            Some("testsha".to_string()),
+        ));
+
+        let job_id = format!("trans-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'running')",
+        )
+        .bind(&job_id)
+        .bind("0xowner-transient-test")
+        .bind("ns-transient-test")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = WalletJobError::Transient("sidecar 503 service unavailable".to_string());
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(&slack),
+            Some(&job_id),
+            &err,
+            "sidecar 503 service unavailable",
+        )
+        .await;
+
+        // Wait the same beat as the permanent test to give a spawn'd
+        // alert (if any) a chance to land before we assert zero.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // DB assertion (#2.a): row stays `running`, NOT `failed`.
+        let (status, error_msg): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(error_msg.as_deref(), Some("sidecar 503 service unavailable"));
+
+        // Slack assertion (#2.b): zero POSTs to the mock.
+        let snapshot = received.lock().unwrap().clone();
+        assert!(
+            snapshot.is_empty(),
+            "transient errors must NOT alert Slack, saw {} message(s): {:?}",
+            snapshot.len(),
+            snapshot
+        );
+
+        // Cleanup
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
     }
 }
