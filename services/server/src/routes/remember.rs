@@ -1073,6 +1073,8 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            slack_webhook_url: None,
+            env_label: "test".to_string(),
         }
     }
 

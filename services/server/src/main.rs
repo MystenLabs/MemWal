@@ -7,6 +7,7 @@ mod observability;
 mod rate_limit;
 mod routes;
 mod services;
+mod slack;
 mod storage;
 mod types;
 
@@ -328,6 +329,33 @@ async fn main() {
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
+    // ENG-1784: Slack alerter — only enabled if SLACK_WEBHOOK_URL is set.
+    // The server commit + env label are baked into the SlackClient so the
+    // footer of every alert identifies which deployment fired it. We pull
+    // the commit from the same env vars compatibility.rs uses (kept
+    // deliberately loose so Railway / CI / Nautilus can each set whichever
+    // var they already expose).
+    let slack = config.slack_webhook_url.as_ref().map(|url| {
+        let commit = std::env::var("GIT_SHA")
+            .or_else(|_| std::env::var("GITHUB_SHA"))
+            .or_else(|_| std::env::var("RAILWAY_GIT_COMMIT_SHA"))
+            .ok()
+            .map(|v| v.chars().take(7).collect::<String>());
+        tracing::info!(
+            "  Slack alerter: enabled (env={}, commit={})",
+            config.env_label,
+            commit.as_deref().unwrap_or("-"),
+        );
+        Arc::new(crate::slack::SlackClient::new(
+            url.clone(),
+            config.env_label.clone(),
+            commit,
+        ))
+    });
+    if slack.is_none() {
+        tracing::info!("  Slack alerter: disabled (set SLACK_WEBHOOK_URL to enable)");
+    }
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -346,6 +374,7 @@ async fn main() {
         blob_cache_ttl,
         blob_cache_max_bytes,
         embedding_cache_ttl,
+        slack,
     });
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)

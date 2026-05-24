@@ -110,6 +110,11 @@ pub struct AppState {
     pub blob_cache_max_bytes: usize,
     /// ENG-1405: Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
+    /// ENG-1784: optional Slack alerter. Populated only when
+    /// `SLACK_WEBHOOK_URL` is set; `None` disables all Slack notifications
+    /// without affecting any other code path. Wrapped in `Arc` so workers
+    /// can clone the handle into a spawned fire-and-forget task.
+    pub slack: Option<Arc<crate::slack::SlackClient>>,
 }
 
 // ============================================================
@@ -213,6 +218,14 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// ENG-1784: optional Slack Incoming Webhook URL for failed-job alerts.
+    /// When set, terminal remember-job failures (after wallet pool exhausts
+    /// retries on every key in the pool) are pushed to Slack. When unset,
+    /// the alerter is `None` and the rest of the server is unaware.
+    pub slack_webhook_url: Option<String>,
+    /// Environment label included in the Slack alert footer
+    /// (e.g. `prod` / `staging` / `dev`). Falls back to `unknown`.
+    pub env_label: String,
 }
 
 impl Config {
@@ -283,6 +296,15 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            env_label: std::env::var("MEMWAL_ENV")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "unknown".to_string()),
         }
     }
 }

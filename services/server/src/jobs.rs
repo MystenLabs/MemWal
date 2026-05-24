@@ -181,28 +181,39 @@ async fn update_remember_job_after_wallet_error(
     .await;
 }
 
+/// Metadata returned by a successful `mark_remember_job_failed` so the
+/// terminal alert can include owner + namespace without an extra round-trip.
+#[derive(Debug, Clone)]
+struct RememberJobMetadata {
+    owner: String,
+    namespace: String,
+}
+
 async fn mark_remember_job_failed(
     pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
     msg: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<Option<RememberJobMetadata>, sqlx::Error> {
     let Some(jid) = remember_job_id else {
-        return Ok(());
+        return Ok(None);
     };
 
-    let result = sqlx::query(
-        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
+    // `RETURNING owner, namespace` lets us hydrate the Slack alert from the
+    // same UPDATE that flips the row to `failed`, instead of issuing a
+    // separate SELECT after the fact.
+    let row: Option<(String, String)> = sqlx::query_as(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() \
+         WHERE id = $2 RETURNING owner, namespace",
     )
     .bind(msg)
     .bind(jid)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(sqlx::Error::RowNotFound);
+    match row {
+        Some((owner, namespace)) => Ok(Some(RememberJobMetadata { owner, namespace })),
+        None => Err(sqlx::Error::RowNotFound),
     }
-
-    Ok(())
 }
 
 fn remember_job_persist_failure_message(msg: &str, persist_err: &sqlx::Error) -> String {
@@ -212,8 +223,47 @@ fn remember_job_persist_failure_message(msg: &str, persist_err: &sqlx::Error) ->
     )
 }
 
+/// ENG-1784: fire-and-forget Slack alert for a terminal remember-job failure.
+///
+/// Spawned in the background so a slow Slack POST cannot block the wallet
+/// worker, and a Slack-side failure cannot fail the wallet job. The Slack
+/// client carries its own 5-minute dedup window so an Enoki / sidecar
+/// incident that fans out into dozens of identical failures only pages the
+/// channel once per window.
+fn spawn_slack_remember_failed_alert(
+    slack: Option<&Arc<crate::slack::SlackClient>>,
+    remember_job_id: Option<&str>,
+    metadata: Option<&RememberJobMetadata>,
+    msg: &str,
+) {
+    let Some(client) = slack else {
+        return;
+    };
+    let client = client.clone();
+    let job_id = remember_job_id.map(|s| s.to_string());
+    let owner = metadata.map(|m| m.owner.clone());
+    let namespace = metadata.map(|m| m.namespace.clone());
+    let msg = msg.to_string();
+    tokio::spawn(async move {
+        if let Err(err) = client
+            .notify_remember_job_failed(
+                job_id.as_deref(),
+                owner.as_deref(),
+                namespace.as_deref(),
+                MAX_ATTEMPTS,
+                MAX_ATTEMPTS,
+                &msg,
+            )
+            .await
+        {
+            tracing::warn!("Slack remember-failed alert failed: {}", err);
+        }
+    });
+}
+
 async fn classify_wallet_remember_handoff_failure(
     pool: &sqlx::PgPool,
+    slack: Option<&Arc<crate::slack::SlackClient>>,
     remember_job_id: Option<&str>,
     msg: String,
 ) -> WalletJobError {
@@ -224,7 +274,10 @@ async fn classify_wallet_remember_handoff_failure(
     // state cannot be persisted, keep the wallet handler retryable so the row
     // is not orphaned.
     match mark_remember_job_failed(pool, remember_job_id, &msg).await {
-        Ok(()) => WalletJobError::Permanent(msg),
+        Ok(metadata) => {
+            spawn_slack_remember_failed_alert(slack, remember_job_id, metadata.as_ref(), &msg);
+            WalletJobError::Permanent(msg)
+        }
         Err(persist_err) => {
             WalletJobError::Transient(remember_job_persist_failure_message(&msg, &persist_err))
         }
@@ -233,11 +286,15 @@ async fn classify_wallet_remember_handoff_failure(
 
 async fn handle_legacy_remember_handoff_failure(
     pool: &sqlx::PgPool,
+    slack: Option<&Arc<crate::slack::SlackClient>>,
     remember_job_id: &str,
     msg: String,
 ) -> Result<(), RememberJobError> {
     match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
-        Ok(()) => Ok(()),
+        Ok(metadata) => {
+            spawn_slack_remember_failed_alert(slack, Some(remember_job_id), metadata.as_ref(), &msg);
+            Ok(())
+        }
         Err(persist_err) => Err(RememberJobError::Internal(
             remember_job_persist_failure_message(&msg, &persist_err),
         )),
@@ -458,6 +515,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                             {
                                 let classified = classify_wallet_remember_handoff_failure(
                                     state.db.pool(),
+                                    state.slack.as_ref(),
                                     finalize_remember_job_id.as_deref(),
                                     enqueue_err.to_string(),
                                 )
@@ -798,6 +856,7 @@ async fn execute_upload_and_transfer(
             {
                 let classified = classify_wallet_remember_handoff_failure(
                     state.db.pool(),
+                    state.slack.as_ref(),
                     recovery_remember_job_id.as_deref(),
                     format!("failed to enqueue metadata/transfer recovery job: {}", e),
                 )
@@ -1117,8 +1176,13 @@ pub async fn execute_remember(
             {
                 let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
                 tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
-                return handle_legacy_remember_handoff_failure(state.db.pool(), &job.job_id, msg)
-                    .await;
+                return handle_legacy_remember_handoff_failure(
+                    state.db.pool(),
+                    state.slack.as_ref(),
+                    &job.job_id,
+                    msg,
+                )
+                .await;
             }
 
             tracing::info!(
@@ -1440,7 +1504,8 @@ mod tests {
         .unwrap();
 
         let classified =
-            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+            classify_wallet_remember_handoff_failure(&pool, None, Some(&job_id), msg.to_string())
+                .await;
 
         match classified {
             WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
@@ -1480,7 +1545,8 @@ mod tests {
         .unwrap();
 
         let classified =
-            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+            classify_wallet_remember_handoff_failure(&pool, None, Some(&job_id), msg.to_string())
+                .await;
 
         match classified {
             WalletJobError::Permanent(ref got) => assert_eq!(got, msg),
@@ -1514,7 +1580,7 @@ mod tests {
 
         let msg = "failed to enqueue uploaded-blob finalization job: synthetic queue down";
         let classified =
-            classify_wallet_remember_handoff_failure(&pool, Some("job-closed-pool"), msg.into())
+            classify_wallet_remember_handoff_failure(&pool, None, Some("job-closed-pool"), msg.into())
                 .await;
 
         match classified {
@@ -1542,6 +1608,39 @@ mod tests {
         assert!(err.to_string().contains("closed"));
     }
 
+    /// Hydrates owner + namespace so the ENG-1784 Slack alert can include
+    /// who/what the failure belonged to. The same UPDATE that flips status
+    /// must return the row metadata, otherwise we'd page on-call with a
+    /// bare job_id and force a SQL lookup.
+    #[tokio::test]
+    async fn mark_remember_job_failed_returns_owner_and_namespace() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'uploaded')",
+        )
+        .bind(&job_id)
+        .bind("0xowner-eng-1784")
+        .bind("ns-eng-1784")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let metadata = mark_remember_job_failed(&pool, Some(&job_id), "boom")
+            .await
+            .expect("update should succeed")
+            .expect("expected metadata for existing job_id");
+
+        assert_eq!(metadata.owner, "0xowner-eng-1784");
+        assert_eq!(metadata.namespace, "ns-eng-1784");
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
     #[tokio::test]
     async fn missing_remember_job_keeps_handoff_retryable() {
         let pool = test_pool().await;
@@ -1549,7 +1648,8 @@ mod tests {
         let msg = "failed to enqueue metadata/transfer recovery job: synthetic queue down";
 
         let classified =
-            classify_wallet_remember_handoff_failure(&pool, Some(&job_id), msg.to_string()).await;
+            classify_wallet_remember_handoff_failure(&pool, None, Some(&job_id), msg.to_string())
+                .await;
 
         match classified {
             WalletJobError::Transient(got) => {
