@@ -21,7 +21,7 @@
  *
  * Error paths:
  *   - Wallet not connected → wallet picker.
- *   - User has no MemWalAccount yet → link to /setup.
+ *   - User has no Walrus Memory account yet → link to /setup.
  *   - Wallet rejects tx → retry button.
  *   - localhost callback unreachable → keep success on-chain anyway, ask user
  *     to manually copy creds (rare — only if the MCP listener died).
@@ -105,7 +105,7 @@ export default function ConnectMcp() {
     const port = params.get('port') ?? ''
     const publicKey = params.get('publicKey') ?? ''
     const delegateAddress = params.get('delegateAddress') ?? ''
-    const label = params.get('label') ?? 'MemWal MCP'
+    const label = params.get('label') ?? 'Walrus Memory MCP'
     const relayer = params.get('relayer') ?? 'https://relayer.memwal.ai'
     /**
      * Cryptographic state token from the MCP bridge. Must be echoed verbatim
@@ -166,7 +166,7 @@ export default function ConnectMcp() {
 
         setStep('signing')
         try {
-            // Resolve the user's MemWalAccount.
+            // Resolve the user's Walrus Memory account object.
             const accountId = await resolveAccountId(suiClient, currentAccount.address)
             if (!accountId) {
                 setStep('no-account')
@@ -193,15 +193,15 @@ export default function ConnectMcp() {
                 // Friendly mapping for common contract aborts.
                 if (m.includes('abort code: 0') && m.includes('add_delegate_key')) {
                     setErrorMsg(
-                        `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of MemWalAccount ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
-                        `Switch your wallet to the account that originally created this MemWal, OR run /setup to create a new MemWalAccount for the current wallet.`
+                        `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
+                        `Switch your wallet to the account that originally created this Walrus Memory account, OR run /setup to create a new Walrus Memory account for the current wallet.`
                     )
                     setStep('error')
                     return
                 }
                 if (m.includes('abort code: 2') && m.includes('add_delegate_key')) {
                     setErrorMsg(
-                        `This MemWalAccount already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
+                        `This Walrus Memory account already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
                     )
                     setStep('error')
                     return
@@ -253,7 +253,7 @@ export default function ConnectMcp() {
             <nav className="lp-nav">
                 <div className="lp-nav-inner">
                     <Link to="/" className="lp-nav-brand" style={mcpNavBrandStyle}>
-                        <img src={memwalLogo} alt="MemWal" height="28" />
+                        <img src={memwalLogo} alt="Walrus Memory" height="28" />
                         <span style={mcpNavTitleStyle}>Connect MCP client</span>
                     </Link>
                 </div>
@@ -312,9 +312,9 @@ export default function ConnectMcp() {
 
                 {paramsValid && step === 'no-account' && (
                     <section style={cardStyle}>
-                        <h1 style={h1Style}>Create a MemWal account first</h1>
+                        <h1 style={h1Style}>Create a Walrus Memory account first</h1>
                         <p>
-                            This wallet doesn't have a MemWalAccount yet. Run
+                            This wallet doesn't have a Walrus Memory account yet. Run
                             through the one-time setup, then come back here.
                         </p>
                         <p>
@@ -370,7 +370,7 @@ function ConsentCard({
         <section style={cardStyle}>
             <h1 style={h1Style}>
                 <span style={{ fontWeight: 700 }}>{label}</span> wants access to
-                your MemWal memory
+                your Walrus Memory
             </h1>
 
             <h3 style={h3Style}>Permissions requested</h3>

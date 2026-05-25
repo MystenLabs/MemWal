@@ -137,13 +137,33 @@ export default function Dashboard() {
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
     const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount
     const isNewAccount = !delegateKey && !loadingAccount && !hasResolvedAccount
+    const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
+        ? 'production / mainnet'
+        : 'staging / testnet'
+    const expectedRelayerUrl = config.suiNetwork === 'mainnet'
+        ? 'https://relayer.memwal.ai'
+        : 'https://relayer.staging.memwal.ai'
+    const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
+    const relayerEnvironmentLabel = normalizedRelayerUrl.includes('localhost') || normalizedRelayerUrl.includes('127.0.0.1')
+        ? 'local development'
+        : normalizedRelayerUrl.includes('staging')
+            ? 'staging / testnet'
+            : normalizedRelayerUrl.includes('dev')
+                ? 'dev / testnet'
+                : 'production / mainnet'
+    const relayerLooksMismatched =
+        (config.suiNetwork === 'mainnet' && normalizedRelayerUrl.includes('staging')) ||
+        (config.suiNetwork !== 'mainnet' &&
+            normalizedRelayerUrl.includes('relayer.memwal.ai') &&
+            !normalizedRelayerUrl.includes('staging') &&
+            !normalizedRelayerUrl.includes('dev'))
     const dashboardSubtitle = delegateKey
-        ? 'manage your memwal account and delegate keys'
+        ? 'manage your Walrus Memory account and delegate keys'
         : loadingAccount
-            ? 'checking your memwal account...'
+            ? 'checking your Walrus Memory account...'
             : hasResolvedAccount
                 ? 'remove an old delegate key, then create a new one'
-                : 'no memwal account found for this wallet'
+                : 'no Walrus Memory account found for this wallet'
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
 
     // ============================================================
@@ -310,9 +330,9 @@ export default function Dashboard() {
     const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
-  key: "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: "${config.memwalServerUrl}",
+  key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: process.env.MEMWAL_ACCOUNT_ID ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "${config.memwalServerUrl}",
 })
 
 // Remember something
@@ -328,9 +348,9 @@ import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 
 const model = withMemWal(openai("gpt-4o"), {
-  key: "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: "${config.memwalServerUrl}",
+  key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: process.env.MEMWAL_ACCOUNT_ID ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "${config.memwalServerUrl}",
 })
 
 const result = await generateText({
@@ -346,7 +366,7 @@ const result = await generateText({
             <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
@@ -369,7 +389,7 @@ const result = await generateText({
                 {isRecoveringExistingAccount && (
                     <div className="warning-box" style={{ marginBottom: 24 }}>
                         <p>
-                            your wallet already has a MemWal account, but this browser does not have a saved delegate key.
+                            your wallet already has a Walrus Memory account, but this browser does not have a saved delegate key.
                             remove an old on-chain key below or create a new delegate key.
                         </p>
                     </div>
@@ -378,7 +398,7 @@ const result = await generateText({
                 {isNewAccount && (
                     <div className="warning-box" style={{ marginBottom: 24 }}>
                         <p>
-                            no MemWal account found for this wallet.
+                            no Walrus Memory account found for this wallet.
                             create a delegate key to get started.
                         </p>
                     </div>
@@ -450,15 +470,29 @@ const result = await generateText({
                     <div className="card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
-                            <div className="card-title">your delegate key</div>
-                            <div className="card-subtitle">your Ed25519 key for SDK authentication</div>
+                            <div className="card-title">SDK credentials</div>
+                            <div className="card-subtitle">copy the delegate private key into server env as MEMWAL_PRIVATE_KEY</div>
                         </div>
+                    </div>
+
+                    <div className="warning-box" style={{ marginBottom: 12 }}>
+                        <p>
+                            active environment: <strong>{activeEnvironmentLabel}</strong>. configured relayer:
+                            {' '}<code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).
+                            {' '}matching relayer: <code>{expectedRelayerUrl}</code>.
+                            {' '}do not mix staging/testnet credentials with production/mainnet relayer configs.
+                        </p>
+                        {relayerLooksMismatched && (
+                            <p style={{ marginTop: 8 }}>
+                                this dashboard network and relayer URL look mismatched; API calls may fail with 401.
+                            </p>
+                        )}
                     </div>
 
                     {/* Account ID */}
                     {effectiveAccountObjectId && (
                         <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                            <div className="key-label">account ID</div>
+                            <div className="key-label">account ID — MEMWAL_ACCOUNT_ID</div>
                             <div className="key-value" style={{ fontSize: '0.78rem' }}>
                                 {effectiveAccountObjectId}
                             </div>
@@ -469,13 +503,34 @@ const result = await generateText({
                                 >
                                     <Copy size={12} /> {copied === 'acct' ? 'copied!' : 'copy'}
                                 </button>
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => copyToClipboard(`MEMWAL_ACCOUNT_ID=${effectiveAccountObjectId}`, 'acct-env')}
+                                >
+                                    <Copy size={12} /> {copied === 'acct-env' ? 'copied!' : 'copy env line'}
+                                </button>
                             </div>
                         </div>
                     )}
 
+                    <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
+                        <div className="key-label">relayer URL — MEMWAL_SERVER_URL</div>
+                        <div className="key-value" style={{ fontSize: '0.78rem' }}>
+                            {config.memwalServerUrl}
+                        </div>
+                        <div className="key-actions">
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => copyToClipboard(`MEMWAL_SERVER_URL=${config.memwalServerUrl}`, 'server-env')}
+                            >
+                                <Copy size={12} /> {copied === 'server-env' ? 'copied!' : 'copy env line'}
+                            </button>
+                        </div>
+                    </div>
+
                     {/* Public Key */}
                     <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                        <div className="key-label">public key</div>
+                        <div className="key-label">delegate public key — shareable, not the .env private key</div>
                         <div className="key-value">
                             {delegatePublicKey}
                         </div>
@@ -491,7 +546,7 @@ const result = await generateText({
 
                     {/* Private Key */}
                     <div className="key-display key-display--white">
-                        <div className="key-label">private key</div>
+                        <div className="key-label">delegate private key — server-side MEMWAL_PRIVATE_KEY</div>
                         {showKey ? (
                             <>
                                 <div className="key-value">{delegateKey}</div>
@@ -501,6 +556,12 @@ const result = await generateText({
                                         onClick={() => copyToClipboard(delegateKey!, 'priv')}
                                     >
                                         <Copy size={12} /> {copied === 'priv' ? 'copied!' : 'copy'}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => copyToClipboard(`MEMWAL_PRIVATE_KEY=${delegateKey}`, 'priv-env')}
+                                    >
+                                        <Copy size={12} /> {copied === 'priv-env' ? 'copied!' : 'copy env line'}
                                     </button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(false)}>
                                         <EyeOff size={12} /> hide
@@ -529,7 +590,7 @@ const result = await generateText({
                         <div>
                             <div className="card-title">delegate keys (on-chain)</div>
                             <div className="card-subtitle">
-                                all Ed25519 keys registered on your MemWalAccount
+                                all Ed25519 keys registered on your Walrus Memory account
                             </div>
                         </div>
                         <div className="card-header-actions">
@@ -667,7 +728,7 @@ const result = await generateText({
                         </div>
                     ) : !effectiveAccountObjectId ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            no MemWal account found for this wallet. create a delegate key to get started.
+                            no Walrus Memory account found for this wallet. create a delegate key to get started.
                         </div>
                     ) : onChainKeys.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
@@ -720,7 +781,7 @@ const result = await generateText({
                     <div className="card-header">
                         <div>
                             <div className="card-title">quick start — SDK</div>
-                            <div className="card-subtitle">use the memwal SDK to remember and recall</div>
+                            <div className="card-subtitle">use the Walrus Memory SDK to remember and recall</div>
                         </div>
                     </div>
                     <div style={{ position: 'relative' }}>

@@ -123,6 +123,7 @@
               "relayer/self-hosting",
               "relayer/nautilus-tee",
               "relayer/observability",
+              "relayer/versioning-and-compatibility",
               "relayer/api-reference"
             ]
           }

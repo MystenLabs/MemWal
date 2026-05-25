@@ -1,5 +1,5 @@
 # ============================================================
-# MemWal Docs — Dockerfile
+# Walrus Memory Docs — Dockerfile
 # Mintlify docs site — install + serve
 # Build context: repo root
 # ============================================================

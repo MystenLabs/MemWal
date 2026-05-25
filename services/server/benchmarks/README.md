@@ -1,6 +1,6 @@
-# MemWal Retrieval Quality Benchmarks
+# Walrus Memory Retrieval Quality Benchmarks
 
-A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemEval) against MemWal and compares composite scoring presets against pure cosine similarity. Results are saved as JSON artifacts with per-query detail for inspection.
+A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemEval) against Walrus Memory and compares composite scoring presets against pure cosine similarity. Results are saved as JSON artifacts with per-query detail for inspection.
 
 > **Scope.** This is the **AI-quality** harness — it measures *memory-retrieval quality* (given a question, does the right memory come back). It is the complement to the **latency** benchmarks under `services/server/scripts/bench-*.ts` (ENG-1409), which measure Walrus throughput / SEAL decrypt latency / sidecar concurrency. Different concerns, different tools.
 >
@@ -77,16 +77,16 @@ Running a benchmark involves two cooperating systems, each with its own config:
 
 ```
 ┌──────────────────────────┐          ┌──────────────────────────┐
-│   MemWal server (Rust)   │  ◄────── │   Benchmark harness      │
+│ Walrus Memory server     │  ◄────── │   Benchmark harness      │
 │                          │   HTTP   │   (this directory)       │
 │   config: ../.env        │          │   config: config.yaml    │
 └──────────────────────────┘          └──────────────────────────┘
         must run first                      runs against it
 ```
 
-**MemWal server** reads from `services/server/.env`. For benchmarks this needs `BENCHMARK_MODE=true` and bumped rate limits. See `services/server/.env.example` for the benchmark section at the bottom.
+**Walrus Memory server** reads from `services/server/.env`. For benchmarks this needs `BENCHMARK_MODE=true` and bumped rate limits. See `services/server/.env.example` for the benchmark section at the bottom.
 
-**Benchmark harness** reads from `benchmarks/config.yaml`. This holds credentials for the MemWal server (delegate key + account ID) and the LLM provider (API key for GPT-4o judge). See `benchmarks/config.example.yaml`.
+**Benchmark harness** reads from `benchmarks/config.yaml`. This holds credentials for the Walrus Memory server (delegate key + account ID) and the LLM provider (API key for GPT-4o judge). See `benchmarks/config.example.yaml`.
 
 Don't confuse the two. The benchmark harness does **not** read the server's `.env`, and the server does **not** read `config.yaml`.
 
@@ -94,17 +94,17 @@ Don't confuse the two. The benchmark harness does **not** read the server's `.en
 
 ## Prerequisites
 
-1. **MemWal server running locally with `BENCHMARK_MODE=true`.** This is critical — see [Server setup for benchmarks](#server-setup-for-benchmarks) below.
+1. **Walrus Memory server running locally with `BENCHMARK_MODE=true`.** This is critical — see [Server setup for benchmarks](#server-setup-for-benchmarks) below.
 2. **Postgres + Redis.** Start via `docker compose -f services/server/docker-compose.yml up -d`.
 3. **Python 3.9+** (tested on 3.9).
-4. **A registered MemWal account** with a delegate key. Get one from the memwal app or via the SDK.
+4. **A registered Walrus Memory account** with a delegate key. Get one from the Walrus Memory app or via the SDK.
 5. **An OpenRouter or OpenAI API key** with GPT-4o access.
 
 ---
 
 ## Server setup for benchmarks
 
-Benchmarks need the MemWal server configured specifically. In
+Benchmarks need the Walrus Memory server configured specifically. In
 `services/server/.env` (the benchmark section at the bottom of
 `.env.example` has these ready to uncomment):
 
@@ -326,7 +326,7 @@ Variance across runs is ~±2-3 points due to judge non-determinism. Retrieval it
 - The client's request signing is out of date with the server's auth scheme
   (`services/server/src/auth.rs`). `client.py::_sign_request` must send an
   `x-nonce` header (UUIDv4) and sign the 6-field canonical message
-  `{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}`. If you see
+  `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`. If you see
   426 on every request, the harness predates the MED-1 nonce / LOW-23
   account-id-in-message changes — update `_sign_request` to match `auth.rs` and
   `packages/sdk/src/memwal.ts`.
@@ -368,7 +368,7 @@ benchmarks/
 
   core/
     types.py               # Shared dataclasses (Conversation, Query, ...)
-    client.py              # MemWal HTTP client with Ed25519 signing
+    client.py              # Walrus Memory HTTP client with Ed25519 signing
     metrics.py             # Recall@K, MRR, nDCG, F1
     judge.py               # LLM-as-Judge with fixed prompts (don't modify between runs)
     report.py              # Markdown comparison table generator

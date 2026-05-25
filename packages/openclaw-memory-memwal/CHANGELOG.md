@@ -1,5 +1,11 @@
 # @mysten-incubation/oc-memwal
 
+## 0.0.3
+
+### Patch Changes
+
+- Rebrand package metadata and documentation from MemWal to Walrus Memory.
+
 ## 0.0.2
 
 ### Internal

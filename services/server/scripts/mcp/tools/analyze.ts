@@ -19,7 +19,7 @@ const ANALYZE_INPUT = {
 } as const;
 
 /**
- * memwal_analyze — let MemWal's LLM extract distinct facts from a piece of
+ * memwal_analyze — let Walrus Memory's LLM extract distinct facts from a piece of
  * text and persist each as its own memory. Resolves only after all extracted
  * facts have been written end-to-end (or the call times out).
  */
@@ -29,7 +29,7 @@ export function registerAnalyzeTool(
 ): void {
     server.tool(
         "memwal_analyze",
-        "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate MemWal memory.",
+        "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory.",
         ANALYZE_INPUT,
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
             const result = await session.memwal.analyzeAndWait(text, namespace, {

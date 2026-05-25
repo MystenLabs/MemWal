@@ -5,7 +5,7 @@
 //! `AppState`, so alternative implementations (mock, local model, hybrid)
 //! can be swapped in at startup without touching handler code.
 //!
-//! Why "services" and not "pipeline": MemWal isn't a single linear flow.
+//! Why "services" and not "pipeline": Walrus Memory isn't a single linear flow.
 //! `analyze` extracts facts then embeds+stores each; `remember` summarises
 //! long text then embeds; `recall` embeds the query then hydrates hits;
 //! `ask` recalls then asks an LLM. Different handlers compose these

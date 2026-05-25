@@ -15,7 +15,7 @@ if (!DELEGATE_KEY) {
 }
 
 async function main() {
-    console.log("=== MemWal Namespace + Restore Test ===\n");
+    console.log("=== Walrus Memory Namespace + Restore Test ===\n");
 
     // Step 0: Health check
     console.log("0. Health check...");

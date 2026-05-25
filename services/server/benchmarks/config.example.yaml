@@ -1,18 +1,18 @@
-# MemWal Benchmark Configuration
+# Walrus Memory Benchmark Configuration
 #
 # Copy this file to config.yaml and fill in the credentials below.
 # config.yaml is gitignored — never commit real keys.
 #
-# This is the benchmark harness config only. MemWal server config is
+# This is the benchmark harness config only. Walrus Memory server config is
 # separate and lives in services/server/.env (see .env.example there).
 # The benchmark harness only needs (1) how to reach the server and
 # (2) an LLM provider for answer generation and judging.
 
 # ─────────────────────────────────────────────────────────────────────
-# MemWal server connection
+# Walrus Memory server connection
 # ─────────────────────────────────────────────────────────────────────
 server:
-  # URL of the running MemWal server. Default is the local dev port.
+  # URL of the running Walrus Memory server. Default is the local dev port.
   # If the server runs elsewhere (Docker, remote host), update this.
   url: http://localhost:3001
 
@@ -24,7 +24,7 @@ server:
   # for the account_id below, otherwise every request gets 401.
   delegate_key: ""
 
-  # MemWal account object ID on Sui (0x... hex).
+  # Walrus Memory account object ID on Sui (0x... hex).
   # Found in the app settings, or returned by the SDK's create account
   # flow. Required because a single delegate key can be associated
   # with multiple accounts; this header picks which one.
@@ -43,7 +43,7 @@ judge:
   api_key: ""
 
   # API base URL. OpenRouter is cost-effective and we use it in our
-  # MemWal server config too. Swap for OpenAI direct if preferred:
+  # Walrus Memory server config too. Swap for OpenAI direct if preferred:
   #   api_base: https://api.openai.com/v1
   #   model: gpt-4o   (no vendor prefix for OpenAI direct)
   api_base: https://openrouter.ai/api/v1
@@ -62,7 +62,7 @@ answer:
 # ─────────────────────────────────────────────────────────────────────
 benchmarks:
   # Parallel workers during ingestion (analyze calls).
-  # Higher = faster ingestion, but the MemWal server's rate limits
+  # Higher = faster ingestion, but the Walrus Memory server's rate limits
   # and OpenRouter's rate limits cap practical throughput. 5-10 is a
   # good default for localhost.
   concurrency: 10

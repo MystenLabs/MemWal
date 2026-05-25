@@ -24,7 +24,7 @@ const RECALL_INPUT = {
 } as const;
 
 /**
- * memwal_recall — semantic search over the user's MemWal memories.
+ * memwal_recall — semantic search over the user's Walrus Memory memories.
  *
  * Returns top-K most relevant memories (cosine distance over embeddings),
  * with the original plaintext decrypted server-side via SEAL.
@@ -35,7 +35,7 @@ export function registerRecallTool(
 ): void {
     server.tool(
         "memwal_recall",
-        "Search the user's MemWal memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+        "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
         RECALL_INPUT,
         wrapTool<{ query: string; limit: number; namespace?: string }>(async ({ query, limit, namespace }) => {
             const result = await session.memwal.recall(query, limit, namespace);

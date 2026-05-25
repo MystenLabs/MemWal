@@ -1,4 +1,5 @@
 mod auth;
+mod compatibility;
 mod engine;
 mod jobs;
 mod mcp_proxy;
@@ -223,7 +224,7 @@ async fn main() {
     }
     if config.walrus_skip_consistency_check {
         tracing::warn!(
-            "  Walrus reads: WALRUS_SKIP_CONSISTENCY_CHECK=true for trusted MemWal cold reads"
+            "  Walrus reads: WALRUS_SKIP_CONSISTENCY_CHECK=true for trusted Walrus Memory cold reads"
         );
     }
     // Log upload key status
@@ -572,6 +573,10 @@ async fn main() {
             get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
+            "/version",
+            get(routes::version).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/config",
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
@@ -621,7 +626,7 @@ async fn main() {
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
                     // ENG-1697: SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
-                    // MCP headers — caller's MemWalAccount id + optional default namespace.
+                    // MCP headers — caller's Walrus Memory account id + optional default namespace.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
                 ])

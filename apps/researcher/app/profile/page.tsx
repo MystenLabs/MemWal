@@ -146,7 +146,7 @@ export default function ProfilePage() {
           <div className="border-b px-5 py-3">
             <h2 className="flex items-center gap-2 font-medium text-sm">
               <Shield className="size-3.5 text-muted-foreground" />
-              MemWal Account
+              Walrus Memory Account
             </h2>
           </div>
 
@@ -227,7 +227,7 @@ export default function ProfilePage() {
             <div className="px-5 py-4">
               <p className="mb-3 text-muted-foreground text-xs leading-relaxed">
                 Use this key to connect other apps (chatbot, CLI, OpenClaw) to
-                your MemWal account. Keep it private.
+                your Walrus Memory account. Keep it private.
               </p>
 
               {showKey && privateKey ? (

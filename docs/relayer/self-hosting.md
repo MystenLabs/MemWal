@@ -131,28 +131,30 @@ MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a
 MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
 ```
 
-If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the sidecar uses built-in defaults for the selected `SUI_NETWORK`. On `testnet`, the default is Mysten's initial committee aggregator:
-
-```env
-SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]
-```
-
-On `mainnet`, the default remains the legacy independent key server pair until Mysten publishes an official committee aggregator.
-
-Use `SEAL_SERVER_CONFIGS` to override the built-in default with another committee. Committee entries require an `aggregatorUrl`, for example:
-
-```env
-SEAL_SERVER_CONFIGS=[{"objectId":"0x...","weight":1,"aggregatorUrl":"https://seal-aggregator.example.com"}]
-```
-
-`SEAL_KEY_SERVERS=0x...,0x...` remains supported for legacy independent key server object IDs. It is only used when `SEAL_SERVER_CONFIGS` is unset. For deployments that still need the previous testnet independent defaults, pin:
+If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the sidecar uses built-in defaults for the selected `SUI_NETWORK`. On `testnet`, the default remains Mysten's original independent key server pair so existing encrypted memories remain decryptable:
 
 ```env
 SEAL_KEY_SERVERS=0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75,0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8
 ```
 
+On `mainnet`, the default remains the legacy independent key server pair until Mysten publishes an official committee aggregator.
+
+Use `SEAL_SERVER_CONFIGS` to opt into a committee key server. Committee entries require an `aggregatorUrl`, for example:
+
+```env
+SEAL_SERVER_CONFIGS=[{"objectId":"0x...","weight":1,"aggregatorUrl":"https://seal-aggregator.example.com"}]
+```
+
+Mysten's official testnet committee aggregator is:
+
+```env
+SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]
+```
+
+Although that committee is 3-of-5 internally, Seal exposes it to the SDK as one logical server config. The aggregator handles the internal committee threshold, so leave `SEAL_THRESHOLD` unset or set it to `1` when using this committee config. Because it uses a different key server object, do not switch an existing deployment to it until older data has been migrated or re-encrypted.
+
 <Warning>
-Changing SEAL key server defaults only affects new encryption. If a deployment already has memories encrypted with the previous testnet independent key servers, keep those servers pinned with `SEAL_KEY_SERVERS` until the data has been migrated or re-encrypted. Otherwise, recall and restore for older blobs may fail to decrypt.
+Changing SEAL key server defaults only affects new encryption. If a deployment already has memories encrypted with the testnet independent key servers, keep those servers as the default or pin them with `SEAL_KEY_SERVERS` until the data has been migrated or re-encrypted. Otherwise, recall and restore for older blobs may fail to decrypt.
 </Warning>
 
 Using official key server of SDK is recommended. 

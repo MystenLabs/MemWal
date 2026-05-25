@@ -16,8 +16,8 @@ import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalError
-from memwal.types import RecallManualOptions, RememberManualOptions
+from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
+from memwal.types import RecallManualOptions, RememberManualOptions, ScoringWeights
 from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
 # ============================================================
@@ -35,7 +35,35 @@ _TEST_PACKAGE_ID = "0x" + "11" * 32
 _TEST_SUI_RPC = "http://localhost:9001"
 
 
+def _version_payload(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> dict[str, Any]:
+    return {
+        "relayerVersion": "0.1.0",
+        "apiVersion": api_version,
+        "minSupportedSdk": {
+            "typescript": "0.0.4",
+            "python": min_python,
+            "mcp": "0.0.1",
+        },
+        "featureFlags": {"runtime.versionEndpoint": True},
+        "deprecations": [],
+        "build": {},
+    }
+
+
+def _mock_version(
+    api_version: str = "1.0.0",
+    min_python: str = "0.1.0",
+) -> None:
+    respx.get(f"{_TEST_SERVER}/version").mock(
+        return_value=httpx.Response(200, json=_version_payload(api_version, min_python))
+    )
+
+
 def mock_seal_session_prereqs() -> None:
+    _mock_version()
     respx.get(f"{_TEST_SERVER}/config").mock(
         return_value=httpx.Response(
             200,
@@ -67,7 +95,7 @@ def decode_seal_session_header(request: httpx.Request) -> dict[str, Any]:
 
 @pytest.fixture
 def memwal_client() -> MemWal:
-    """Create a MemWal client with a test key."""
+    """Create a Walrus Memory client with a test key."""
     return MemWal.create(
         key=_TEST_KEY_HEX,
         account_id=_TEST_ACCOUNT_ID,
@@ -263,6 +291,31 @@ class TestRecall:
         assert "x-delegate-key" not in headers
 
     @respx.mock
+    async def test_max_distance_filters_results(self, memwal_client: MemWal) -> None:
+        """recall() should filter weak matches when max_distance is provided."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"blob_id": "b1", "text": "I love coffee", "distance": 0.2},
+                        {"blob_id": "b2", "text": "I live in Tokyo", "distance": 0.7},
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        result = await memwal_client.recall("coffee", limit=10, max_distance=0.7)
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["limit"] == 10
+        assert len(result.results) == 1
+        assert result.total == 1
+        assert result.results[0].blob_id == "b1"
+
+    @respx.mock
     async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(
         self, memwal_client: MemWal
     ) -> None:
@@ -274,7 +327,11 @@ class TestRecall:
             )
         )
 
-        result = await memwal_client.wait_for_remember_job("job-1", poll_interval_ms=0, timeout_ms=100)
+        result = await memwal_client.wait_for_remember_job(
+            "job-1",
+            poll_interval_ms=0,
+            timeout_ms=100,
+        )
 
         request = route.calls[0].request
         assert request.content == b""
@@ -312,6 +369,22 @@ class TestErrorHandling:
 
         with pytest.raises(MemWalError, match="401"):
             await memwal_client.remember("test")
+
+    @respx.mock
+    async def test_empty_401_uses_workshop_friendly_message(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Empty-body auth failures should still give actionable guidance."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(401, text="")
+        )
+
+        with pytest.raises(
+            MemWalError,
+            match="wrong private key.*account ID mismatch.*staging/mainnet mismatch",
+        ):
+            await memwal_client.recall("test")
 
     @respx.mock
     async def test_500_raises_memwal_error(self, memwal_client: MemWal) -> None:
@@ -409,10 +482,58 @@ class TestHealth:
         assert result.status == "ok"
         assert result.version == "0.1.0"
 
+    @respx.mock
+    async def test_compatibility(self, memwal_client: MemWal) -> None:
+        _mock_version()
+
+        metadata = await memwal_client.compatibility()
+
+        assert metadata["apiVersion"] == "1.0.0"
+        assert metadata["minSupportedSdk"]["python"] == "0.1.0"
+
+    @respx.mock
+    async def test_compatibility_rejects_unsupported_relayer(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(api_version="2.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="supports relayer API 1.x"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_old_sdk(self, memwal_client: MemWal) -> None:
+        _mock_version(min_python="9.0.0")
+
+        with pytest.raises(MemWalCompatibilityError, match="requires Python SDK >= 9.0.0"):
+            await memwal_client.recall("test")
+
+    @respx.mock
+    async def test_compatibility_rejects_missing_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        payload = _version_payload()
+        del payload["minSupportedSdk"]["python"]
+        respx.get(f"{_TEST_SERVER}/version").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        with pytest.raises(MemWalCompatibilityError, match="minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
+    @respx.mock
+    async def test_compatibility_rejects_invalid_python_min(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version(min_python="latest")
+
+        with pytest.raises(MemWalCompatibilityError, match="invalid minSupportedSdk.python"):
+            await memwal_client.compatibility()
+
 
 class TestManualAPI:
     @respx.mock
     async def test_remember_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/remember/manual").mock(
             return_value=httpx.Response(
                 200,
@@ -441,6 +562,7 @@ class TestManualAPI:
 
     @respx.mock
     async def test_recall_manual(self, memwal_client: MemWal) -> None:
+        _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
             return_value=httpx.Response(
                 200,
@@ -464,6 +586,33 @@ class TestManualAPI:
         assert "x-delegate-key" not in headers
         assert len(result.results) == 1
         assert result.results[0].blob_id == "b1"
+
+    @respx.mock
+    async def test_recall_manual_forwards_scoring_weights(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
+            return_value=httpx.Response(200, json={"results": [], "total": 0})
+        )
+
+        opts = RecallManualOptions(
+            vector=[0.1, 0.2, 0.3],
+            limit=5,
+            scoring_weights=ScoringWeights(
+                semantic=1.0,
+                recency=0.5,
+                recency_half_life_days=7.0,
+                importance=2.0,
+            ),
+        )
+        await memwal_client.recall_manual(opts)
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["scoring_weights"] == {
+            "semantic": 1.0,
+            "recency": 0.5,
+            "recency_half_life_days": 7.0,
+            "importance": 2.0,
+        }
 
 
 class TestPublicKey:

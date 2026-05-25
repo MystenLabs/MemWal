@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memwal"
-version = "0.1.0"
-description = "Python SDK for MemWal — Privacy-first AI memory with Ed25519 signing"
+version = "0.1.2"
+description = "Python SDK for Walrus Memory — Privacy-first AI memory with Ed25519 signing"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
-    { name = "MemWal Team" },
+    { name = "Walrus Memory Team" },
 ]
-keywords = ["memwal", "ai", "memory", "ed25519", "privacy", "walrus", "sui"]
+keywords = ["memwal", "walrus-memory", "ai", "memory", "ed25519", "privacy", "walrus", "sui"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

@@ -365,8 +365,7 @@ pub async fn analyze(
     if state.config.benchmark_mode {
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
-        let total_plaintext_bytes: i64 =
-            facts.iter().map(|f| f.text.len() as i64).sum();
+        let total_plaintext_bytes: i64 = facts.iter().map(|f| f.text.len() as i64).sum();
         rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
 
         let store_tasks: Vec<_> = facts
@@ -461,7 +460,12 @@ pub async fn analyze(
                 // MEM-54: carry `importance` through the prep tuple so
                 // the job payload below can persist it alongside the
                 // ciphertext + vector.
-                Ok::<_, AppError>((fact.text, fact.importance, vector_result?, encrypted_result?))
+                Ok::<_, AppError>((
+                    fact.text,
+                    fact.importance,
+                    vector_result?,
+                    encrypted_result?,
+                ))
             }
         })
         .collect();
@@ -469,7 +473,8 @@ pub async fn analyze(
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
     // Quota check on total ciphertext size
-    let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> = Vec::with_capacity(prep_results.len());
+    let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> =
+        Vec::with_capacity(prep_results.len());
     let mut total_encrypted_bytes: i64 = 0;
     for r in prep_results {
         let (fact_text, importance, vector, encrypted) = r?;

@@ -1,7 +1,7 @@
 /**
  * Auto-recall hook — before_prompt_build.
  *
- * Searches MemWal for memories relevant to the user's prompt and injects
+ * Searches Walrus Memory for memories relevant to the user's prompt and injects
  * them into the LLM context. Also injects a namespace instruction so
  * tools scope to the correct agent's memory.
  */

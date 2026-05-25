@@ -1,5 +1,5 @@
 """
-MemWal HTTP client for benchmark operations.
+Walrus Memory HTTP client for benchmark operations.
 
 Handles Ed25519 request signing and provides typed methods for
 the API endpoints used during benchmarking: analyze, recall, stats, cleanup.
@@ -37,7 +37,7 @@ class RecallResult:
 
 
 class MemWalClient:
-    """Synchronous HTTP client for MemWal server with Ed25519 auth."""
+    """Synchronous HTTP client for Walrus Memory server with Ed25519 auth."""
 
     def __init__(
         self,
@@ -65,11 +65,11 @@ class MemWalClient:
     # ------------------------------------------------------------------
 
     def _sign_request(self, method: str, path: str, body_bytes: bytes) -> dict:
-        """Build auth headers matching MemWal's Ed25519 verification.
+        """Build auth headers matching Walrus Memory's Ed25519 verification.
 
         Canonical message (must match services/server/src/auth.rs and
         packages/sdk/src/memwal.ts):
-            "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+            "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
         Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
 
         `nonce` is a fresh UUIDv4 per call (MED-1 replay protection — the server

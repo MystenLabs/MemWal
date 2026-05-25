@@ -1,4 +1,4 @@
-/** Memory Health API — checks if MemWal is configured and server is reachable. */
+/** Memory Health API — checks if Walrus Memory is configured and server is reachable. */
 
 import { getMemWalClient } from "@/feature/note/lib/pdw-client";
 
@@ -14,7 +14,7 @@ export async function GET() {
     }
   } catch (error) {
     return Response.json(
-      { status: "not_configured", message: error instanceof Error ? error.message : "MemWal not configured" },
+      { status: "not_configured", message: error instanceof Error ? error.message : "Walrus Memory not configured" },
       { status: 503 },
     );
   }

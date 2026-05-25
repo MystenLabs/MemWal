@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MemWal Retrieval Quality Benchmark — CLI Entry Point.
+Walrus Memory Retrieval Quality Benchmark — CLI Entry Point.
 
 Usage:
     python run.py download <benchmark>
@@ -140,7 +140,7 @@ def stage_ingest(
     config: dict,
 ) -> IngestionStats:
     """
-    Ingest benchmark conversations into MemWal via /api/analyze.
+    Ingest benchmark conversations into Walrus Memory via /api/analyze.
 
     Also records a session_label → list[memory_id] map so later recall metric
     calculations can check whether retrieved memories came from the expected
@@ -551,7 +551,7 @@ def _serialize_artifact(artifact: RunArtifact) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="MemWal Retrieval Quality Benchmark",
+        description="Walrus Memory Retrieval Quality Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -563,7 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
 
     # ingest
-    ing = sub.add_parser("ingest", help="Ingest benchmark conversations into MemWal")
+    ing = sub.add_parser("ingest", help="Ingest benchmark conversations into Walrus Memory")
     ing.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
     ing.add_argument("--run-id", default=None)
 
@@ -595,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     rpt.add_argument("--run-id", default=None)
 
     # cleanup
-    cl = sub.add_parser("cleanup", help="Clean up benchmark data from MemWal")
+    cl = sub.add_parser("cleanup", help="Clean up benchmark data from Walrus Memory")
     cl.add_argument("--run-id", required=True)
     cl.add_argument("--benchmark", default=None)
 

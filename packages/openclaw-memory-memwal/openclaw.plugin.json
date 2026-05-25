@@ -1,8 +1,8 @@
 {
   "id": "memory-memwal",
   "kind": "memory",
-  "name": "Memory (MemWal)",
-  "description": "Encrypted, decentralized long-term memory via MemWal + Walrus",
+  "name": "Walrus Memory",
+  "description": "Encrypted, decentralized long-term memory via Walrus Memory",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -13,11 +13,11 @@
       },
       "accountId": {
         "type": "string",
-        "description": "MemWalAccount object ID on Sui (0x...)"
+        "description": "Walrus Memory account object ID on Sui (0x...)"
       },
       "serverUrl": {
         "type": "string",
-        "description": "MemWal server URL"
+        "description": "Walrus Memory server URL"
       },
       "defaultNamespace": {
         "type": "string",
@@ -57,15 +57,15 @@
       "label": "Ed25519 Private Key",
       "sensitive": true,
       "placeholder": "64-character hex string or ${ENV_VAR}",
-      "help": "Get from memwal.ai. Supports ${ENV_VAR} syntax."
+      "help": "Get from the Walrus Memory dashboard. Supports ${ENV_VAR} syntax."
     },
     "accountId": {
-      "label": "MemWalAccount ID",
+      "label": "Walrus Memory Account ID",
       "placeholder": "0x3247e3da...",
-      "help": "MemWalAccount object ID on Sui. Get from memwal.ai."
+      "help": "Walrus Memory account object ID on Sui. Get from the Walrus Memory dashboard."
     },
     "serverUrl": {
-      "label": "MemWal Server URL",
+      "label": "Walrus Memory Server URL",
       "placeholder": "https://relayer.dev.memwal.ai"
     },
     "defaultNamespace": {

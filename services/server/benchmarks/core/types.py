@@ -78,7 +78,7 @@ class Query:
 
 @dataclass
 class ScoringWeights:
-    """Weights for MemWal's composite retrieval scoring."""
+    """Weights for Walrus Memory's composite retrieval scoring."""
     semantic: float = 0.5
     importance: float = 0.2
     recency: float = 0.2

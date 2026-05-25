@@ -109,7 +109,7 @@ pub async fn stats(
 }
 
 // ============================================================
-// /health + /config
+// /health + /version + /config
 // ============================================================
 
 /// GET /health
@@ -117,6 +117,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        compatibility: crate::compatibility::version_response(),
         mode: if state.config.benchmark_mode {
             "benchmark".to_string()
         } else {
@@ -131,6 +132,11 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
     })
+}
+
+/// GET /version
+pub async fn version() -> Json<crate::compatibility::VersionResponse> {
+    Json(crate::compatibility::version_response())
 }
 
 /// GET /config

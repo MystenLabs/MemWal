@@ -1,11 +1,11 @@
 /**
- * memwal — Manual Client (Full Client-Side)
+ * Walrus Memory — Manual Client (Full Client-Side)
  *
  * User-side flow where the SDK handles everything locally:
  * - SEAL encrypt/decrypt via @mysten/seal (user's own Sui wallet)
  * - Walrus upload/download via @mysten/walrus
  * - Embedding via OpenAI-compatible API (user's own key)
- * - Vector registration via MemWal server (Ed25519 signed)
+ * - Vector registration via Walrus Memory server (Ed25519 signed)
  *
  * @example
  * ```typescript
@@ -33,10 +33,23 @@ import type {
     RememberManualResult,
     RecallManualResult,
     RecallManualMemory,
+    MemWalManualRecallOptions,
     RestoreResult,
     SealServerConfig,
+    RelayerVersionMetadata,
 } from "./types.js";
-import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import {
+    sha256hex,
+    hexToBytes,
+    bytesToHex,
+    normalizeServerUrl,
+    sanitizeServerError,
+    scoringWeightsToWire,
+} from "./utils.js";
+import {
+    assertCompatibleRelayer,
+    compatibilityErrorFromStatus,
+} from "./compatibility.js";
 
 // ============================================================
 // Constants
@@ -128,6 +141,8 @@ export class MemWalManual {
     private config: MemWalManualConfig;
     private walletSigner: WalletSigner | null;
     private namespace: string;
+    private relayerVersionMetadata: RelayerVersionMetadata | null = null;
+    private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
@@ -160,8 +175,8 @@ export class MemWalManual {
      * @param config.suiPrivateKey - Sui private key (bech32) for SEAL + Walrus (OR walletSigner)
      * @param config.walletSigner - Connected wallet signer from dapp-kit (OR suiPrivateKey)
      * @param config.embeddingApiKey - OpenAI/OpenRouter API key for embeddings
-     * @param config.packageId - MemWal contract package ID
-     * @param config.accountId - MemWalAccount object ID (for SEAL seal_approve)
+     * @param config.packageId - Walrus Memory contract package ID
+     * @param config.accountId - Walrus Memory account object ID (for SEAL seal_approve)
      */
     static create(config: MemWalManualConfig): MemWalManual {
         return new MemWalManual(config);
@@ -178,6 +193,15 @@ export class MemWalManual {
         if (this.delegatePublicKey) {
             this.delegatePublicKey.fill(0);
         }
+        this.relayerVersionMetadata = null;
+        this.compatibilityPromise = null;
+    }
+
+    /**
+     * Fetch and validate the relayer compatibility contract.
+     */
+    async compatibility(): Promise<RelayerVersionMetadata> {
+        return this.ensureCompatibleRelayer();
     }
 
     /** Whether this client uses a connected wallet signer (vs raw keypair) */
@@ -350,10 +374,20 @@ export class MemWalManual {
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
      */
-    async recallManual(query: string, limit: number = 10, namespace?: string): Promise<RecallManualResult> {
+    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;
+    async recallManual(query: string, options?: MemWalManualRecallOptions): Promise<RecallManualResult>;
+    async recallManual(
+        query: string,
+        limitOrOptions: number | MemWalManualRecallOptions = 10,
+        namespace?: string,
+    ): Promise<RecallManualResult> {
         if (!query) throw new Error("Query cannot be empty");
 
-        const ns = namespace ?? this.namespace;
+        const options = typeof limitOrOptions === "number"
+            ? { limit: limitOrOptions, namespace }
+            : limitOrOptions;
+        const limit = options.limit ?? 10;
+        const ns = options.namespace ?? this.namespace;
 
         // Step 1: Embed query
         const vector = await this.embed(query);
@@ -362,7 +396,12 @@ export class MemWalManual {
         const searchResult = await this.signedRequest<{ results: { blob_id: string; distance: number }[]; total: number }>(
             "POST",
             "/api/recall/manual",
-            { vector, limit, namespace: ns },
+            {
+                vector,
+                limit,
+                namespace: ns,
+                scoring_weights: scoringWeightsToWire(options.scoringWeights),
+            },
         );
 
         if (searchResult.results.length === 0) {
@@ -660,6 +699,42 @@ export class MemWalManual {
         return this.delegatePublicKey;
     }
 
+    private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
+        if (this.relayerVersionMetadata) return this.relayerVersionMetadata;
+        if (this.compatibilityPromise) return this.compatibilityPromise;
+
+        this.compatibilityPromise = this.fetchCompatibilityMetadata().finally(() => {
+            this.compatibilityPromise = null;
+        });
+        return this.compatibilityPromise;
+    }
+
+    private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        let body: Partial<RelayerVersionMetadata>;
+
+        if (versionRes.ok) {
+            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+        } else if (versionRes.status === 404 || versionRes.status === 405) {
+            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            if (!healthRes.ok) {
+                throw new Error(
+                    `Walrus Memory compatibility check failed: GET /version returned ` +
+                        `${versionRes.status}, and GET /health returned ${healthRes.status}`,
+                );
+            }
+            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+        } else {
+            throw new Error(
+                `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
+            );
+        }
+
+        assertCompatibleRelayer(body, this.serverUrl);
+        this.relayerVersionMetadata = body;
+        return body;
+    }
+
     /**
      * Make a signed request to the server.
      *
@@ -673,6 +748,7 @@ export class MemWalManual {
         path: string,
         body: object,
     ): Promise<T> {
+        await this.ensureCompatibleRelayer();
         const ed = await import("@noble/ed25519");
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -707,6 +783,9 @@ export class MemWalManual {
         if (!res.ok) {
             // LOW-26: sanitize server error bodies before re-throwing.
             const raw = await res.text();
+            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+            if (compatibilityError) throw compatibilityError;
+
             const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(sanitized) as Error & {
                 status?: number;

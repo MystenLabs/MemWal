@@ -1,6 +1,6 @@
 # TEE reference template
 
-This directory contains MemWal-specific starting files for running the relayer
+This directory contains Walrus Memory-specific starting files for running the relayer
 with a TEE deployment pattern. The canonical operator guide is
 `docs/relayer/nautilus-tee.md`.
 

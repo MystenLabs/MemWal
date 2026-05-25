@@ -1,7 +1,7 @@
 /**
- * memwal — SDK Client
+ * Walrus Memory — SDK Client
  *
- * Ed25519 delegate key based client that communicates with the MemWal
+ * Ed25519 delegate key based client that communicates with the Walrus Memory
  * Rust server (TEE). All data processing (encryption, embedding, Walrus)
  * happens server-side — the SDK just signs requests and sends text.
  *
@@ -15,7 +15,7 @@
  *
  * const memwal = MemWal.create({
  *     key: process.env.MEMWAL_PRIVATE_KEY,  // Ed25519 private key (hex)
- *     accountId: process.env.MEMWAL_ACCOUNT_ID, // MemWalAccount object ID
+ *     accountId: process.env.MEMWAL_ACCOUNT_ID, // Walrus Memory account object ID
  * })
  *
  * // Remember — returns an accepted background job immediately
@@ -33,6 +33,7 @@ import type {
     RememberResult,
     RecallResult,
     RecallMemory,
+    RecallOptions,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -51,8 +52,20 @@ import type {
     RememberBulkStatusResult,
     RememberBulkStatusItem,
     RememberBulkItemResult,
+    RelayerVersionMetadata,
 } from "./types.js";
-import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import {
+    sha256hex,
+    hexToBytes,
+    bytesToHex,
+    normalizeServerUrl,
+    sanitizeServerError,
+    scoringWeightsToWire,
+} from "./utils.js";
+import {
+    assertCompatibleRelayer,
+    compatibilityErrorFromStatus,
+} from "./compatibility.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -109,6 +122,10 @@ function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
 }
 
+function normalizeSuiNetworkForGrpc(network: string): string {
+    return network === "local" ? "localnet" : network;
+}
+
 export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
@@ -120,8 +137,11 @@ export class MemWal {
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
     private sessionCache: SessionCacheEntry | null = null;
     private serverConfig: ServerConfig | null = null;
+    private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
+    /** Single-flight guard so concurrent requests share one compatibility probe. */
+    private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -134,7 +154,7 @@ export class MemWal {
     }
 
     /**
-     * Create a new MemWal client instance.
+     * Create a new Walrus Memory client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
      * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
@@ -158,6 +178,8 @@ export class MemWal {
         // instance must not leak authorization tokens either.
         this.sessionCache = null;
         this.serverConfig = null;
+        this.relayerVersionMetadata = null;
+        this.compatibilityPromise = null;
     }
 
     // ============================================================
@@ -457,7 +479,7 @@ export class MemWal {
      * verify → embed query → search → Walrus download → decrypt → return plaintext
      *
      * @param query - Search query
-     * @param limit - Max number of results (default: 10)
+     * @param limitOrOptions - Max number of results (default: 10), or recall options
      * @returns RecallResult with decrypted text results
      *
      * @example
@@ -468,15 +490,43 @@ export class MemWal {
      * }
      * ```
      */
-    async recall(query: string, limit: number = 10, namespace?: string): Promise<RecallResult> {
+    async recall(
+        query: string,
+        limitOrOptions: number | RecallOptions | undefined = 10,
+        namespace?: string,
+    ): Promise<RecallResult> {
+        let options: RecallOptions;
+        if (limitOrOptions == null) {
+            options = { limit: 10, namespace };
+        } else if (typeof limitOrOptions === "number") {
+            options = { limit: limitOrOptions, namespace };
+        } else {
+            options = limitOrOptions;
+        }
+        const limit = options.topK ?? options.limit ?? 10;
+        const resolvedNamespace = options.namespace ?? this.namespace;
+
         const ac = new AbortController();
         const tid = setTimeout(() => ac.abort(), 15000);
         try {
-            return await this.signedRequest<RecallResult>("POST", "/api/recall", {
+            const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
-                namespace: namespace ?? this.namespace,
+                namespace: resolvedNamespace,
             }, { signal: ac.signal });
+
+            if (typeof options.maxDistance === "number") {
+                const filtered = result.results.filter(
+                    (memory) => memory.distance < options.maxDistance!,
+                );
+                return {
+                    ...result,
+                    results: filtered,
+                    total: filtered.length,
+                };
+            }
+
+            return result;
         } finally {
             clearTimeout(tid);
         }
@@ -532,6 +582,7 @@ export class MemWal {
      *
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
+     * @param opts.scoringWeights - Optional composite-scoring weights
      * @returns RecallManualResult with blob_id + distance pairs (no decrypted text)
      *
      * @example
@@ -558,6 +609,7 @@ export class MemWal {
                 vector: opts.vector,
                 limit: opts.limit ?? 10,
                 namespace: opts.namespace ?? this.namespace,
+                scoring_weights: scoringWeightsToWire(opts.scoringWeights),
             },
             { includeDelegateKey: false },
         );
@@ -634,28 +686,21 @@ export class MemWal {
     }
 
     /**
-     * Check server health.
-     *
-     * INFO-7: The health endpoint is currently public/unsigned server-side,
-     * but we send the same signed-request envelope as every other call so
-     * that (a) the channel is authenticated whenever the server opts in, and
-     * (b) a MitM cannot trivially forge a "healthy" response for a client
-     * that has no way to tell. If the server ignores the signature headers
-     * on `/health`, this is still a harmless no-op.
+     * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        try {
-            return await this.signedRequest<HealthResult>("GET", "/health", {});
-        } catch (err) {
-            // Fall back to a plain GET for servers that reject bodies on GET /health.
-            const res = await fetch(`${this.serverUrl}/health`);
-            if (!res.ok) {
-                throw err instanceof Error
-                    ? err
-                    : new Error(`Health check failed: ${res.status}`);
-            }
-            return res.json() as Promise<HealthResult>;
+        const res = await fetch(`${this.serverUrl}/health`);
+        if (!res.ok) {
+            throw new Error(`Health check failed: ${res.status}`);
         }
+        return res.json() as Promise<HealthResult>;
+    }
+
+    /**
+     * Fetch and validate the relayer compatibility contract.
+     */
+    async compatibility(): Promise<RelayerVersionMetadata> {
+        return this.ensureCompatibleRelayer();
     }
 
     /**
@@ -676,6 +721,42 @@ export class MemWal {
             this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
         }
         return this.publicKey;
+    }
+
+    private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
+        if (this.relayerVersionMetadata) return this.relayerVersionMetadata;
+        if (this.compatibilityPromise) return this.compatibilityPromise;
+
+        this.compatibilityPromise = this.fetchCompatibilityMetadata().finally(() => {
+            this.compatibilityPromise = null;
+        });
+        return this.compatibilityPromise;
+    }
+
+    private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        let body: Partial<RelayerVersionMetadata>;
+
+        if (versionRes.ok) {
+            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+        } else if (versionRes.status === 404 || versionRes.status === 405) {
+            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            if (!healthRes.ok) {
+                throw new Error(
+                    `Walrus Memory compatibility check failed: GET /version returned ` +
+                        `${versionRes.status}, and GET /health returned ${healthRes.status}`,
+                );
+            }
+            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+        } else {
+            throw new Error(
+                `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
+            );
+        }
+
+        assertCompatibleRelayer(body, this.serverUrl);
+        this.relayerVersionMetadata = body;
+        return body;
     }
 
     // ============================================================
@@ -720,14 +801,29 @@ export class MemWal {
 
     private async buildSealSessionInner(): Promise<string> {
         const cfg = await this.fetchServerConfig();
-        // @mysten/sui renamed/moved `SuiClient` between minor versions:
-        //   - pre-2.6:  `SuiClient` in `@mysten/sui/client`
-        //   - 2.6+:     `SuiJsonRpcClient` in `@mysten/sui/jsonRpc`
-        // Probe both paths so the SDK works across the supported range.
         const sealMod = (await import("@mysten/seal")) as any;
         const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
         const SessionKey = sealMod.SessionKey;
         const Ed25519Keypair = ed25519Mod.Ed25519Keypair;
+
+        const clientCandidates: Array<{ name: string; client: any }> = [];
+
+        // Prefer Sui's gRPC client on modern @mysten/sui versions. Keep the
+        // JSON-RPC probes as compatibility fallbacks for older peer installs.
+        try {
+            const mod = (await import("@mysten/sui/grpc")) as any;
+            if (typeof mod.SuiGrpcClient === "function") {
+                clientCandidates.push({
+                    name: "SuiGrpcClient",
+                    client: new mod.SuiGrpcClient({
+                        network: normalizeSuiNetworkForGrpc(cfg.network),
+                        baseUrl: cfg.suiRpcUrl,
+                    }),
+                });
+            }
+        } catch {
+            /* @mysten/sui/grpc is not present on this version */
+        }
 
         let SuiClient: any = undefined;
         try {
@@ -744,23 +840,45 @@ export class MemWal {
                 /* not present on this version either */
             }
         }
-        if (typeof SuiClient !== "function" || typeof Ed25519Keypair !== "function") {
+        if (typeof SuiClient === "function") {
+            clientCandidates.push({
+                name: "SuiClient",
+                client: new SuiClient({ url: cfg.suiRpcUrl }),
+            });
+        }
+
+        if (clientCandidates.length === 0 || typeof Ed25519Keypair !== "function") {
             throw new Error(
-                "SuiClient/SuiJsonRpcClient or Ed25519Keypair not found in @mysten/sui. " +
+                "SuiGrpcClient/SuiClient or Ed25519Keypair not found in @mysten/sui. " +
                 "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
             );
         }
 
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
-        const suiClient = new SuiClient({ url: cfg.suiRpcUrl });
 
-        const session = await SessionKey.create({
-            address: keypair.getPublicKey().toSuiAddress(),
-            packageId: cfg.packageId,
-            ttlMin: SEAL_SESSION_TTL_MIN,
-            signer: keypair,
-            suiClient: suiClient as any,
-        });
+        // gRPC getObject returns { object } whereas legacy JSON-RPC returns
+        // { data }. SessionKey accepts either through the shared core client
+        // interface. If the relayer still serves a JSON-RPC URL in config,
+        // the legacy client remains a runtime fallback.
+        let session: any = undefined;
+        let lastClientError: unknown;
+        for (const candidate of clientCandidates) {
+            try {
+                session = await SessionKey.create({
+                    address: keypair.getPublicKey().toSuiAddress(),
+                    packageId: cfg.packageId,
+                    ttlMin: SEAL_SESSION_TTL_MIN,
+                    signer: keypair,
+                    suiClient: candidate.client as any,
+                });
+                break;
+            } catch (err) {
+                lastClientError = err;
+            }
+        }
+        if (!session) {
+            throw lastClientError;
+        }
 
         // Eagerly sign the personal message so the exported envelope is
         // fully self-contained. `SessionKey.create()` defers this signing
@@ -822,7 +940,7 @@ export class MemWal {
      * Make a signed request to the server.
      *
      * Signature format (LOW-23 updated):
-     *   "{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"
+     *   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
      *
      * Headers: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id
      *
@@ -863,6 +981,7 @@ export class MemWal {
         const options = Array.isArray(acceptedStatusesOrOptions)
             ? requestOptions
             : acceptedStatusesOrOptions;
+        await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
         const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -911,6 +1030,9 @@ export class MemWal {
         if (!acceptedStatuses.includes(res.status)) {
             // LOW-26: sanitize server error bodies before surfacing to callers.
             const raw = await res.text();
+            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+            if (compatibilityError) throw compatibilityError;
+
             const { message, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(message) as Error & {
                 status?: number;

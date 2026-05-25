@@ -22,7 +22,7 @@ const INITIAL_STEPS: SaveStep[] = [
   { id: "check-duplicate", label: "Checking existing sprint", status: "pending" },
   { id: "generate-report", label: "Generating report", status: "pending" },
   { id: "build-sources", label: "Processing sources", status: "pending" },
-  { id: "store-memwal", label: "Storing in MemWal", status: "pending" },
+  { id: "store-memwal", label: "Storing in Walrus Memory", status: "pending" },
   { id: "save-db", label: "Saving to database", status: "pending" },
 ];
 

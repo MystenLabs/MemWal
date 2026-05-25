@@ -2,12 +2,12 @@
  * =============================================================================
  * MCP AUTH — Delegate-key Bearer resolution
  * =============================================================================
- * MemWal MCP authenticates each session with a delegate key (Ed25519 private)
- * passed via the `Authorization: Bearer <hex>` header. The MemWalAccount id
+ * Walrus Memory MCP authenticates each session with a delegate key (Ed25519 private)
+ * passed via the `Authorization: Bearer <hex>` header. The Walrus Memory account id
  * comes from a second header (`X-MemWal-Account-Id`) so the same delegate key
  * can be registered against multiple accounts.
  *
- * No OAuth flow — MemWal's on-chain delegate-key model IS the auth. The
+ * No OAuth flow — Walrus Memory's on-chain delegate-key model IS the auth. The
  * relayer already verifies the delegate key is registered against the account
  * on its first signed request, so we don't repeat that check here.
  *

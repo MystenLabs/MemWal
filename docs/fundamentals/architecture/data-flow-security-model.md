@@ -71,10 +71,10 @@ flowchart LR
 
 Every protected API call goes through Ed25519 signature verification:
 
-1. The SDK signs a message: `{timestamp}.{method}.{path}.{body_sha256}` using the delegate private key
+1. The SDK signs a message: `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}` using the delegate private key
 2. The relayer verifies the Ed25519 signature against the provided public key
-3. Timestamps must be within a **5-minute window** to prevent replay attacks
-4. The relayer resolves the public key to a `MemWalAccount` using the priority chain: cache → indexed accounts → onchain registry → header hint → config fallback
+3. Timestamps must be within a **5-minute window**, and each `x-nonce` UUID is recorded in Redis for replay protection
+4. The relayer resolves the public key to a `MemWalAccount` using the priority chain: cache → signed account header/config fallback → onchain registry scan
 5. The onchain account is fetched to verify the delegate key is registered in `delegate_keys`
 6. The resolved owner address is used to scope all subsequent operations
 

@@ -9,14 +9,22 @@
  */
 
 export { MemWalManual } from "./manual.js";
+export {
+    MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION,
+    MemWalCompatibilityError,
+    SUPPORTED_RELAYER_API_MAJOR,
+} from "./compatibility.js";
 
 export type {
     MemWalManualConfig,
+    RelayerVersionMetadata,
     SealServerConfig,
     WalletSigner,
+    ScoringWeights,
     RememberManualOptions,
     RememberManualResult,
     RecallManualOptions,
+    MemWalManualRecallOptions,
     RecallManualResult,
     RecallManualHit,
     RecallManualMemory,

@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * MemWal Status Indicator Component
+ * Walrus Memory Status Indicator Component
  *
- * Shows the current status of MemWal connection.
+ * Shows the current status of the Walrus Memory connection.
  * V2 uses server-side Ed25519 key — no wallet connection needed.
  *
  * States:
- * - Checking: Checking MemWal server health
- * - Connected: MemWal server reachable and configured
- * - Unavailable: MemWal not configured or server unreachable
+ * - Checking: Checking Walrus Memory server health
+ * - Connected: Walrus Memory server reachable and configured
+ * - Unavailable: Walrus Memory not configured or server unreachable
  */
 
 import {
@@ -41,7 +41,7 @@ export function PDWStatusIndicator() {
             </div>
           </TooltipTrigger>
           <TooltipContent>
-            <p className="text-xs">MemWal not configured (MEMWAL_KEY not set)</p>
+            <p className="text-xs">Walrus Memory not configured (MEMWAL_PRIVATE_KEY not set)</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -55,12 +55,12 @@ export function PDWStatusIndicator() {
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
             <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
             <span className="text-xs font-medium text-green-700 dark:text-green-300">
-              MemWal On
+              Memory On
             </span>
           </div>
         </TooltipTrigger>
         <TooltipContent>
-          <p className="text-xs">MemWal connected — memories auto-saved</p>
+          <p className="text-xs">Walrus Memory connected — memories auto-saved</p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

@@ -1,6 +1,6 @@
-# memwal
+# Walrus Memory Python SDK
 
-Python SDK for [MemWal](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
+Python SDK for [Walrus Memory](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
 
 All data processing (encryption, embedding, Walrus storage) happens server-side in a TEE. The SDK signs requests with your Ed25519 delegate key and sends text over HTTPS.
 
@@ -23,10 +23,13 @@ pip install memwal[all]         # Everything
 Set your environment variables first:
 
 ```bash
-export MEMWAL_KEY="your-ed25519-delegate-key-hex"
-export MEMWAL_ACCOUNT_ID="0x-your-memwal-account-id"
+export MEMWAL_PRIVATE_KEY="your-ed25519-delegate-private-key-hex"
+export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
 export MEMWAL_SERVER_URL="https://relayer.memwal.ai"
 ```
+
+`MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
+must stay server-side.
 
 ### Async (recommended)
 
@@ -37,7 +40,7 @@ from memwal import MemWal
 
 async def main():
     memwal = MemWal.create(
-        key=os.environ["MEMWAL_KEY"],
+        key=os.environ["MEMWAL_PRIVATE_KEY"],
         account_id=os.environ["MEMWAL_ACCOUNT_ID"],
         server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
     )
@@ -47,7 +50,7 @@ async def main():
     print(result.blob_id)
 
     # Recall memories
-    matches = await memwal.recall("food allergies")
+    matches = await memwal.recall("food allergies", limit=10, max_distance=0.7)
     for memory in matches.results:
         print(f"{memory.text} (relevance: {1 - memory.distance:.2f})")
 
@@ -68,7 +71,7 @@ import os
 from memwal import MemWalSync
 
 client = MemWalSync.create(
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
 )
@@ -85,7 +88,7 @@ import os
 from memwal import MemWal
 
 async with MemWal.create(
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
 ) as memwal:
     await memwal.remember("I prefer dark mode")
@@ -100,7 +103,7 @@ Same shorthand as the TypeScript SDK and MCP package.
 from memwal import MemWal
 
 memwal = MemWal.create(
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     env="prod",   # prod | dev | staging | local
 )
@@ -130,7 +133,7 @@ from memwal import with_memwal_langchain
 llm = ChatOpenAI(model="gpt-4o")
 smart_llm = with_memwal_langchain(
     llm,
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
     max_memories=5,
@@ -151,7 +154,7 @@ from memwal import with_memwal_openai
 client = AsyncOpenAI()
 smart_client = with_memwal_openai(
     client,
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
 )
@@ -174,7 +177,7 @@ Create a new async client.
 | Method | Description |
 |--------|-------------|
 | `await remember(text, namespace?)` | Store a memory |
-| `await recall(query, limit?, namespace?)` | Search memories |
+| `await recall(query, limit?, namespace?, max_distance?)` | Search memories, optionally filtering by distance |
 | `await analyze(text, namespace?)` | Extract and store facts |
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |
@@ -188,10 +191,10 @@ Create a new async client.
 Every request is signed with Ed25519:
 
 ```
-message = f"{timestamp}.{method}.{path}.{sha256(body)}"
+message = f"{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
 ```
 
-Headers sent: `x-public-key`, `x-signature`, `x-timestamp`, `x-delegate-key`, `x-account-id`.
+Signed requests send `x-public-key`, `x-signature`, `x-timestamp`, `x-nonce`, and `x-account-id`. Relayer-mode requests also send `x-seal-session`; manual-mode requests omit decrypt credentials.
 
 ## License
 

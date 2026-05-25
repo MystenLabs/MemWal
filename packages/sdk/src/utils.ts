@@ -1,8 +1,10 @@
 /**
- * memwal — Shared Utilities
+ * Walrus Memory — Shared Utilities
  *
  * Common crypto and encoding helpers used across the SDK.
  */
+
+import type { ScoringWeights } from "./types.js";
 
 // ============================================================
 // SHA-256 (Isomorphic)
@@ -65,6 +67,17 @@ export function bytesToHex(bytes: Uint8Array): string {
         .join("");
 }
 
+export function scoringWeightsToWire(weights?: ScoringWeights): object | undefined {
+    if (!weights) return undefined;
+
+    return {
+        semantic: weights.semantic,
+        recency: weights.recency,
+        recency_half_life_days: weights.recencyHalfLifeDays,
+        importance: weights.importance,
+    };
+}
+
 // ============================================================
 // Transport Security Helpers
 // ============================================================
@@ -119,6 +132,16 @@ export function sanitizeServerError(
     status: number,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
+    if (status === 401) {
+        return {
+            message:
+                "401 from relayer: typically wrong private key, key not registered on this account, " +
+                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials.",
+            raw: rawBody,
+            serverCode: "AUTH_REJECTED",
+        };
+    }
+
     const MAX = 200;
     let serverCode: string | undefined;
     let text = rawBody;
@@ -140,7 +163,7 @@ export function sanitizeServerError(
     const stripped = text.replace(/[\u0000-\u001F\u007F]/g, " ").trim();
     const truncated =
         stripped.length > MAX ? `${stripped.slice(0, MAX)}...` : stripped;
-    const message = `MemWal server error (${status}): ${truncated || "<no message>"}`;
+    const message = `Walrus Memory server error (${status}): ${truncated || "<no message>"}`;
     return { message, raw: rawBody, serverCode };
 }
 
@@ -192,4 +215,3 @@ export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uin
     const ed = await import("@noble/ed25519");
     return ed.getPublicKeyAsync(hexToBytes(privateKeyHex));
 }
-

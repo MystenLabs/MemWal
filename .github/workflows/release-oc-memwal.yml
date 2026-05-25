@@ -1,4 +1,4 @@
-name: Release OC-MemWal Plugin
+name: Release Walrus Memory OpenClaw Plugin
 
 on:
   push:

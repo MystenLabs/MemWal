@@ -1,4 +1,4 @@
--- memwal — Storage Quota Tracking
+-- Walrus Memory — Storage Quota Tracking
 -- Rate limiting is handled by Redis (no PostgreSQL table needed).
 -- Storage quota is tracked per-row in vector_entries.
 
