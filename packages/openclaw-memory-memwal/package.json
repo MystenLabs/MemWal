@@ -1,8 +1,8 @@
 {
   "name": "@mysten-incubation/oc-memwal",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
-  "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via MemWal + Walrus",
+  "description": "NemoClaw/OpenClaw memory plugin — encrypted, decentralized long-term memory via Walrus Memory",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -21,6 +21,14 @@
     "dist",
     "openclaw.plugin.json",
     "README.md"
+  ],
+  "keywords": [
+    "ai",
+    "memory",
+    "walrus-memory",
+    "walrus",
+    "openclaw",
+    "nemoclaw"
   ],
   "scripts": {
     "build": "tsc",

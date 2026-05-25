@@ -1,7 +1,7 @@
 /**
  * Playground — Interactive Demo Showcase
  *
- * Shows code for each memwal SDK operation, with a "Run" button
+ * Shows code for each Walrus Memory SDK operation, with a "Run" button
  * that executes the call against a live server using the real SDK.
  */
 
@@ -422,7 +422,7 @@ export default function Playground() {
 
         try {
             // Phase 1: Recall memories using SDK
-            setAskPhase('step 1/3 — recalling memories from memwal...')
+            setAskPhase('step 1/3 — recalling memories from Walrus Memory...')
             const recallData = await memwal.recall(askQuestion, 5)
             const memories = recallData.results || []
 
@@ -432,7 +432,7 @@ export default function Playground() {
                 ? `The following are known facts about this user (from encrypted Walrus storage):\n${memories.map((m) => `- ${m.text} (relevance: ${(((1 - m.distance) * 100)).toFixed(0)}%)`).join('\n')}`
                 : 'No memories found for this user yet.'
 
-            const systemPrompt = `You are a helpful AI assistant. The user has a personal memory store powered by memwal (encrypted, stored on Walrus blockchain).\n\n${memoryContext}\n\nUse the above context to provide personalized answers. If the memories don't contain relevant information, say so honestly.`
+            const systemPrompt = `You are a helpful AI assistant. The user has a personal memory store powered by Walrus Memory (encrypted, stored on Walrus blockchain).\n\n${memoryContext}\n\nUse the above context to provide personalized answers. If the memories don't contain relevant information, say so honestly.`
 
             // Phase 3: Call user's own LLM
             setAskPhase('step 3/3 — calling your LLM with enriched prompt...')
@@ -553,7 +553,7 @@ export default function Playground() {
             <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <Link to="/dashboard" className="demo-nav-back">
@@ -577,7 +577,7 @@ export default function Playground() {
                 <div className="dashboard-header">
                     <h2>interactive demo</h2>
                     <p>
-                        try each memwal SDK operation live. click{' '}
+                        try each Walrus Memory SDK operation live. click{' '}
                         <strong>▶ run</strong> to execute against your server
                         using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
@@ -613,7 +613,7 @@ export default function Playground() {
                 <DemoStep
                     number={1}
                     title="health check"
-                    description="verify the memwal server is running"
+                    description="verify the Walrus Memory server is running"
                     code={`import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
@@ -749,7 +749,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                             <div>
                                 <div className="card-title">configure your LLM</div>
                                 <div className="card-subtitle">
-                                    memwal is just the memory layer — you bring your own LLM
+                                    Walrus Memory is just the memory layer — you bring your own LLM
                                 </div>
                             </div>
                         </div>
@@ -784,17 +784,17 @@ const result = await memwal.restore("${namespace || 'default'}")
                             />
                         </div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                            required for steps 7–9. your key stays in this browser tab — never sent to memwal.
+                            required for steps 7–9. your key stays in this browser tab — never sent to Walrus Memory.
                         </div>
                     </div>
 
                     <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
-{`// memwal doesn't include an LLM — you choose your own.
+{`// Walrus Memory doesn't include an LLM — you choose your own.
 // steps 7–9 use this key for:
 //   • ask AI: recalls memories → injects into your LLM prompt
 //   • full client-side: embeds text via your OpenAI / OpenRouter key
 //
-// your key is never sent to memwal servers.`}
+// your key is never sent to Walrus Memory servers.`}
                     </SyntaxHighlighter>
                 </div>
 
@@ -806,7 +806,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                             <div>
                                 <div className="card-title">ask AI (with memory)</div>
                                 <div className="card-subtitle">
-                                    your LLM key + memwal memory layer — like Supermemory
+                                    your LLM key + Walrus Memory layer — like Supermemory
                                 </div>
                             </div>
                         </div>
@@ -840,14 +840,14 @@ const result = await memwal.restore("${namespace || 'default'}")
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
 
-// wrap your model with memwal — that's it
+// wrap your model with Walrus Memory — that's it
 const model = withMemWal(openai("gpt-4o-mini"), {
   key: delegateKeyHex,
   accountId: "0x...",
   serverUrl: "${serverUrl}"
 })
 
-// use as normal — memwal handles memory automatically
+// use as normal — Walrus Memory handles memory automatically
 const { text } = await generateText({
   model,
   prompt: "${askQuestion.slice(0, 50)}"
@@ -869,7 +869,7 @@ const { text } = await generateText({
                             {/* AI Answer */}
                             <div className="demo-ai-panel">
                                 <div className="demo-info-label" style={{ marginBottom: 12 }}>
-                                    AI response (your LLM + memwal memory)
+                                    AI response (your LLM + Walrus Memory)
                                 </div>
                                 <div className="demo-ai-answer">
                                     {askResult.answer}

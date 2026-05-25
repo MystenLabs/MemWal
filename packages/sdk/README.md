@@ -1,8 +1,8 @@
 # @mysten-incubation/memwal
 
-Privacy-first AI memory SDK for storing encrypted memories on Walrus and retrieving them with semantic search.
+Walrus Memory SDK for storing encrypted AI memories on Walrus and retrieving them with semantic search.
 
-> MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
+> Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## Documentation
 
@@ -26,15 +26,21 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
-  key: "your-delegate-key-hex",
-  accountId: "your-memwal-account-id",
-  serverUrl: "https://your-relayer-url.com",
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
   namespace: "demo",
 });
 
-const job = await memwal.remember("User prefers dark mode and uses TypeScript.");
-await memwal.waitForRememberJob(job.job_id);
-const memories = await memwal.recall("What are the user's preferences?");
+await memwal.rememberAndWait(
+  "User prefers dark mode and uses TypeScript.",
+  undefined,
+  { timeoutMs: 30_000 },
+);
+const memories = await memwal.recall("What are the user's preferences?", {
+  topK: 10,
+  maxDistance: 0.7,
+});
 await memwal.restore("demo");
 ```
 

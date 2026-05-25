@@ -1,4 +1,4 @@
-# MemWal default balanced weights for general-purpose retrieval
+# Walrus Memory default balanced weights for general-purpose retrieval
 name: default
 weights:
   semantic: 0.5

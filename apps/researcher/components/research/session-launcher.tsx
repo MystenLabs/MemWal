@@ -287,7 +287,7 @@ export function SessionLauncher({
                       </div>
                     </div>
                     <p className="mt-3 text-xs text-muted-foreground">
-                      Your findings are persisted on-chain via MemWal and recalled across sessions.
+                      Your findings are persisted on-chain via Walrus Memory and recalled across sessions.
                     </p>
                   </div>
 

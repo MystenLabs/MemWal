@@ -1,5 +1,5 @@
 /**
- * memwal — Account Management
+ * Walrus Memory — Account Management
  *
  * On-chain account operations: create account, add/remove delegate keys.
  * Supports both wallet signing (browser) and private key signing (server-side).
@@ -172,7 +172,7 @@ export async function createAccount(
 
     const { digest, effects } = await signAndExecute(ctx, tx);
 
-    // Extract the created MemWalAccount object ID from object changes
+    // Extract the created Walrus Memory account object ID from object changes
     let accountId = "";
     const objectChanges = effects?.objectChanges ?? [];
     for (const change of objectChanges) {

@@ -1,7 +1,7 @@
 /**
- * OpenClaw Memory Plugin — MemWal
+ * OpenClaw Memory Plugin — Walrus Memory
  *
- * Encrypted, decentralized long-term memory via MemWal + Walrus.
+ * Encrypted, decentralized long-term memory via Walrus Memory.
  *
  * Components:
  *   hooks/     — before_prompt_build (auto-recall), agent_end (auto-capture)
@@ -25,11 +25,11 @@ import { registerCli } from "./cli/index.js";
 
 export default {
   id: "memory-memwal",
-  name: "Memory (MemWal)",
-  description: "Encrypted, decentralized long-term memory via MemWal + Walrus",
+  name: "Walrus Memory",
+  description: "Encrypted, decentralized long-term memory via Walrus Memory",
   kind: "memory" as const,
 
-  /** Initialize MemWal client and register all plugin components. */
+  /** Initialize the Walrus Memory client and register all plugin components. */
   register(api: any) {
     const config = parseConfig(api.pluginConfig);
 

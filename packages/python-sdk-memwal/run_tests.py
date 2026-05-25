@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MemWal Python SDK — Test Runner
+Walrus Memory Python SDK — Test Runner
 
 Runs all tests grouped by category and prints a clean summary.
 
@@ -8,7 +8,7 @@ Usage:
     python3 run_tests.py
 
 With dev server (integration tests):
-    MEMWAL_KEY=<hex> MEMWAL_ACCOUNT_ID=0x... MEMWAL_SERVER_URL=https://... python3 run_tests.py
+    MEMWAL_PRIVATE_KEY=<hex> MEMWAL_ACCOUNT_ID=0x... MEMWAL_SERVER_URL=https://... python3 run_tests.py
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ DIM    = "\033[2m"
 RESET  = "\033[0m"
 
 SERVER_URL  = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.dev.memwal.ai")
-PRIVATE_KEY = os.environ.get("MEMWAL_KEY", "")
+PRIVATE_KEY = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID  = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 HAS_KEY     = bool(PRIVATE_KEY and ACCOUNT_ID)
 
@@ -77,7 +77,7 @@ def status(passed: int, failed: int) -> str:
 
 def print_header() -> None:
     print()
-    print(f"{BOLD}{CYAN}  MemWal Python SDK — Test Suite{RESET}")
+    print(f"{BOLD}{CYAN}  Walrus Memory Python SDK — Test Suite{RESET}")
     print(f"  {DIM}Server: {SERVER_URL}{RESET}")
     print(f"  {DIM}Auth:   {'✓ credentials set' if HAS_KEY else '✗ no key (integration tests skipped)'}{RESET}")
     print()
@@ -192,7 +192,7 @@ def main() -> None:
     print(f"  {'─' * 78}")
 
     if not HAS_KEY:
-        print(f"\n  {YELLOW}Integration tests skipped — set MEMWAL_KEY + MEMWAL_ACCOUNT_ID to run them{RESET}")
+        print(f"\n  {YELLOW}Integration tests skipped — set MEMWAL_PRIVATE_KEY + MEMWAL_ACCOUNT_ID to run them{RESET}")
         print_totals(total_passed, total_failed, all_failures)
         return
 

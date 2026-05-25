@@ -95,11 +95,11 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
               </div>
             </div>
 
-            {/* MemWal Account Info */}
+            {/* Walrus Memory Account Info */}
             <div className="space-y-0.5">
               <div className="flex items-center gap-1 px-1 py-0.5">
                 <Shield className="size-3 text-muted-foreground" />
-                <span className="text-xs font-medium">MemWal Account</span>
+                <span className="text-xs font-medium">Walrus Memory Account</span>
               </div>
 
               {/* Sui Address */}

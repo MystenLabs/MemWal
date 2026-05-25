@@ -31,7 +31,7 @@ export function registerRememberTool(
 ): void {
     server.tool(
         "memwal_remember",
-        "Save a fact to the user's MemWal personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+        "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
         REMEMBER_INPUT,
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
             const result = await session.memwal.rememberAndWait(

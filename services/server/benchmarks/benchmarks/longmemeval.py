@@ -80,7 +80,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
         # EXPLICIT CHOICE: per-turn chunking.
         # Switched from naive session-concat (2026-04-20 run, 65.90 overall)
         # to per-turn for consistency with LOCOMO and to match how the
-        # MemWal SDK drives /api/analyze in production — one call per user
+        # Walrus Memory SDK drives /api/analyze in production — one call per user
         # message. LongMemEval's small haystacks (~22 turns) were already
         # handled well by session-concat (19% "no info"), so we don't
         # expect a large delta here; the change is about methodology

@@ -29,7 +29,7 @@ export function recallSprintTool({ memwalKey, accountId }: { memwalKey: string; 
         const elapsed = Date.now() - startTime;
 
         console.log(
-          `[tool:recallSprint] <<< MemWal returned ${results.length} results in ${elapsed}ms`
+          `[tool:recallSprint] <<< Walrus Memory returned ${results.length} results in ${elapsed}ms`
         );
 
         if (results.length === 0) {

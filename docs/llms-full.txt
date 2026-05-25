@@ -83,7 +83,7 @@ Config:
 |---|---|---|---|---|
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | `http://localhost:8000` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 ### `remember(text, namespace?): Promise<RememberAcceptedResult>`
@@ -100,11 +100,13 @@ Returns:
 
 Use `rememberAndWait(text, namespace?, opts?)` or `waitForRememberJob(job_id, opts?)` to resolve the completed `{ id, job_id, blob_id, owner, namespace }` result.
 
-### `recall(query, limit?, namespace?): Promise<RecallResult>`
+### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limit` defaults to `10`
+- `limitOrOptions` defaults to `10`
+- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 Returns:
 ```ts
@@ -290,7 +292,7 @@ Used by `MemWal.create(config)` and `withMemWal(model, options)`.
 |---|---|---|
 | `key` | yes | Delegate private key in hex |
 | `accountId` | yes | MemWalAccount object ID on Sui |
-| `serverUrl` | no | Relayer URL. Default: `http://localhost:8000` |
+| `serverUrl` | no | Relayer URL. Default: `https://relayer.memwal.ai` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
 
 ### MemWalManualConfig
@@ -339,15 +341,19 @@ The relayer is the backend that turns SDK calls into memory operations:
 | `x-public-key` | Hex-encoded Ed25519 public key (32 bytes) |
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) |
 | `x-timestamp` | Unix timestamp in seconds (5-minute validity window) |
-| `x-account-id` | Optional — MemWalAccount object ID hint |
+| `x-nonce` | UUID v4 nonce for replay protection |
+| `x-account-id` | MemWalAccount object ID hint included in the canonical signature by official SDKs |
+| `x-seal-session` | Exported SEAL SessionKey for TypeScript and Python relayer-mode decrypt flows |
+| `x-delegate-key` | Legacy decrypt credential; deprecated where `x-seal-session` is supported |
 
-Signature format: `{timestamp}.{method}.{path}.{body_sha256}`
+Signature format: `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
 
 ### Relayer API Routes
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `GET` | `/health` | Service health check (no auth) |
+| `GET` | `/health` | Service health check and compatibility metadata (no auth) |
+| `GET` | `/version` | Relayer/API compatibility metadata (no auth) |
 | `POST` | `/api/remember` | Store text as encrypted memory |
 | `POST` | `/api/recall` | Semantic search for memories |
 | `POST` | `/api/remember/manual` | Register client-encrypted payload |

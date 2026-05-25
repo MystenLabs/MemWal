@@ -58,6 +58,11 @@ You will need to use the environment variables [defined in `.env.example`](.env.
 
 > Note: You should not commit your `.env` file or it will expose secrets that will allow others to control access to your various AI and authentication provider accounts.
 
+For Walrus Memory, set `MEMWAL_PRIVATE_KEY`, `MEMWAL_ACCOUNT_ID`, and
+`MEMWAL_SERVER_URL` in `.env.local`. The private key is the delegate private key
+from the Walrus Memory dashboard and must stay server-side. Run `pnpm verify:memwal`
+to derive the public key locally before the first relayer call.
+
 1. Install Vercel CLI: `npm i -g vercel`
 2. Link local instance with Vercel and GitHub accounts (creates `.vercel` directory): `vercel link`
 3. Download your environment variables: `vercel env pull`

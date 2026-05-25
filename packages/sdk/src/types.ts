@@ -1,8 +1,8 @@
 /**
- * memwal — Core Types
+ * Walrus Memory — Core Types
  *
  * Ed25519 delegate key based SDK that communicates with
- * the MemWal Rust server (TEE).
+ * the Walrus Memory Rust server (TEE).
  */
 
 // ============================================================
@@ -10,11 +10,11 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string or Uint8Array). This is the delegate key from app.memwal.com */
+    /** Ed25519 private key (hex string or Uint8Array). This is the Walrus Memory delegate key. */
     key: string | Uint8Array;
-    /** MemWalAccount object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
+    /** Walrus Memory account object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
-    /** Server URL (default: http://localhost:8000) */
+    /** Server URL (default: https://relayer.memwal.ai) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
@@ -62,6 +62,30 @@ export interface RecallMemory {
 export interface RecallResult {
     results: RecallMemory[];
     total: number;
+}
+
+/** Options for recall(). */
+export interface RecallOptions {
+    /** Max number of nearest memories to request from the relayer (default: 10). */
+    limit?: number;
+    /** Alias for limit, useful when describing top-K search behaviour. */
+    topK?: number;
+    /** Namespace override (default: config namespace or "default"). */
+    namespace?: string;
+    /** Drop memories whose distance is greater than or equal to this value. */
+    maxDistance?: number;
+}
+
+/** Optional composite-scoring weights for recall ranking. */
+export interface ScoringWeights {
+    /** Weight applied to semantic similarity (`1.0 - distance`). Default: 1. */
+    semantic?: number;
+    /** Weight applied to recency decay. Default: 0. */
+    recency?: number;
+    /** Half-life for the recency term, in days. Default: 30. */
+    recencyHalfLifeDays?: number;
+    /** Weight applied to memory importance. Default: 0. */
+    importance?: number;
 }
 
 /** Result from rememberBulk() / rememberBulkAsync() */
@@ -158,9 +182,47 @@ export interface AnalyzeWaitResult extends RememberBulkResult {
 }
 
 /** Server health response */
-export interface HealthResult {
+export interface HealthResult extends Partial<RelayerVersionMetadata> {
     status: string;
+    /** Backward-compatible relayer package version alias. */
     version: string;
+    /** "production" or "benchmark" when returned by modern relayers. */
+    mode?: string;
+    prompt_versions?: {
+        extract: string;
+        ask: string;
+    };
+}
+
+/** Minimum SDK versions accepted by a relayer API contract. */
+export interface MinSupportedSdk {
+    typescript: string;
+    python: string;
+    mcp: string;
+}
+
+/** Public deprecation metadata returned by GET /version and GET /health. */
+export interface RelayerDeprecationNotice {
+    surface: string;
+    deprecatedSince: string;
+    removalApiVersion: string;
+    guidance: string;
+}
+
+/** Public build metadata returned by GET /version and GET /health. */
+export interface RelayerBuildMetadata {
+    commit?: string;
+    buildTimestamp?: string;
+}
+
+/** Runtime compatibility metadata returned by GET /version. */
+export interface RelayerVersionMetadata {
+    relayerVersion: string;
+    apiVersion: string;
+    minSupportedSdk: MinSupportedSdk;
+    featureFlags: Record<string, boolean>;
+    deprecations: RelayerDeprecationNotice[];
+    build: RelayerBuildMetadata;
 }
 
 // ============================================================
@@ -193,6 +255,8 @@ export interface RecallManualOptions {
     limit?: number;
     /** Namespace (default: config namespace or "default") */
     namespace?: string;
+    /** Optional composite-scoring weights applied before returning hits. */
+    scoringWeights?: ScoringWeights;
 }
 
 /** A single search hit — raw blobId + distance (no decrypted text) */
@@ -232,7 +296,7 @@ export interface SealServerConfig {
 export interface MemWalManualConfig {
     /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
     key: string | Uint8Array;
-    /** Server URL (default: http://localhost:8000) */
+    /** Server URL (default: https://relayer.memwal.ai) */
     serverUrl?: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for SEAL + Walrus signing.
@@ -257,9 +321,9 @@ export interface MemWalManualConfig {
     embeddingApiBase?: string;
     /** Embedding model name (default: text-embedding-3-small) */
     embeddingModel?: string;
-    /** MemWal contract package ID on Sui */
+    /** Walrus Memory contract package ID on Sui */
     packageId: string;
-    /** MemWalAccount object ID (for SEAL seal_approve) */
+    /** Walrus Memory account object ID (for SEAL seal_approve) */
     accountId: string;
     /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
@@ -307,6 +371,16 @@ export interface WalletSigner {
     }) => Promise<{ signature: string }>;
 }
 
+/** Options for MemWalManual.recallManual(). */
+export interface MemWalManualRecallOptions {
+    /** Max number of results (default: 10). */
+    limit?: number;
+    /** Namespace (default: config namespace or "default"). */
+    namespace?: string;
+    /** Optional composite-scoring weights applied before returning hits. */
+    scoringWeights?: ScoringWeights;
+}
+
 /** A recalled memory with decrypted text (from MemWalManual.recallManual) */
 export interface RecallManualMemory {
     blob_id: string;
@@ -326,7 +400,7 @@ export interface RecallManualResult {
 
 /** Base options for on-chain account transactions */
 interface AccountTxOpts {
-    /** MemWal contract package ID on Sui */
+    /** Walrus Memory contract package ID on Sui */
     packageId: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for signing.
@@ -355,7 +429,7 @@ export interface CreateAccountOpts extends AccountTxOpts {
 
 /** Result from createAccount() */
 export interface CreateAccountResult {
-    /** Created MemWalAccount object ID */
+    /** Created Walrus Memory account object ID */
     accountId: string;
     /** Owner Sui address */
     owner: string;
@@ -365,7 +439,7 @@ export interface CreateAccountResult {
 
 /** Options for addDelegateKey() */
 export interface AddDelegateKeyOpts extends AccountTxOpts {
-    /** MemWalAccount object ID */
+    /** Walrus Memory account object ID */
     accountId: string;
     /** Ed25519 public key (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
@@ -385,7 +459,7 @@ export interface AddDelegateKeyResult {
 
 /** Options for removeDelegateKey() */
 export interface RemoveDelegateKeyOpts extends AccountTxOpts {
-    /** MemWalAccount object ID */
+    /** Walrus Memory account object ID */
     accountId: string;
     /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;

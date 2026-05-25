@@ -68,6 +68,76 @@ async fn generate_recall_embedding_cached(
 }
 
 // ============================================================
+// Shared ranking for manual recall (ENG-1785)
+// ============================================================
+
+/// Rank `SearchHit`s with the composite ranker and return them reordered,
+/// without hydrating (no Walrus fetch / SEAL decrypt).
+///
+/// ENG-1785: manual recall must produce the same ordering as `/api/recall`
+/// and `/api/ask` for the same query + weights. Those paths rank
+/// `HydratedMemory` values; to guarantee identical ordering we reuse the
+/// **same** `Ranker::rank` rather than re-implementing the scoring on
+/// `SearchHit` (which would risk drift — the exact class of bug this fixes).
+/// We map each `SearchHit` into a `HydratedMemory` carrying only the fields
+/// the ranker reads (`distance` / `created_at` / `importance`), with empty
+/// `text` (the ranker never reads text; manual recall never decrypts).
+///
+/// The ranked output is mapped back to the original `SearchHit`s **by
+/// original index, not by `blob_id`**. `blob_id` is not unique
+/// (`vector_entries` has no UNIQUE constraint on it and `search_similar`
+/// does not `SELECT DISTINCT`, so `restore` can produce — and a query can
+/// return — multiple hits with the same blob_id). Keying the round-trip on
+/// blob_id would collapse those duplicates, silently dropping hits and
+/// reordering them — re-introducing the very manual-vs-non-manual
+/// divergence this fix removes (the non-manual paths keep duplicates 1:1).
+/// So we stash each hit's input index in the throwaway `HydratedMemory`'s
+/// `blob_id` slot — the ranker treats that field as opaque carry-through
+/// (it scores only distance/recency/importance) — and reorder the original
+/// `Vec<SearchHit>` by the ranked index sequence. Indices are unique, so no
+/// hit is dropped and `results.len() == hits.len()` always.
+///
+/// At default weights `rank()` short-circuits, so the input (cosine) order
+/// is returned unchanged.
+fn rank_search_hits(
+    ranker: &dyn crate::services::ranker::Ranker,
+    hits: Vec<SearchHit>,
+    weights: &ScoringWeights,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<SearchHit> {
+    // Carry the original index through the ranker via the (opaque-to-ranker)
+    // blob_id field, so we can reorder duplicate-blob_id hits unambiguously.
+    let hydrated: Vec<crate::engine::HydratedMemory> = hits
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| crate::engine::HydratedMemory {
+            blob_id: idx.to_string(),
+            text: String::new(),
+            distance: h.distance,
+            created_at: Some(h.created_at),
+            importance: Some(h.importance),
+        })
+        .collect();
+    let ranked = ranker.rank(hydrated, weights, now);
+
+    // Reorder the originals by the ranked index sequence. `Option::take`
+    // moves each `SearchHit` out exactly once; a malformed/duplicate index
+    // (cannot happen — we generated them) would just be skipped, never
+    // duplicating a hit.
+    let mut slots: Vec<Option<SearchHit>> = hits.into_iter().map(Some).collect();
+    ranked
+        .iter()
+        .filter_map(|r| {
+            r.memory
+                .blob_id
+                .parse::<usize>()
+                .ok()
+                .and_then(|idx| slots.get_mut(idx).and_then(Option::take))
+        })
+        .collect()
+}
+
+// ============================================================
 // Handlers
 // ============================================================
 
@@ -231,6 +301,17 @@ pub async fn recall(
 /// Manual flow — user provides pre-computed query vector.
 /// Server searches Vector DB and returns {blob_id, distance}[].
 /// User downloads from Walrus + SEAL decrypts on their own.
+///
+/// ENG-1785: manual recall applies the **same** `CompositeRanker` as
+/// `/api/recall` and `/api/ask`, so all three return the same ordering for
+/// the same query + `scoring_weights`. Before this fix, manual recall
+/// returned raw cosine order while the others reordered when weights were
+/// set (the cycle-13 ranker only ran on the hydrating paths), so the two
+/// disagreed. The ranker scores the `SearchHit` fields directly
+/// (`distance` / `created_at` / `importance`) — no Walrus fetch, no SEAL
+/// decrypt — preserving manual recall's lightweight "client hydrates"
+/// contract. At default weights this is a no-op: the ranker short-circuits
+/// and the pgvector cosine order is returned unchanged.
 pub async fn recall_manual(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -240,24 +321,51 @@ pub async fn recall_manual(
         return Err(AppError::BadRequest("vector cannot be empty".into()));
     }
 
+    // Validate scoring_weights up front (NaN / out-of-range / sub-floor
+    // half-life) before the vector search, mirroring `recall`. Previously
+    // the manual path silently ignored weights entirely; now they apply, so
+    // malformed input must 400 rather than be discarded.
+    let weights = body.scoring_weights.clone().unwrap_or_default();
+    weights.validate()?;
+
     let owner = &auth.owner;
     let namespace = &body.namespace;
     tracing::info!(
-        "recall_manual: vector_dims={} limit={} owner={} ns={}",
+        "recall_manual: vector_dims={} limit={} owner={} ns={} ranker_active={}",
         body.vector.len(),
         body.limit,
         owner,
-        namespace
+        namespace,
+        weights.is_ranker_active()
     );
 
-    // Search Vector DB — return blob IDs + distances only
-    // MED-3 fix: Cap limit on recall_manual as well
+    // Search Vector DB — blob IDs + distances (+ created_at + importance).
+    // MED-3 fix: Cap limit on recall_manual as well.
     let limit = body.limit.min(100);
     let hits = state
         .db
         .search_similar(&body.vector, owner, namespace, limit)
         .await?;
-    let total = hits.len();
+
+    // Apply the shared CompositeRanker so manual ordering matches
+    // `/api/recall` and `/api/ask` (ENG-1785). `rank_search_hits` reuses the
+    // exact same `rank()` the hydrating paths use — see its doc for why we
+    // map through `HydratedMemory`. At default weights it short-circuits and
+    // preserves the pgvector cosine order. Index-based reorder => no hit is
+    // dropped, so `results.len()` equals the search hit count.
+    let results = rank_search_hits(state.ranker.as_ref(), hits, &weights, chrono::Utc::now());
+    let total = results.len();
+
+    if weights.is_ranker_active() {
+        tracing::info!(
+            owner = %owner,
+            semantic = weights.semantic,
+            recency = weights.recency,
+            half_life_days = weights.recency_half_life_days,
+            importance = weights.importance,
+            "recall_manual: ranker active"
+        );
+    }
 
     tracing::info!(
         "recall_manual complete: {} results for owner={} ns={}",
@@ -266,10 +374,7 @@ pub async fn recall_manual(
         namespace
     );
 
-    Ok(Json(RecallManualResponse {
-        results: hits,
-        total,
-    }))
+    Ok(Json(RecallManualResponse { results, total }))
 }
 
 #[cfg(test)]
@@ -312,5 +417,332 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent
         assert!(json.get("dropped_count").is_none());
+    }
+
+    // ── ENG-1785: manual recall applies the same ranker as non-manual ───
+
+    use crate::services::ranker::{CompositeRanker, Ranker};
+    use crate::types::{ScoringWeights, SearchHit};
+    use chrono::{DateTime, TimeZone, Utc};
+
+    fn t_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap()
+    }
+
+    fn sh(blob_id: &str, distance: f64, age_days: i64, importance: f32) -> SearchHit {
+        SearchHit {
+            blob_id: blob_id.into(),
+            distance,
+            created_at: t_now() - chrono::Duration::days(age_days),
+            importance,
+        }
+    }
+
+    /// Ranking the equivalent hydrated memories directly (the non-manual
+    /// path) and ranking the SearchHits via `rank_search_hits` (the manual
+    /// path) MUST produce the same blob_id ordering — that's the whole point
+    /// of ENG-1785. Use importance-heavy weights so the ranker actually
+    /// reorders (a no-op would pass trivially).
+    #[test]
+    fn manual_ranking_matches_non_manual_ranking() {
+        use crate::engine::HydratedMemory;
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+
+        let weights = ScoringWeights {
+            semantic: 0.3,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.7,
+        };
+
+        // Cosine-order input where a vital fact sits *below* a trivial one;
+        // importance-heavy ranking should promote the vital fact.
+        let hits = vec![
+            sh("trivial_near", 0.20, 0, IMPORTANCE_TRIVIAL),
+            sh("vital_far", 0.25, 0, IMPORTANCE_VITAL),
+        ];
+
+        // Manual path: rank the SearchHits via the function under test.
+        let manual = super::rank_search_hits(&CompositeRanker, hits.clone(), &weights, t_now());
+        let manual_order: Vec<&str> = manual.iter().map(|h| h.blob_id.as_str()).collect();
+
+        // Non-manual path: rank the *equivalent* HydratedMemory values
+        // through the same ranker (this is what /api/recall does post-hydrate).
+        let hydrated: Vec<HydratedMemory> = hits
+            .iter()
+            .map(|h| HydratedMemory {
+                blob_id: h.blob_id.clone(),
+                text: format!("decrypted text for {}", h.blob_id),
+                distance: h.distance,
+                created_at: Some(h.created_at),
+                importance: Some(h.importance),
+            })
+            .collect();
+        let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
+
+        assert_eq!(
+            manual_order, non_manual_order,
+            "manual and non-manual ranking must agree on ordering"
+        );
+        // And confirm the ranker actually reordered (vital promoted above trivial).
+        assert_eq!(manual_order, vec!["vital_far", "trivial_near"]);
+    }
+
+    /// At default weights the ranker short-circuits — manual recall must
+    /// return the SearchHits in their original (pgvector cosine) order,
+    /// byte-identical to the pre-ENG-1785 behaviour.
+    #[test]
+    fn manual_ranking_default_weights_preserves_cosine_order() {
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+
+        // Deliberately put a vital fact last in cosine order — default
+        // weights must NOT promote it.
+        let hits = vec![
+            sh("a", 0.10, 0, IMPORTANCE_TRIVIAL),
+            sh("b", 0.30, 100, IMPORTANCE_VITAL),
+            sh("c", 0.50, 1, IMPORTANCE_TRIVIAL),
+        ];
+        let ranked =
+            super::rank_search_hits(&CompositeRanker, hits, &ScoringWeights::default(), t_now());
+        let order: Vec<&str> = ranked.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(order, vec!["a", "b", "c"]);
+    }
+
+    /// The ranked output must preserve the full SearchHit fields
+    /// (created_at + importance), not drop them — clients rely on the shape.
+    #[test]
+    fn manual_ranking_preserves_search_hit_fields() {
+        use crate::services::extractor::IMPORTANCE_VITAL;
+        let hits = vec![sh("only", 0.10, 7, IMPORTANCE_VITAL)];
+        let ranked =
+            super::rank_search_hits(&CompositeRanker, hits, &ScoringWeights::default(), t_now());
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].blob_id, "only");
+        assert_eq!(ranked[0].distance, 0.10);
+        assert_eq!(ranked[0].importance, IMPORTANCE_VITAL);
+        assert_eq!(ranked[0].created_at, t_now() - chrono::Duration::days(7));
+    }
+
+    /// ENG-1785 regression guard (deep-review blocker): `blob_id` is NOT
+    /// unique — `search_similar` can return multiple hits with the same
+    /// blob_id. A blob_id-keyed round-trip would collapse them, silently
+    /// dropping hits and reordering — re-introducing the manual-vs-non-manual
+    /// divergence this fix removes (the non-manual paths keep duplicates 1:1).
+    /// The index-based reorder must keep every hit. Tested at BOTH default
+    /// (short-circuit) and active weights.
+    #[test]
+    fn manual_ranking_keeps_duplicate_blob_ids() {
+        use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+
+        // Two hits sharing a blob_id, plus a distinct one — three in total.
+        let hits = vec![
+            sh("dup", 0.10, 0, IMPORTANCE_TRIVIAL),
+            sh("dup", 0.30, 0, IMPORTANCE_VITAL),
+            sh("other", 0.20, 0, IMPORTANCE_TRIVIAL),
+        ];
+
+        // Default weights → short-circuit → input order preserved, no drop.
+        let ranked = super::rank_search_hits(
+            &CompositeRanker,
+            hits.clone(),
+            &ScoringWeights::default(),
+            t_now(),
+        );
+        assert_eq!(ranked.len(), 3, "duplicate blob_ids must not be dropped");
+        // Order + per-hit distances preserved exactly (the wrong-survivor bug
+        // would swap the two `dup` distances).
+        assert_eq!(
+            ranked.iter().map(|h| h.distance).collect::<Vec<_>>(),
+            vec![0.10, 0.30, 0.20]
+        );
+
+        // Active weights (importance-heavy) → still all three, reordered by
+        // score. The vital `dup` (0.30 dist) should outrank the trivial `dup`
+        // (0.10 dist) and the trivial `other`.
+        let weights = ScoringWeights {
+            semantic: 0.3,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 0.7,
+        };
+        let ranked = super::rank_search_hits(&CompositeRanker, hits, &weights, t_now());
+        assert_eq!(ranked.len(), 3, "no hit dropped under active weights");
+        // vital dup wins: 0.3*(1-0.30) + 0.7*0.9 = 0.21 + 0.63 = 0.84
+        assert_eq!(ranked[0].distance, 0.30);
+        assert_eq!(ranked[0].importance, IMPORTANCE_VITAL);
+    }
+
+    /// Empty hit list ranks to empty (no panic, no spurious entries).
+    #[test]
+    fn manual_ranking_empty_hits_returns_empty() {
+        let ranked = super::rank_search_hits(
+            &CompositeRanker,
+            vec![],
+            &ScoringWeights::default(),
+            t_now(),
+        );
+        assert!(ranked.is_empty());
+    }
+
+    /// Index carry-through under a NON-TRIVIAL reorder of MANY items. The
+    /// 2-3 element parity tests can't catch an off-by-one or wrong-survivor
+    /// in the `slots[idx].take()` reassembly. Build 8 hits whose importance
+    /// forces a known full permutation, and assert the entire reordered
+    /// (blob_id, distance) sequence — not just the count — survives the
+    /// index round-trip exactly, AND matches the non-manual path.
+    #[test]
+    fn manual_ranking_many_item_permutation_round_trips_exactly() {
+        use crate::engine::HydratedMemory;
+
+        // 8 hits, ascending cosine distance (so input/cosine order is the
+        // identity). Importance increases in the OPPOSITE direction, so an
+        // importance-only weight reverses the order — a full permutation
+        // that touches every slot index.
+        let hits: Vec<SearchHit> = (0..8)
+            .map(|i| {
+                // distance 0.10..0.45 ascending; importance 0.9..0.2 descending
+                let distance = 0.10 + (i as f64) * 0.05;
+                let importance = 0.9 - (i as f32) * 0.1;
+                sh(&format!("hit{i}"), distance, 0, importance)
+            })
+            .collect();
+
+        let weights = ScoringWeights {
+            semantic: 0.0,
+            recency: 0.0,
+            recency_half_life_days: 30.0,
+            importance: 1.0,
+        };
+
+        let manual = super::rank_search_hits(&CompositeRanker, hits.clone(), &weights, t_now());
+
+        // Expected: reversed (highest importance = hit0 first ... hit7 last).
+        let manual_pairs: Vec<(String, f64)> = manual
+            .iter()
+            .map(|h| (h.blob_id.clone(), h.distance))
+            .collect();
+        let expected: Vec<(String, f64)> = (0..8)
+            .map(|i| (format!("hit{i}"), 0.10 + (i as f64) * 0.05))
+            .collect();
+        assert_eq!(
+            manual_pairs, expected,
+            "index reassembly corrupted the (blob_id, distance) pairing under an 8-item reorder"
+        );
+
+        // And it must match the non-manual path on the same inputs.
+        let hydrated: Vec<HydratedMemory> = hits
+            .iter()
+            .map(|h| HydratedMemory {
+                blob_id: h.blob_id.clone(),
+                text: String::new(),
+                distance: h.distance,
+                created_at: Some(h.created_at),
+                importance: Some(h.importance),
+            })
+            .collect();
+        let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
+        let manual_order: Vec<&str> = manual.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(manual_order, non_manual_order);
+    }
+
+    /// Combined weights — semantic + recency + importance all non-zero (the
+    /// realistic production weight vector). A term-coupling/sign bug only
+    /// surfaces when all three signals are live. Manual must match non-manual.
+    #[test]
+    fn manual_ranking_combined_weights_matches_non_manual() {
+        use crate::engine::HydratedMemory;
+        use crate::services::extractor::{
+            IMPORTANCE_STANDARD, IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL,
+        };
+
+        let weights = ScoringWeights {
+            semantic: 0.3,
+            recency: 0.3,
+            recency_half_life_days: 30.0,
+            importance: 0.4,
+        };
+        let hits = vec![
+            sh("a", 0.15, 200, IMPORTANCE_TRIVIAL),
+            sh("b", 0.25, 5, IMPORTANCE_VITAL),
+            sh("c", 0.20, 60, IMPORTANCE_STANDARD),
+            sh("d", 0.40, 0, IMPORTANCE_VITAL),
+            sh("e", 0.10, 365, IMPORTANCE_TRIVIAL),
+        ];
+
+        let manual = super::rank_search_hits(&CompositeRanker, hits.clone(), &weights, t_now());
+        let manual_order: Vec<&str> = manual.iter().map(|h| h.blob_id.as_str()).collect();
+
+        let hydrated: Vec<HydratedMemory> = hits
+            .iter()
+            .map(|h| HydratedMemory {
+                blob_id: h.blob_id.clone(),
+                text: String::new(),
+                distance: h.distance,
+                created_at: Some(h.created_at),
+                importance: Some(h.importance),
+            })
+            .collect();
+        let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
+
+        assert_eq!(
+            manual_order, non_manual_order,
+            "manual and non-manual must agree under combined weights"
+        );
+        assert_eq!(manual.len(), 5, "no hit dropped under combined weights");
+    }
+
+    /// Recency-weighted parity: manual ranking must match non-manual for a
+    /// recency-heavy weight set too (closes the loop beyond importance).
+    #[test]
+    fn manual_ranking_recency_matches_non_manual() {
+        use crate::engine::HydratedMemory;
+        use crate::services::extractor::IMPORTANCE_STANDARD;
+
+        let weights = ScoringWeights {
+            semantic: 0.4,
+            recency: 0.6,
+            recency_half_life_days: 30.0,
+            importance: 0.0,
+        };
+        // "older" has the better cosine match; "newer" is brand new. Recency-
+        // heavy weights should promote "newer".
+        let hits = vec![
+            sh("older", 0.20, 365, IMPORTANCE_STANDARD),
+            sh("newer", 0.25, 0, IMPORTANCE_STANDARD),
+        ];
+
+        let manual = super::rank_search_hits(&CompositeRanker, hits.clone(), &weights, t_now());
+        let manual_order: Vec<&str> = manual.iter().map(|h| h.blob_id.as_str()).collect();
+
+        let hydrated: Vec<HydratedMemory> = hits
+            .iter()
+            .map(|h| HydratedMemory {
+                blob_id: h.blob_id.clone(),
+                text: String::new(),
+                distance: h.distance,
+                created_at: Some(h.created_at),
+                importance: Some(h.importance),
+            })
+            .collect();
+        let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
+
+        assert_eq!(manual_order, non_manual_order);
+        assert_eq!(manual_order, vec!["newer", "older"]);
     }
 }

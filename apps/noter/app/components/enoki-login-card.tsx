@@ -55,7 +55,7 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/** Execute a transaction via Enoki gas sponsorship through the MemWal relayer. */
+/** Execute a transaction via Enoki gas sponsorship through the Walrus Memory relayer. */
 async function sponsoredSignAndExecute(
   transaction: Transaction,
   sender: string,

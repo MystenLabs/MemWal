@@ -22,9 +22,9 @@ export interface MemWalCredentials {
     delegateAddress: string;
     /** 0x-prefixed Sui wallet address that signed the add_delegate_key tx. */
     walletAddress: string;
-    /** 0x-prefixed MemWalAccount object id this delegate is registered against. */
+    /** 0x-prefixed Walrus Memory account object id this delegate is registered against. */
     accountId: string;
-    /** 0x-prefixed MemWal package id the account lives in. */
+    /** 0x-prefixed Walrus Memory package id the account lives in. */
     packageId: string;
     /** Relayer base URL the bridge should connect to. */
     relayerUrl: string;

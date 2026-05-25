@@ -22,7 +22,7 @@ Env vars:
   TEST_DELEGATE_KEY    hex-encoded Ed25519 secret (32 bytes → 64 hex chars)
                        of a delegate key registered on-chain. If unset,
                        remember/recall is skipped.
-  TEST_ACCOUNT_ID      MemWalAccount object ID (0x... Sui address). Only
+  TEST_ACCOUNT_ID      Walrus Memory account object ID (0x... Sui address). Only
                        used informationally; auth middleware resolves the
                        account from the delegate key.
 
@@ -141,7 +141,22 @@ def test_health() -> None:
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
         assert data["status"] == "ok", f"Expected status=ok, got {data}"
+        assert data["apiVersion"], f"Expected apiVersion in health metadata, got {data}"
+        assert data["minSupportedSdk"]["typescript"], f"Expected SDK matrix in health, got {data}"
         print(f"[pass] GET /health → {data}")
+
+
+def test_version() -> None:
+    req = urllib.request.Request(f"{BASE_URL}/version")
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+        assert data["relayerVersion"], f"Expected relayerVersion, got {data}"
+        assert data["apiVersion"], f"Expected apiVersion, got {data}"
+        assert data["minSupportedSdk"]["python"], f"Expected SDK matrix, got {data}"
+        assert data["featureFlags"]["runtime.versionEndpoint"] is True, (
+            f"Expected runtime.versionEndpoint feature flag, got {data}"
+        )
+        print(f"[pass] GET /version → {data}")
 
 
 def test_unsigned_rejected() -> None:
@@ -231,7 +246,7 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
     """Signed /api/remember → /api/recall with a pre-registered delegate key.
 
     Requires real Walrus + SEAL + Sui + funded server wallet + delegate key
-    registered on-chain in the MemWalAccount identified by account_id.
+    registered on-chain in the Walrus Memory account identified by account_id.
     """
     remember_body = {
         "text": "The capital of France is Paris.",
@@ -379,6 +394,7 @@ def main() -> int:
 
     contract_checks = (
         ("health", test_health),
+        ("version", test_version),
         ("unsigned_rejected", test_unsigned_rejected),
         ("wrong_signature_rejected", test_wrong_signature_rejected),
         ("expired_timestamp_rejected", test_expired_timestamp_rejected),

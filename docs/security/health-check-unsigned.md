@@ -1,15 +1,15 @@
 # Unsigned Health Check Rationale
 
 ## Endpoint
-`GET /health`
+`GET /health` and `GET /version`
 
 ## Design Decision
-The health check endpoint is intentionally left unauthenticated and unsigned. It does not require a valid Ed25519 signature in headers like the rest of the API.
+The health and version endpoints are intentionally left unauthenticated and unsigned. They do not require a valid Ed25519 signature in headers like the rest of the API.
 
 ## Security Considerations
 
 1. **No Sensitive Information:** 
-   The endpoint only returns a standard `{"status": "ok"}` payload. Following security audits (INFO-6), sensitive environment state such as `process.uptime()` has been removed to prevent system reconnaissance.
+   The endpoints return service status, package/API versions, SDK compatibility metadata, feature flags, and documented deprecation notices. They do not expose secrets, environment values, uptime, database state, wallet addresses, or credentials.
 
 2. **Load Balancer Integration:**
    Standard load balancers, orchestrators (e.g. Kubernetes, Railway), and uptime monitoring tools cannot easily sign requests dynamically. Leaving the endpoint public ensures compatibility with external infrastructure components that rely on straightforward HTTP GET probes.

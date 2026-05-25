@@ -68,7 +68,7 @@ class LocomoBenchmark(BenchmarkAdapter):
 
     def build_ingest_text(self, conversation):
         # EXPLICIT CHOICE: per-turn chunking.
-        # Matches how the MemWal SDK wrapper (withMemWal) drives /api/analyze
+        # Matches how the Walrus Memory SDK wrapper (withMemWal) drives /api/analyze
         # in production — one call per user message — and how Mem0 runs its
         # own LOCOMO evaluation (turn-by-turn replay). The prior session-
         # concat approach produced a 53% "no info" rate because dumping

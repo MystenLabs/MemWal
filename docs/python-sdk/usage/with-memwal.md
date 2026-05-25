@@ -30,7 +30,7 @@ from memwal import with_memwal_langchain
 llm = ChatOpenAI(model="gpt-4o")
 smart_llm = with_memwal_langchain(
     llm,
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     env="prod",
     namespace="chatbot-prod",
@@ -55,7 +55,7 @@ from memwal import with_memwal_openai
 client = AsyncOpenAI()
 smart_client = with_memwal_openai(
     client,
-    key=os.environ["MEMWAL_KEY"],
+    key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
     env="prod",
 )

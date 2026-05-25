@@ -47,11 +47,11 @@ pub enum WalletOperation {
         /// rather than failing deserialisation.
         #[serde(default = "default_importance")]
         importance: f32,
-        /// MemWal owner address.
+        /// Walrus Memory owner address.
         owner: String,
         /// Namespace for isolation.
         namespace: String,
-        /// MemWal package ID.
+        /// Walrus Memory package ID.
         package_id: String,
         /// Delegate public key (used as agent_id on-chain).
         agent_public_key: Option<String>,
@@ -66,11 +66,11 @@ pub enum WalletOperation {
     SetMetadataAndTransfer {
         /// Sui object ID of the certified Walrus Blob.
         blob_object_id: String,
-        /// Sui address of the MemWal user.
+        /// Sui address of the Walrus Memory user.
         owner: String,
-        /// MemWal namespace.
+        /// Walrus Memory namespace.
         namespace: String,
-        /// MemWal package ID.
+        /// Walrus Memory package ID.
         package_id: Option<String>,
         /// Agent / delegate public key.
         agent_id: Option<String>,
@@ -267,11 +267,11 @@ pub type WalletJobStorage = PostgresStorage<WalletJob>;
 pub struct MetaTransferJob {
     /// Sui object ID of the certified Walrus Blob (0x...).
     pub blob_object_id: String,
-    /// Sui address of the MemWal user who should own the blob.
+    /// Sui address of the Walrus Memory user who should own the blob.
     pub owner: String,
-    /// MemWal namespace (e.g. "default").
+    /// Walrus Memory namespace (e.g. "default").
     pub namespace: String,
-    /// MemWal package ID (optional — stored as on-chain attribute).
+    /// Walrus Memory package ID (optional — stored as on-chain attribute).
     pub package_id: Option<String>,
     /// Agent ID (optional — stored as on-chain attribute).
     pub agent_id: Option<String>,
@@ -972,11 +972,11 @@ pub struct RememberJob {
     pub encrypted_b64: String,
     /// Pre-computed embedding vector (generated in route handler alongside encrypt).
     pub vector: Vec<f32>,
-    /// MemWal owner address (from auth middleware).
+    /// Walrus Memory owner address (from auth middleware).
     pub owner: String,
     /// Namespace for isolation.
     pub namespace: String,
-    /// MemWal package ID (needed by metadata tx).
+    /// Walrus Memory package ID (needed by metadata tx).
     pub package_id: String,
     /// Delegate public key (agent_id for upload metadata).
     pub agent_public_key: Option<String>,
@@ -1309,6 +1309,7 @@ pub async fn execute_bulk_remember(
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
+    use std::time::Duration;
 
     use sqlx::postgres::PgPoolOptions;
 
@@ -1325,7 +1326,8 @@ mod tests {
 
     async fn test_pool() -> sqlx::PgPool {
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();
@@ -1507,6 +1509,7 @@ mod tests {
     async fn failed_status_persistence_keeps_wallet_handoff_retryable() {
         let pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();
@@ -1530,6 +1533,7 @@ mod tests {
     async fn mark_remember_job_failed_returns_real_update_error() {
         let pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();

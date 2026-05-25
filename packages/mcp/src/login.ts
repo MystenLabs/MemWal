@@ -48,7 +48,7 @@ export interface LoginOptions {
 const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: string } = {
     webUrl: process.env.MEMWAL_WEB_URL ?? "https://memwal.ai",
     relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
-    label: process.env.MEMWAL_CLIENT_LABEL ?? "MemWal MCP",
+    label: process.env.MEMWAL_CLIENT_LABEL ?? "Walrus Memory MCP",
     timeoutMs: 5 * 60_000,
     openBrowser: true,
 };
@@ -111,7 +111,7 @@ const SUCCESS_HTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>MemWal MCP — Connected</title>
+  <title>Walrus Memory MCP — Connected</title>
   <style>
     body { font: 16px/1.5 system-ui, sans-serif; max-width: 480px; margin: 80px auto; padding: 0 24px; color: #1a1a1a; }
     h1 { font-size: 24px; }
@@ -120,7 +120,7 @@ const SUCCESS_HTML = `<!doctype html>
   </style>
 </head>
 <body>
-  <h1><span class="check">✓</span> MemWal MCP connected</h1>
+  <h1><span class="check">✓</span> Walrus Memory MCP connected</h1>
   <p>Credentials saved to <code>~/.memwal/credentials.json</code>.</p>
   <p>You can close this tab — your MCP client will pick up the new credentials automatically.</p>
 </body>
@@ -128,11 +128,11 @@ const SUCCESS_HTML = `<!doctype html>
 
 const FAIL_HTML_TEMPLATE = (msg: string) => `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8" /><title>MemWal MCP — Failed</title>
+<head><meta charset="utf-8" /><title>Walrus Memory MCP — Failed</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:480px;margin:80px auto;padding:0 24px;color:#1a1a1a}h1{font-size:24px}.x{display:inline-block;width:32px;height:32px;line-height:32px;text-align:center;border-radius:50%;background:#ef4444;color:white;font-weight:700;margin-right:12px;vertical-align:middle}p{color:#525252}</style>
 </head>
 <body>
-  <h1><span class="x">×</span> MemWal MCP login failed</h1>
+  <h1><span class="x">×</span> Walrus Memory MCP login failed</h1>
   <p>${msg}</p>
   <p>Close this tab and retry from your MCP client.</p>
 </body></html>`;

@@ -19,7 +19,7 @@ Config:
 | --- | --- | --- | --- | --- |
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | `http://localhost:8000` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 For the full config surface, see [Configuration](/reference/configuration).
@@ -77,11 +77,13 @@ Submit up to 20 memories in one request and return the accepted job IDs immediat
 
 Submit a bulk remember request and wait until every job reaches a terminal state.
 
-### `recall(query, limit?, namespace?): Promise<RecallResult>`
+### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limit` defaults to `10`
+- `limitOrOptions` defaults to `10`
+- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 **Returns:**
 
@@ -95,6 +97,8 @@ Search for memories matching a natural language query, scoped to `owner + namesp
   total: number;
 }
 ```
+
+`distance` is cosine distance — lower is more similar.
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 
@@ -140,7 +144,11 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 
 Check relayer health. Does not require authentication.
 
-**Returns:** `{ status: string, version: string }`
+**Returns:** `{ status: string, version: string, relayerVersion?: string, apiVersion?: string, minSupportedSdk?: ... }`
+
+### `compatibility(): Promise<RelayerVersionMetadata>`
+
+Fetch and validate the relayer compatibility contract from `/version`. Protected SDK calls run this check before signing the first request and raise `MemWalCompatibilityError` when the SDK/relayer pair is unsupported.
 
 ### `getPublicKeyHex(): Promise<string>`
 

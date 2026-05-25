@@ -14,10 +14,10 @@ interface ToolResultLike {
  *
  * Known error names we map to a specific prefix so agents can route on the
  * class without parsing the message:
- *     MemWalRememberJobFailed  → "MemWal job failed"
- *     MemWalRememberJobTimeout → "MemWal job timed out"
- *     MemWalRememberJobNotFound→ "MemWal job not found"
- *     MemWalError              → "MemWal relayer error"
+ *     MemWalRememberJobFailed  → "Walrus Memory job failed"
+ *     MemWalRememberJobTimeout → "Walrus Memory job timed out"
+ *     MemWalRememberJobNotFound→ "Walrus Memory job not found"
+ *     MemWalError              → "Walrus Memory relayer error"
  * Anything else propagates under "Tool error:".
  *
  * The underlying Error.cause (if present, e.g. Node's `TypeError("fetch
@@ -49,16 +49,16 @@ export function wrapTool<Args>(
             let prefix = "Tool error";
             switch (name) {
                 case "MemWalRememberJobFailed":
-                    prefix = "MemWal job failed";
+                    prefix = "Walrus Memory job failed";
                     break;
                 case "MemWalRememberJobTimeout":
-                    prefix = "MemWal job timed out";
+                    prefix = "Walrus Memory job timed out";
                     break;
                 case "MemWalRememberJobNotFound":
-                    prefix = "MemWal job not found";
+                    prefix = "Walrus Memory job not found";
                     break;
                 case "MemWalError":
-                    prefix = "MemWal relayer error";
+                    prefix = "Walrus Memory relayer error";
                     break;
             }
 

@@ -1,4 +1,4 @@
--- memwal — Add namespace to vector_entries
+-- Walrus Memory — Add namespace to vector_entries
 -- Supports multi-tenant/multi-app memory isolation
 
 ALTER TABLE vector_entries

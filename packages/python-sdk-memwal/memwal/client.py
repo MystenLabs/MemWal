@@ -1,7 +1,7 @@
 """
-memwal — SDK Client
+Walrus Memory — SDK Client
 
-Ed25519 delegate key based client that communicates with the MemWal
+Ed25519 delegate key based client that communicates with the Walrus Memory
 Rust server (TEE). All data processing (encryption, embedding, Walrus)
 happens server-side -- the SDK just signs requests and sends text.
 
@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
 import httpx
 import nacl.signing
 
+from .compatibility import compatibility_error
 from .types import (
     AnalyzedFact,
     AnalyzeResult,
@@ -57,7 +58,6 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
-    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -78,6 +78,11 @@ from .utils import (
 T = TypeVar("T")
 SEAL_SESSION_TTL_MIN = 5
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
+AUTH_REJECTED_MESSAGE = (
+    "401 from relayer: typically wrong private key, key not registered on this "
+    "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
+    "and dashboard credentials."
+)
 
 
 # ============================================================
@@ -118,7 +123,7 @@ def _is_transient_polling_status(status: int) -> bool:
 
 
 class MemWal:
-    """Async-native MemWal client.
+    """Async-native Walrus Memory client.
 
     All API methods are ``async``. For synchronous usage, wrap calls with
     ``asyncio.run()`` or use the :class:`MemWalSync` convenience wrapper.
@@ -134,6 +139,8 @@ class MemWal:
         self._server_config: Optional[Dict[str, str]] = None
         self._session_cache: Optional[Tuple[str, int]] = None
         self._session_build_task: Optional[asyncio.Task[str]] = None
+        self._relayer_version_metadata: Optional[Dict[str, Any]] = None
+        self._compatibility_lock: Optional[asyncio.Lock] = None
 
     @classmethod
     def create(
@@ -144,11 +151,11 @@ class MemWal:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWal":
-        """Create a new MemWal client instance.
+        """Create a new Walrus Memory client instance.
 
         Args:
             key: Ed25519 private key hex string (the delegate key).
-            account_id: MemWalAccount object ID on Sui.
+            account_id: Walrus Memory account object ID on Sui.
             server_url: Server URL (default: ``http://localhost:8000``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
             env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
@@ -469,6 +476,7 @@ class MemWal:
         query: str,
         limit: int = 10,
         namespace: Optional[str] = None,
+        max_distance: Optional[float] = None,
     ) -> RecallResult:
         """Recall memories similar to a query.
 
@@ -478,6 +486,8 @@ class MemWal:
             query: Search query.
             limit: Max number of results (default: 10).
             namespace: Override the default namespace.
+            max_distance: Optional client-side relevance threshold. Memories with
+                ``distance >= max_distance`` are dropped.
 
         Returns:
             :class:`RecallResult` with decrypted text results.
@@ -495,6 +505,9 @@ class MemWal:
             )
             for m in data.get("results", [])
         ]
+        if max_distance is not None:
+            memories = [m for m in memories if m.distance < max_distance]
+            return RecallResult(results=memories, total=len(memories))
         return RecallResult(results=memories, total=data.get("total", len(memories)))
 
     async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
@@ -652,7 +665,22 @@ class MemWal:
         if response.status_code != 200:
             raise MemWalError(f"Health check failed: {response.status_code}")
         data = response.json()
-        return HealthResult(status=data["status"], version=data["version"])
+        return HealthResult(
+            status=data["status"],
+            version=data["version"],
+            relayer_version=data.get("relayerVersion"),
+            api_version=data.get("apiVersion"),
+            min_supported_sdk=data.get("minSupportedSdk"),
+            feature_flags=data.get("featureFlags"),
+            deprecations=data.get("deprecations"),
+            build=data.get("build"),
+            mode=data.get("mode"),
+        )
+
+    async def compatibility(self) -> Dict[str, Any]:
+        """Fetch and validate the relayer compatibility contract."""
+
+        return await self._ensure_compatible_relayer()
 
     # ============================================================
     # Manual API (user handles SEAL + embedding + Walrus)
@@ -699,14 +727,18 @@ class MemWal:
         Returns:
             :class:`RecallManualResult` with blob_id + distance pairs.
         """
+        body: Dict[str, Any] = {
+            "vector": opts.vector,
+            "limit": opts.limit,
+            "namespace": opts.namespace or self._namespace,
+        }
+        if opts.scoring_weights is not None:
+            body["scoring_weights"] = opts.scoring_weights.to_wire()
+
         data = await self._signed_request(
             "POST",
             "/api/recall/manual",
-            {
-                "vector": opts.vector,
-                "limit": opts.limit,
-                "namespace": opts.namespace or self._namespace,
-            },
+            body,
             include_seal_session=False,
         )
         hits = [
@@ -726,6 +758,42 @@ class MemWal:
     # ============================================================
     # Internal: Signed HTTP Requests
     # ============================================================
+
+    async def _ensure_compatible_relayer(self) -> Dict[str, Any]:
+        if self._relayer_version_metadata is not None:
+            return self._relayer_version_metadata
+
+        if self._compatibility_lock is None:
+            self._compatibility_lock = asyncio.Lock()
+
+        async with self._compatibility_lock:
+            if self._relayer_version_metadata is not None:
+                return self._relayer_version_metadata
+
+            version_response = await self._http.get(f"{self._server_url}/version")
+            if version_response.status_code == 200:
+                metadata = version_response.json()
+            elif version_response.status_code in (404, 405):
+                health_response = await self._http.get(f"{self._server_url}/health")
+                if health_response.status_code != 200:
+                    raise MemWalError(
+                        "Walrus Memory compatibility check failed: "
+                        f"GET /version returned {version_response.status_code}, "
+                        f"and GET /health returned {health_response.status_code}"
+                    )
+                metadata = health_response.json()
+            else:
+                raise MemWalError(
+                    "Walrus Memory compatibility check failed: "
+                    f"GET /version returned {version_response.status_code}"
+                )
+
+            error = compatibility_error(metadata, self._server_url)
+            if error is not None:
+                raise MemWalCompatibilityError(error)
+
+            self._relayer_version_metadata = metadata
+            return metadata
 
     async def _fetch_server_config(self) -> Dict[str, str]:
         if self._server_config is not None:
@@ -775,7 +843,8 @@ class MemWal:
                     version = obj.get("version")
         if str(version) != "1":
             raise MemWalError(
-                f"SEAL package {package_id} must be at version 1 to build x-seal-session, got {version!r}"
+                f"SEAL package {package_id} must be at version 1 to build "
+                f"x-seal-session, got {version!r}"
             )
 
     async def _build_seal_session_inner(self) -> str:
@@ -842,7 +911,7 @@ class MemWal:
         """Make a signed request to the server.
 
         Signature format:
-            ``{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}``
+            ``{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}``
 
         For ``GET`` requests the canonical body string is the empty string,
         and no HTTP request body is sent. This keeps the signed payload hash
@@ -853,11 +922,14 @@ class MemWal:
             - ``x-public-key``: Ed25519 public key hex
             - ``x-signature``: Ed25519 signature hex
             - ``x-timestamp``: Unix seconds string
+            - ``x-nonce``: UUID v4 replay-protection nonce
             - ``x-seal-session``: Base64-encoded exported session envelope
-            - ``x-account-id``: MemWalAccount object ID
+            - ``x-account-id``: Walrus Memory account object ID
             - ``Content-Type``: application/json
         """
         import uuid
+
+        await self._ensure_compatible_relayer()
 
         method_upper = method.upper()
         timestamp = str(int(time.time()))
@@ -899,6 +971,12 @@ class MemWal:
 
         if response.status_code not in accepted_statuses:
             err_text = response.text
+            if response.status_code == 426:
+                raise MemWalCompatibilityError(
+                    "Walrus Memory relayer rejected this SDK as unsupported "
+                    f"(HTTP 426 Upgrade Required). Relayer response: "
+                    f"{err_text[:300] or 'upgrade required'}"
+                )
             raise _HttpStatusError(
                 status=response.status_code,
                 body=err_text,
@@ -908,7 +986,13 @@ class MemWal:
 
 
 class MemWalError(Exception):
-    """Exception raised for MemWal API errors."""
+    """Exception raised for Walrus Memory API errors."""
+
+    pass
+
+
+class MemWalCompatibilityError(MemWalError):
+    """Raised when the SDK and relayer API contract are incompatible."""
 
     pass
 
@@ -922,7 +1006,10 @@ class _HttpStatusError(MemWalError):
     """
 
     def __init__(self, status: int, body: str) -> None:
-        super().__init__(f"MemWal API error ({status}): {body}")
+        if status == 401:
+            super().__init__(AUTH_REJECTED_MESSAGE)
+        else:
+            super().__init__(f"Walrus Memory API error ({status}): {body}")
         self.status = status
         self.body = body
 
@@ -985,7 +1072,7 @@ class MemWalSync:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWalSync":
-        """Create a synchronous MemWal client.
+        """Create a synchronous Walrus Memory client.
 
         Same parameters as :meth:`MemWal.create` (including the ``env``
         relayer preset).
@@ -1101,10 +1188,14 @@ class MemWalSync:
         return self._run(self._inner.remember_bulk_and_wait(items, opts))
 
     def recall(
-        self, query: str, limit: int = 10, namespace: Optional[str] = None
+        self,
+        query: str,
+        limit: int = 10,
+        namespace: Optional[str] = None,
+        max_distance: Optional[float] = None,
     ) -> RecallResult:
         """Synchronous version of :meth:`MemWal.recall`."""
-        return self._run(self._inner.recall(query, limit, namespace))
+        return self._run(self._inner.recall(query, limit, namespace, max_distance))
 
     def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
@@ -1134,6 +1225,10 @@ class MemWalSync:
     def health(self) -> HealthResult:
         """Synchronous version of :meth:`MemWal.health`."""
         return self._run(self._inner.health())
+
+    def compatibility(self) -> Dict[str, Any]:
+        """Synchronous version of :meth:`MemWal.compatibility`."""
+        return self._run(self._inner.compatibility())
 
     def remember_manual(self, opts: RememberManualOptions) -> RememberManualResult:
         """Synchronous version of :meth:`MemWal.remember_manual`."""

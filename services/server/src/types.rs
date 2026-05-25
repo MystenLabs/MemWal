@@ -509,7 +509,7 @@ pub struct RecallResult {
     pub score: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
@@ -743,6 +743,16 @@ pub struct RecallManualRequest {
     pub limit: usize,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional composite-scoring weights. Omitted → results are ordered by
+    /// raw pgvector cosine distance, byte-identical to the pre-ranker
+    /// behaviour. When set, the manual path applies the **same**
+    /// `CompositeRanker` as `/api/recall` and `/api/ask` so all three return
+    /// the same ordering for the same query + weights (ENG-1785). The ranker
+    /// scores the `SearchHit` fields directly (`distance` / `created_at` /
+    /// `importance`) — no Walrus fetch or SEAL decrypt — preserving manual
+    /// recall's "server returns blob ids + distances, client hydrates" contract.
+    #[serde(default)]
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Serialize)]
@@ -835,6 +845,8 @@ pub struct StatsResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    #[serde(flatten)]
+    pub compatibility: crate::compatibility::VersionResponse,
     /// "production" or "benchmark" — lets benchmark harness runs verify
     /// at startup that they're hitting a benchmark-mode server before
     /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
@@ -913,7 +925,7 @@ pub struct AuthInfo {
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)
     pub owner: String,
-    /// MemWalAccount object ID (set after onchain verification)
+    /// Walrus Memory account object ID (set after onchain verification)
     pub account_id: String,
     /// Delegate private key (hex) — legacy path for SEAL decrypt. Optional;
     /// modern SDKs send `seal_session` instead. Retained during the
@@ -1433,6 +1445,7 @@ mod tests {
         let resp = HealthResponse {
             status: "ok".to_string(),
             version: "0.1.0".to_string(),
+            compatibility: crate::compatibility::version_response(),
             mode: "benchmark".to_string(),
             prompt_versions: PromptVersions {
                 extract: "extract.v1".to_string(),
@@ -1442,5 +1455,14 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
         assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
+        assert_eq!(
+            json["apiVersion"],
+            crate::compatibility::RELAYER_API_VERSION
+        );
+        assert_eq!(json["relayerVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            json["minSupportedSdk"]["typescript"],
+            crate::compatibility::MIN_TYPESCRIPT_SDK_VERSION
+        );
     }
 }

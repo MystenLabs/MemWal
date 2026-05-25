@@ -15,6 +15,7 @@
         "db:pull": "drizzle-kit pull",
         "db:check": "drizzle-kit check",
         "db:up": "drizzle-kit up",
+        "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
         "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
     },
     "dependencies": {

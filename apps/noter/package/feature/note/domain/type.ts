@@ -65,7 +65,7 @@ export type MemorySaveStatus = {
 };
 
 export type MemorySaveResult = {
-  id: string; // MemWal memory ID
+  id: string; // Walrus Memory memory ID
   blobId: string; // Walrus blob ID
   transactionDigest?: string; // Sui transaction
 };

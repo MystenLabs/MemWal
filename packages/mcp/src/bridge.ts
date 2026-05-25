@@ -2,7 +2,7 @@
  * stdio ↔ remote-SSE bridge.
  *
  * The MCP client (Cursor, Claude Desktop, etc.) speaks **stdio** MCP — JSON
- * lines on stdin, JSON lines on stdout. The MemWal relayer speaks **remote
+ * lines on stdin, JSON lines on stdout. The Walrus Memory relayer speaks **remote
  * SSE** MCP at `/api/mcp/sse` + `/api/mcp/messages`. This module glues the
  * two together so the user only adds a `command + args` entry to their MCP
  * client config (no headers, no URL).
@@ -16,6 +16,7 @@
  */
 import type { MemWalCredentials } from "./auth.js";
 import { clearCreds, credsPath } from "./auth.js";
+import { ensureCompatibleRelayer } from "./compatibility.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
 
@@ -81,7 +82,7 @@ const LOCAL_TOOL_DEFINITIONS = [
     {
         name: "memwal_login",
         description:
-            "Sign in (or re-sign in) to MemWal by opening a browser. Use to switch wallets, refresh credentials, or sign in for the first time. Returns a click-able URL — the user must approve in their browser.",
+            "Sign in (or re-sign in) to Walrus Memory by opening a browser. Use to switch wallets, refresh credentials, or sign in for the first time. Returns a click-able URL — the user must approve in their browser.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -91,7 +92,7 @@ const LOCAL_TOOL_DEFINITIONS = [
     {
         name: "memwal_logout",
         description:
-            "Remove the saved MemWal credentials from this machine (~/.memwal/credentials.json). The on-chain delegate key registration is NOT revoked — visit the MemWal dashboard to remove it from your account if needed.",
+            "Remove the saved Walrus Memory credentials from this machine (~/.memwal/credentials.json). The on-chain delegate key registration is NOT revoked — visit the Walrus Memory dashboard to remove it from your account if needed.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -125,6 +126,8 @@ async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
 ): Promise<SseHandshakeResult> {
+    await ensureCompatibleRelayer(relayerUrl);
+
     const url = `${relayerUrl.replace(/\/+$/, "")}/api/mcp/sse`;
     const controller = new AbortController();
 
@@ -151,7 +154,7 @@ async function openSseStream(
         // outage that forces re-login. Force-fail loud instead; the user
         // runs `memwal-mcp login` if they want to actually rotate.
         throw new Error(
-            "MemWal relayer rejected credentials (HTTP 401). " +
+            "Walrus Memory relayer rejected credentials (HTTP 401). " +
                 "Delegate key may have been revoked, the relayer may be " +
                 "rate-limiting, or a proxy may be interposed. Saved " +
                 `credentials at ${credsPath()} were NOT modified. ` +
@@ -162,7 +165,7 @@ async function openSseStream(
         const body = resp.body ? await resp.text() : "";
         controller.abort();
         throw new Error(
-            `MemWal relayer SSE handshake failed: HTTP ${resp.status} ${body.slice(0, 200)}`
+            `Walrus Memory relayer SSE handshake failed: HTTP ${resp.status} ${body.slice(0, 200)}`
         );
     }
 
@@ -170,7 +173,7 @@ async function openSseStream(
     if (!ct.includes("event-stream")) {
         controller.abort();
         throw new Error(
-            `MemWal relayer returned unexpected content-type "${ct}" for SSE endpoint`
+            `Walrus Memory relayer returned unexpected content-type "${ct}" for SSE endpoint`
         );
     }
 
@@ -259,7 +262,7 @@ async function openSseStream(
         if (streamEnded) {
             controller.abort();
             throw new Error(
-                `MemWal relayer SSE handshake ended before endpoint event${streamError ? `: ${streamError}` : ""}`
+                `Walrus Memory relayer SSE handshake ended before endpoint event${streamError ? `: ${streamError}` : ""}`
             );
         }
         await new Promise<void>((r) => (queueResolver = r));
@@ -382,7 +385,7 @@ async function handleLocalLogin(config: BridgeConfig): Promise<{ text: string; i
             url,
             `\`\`\``,
             ``,
-            `[Click here to open MemWal sign-in](${url})`,
+            `[Click here to open Walrus Memory sign-in](${url})`,
             ``,
             `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
             `Surface it verbatim so the user can click it.`,
@@ -408,7 +411,7 @@ function handleLocalLogout(): { text: string; isError: boolean } {
             text: [
                 `✅ Signed out. Credentials removed from \`${credsPath()}\`.`,
                 ``,
-                `**Note:** the on-chain delegate key for this client is still registered on your MemWal account. To fully revoke access, visit the MemWal dashboard and remove the matching public key from the "Delegate Keys" section.`,
+                `**Note:** the on-chain delegate key for this client is still registered on your Walrus Memory account. To fully revoke access, visit the Walrus Memory dashboard and remove the matching public key from the "Delegate Keys" section.`,
                 ``,
                 `Call \`memwal_login\` to sign in again with the same or a different wallet.`,
             ].join("\n"),
