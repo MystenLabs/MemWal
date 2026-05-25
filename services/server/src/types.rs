@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::engine::MemoryEngine;
@@ -165,6 +166,32 @@ impl KeyPool {
 // Config
 // ============================================================
 
+#[derive(Clone)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppAuthClientConfig {
+    pub client_id: String,
+    pub client_secret_sha256: String,
+    pub display_name: String,
+    pub allowed_redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    #[serde(default)]
+    pub allowed_fallback_uris: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -213,6 +240,14 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// Registered confidential third-party clients for hosted web app auth.
+    /// V1 is env-backed only: APP_AUTH_CLIENTS_JSON.
+    pub app_auth_clients: Vec<AppAuthClientConfig>,
+    /// Dev/test only: allow configured localhost callback paths on any port.
+    pub app_auth_enable_dev_localhost_wildcards: bool,
+    /// AES key material derived from APP_AUTH_DELEGATE_ENCRYPTION_KEY or
+    /// SIDECAR_AUTH_TOKEN. Redacted in Debug.
+    pub app_auth_delegate_secret: Option<SecretBytes>,
 }
 
 impl Config {
@@ -231,6 +266,9 @@ impl Config {
             &walrus_aggregator_url,
             std::env::var("WALRUS_AGGREGATOR_URLS").ok().as_deref(),
         );
+
+        let app_auth_enable_dev_localhost_wildcards =
+            app_auth_dev_localhost_wildcards_enabled(&network);
 
         Self {
             port: std::env::var("PORT")
@@ -283,8 +321,76 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            app_auth_clients: parse_app_auth_clients(app_auth_enable_dev_localhost_wildcards),
+            app_auth_enable_dev_localhost_wildcards,
+            app_auth_delegate_secret: derive_app_auth_delegate_secret(),
         }
     }
+}
+
+fn parse_app_auth_clients(include_dev_localhost_client: bool) -> Vec<AppAuthClientConfig> {
+    let mut clients = match std::env::var("APP_AUTH_CLIENTS_JSON") {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw)
+            .expect("APP_AUTH_CLIENTS_JSON must be a JSON array of app auth clients"),
+        _ => vec![AppAuthClientConfig {
+            client_id: "demo_dapp".to_string(),
+            // sha256("demo_dapp_secret") — test/dev only. Override in production.
+            client_secret_sha256:
+                "5619a8cdf18ecc129cf7301e0272f0bb4d04144ec1e72e2882de620436a5c577".to_string(),
+            display_name: "Demo Dapp".to_string(),
+            allowed_redirect_uris: vec!["https://demo-app.com/api/memwal/callback".to_string()],
+            fallback_uri: Some("https://demo-app.com/memwal/error".to_string()),
+            allowed_fallback_uris: vec!["https://demo-app.com/memwal/error".to_string()],
+        }],
+    };
+
+    if include_dev_localhost_client
+        && !clients
+            .iter()
+            .any(|client| client.client_id == "dev_localhost")
+    {
+        clients.push(AppAuthClientConfig {
+            client_id: "dev_localhost".to_string(),
+            // sha256("dev_localhost_secret") — local/dev only.
+            client_secret_sha256:
+                "a8af739963bcf3b6b2267229bbaba4106dc13812e7ace14c03b4cdb70acc0667".to_string(),
+            display_name: "Local Dev App".to_string(),
+            allowed_redirect_uris: vec![
+                "http://localhost:*/api/memwal/callback".to_string(),
+                "http://127.0.0.1:*/api/memwal/callback".to_string(),
+            ],
+            fallback_uri: None,
+            allowed_fallback_uris: vec![
+                "http://localhost:*/memwal/error".to_string(),
+                "http://127.0.0.1:*/memwal/error".to_string(),
+            ],
+        });
+    }
+
+    clients
+}
+
+fn app_auth_dev_localhost_wildcards_enabled(network: &str) -> bool {
+    app_auth_dev_localhost_wildcards_enabled_from_value(
+        network,
+        env_bool("APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS"),
+    )
+}
+
+fn app_auth_dev_localhost_wildcards_enabled_from_value(network: &str, enabled: bool) -> bool {
+    network != "mainnet" && enabled
+}
+
+fn derive_app_auth_delegate_secret() -> Option<SecretBytes> {
+    let source = std::env::var("APP_AUTH_DELEGATE_ENCRYPTION_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("SIDECAR_AUTH_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    Some(SecretBytes(Sha256::digest(source.as_bytes()).to_vec()))
 }
 
 fn env_bool(name: &str) -> bool {
@@ -1258,6 +1364,19 @@ mod tests {
         let config = SponsorRateLimitConfig::default();
         assert_eq!(config.per_minute, 10);
         assert_eq!(config.per_hour, 30);
+    }
+
+    #[test]
+    fn app_auth_dev_localhost_wildcards_are_never_enabled_on_mainnet() {
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "mainnet", true
+        ));
+        assert!(app_auth_dev_localhost_wildcards_enabled_from_value(
+            "testnet", true
+        ));
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "testnet", false
+        ));
     }
 
     #[test]

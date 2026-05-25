@@ -17,7 +17,7 @@ import {
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -25,6 +25,7 @@ import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
+import ConnectApp from './pages/ConnectApp'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -179,7 +180,10 @@ function RegisterEnokiWallets() {
     const { unregister } = registerEnokiWallets({
       apiKey: config.enokiApiKey,
       providers: {
-        google: { clientId: config.googleClientId },
+        google: {
+          clientId: config.googleClientId,
+          redirectUrl: config.enokiRedirectUrl || `${window.location.origin}/`,
+        },
       },
       client,
       network,
@@ -189,6 +193,81 @@ function RegisterEnokiWallets() {
   }, [client, network])
 
   return null
+}
+
+function EnokiCallback() {
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'grid',
+      placeItems: 'center',
+      background: 'var(--bg-primary)',
+      color: 'var(--text-primary)',
+    }}>
+      <p style={{ color: 'var(--text-secondary)' }}>Finishing sign in...</p>
+    </main>
+  )
+}
+
+function LocalAppAuthCallback() {
+  const { search } = useLocation()
+  const params = new URLSearchParams(search)
+  const code = params.get('code')
+  const state = params.get('state')
+  const error = params.get('error')
+
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'grid',
+      placeItems: 'center',
+      padding: 24,
+      background: 'var(--bg-primary)',
+      color: 'var(--text-primary)',
+    }}>
+      <section style={{
+        width: 'min(100%, 520px)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: 24,
+        background: 'var(--bg-secondary)',
+        boxShadow: '0 20px 60px rgba(15, 23, 42, 0.08)',
+      }}>
+        <h1 style={{ margin: '0 0 8px', fontSize: 24, letterSpacing: 0 }}>
+          Local MemWal callback
+        </h1>
+        <p style={{ color: 'var(--text-secondary)', lineHeight: 1.5, margin: '0 0 18px' }}>
+          This local test page only shows the browser callback result. The app backend must exchange the code server-side.
+        </p>
+        <dl style={{ display: 'grid', gap: 12, margin: 0 }}>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              code
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
+              {code || '-'}
+            </dd>
+          </div>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              state
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
+              {state || '-'}
+            </dd>
+          </div>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              error
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere', color: error ? '#dc2626' : 'inherit' }}>
+              {error || '-'}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+  )
 }
 
 // ============================================================
@@ -214,6 +293,10 @@ function AppContent() {
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       } />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
+      <Route path="/connect/app" element={<ConnectApp />} />
+      <Route path="/auth/enoki/callback" element={<EnokiCallback />} />
+      <Route path="/api/memwal/callback" element={<LocalAppAuthCallback />} />
+      <Route path="/memwal/error" element={<LocalAppAuthCallback />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

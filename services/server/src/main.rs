@@ -561,6 +561,28 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
+    // Hosted app auth routes — OAuth-style connect flow for third-party web
+    // apps. Browser-facing endpoints create/complete a short-lived session;
+    // the token endpoint is server-to-server and requires HTTP Basic client
+    // authentication.
+    let app_auth_routes = Router::new()
+        .route(
+            "/api/app-auth/start",
+            post(routes::app_auth_start).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/complete",
+            post(routes::app_auth_complete).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/cancel",
+            post(routes::app_auth_cancel).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/token",
+            post(routes::app_auth_token).layer(DefaultBodyLimit::max(4 * 1024)),
+        );
+
     // Public routes
     // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -585,7 +607,8 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(sponsor_routes)
-        .merge(mcp_routes);
+        .merge(mcp_routes)
+        .merge(app_auth_routes);
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),

@@ -4,6 +4,7 @@
 export const config = {
     enokiApiKey: import.meta.env.VITE_ENOKI_API_KEY as string || '',
     googleClientId: import.meta.env.VITE_GOOGLE_CLIENT_ID as string || '',
+    enokiRedirectUrl: import.meta.env.VITE_ENOKI_REDIRECT_URL as string || '',
     memwalPackageId: import.meta.env.VITE_MEMWAL_PACKAGE_ID as string ||
         '0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6',
     memwalRegistryId: import.meta.env.VITE_MEMWAL_REGISTRY_ID as string ||

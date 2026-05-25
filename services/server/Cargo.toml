@@ -18,6 +18,9 @@ pgvector = { version = "0.4", features = ["sqlx"] }
 ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
+aes-gcm = "0.10"
+blake2 = "0.10"
+rand = "0.8"
 
 # SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
 # (no Rust crypto deps needed)
