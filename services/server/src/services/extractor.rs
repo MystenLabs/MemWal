@@ -513,8 +513,14 @@ mod tests {
 
         assert_eq!(parsed.raw_count, MAX_ANALYZE_FACTS + 3);
         assert_eq!(parsed.facts.len(), MAX_ANALYZE_FACTS);
-        assert_eq!(parsed.facts.first().map(|f| f.text.as_str()), Some("Fact 0"));
-        assert_eq!(parsed.facts.last().map(|f| f.text.as_str()), Some("Fact 19"));
+        assert_eq!(
+            parsed.facts.first().map(|f| f.text.as_str()),
+            Some("Fact 0")
+        );
+        assert_eq!(
+            parsed.facts.last().map(|f| f.text.as_str()),
+            Some("Fact 19")
+        );
     }
 
     #[test]
@@ -793,7 +799,10 @@ mod tests {
         let parsed = parse_extracted_facts(llm_output);
         assert_eq!(parsed.raw_count, 1);
         assert_eq!(parsed.facts.len(), 1);
-        assert_eq!(parsed.facts[0].text, "User moved from Hanoi to Da Nang last week");
+        assert_eq!(
+            parsed.facts[0].text,
+            "User moved from Hanoi to Da Nang last week"
+        );
         assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
     }
 
@@ -809,7 +818,9 @@ mod tests {
         let parsed = parse_extracted_facts(llm_output);
         assert_eq!(parsed.raw_count, 2);
         assert_eq!(parsed.facts.len(), 2);
-        assert!(parsed.facts[0].text.contains("How to Sit Properly at a Desk"));
+        assert!(parsed.facts[0]
+            .text
+            .contains("How to Sit Properly at a Desk"));
         assert!(parsed.facts[1].text.contains("5 Tips for Better Posture"));
         assert_eq!(parsed.facts[0].importance, IMPORTANCE_STANDARD);
         assert_eq!(parsed.facts[1].importance, IMPORTANCE_STANDARD);
@@ -893,13 +904,22 @@ mod tests {
     fn escape_for_prompt_context_handles_all_three_chars() {
         // Unit-test the escape function directly so future changes don't
         // accidentally drop one of the three characters.
-        assert_eq!(super::escape_for_prompt_context("a<b>c&d"), "a&lt;b&gt;c&amp;d");
+        assert_eq!(
+            super::escape_for_prompt_context("a<b>c&d"),
+            "a&lt;b&gt;c&amp;d"
+        );
         // Empty input — no panic, returns empty.
         assert_eq!(super::escape_for_prompt_context(""), "");
         // Pure text without entities is untouched.
-        assert_eq!(super::escape_for_prompt_context("plain text 123"), "plain text 123");
+        assert_eq!(
+            super::escape_for_prompt_context("plain text 123"),
+            "plain text 123"
+        );
         // Quotes and apostrophes intentionally NOT escaped (natural prose).
-        assert_eq!(super::escape_for_prompt_context("It's \"quoted\"."), "It's \"quoted\".");
+        assert_eq!(
+            super::escape_for_prompt_context("It's \"quoted\"."),
+            "It's \"quoted\"."
+        );
     }
 
     #[test]

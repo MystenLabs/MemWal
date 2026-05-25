@@ -58,7 +58,6 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
-    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -728,14 +727,18 @@ class MemWal:
         Returns:
             :class:`RecallManualResult` with blob_id + distance pairs.
         """
+        body: Dict[str, Any] = {
+            "vector": opts.vector,
+            "limit": opts.limit,
+            "namespace": opts.namespace or self._namespace,
+        }
+        if opts.scoring_weights is not None:
+            body["scoring_weights"] = opts.scoring_weights.to_wire()
+
         data = await self._signed_request(
             "POST",
             "/api/recall/manual",
-            {
-                "vector": opts.vector,
-                "limit": opts.limit,
-                "namespace": opts.namespace or self._namespace,
-            },
+            body,
             include_seal_session=False,
         )
         hits = [
@@ -840,7 +843,8 @@ class MemWal:
                     version = obj.get("version")
         if str(version) != "1":
             raise MemWalError(
-                f"SEAL package {package_id} must be at version 1 to build x-seal-session, got {version!r}"
+                f"SEAL package {package_id} must be at version 1 to build "
+                f"x-seal-session, got {version!r}"
             )
 
     async def _build_seal_session_inner(self) -> str:

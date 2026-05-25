@@ -17,7 +17,7 @@ import pytest
 import respx
 
 from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
-from memwal.types import RecallManualOptions, RememberManualOptions
+from memwal.types import RecallManualOptions, RememberManualOptions, ScoringWeights
 from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
 # ============================================================
@@ -327,7 +327,11 @@ class TestRecall:
             )
         )
 
-        result = await memwal_client.wait_for_remember_job("job-1", poll_interval_ms=0, timeout_ms=100)
+        result = await memwal_client.wait_for_remember_job(
+            "job-1",
+            poll_interval_ms=0,
+            timeout_ms=100,
+        )
 
         request = route.calls[0].request
         assert request.content == b""
@@ -582,6 +586,33 @@ class TestManualAPI:
         assert "x-delegate-key" not in headers
         assert len(result.results) == 1
         assert result.results[0].blob_id == "b1"
+
+    @respx.mock
+    async def test_recall_manual_forwards_scoring_weights(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
+            return_value=httpx.Response(200, json={"results": [], "total": 0})
+        )
+
+        opts = RecallManualOptions(
+            vector=[0.1, 0.2, 0.3],
+            limit=5,
+            scoring_weights=ScoringWeights(
+                semantic=1.0,
+                recency=0.5,
+                recency_half_life_days=7.0,
+                importance=2.0,
+            ),
+        )
+        await memwal_client.recall_manual(opts)
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["scoring_weights"] == {
+            "semantic": 1.0,
+            "recency": 0.5,
+            "recency_half_life_days": 7.0,
+            "importance": 2.0,
+        }
 
 
 class TestPublicKey:

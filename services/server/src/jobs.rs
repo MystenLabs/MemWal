@@ -1309,6 +1309,7 @@ pub async fn execute_bulk_remember(
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
+    use std::time::Duration;
 
     use sqlx::postgres::PgPoolOptions;
 
@@ -1325,7 +1326,8 @@ mod tests {
 
     async fn test_pool() -> sqlx::PgPool {
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();
@@ -1507,6 +1509,7 @@ mod tests {
     async fn failed_status_persistence_keeps_wallet_handoff_retryable() {
         let pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();
@@ -1530,6 +1533,7 @@ mod tests {
     async fn mark_remember_job_failed_returns_real_update_error() {
         let pool = PgPoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
             .connect(&test_database_url())
             .await
             .unwrap();

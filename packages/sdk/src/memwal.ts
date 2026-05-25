@@ -54,7 +54,14 @@ import type {
     RememberBulkItemResult,
     RelayerVersionMetadata,
 } from "./types.js";
-import { sha256hex, hexToBytes, bytesToHex, normalizeServerUrl, sanitizeServerError } from "./utils.js";
+import {
+    sha256hex,
+    hexToBytes,
+    bytesToHex,
+    normalizeServerUrl,
+    sanitizeServerError,
+    scoringWeightsToWire,
+} from "./utils.js";
 import {
     assertCompatibleRelayer,
     compatibilityErrorFromStatus,
@@ -575,6 +582,7 @@ export class MemWal {
      *
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
+     * @param opts.scoringWeights - Optional composite-scoring weights
      * @returns RecallManualResult with blob_id + distance pairs (no decrypted text)
      *
      * @example
@@ -601,6 +609,7 @@ export class MemWal {
                 vector: opts.vector,
                 limit: opts.limit ?? 10,
                 namespace: opts.namespace ?? this.namespace,
+                scoring_weights: scoringWeightsToWire(opts.scoringWeights),
             },
             { includeDelegateKey: false },
         );

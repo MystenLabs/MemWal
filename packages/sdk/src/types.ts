@@ -76,6 +76,18 @@ export interface RecallOptions {
     maxDistance?: number;
 }
 
+/** Optional composite-scoring weights for recall ranking. */
+export interface ScoringWeights {
+    /** Weight applied to semantic similarity (`1.0 - distance`). Default: 1. */
+    semantic?: number;
+    /** Weight applied to recency decay. Default: 0. */
+    recency?: number;
+    /** Half-life for the recency term, in days. Default: 30. */
+    recencyHalfLifeDays?: number;
+    /** Weight applied to memory importance. Default: 0. */
+    importance?: number;
+}
+
 /** Result from rememberBulk() / rememberBulkAsync() */
 export interface RememberBulkAcceptedResult {
     job_ids: string[];
@@ -243,6 +255,8 @@ export interface RecallManualOptions {
     limit?: number;
     /** Namespace (default: config namespace or "default") */
     namespace?: string;
+    /** Optional composite-scoring weights applied before returning hits. */
+    scoringWeights?: ScoringWeights;
 }
 
 /** A single search hit — raw blobId + distance (no decrypted text) */
@@ -355,6 +369,16 @@ export interface WalletSigner {
     signPersonalMessage: (input: {
         message: Uint8Array;
     }) => Promise<{ signature: string }>;
+}
+
+/** Options for MemWalManual.recallManual(). */
+export interface MemWalManualRecallOptions {
+    /** Max number of results (default: 10). */
+    limit?: number;
+    /** Namespace (default: config namespace or "default"). */
+    namespace?: string;
+    /** Optional composite-scoring weights applied before returning hits. */
+    scoringWeights?: ScoringWeights;
 }
 
 /** A recalled memory with decrypted text (from MemWalManual.recallManual) */
