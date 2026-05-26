@@ -4,11 +4,14 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 const PORT = Number(process.env.PORT || 3000)
 const MEMWAL_WEB_URL = process.env.MEMWAL_WEB_URL || 'http://localhost:5173'
 const MEMWAL_API_URL = process.env.MEMWAL_API_URL || 'http://localhost:8000'
-const MEMWAL_CLIENT_ID = process.env.MEMWAL_CLIENT_ID || 'dev_localhost'
-const MEMWAL_CLIENT_SECRET = process.env.MEMWAL_CLIENT_SECRET || 'dev_localhost_secret'
-const APP_LABEL = process.env.APP_LABEL || 'Local Demo App'
+const STATIC_MEMWAL_CLIENT_ID = (process.env.MEMWAL_CLIENT_ID || '').trim()
+const STATIC_MEMWAL_CLIENT_SECRET = (process.env.MEMWAL_CLIENT_SECRET || '').trim()
+const APP_LABEL = process.env.APP_LABEL || 'Walrus Memory Demo App'
 const APP_BASE_URL = normalizeAppBaseUrl(process.env.APP_BASE_URL)
 const COOKIE_NAME = 'memwal_demo_state'
+
+let dynamicClient = null
+let dynamicClientPromise = null
 
 function normalizeAppBaseUrl(raw) {
   if (!raw || !raw.trim()) return ''
@@ -92,6 +95,58 @@ function stateCookie(state, req) {
 
 function modeLabel() {
   return APP_BASE_URL ? 'Deployed app' : 'Local app'
+}
+
+function configuredClientId() {
+  return STATIC_MEMWAL_CLIENT_ID || dynamicClient?.client_id || 'auto-register on first connect'
+}
+
+function hasStaticClient() {
+  return Boolean(STATIC_MEMWAL_CLIENT_ID && STATIC_MEMWAL_CLIENT_SECRET)
+}
+
+async function registerDynamicClient(req) {
+  const response = await fetch(new URL('/api/app-auth/register', MEMWAL_API_URL), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      display_name: APP_LABEL,
+      redirect_uris: [callbackUrl(req)],
+      fallback_uris: [errorUrl(req)],
+    }),
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(payload.error || `client registration failed (${response.status})`)
+  }
+  if (!payload.client_id || !payload.client_secret) {
+    throw new Error('client registration did not return credentials')
+  }
+  return {
+    origin: requestOrigin(req),
+    client_id: payload.client_id,
+    client_secret: payload.client_secret,
+  }
+}
+
+async function appClient(req) {
+  if (hasStaticClient()) {
+    return {
+      origin: requestOrigin(req),
+      client_id: STATIC_MEMWAL_CLIENT_ID,
+      client_secret: STATIC_MEMWAL_CLIENT_SECRET,
+    }
+  }
+
+  const origin = requestOrigin(req)
+  if (dynamicClient?.origin === origin) return dynamicClient
+
+  if (!dynamicClientPromise || dynamicClientPromise.origin !== origin) {
+    dynamicClientPromise = registerDynamicClient(req)
+    dynamicClientPromise.origin = origin
+  }
+  dynamicClient = await dynamicClientPromise
+  return dynamicClient
 }
 
 function page({ title, eyebrow, body, result, req }) {
@@ -268,7 +323,7 @@ function page({ title, eyebrow, body, result, req }) {
       <dl>
         <div><dt>Mode</dt><dd>${htmlEscape(modeLabel())}</dd></div>
         <div><dt>App base URL</dt><dd>${htmlEscape(APP_BASE_URL || 'request host')}</dd></div>
-        <div><dt>Client</dt><dd>${htmlEscape(MEMWAL_CLIENT_ID)}</dd></div>
+        <div><dt>Client</dt><dd>${htmlEscape(configuredClientId())}</dd></div>
         <div><dt>Walrus Memory web</dt><dd>${htmlEscape(MEMWAL_WEB_URL)}</dd></div>
         <div><dt>Walrus Memory API</dt><dd>${htmlEscape(MEMWAL_API_URL)}</dd></div>
         <div><dt>Callback</dt><dd>${htmlEscape(callback)}</dd></div>
@@ -282,34 +337,54 @@ function page({ title, eyebrow, body, result, req }) {
 }
 
 function home(req, res) {
+  const previewClientId = STATIC_MEMWAL_CLIENT_ID || dynamicClient?.client_id
+  const previewHref = previewClientId
+    ? `${MEMWAL_WEB_URL}/connect/app?client_id=${encodeURIComponent(previewClientId)}&redirect_uri=${encodeURIComponent(callbackUrl(req))}&state=preview_state&label=${encodeURIComponent(APP_LABEL)}&intent=sdk_delegate&fallback_uri=${encodeURIComponent(errorUrl(req))}`
+    : '/connect/memwal'
+  const previewText = previewClientId ? 'Preview auth URL' : 'Register and preview'
+
   writeHtml(res, 200, page({
     title: 'Walrus Memory App Auth Demo',
     eyebrow: 'Local backend app',
     body: `
       <h1>Connect Walrus Memory from another app</h1>
-      <p class="copy">This demo behaves like a third-party app with its own backend. It sends the browser to Walrus Memory, then exchanges the returned one-time code server-side.</p>
+      <p class="copy">This demo behaves like a third-party app with its own backend. It registers itself with Walrus Memory, sends the browser to hosted connect, then exchanges the returned one-time code server-side.</p>
       <div class="actions">
         <a class="button" href="/connect/memwal">Connect Walrus Memory</a>
-        <a class="button secondary" href="${htmlEscape(MEMWAL_WEB_URL)}/connect/app?client_id=${encodeURIComponent(MEMWAL_CLIENT_ID)}&redirect_uri=${encodeURIComponent(callbackUrl(req))}&state=preview_state&label=${encodeURIComponent(APP_LABEL)}&intent=sdk_delegate&fallback_uri=${encodeURIComponent(errorUrl(req))}">Preview auth URL</a>
+        <a class="button secondary" href="${htmlEscape(previewHref)}">${htmlEscape(previewText)}</a>
       </div>
     `,
     req,
   }))
 }
 
-function startConnect(req, res) {
-  const state = randomState()
-  const authUrl = new URL('/connect/app', MEMWAL_WEB_URL)
-  authUrl.searchParams.set('client_id', MEMWAL_CLIENT_ID)
-  authUrl.searchParams.set('redirect_uri', callbackUrl(req))
-  authUrl.searchParams.set('state', state)
-  authUrl.searchParams.set('label', APP_LABEL)
-  authUrl.searchParams.set('intent', 'sdk_delegate')
-  authUrl.searchParams.set('fallback_uri', errorUrl(req))
+async function startConnect(req, res) {
+  try {
+    const client = await appClient(req)
+    const state = randomState()
+    const authUrl = new URL('/connect/app', MEMWAL_WEB_URL)
+    authUrl.searchParams.set('client_id', client.client_id)
+    authUrl.searchParams.set('redirect_uri', callbackUrl(req))
+    authUrl.searchParams.set('state', state)
+    authUrl.searchParams.set('label', APP_LABEL)
+    authUrl.searchParams.set('intent', 'sdk_delegate')
+    authUrl.searchParams.set('fallback_uri', errorUrl(req))
 
-  redirect(res, authUrl.toString(), {
-    'set-cookie': stateCookie(state, req),
-  })
+    redirect(res, authUrl.toString(), {
+      'set-cookie': stateCookie(state, req),
+    })
+  } catch (err) {
+    writeHtml(res, 502, page({
+      title: 'Walrus Memory client registration failed',
+      eyebrow: 'Registration failed',
+      body: `
+        <h1 class="error">Client registration failed</h1>
+        <p class="copy">${htmlEscape(err instanceof Error ? err.message : String(err))}</p>
+        <div class="actions"><a class="button secondary" href="/">Back</a></div>
+      `,
+      req,
+    }))
+  }
 }
 
 async function handleCallback(req, res, url) {
@@ -347,8 +422,9 @@ async function handleCallback(req, res, url) {
   }
 
   try {
+    const client = await appClient(req)
     const tokenUrl = new URL('/api/app-auth/token', MEMWAL_API_URL)
-    const auth = Buffer.from(`${MEMWAL_CLIENT_ID}:${MEMWAL_CLIENT_SECRET}`).toString('base64')
+    const auth = Buffer.from(`${client.client_id}:${client.client_secret}`).toString('base64')
     const response = await fetch(tokenUrl, {
       method: 'POST',
       headers: {
@@ -409,7 +485,7 @@ function handleError(req, res, url) {
 const server = createServer((req, res) => {
   const url = new URL(req.url || '/', requestOrigin(req))
   if (req.method === 'GET' && url.pathname === '/') return home(req, res)
-  if (req.method === 'GET' && url.pathname === '/connect/memwal') return startConnect(req, res)
+  if (req.method === 'GET' && url.pathname === '/connect/memwal') return void startConnect(req, res)
   if (req.method === 'GET' && url.pathname === '/api/memwal/callback') return void handleCallback(req, res, url)
   if (req.method === 'GET' && url.pathname === '/memwal/error') return handleError(req, res, url)
 

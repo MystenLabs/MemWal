@@ -240,8 +240,8 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
-    /// Registered confidential third-party clients for hosted web app auth.
-    /// V1 is env-backed only: APP_AUTH_CLIENTS_JSON.
+    /// Legacy/static confidential clients for hosted web app auth. Real dapps
+    /// should use `/api/app-auth/register`, which stores clients in Postgres.
     pub app_auth_clients: Vec<AppAuthClientConfig>,
     /// Dev/test only: allow configured localhost callback paths on any port.
     pub app_auth_enable_dev_localhost_wildcards: bool,

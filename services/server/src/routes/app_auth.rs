@@ -41,6 +41,8 @@ const APP_AUTH_CODE_TTL_SECS: u64 = 5 * 60;
 const APP_AUTH_DELEGATE_TTL_SECS: u64 = 24 * 60 * 60;
 const APP_AUTH_INTENT: &str = "sdk_delegate";
 const DEFAULT_LABEL: &str = "Walrus Memory App";
+const APP_AUTH_DISPLAY_NAME_MAX_CHARS: usize = 80;
+const APP_AUTH_MAX_REGISTERED_URLS: usize = 10;
 // ENG-1783 review N4 (2026-05-26): the `label` field is third-party-supplied
 // per-session text shown next to the trusted display_name on the consent
 // screen. 64 chars made it easy to spoof phrases like "MemWal Official Wallet"
@@ -57,6 +59,25 @@ pub struct AppAuthStartRequest {
     pub label: Option<String>,
     pub intent: String,
     pub fallback_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppAuthRegisterRequest {
+    pub display_name: String,
+    pub redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    #[serde(default)]
+    pub fallback_uris: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthRegisterResponse {
+    pub client_id: String,
+    pub client_secret: String,
+    pub display_name: String,
+    pub allowed_redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    pub allowed_fallback_uris: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,6 +193,61 @@ struct AppAuthDelegateStore {
     updated_at: DateTime<Utc>,
 }
 
+/// Dynamic client registration for third-party backend apps.
+///
+/// This replaces the "ask Walrus Memory operators to edit
+/// APP_AUTH_CLIENTS_JSON" path for real dapps. The returned `client_secret` is
+/// shown once and must be stored by the third-party backend, never in browser
+/// JavaScript.
+pub async fn app_auth_register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AppAuthRegisterRequest>,
+) -> Result<Json<AppAuthRegisterResponse>, AppError> {
+    let display_name = sanitize_client_display_name(&req.display_name)?;
+    let allowed_redirect_uris = validate_registration_urls(
+        "redirect_uris",
+        &req.redirect_uris,
+        state.config.app_auth_enable_dev_localhost_wildcards,
+    )?;
+
+    let mut requested_fallback_uris = req.fallback_uris;
+    if let Some(fallback_uri) = req.fallback_uri {
+        requested_fallback_uris.push(fallback_uri);
+    }
+    let allowed_fallback_uris = if requested_fallback_uris.is_empty() {
+        Vec::new()
+    } else {
+        validate_registration_urls(
+            "fallback_uris",
+            &requested_fallback_uris,
+            state.config.app_auth_enable_dev_localhost_wildcards,
+        )?
+    };
+    let fallback_uri = allowed_fallback_uris.first().cloned();
+
+    let client_id = random_token("app_");
+    let client_secret = random_token("mwas_");
+    let client = AppAuthClientConfig {
+        client_id: client_id.clone(),
+        client_secret_sha256: hash_secret(&client_secret),
+        display_name: display_name.clone(),
+        allowed_redirect_uris: allowed_redirect_uris.clone(),
+        fallback_uri: fallback_uri.clone(),
+        allowed_fallback_uris: allowed_fallback_uris.clone(),
+    };
+
+    state.db.insert_app_auth_client(&client).await?;
+
+    Ok(Json(AppAuthRegisterResponse {
+        client_id,
+        client_secret,
+        display_name,
+        allowed_redirect_uris,
+        fallback_uri,
+        allowed_fallback_uris,
+    }))
+}
+
 pub async fn app_auth_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AppAuthStartRequest>,
@@ -183,7 +259,8 @@ pub async fn app_auth_start(
         return Err(AppError::BadRequest("state is required".into()));
     }
 
-    let client = find_client(&state.config.app_auth_clients, &req.client_id)
+    let client = load_client(state.as_ref(), &req.client_id)
+        .await?
         .ok_or_else(|| AppError::BadRequest("unknown app client".into()))?;
     let redirect_uri = validated_allowed_url(
         &req.redirect_uri,
@@ -192,7 +269,7 @@ pub async fn app_auth_start(
     )
     .ok_or_else(|| AppError::BadRequest("redirect_uri is not registered for this client".into()))?;
     let fallback_uri = select_fallback_uri(
-        client,
+        &client,
         req.fallback_uri.as_deref(),
         state.config.app_auth_enable_dev_localhost_wildcards,
     );
@@ -395,7 +472,8 @@ pub async fn app_auth_token(
     }
 
     let (client_id, client_secret) = parse_basic_client_auth(&headers)?;
-    let client = find_client(&state.config.app_auth_clients, &client_id)
+    let client = load_client(state.as_ref(), &client_id)
+        .await?
         .ok_or_else(|| AppError::Unauthorized("invalid client credentials".into()))?;
     let secret_hash = hash_secret(&client_secret);
     if !constant_time_eq(
@@ -433,11 +511,19 @@ pub async fn app_auth_token(
     }))
 }
 
-fn find_client<'a>(
-    clients: &'a [AppAuthClientConfig],
+async fn load_client(
+    state: &AppState,
     client_id: &str,
-) -> Option<&'a AppAuthClientConfig> {
-    clients.iter().find(|client| client.client_id == client_id)
+) -> Result<Option<AppAuthClientConfig>, AppError> {
+    if let Some(client) = state
+        .config
+        .app_auth_clients
+        .iter()
+        .find(|client| client.client_id == client_id)
+    {
+        return Ok(Some(client.clone()));
+    }
+    state.db.fetch_app_auth_client(client_id).await
 }
 
 fn select_fallback_uri(
@@ -490,6 +576,15 @@ fn validated_redirect_url(raw: &str) -> Option<Url> {
         return None;
     }
     Some(url)
+}
+
+fn validated_registration_url(raw: &str, allow_dev_localhost_http: bool) -> Option<String> {
+    let url = validated_redirect_url(raw)?;
+    let host = url.host_str()?;
+    if url.scheme() == "http" && is_loopback_host(host) && !allow_dev_localhost_http {
+        return None;
+    }
+    Some(url.as_str().to_string())
 }
 
 fn localhost_wildcard_matches(
@@ -574,6 +669,53 @@ fn sanitize_label(raw: &str) -> String {
         DEFAULT_LABEL.to_string()
     } else {
         cleaned
+    }
+}
+
+fn sanitize_client_display_name(raw: &str) -> Result<String, AppError> {
+    let cleaned = raw
+        .chars()
+        .filter(|ch| !matches!(ch, '<' | '>' | '&' | '"' | '\'' | '/' | '\\'))
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(APP_AUTH_DISPLAY_NAME_MAX_CHARS)
+        .collect::<String>();
+    if cleaned.is_empty() {
+        Err(AppError::BadRequest("display_name is required".into()))
+    } else {
+        Ok(cleaned)
+    }
+}
+
+fn validate_registration_urls(
+    field: &str,
+    values: &[String],
+    allow_dev_localhost_http: bool,
+) -> Result<Vec<String>, AppError> {
+    if values.is_empty() || values.len() > APP_AUTH_MAX_REGISTERED_URLS {
+        return Err(AppError::BadRequest(format!(
+            "{} must contain 1-{} URLs",
+            field, APP_AUTH_MAX_REGISTERED_URLS
+        )));
+    }
+
+    let mut urls = Vec::with_capacity(values.len());
+    for value in values {
+        let url = validated_registration_url(value, allow_dev_localhost_http)
+            .ok_or_else(|| AppError::BadRequest(format!("{} contains an invalid URL", field)))?;
+        if !urls.iter().any(|existing| existing == &url) {
+            urls.push(url);
+        }
+    }
+    if urls.is_empty() {
+        Err(AppError::BadRequest(format!(
+            "{} must contain at least one unique URL",
+            field
+        )))
+    } else {
+        Ok(urls)
     }
 }
 
@@ -1200,6 +1342,62 @@ mod tests {
         assert_eq!(sanitize_label(""), DEFAULT_LABEL);
         assert_eq!(sanitize_label("   "), DEFAULT_LABEL);
         assert_eq!(sanitize_label("<<<>>>"), DEFAULT_LABEL);
+    }
+
+    #[test]
+    fn registration_url_validation_requires_https_except_dev_localhost() {
+        assert_eq!(
+            validated_registration_url("https://example.com/api/memwal/callback", false).as_deref(),
+            Some("https://example.com/api/memwal/callback")
+        );
+        assert_eq!(
+            validated_registration_url("http://example.com/api/memwal/callback", true),
+            None
+        );
+        assert_eq!(
+            validated_registration_url("http://localhost:3000/api/memwal/callback", false),
+            None
+        );
+        assert_eq!(
+            validated_registration_url("http://localhost:3000/api/memwal/callback", true)
+                .as_deref(),
+            Some("http://localhost:3000/api/memwal/callback")
+        );
+    }
+
+    #[test]
+    fn registration_display_name_is_sanitized_and_required() {
+        assert_eq!(
+            sanitize_client_display_name(" <My Demo/App> ").unwrap(),
+            "My DemoApp"
+        );
+        assert!(sanitize_client_display_name("<<>>").is_err());
+        assert_eq!(
+            sanitize_client_display_name(&"x".repeat(100))
+                .unwrap()
+                .chars()
+                .count(),
+            APP_AUTH_DISPLAY_NAME_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn registration_urls_are_deduped_and_capped() {
+        let urls = validate_registration_urls(
+            "redirect_uris",
+            &[
+                "https://example.com/api/memwal/callback".into(),
+                "https://example.com/api/memwal/callback".into(),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(urls, vec!["https://example.com/api/memwal/callback"]);
+
+        let too_many = (0..=APP_AUTH_MAX_REGISTERED_URLS)
+            .map(|idx| format!("https://example.com/callback/{idx}"))
+            .collect::<Vec<_>>();
+        assert!(validate_registration_urls("redirect_uris", &too_many, false).is_err());
     }
 
     #[test]

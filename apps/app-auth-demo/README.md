@@ -14,29 +14,15 @@ Default local config:
 PORT=3000
 MEMWAL_WEB_URL=http://localhost:5173
 MEMWAL_API_URL=http://localhost:8000
-MEMWAL_CLIENT_ID=dev_localhost
-MEMWAL_CLIENT_SECRET=dev_localhost_secret
+APP_LABEL=Walrus Memory Demo App
 ```
 
-Walrus Memory server must run with `APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS=true` on a non-mainnet network for the built-in `dev_localhost` client.
+On first connect, the demo registers itself with `POST /api/app-auth/register`
+using its exact callback/fallback URLs. For localhost registration, the Walrus
+Memory server must run with `APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS=true` on a
+non-mainnet network.
 
 ## Deployed Demo App
-
-For deployed testing, register the exact deployed callback and fallback URLs in Walrus Memory's env-backed client list.
-
-Generate a client secret hash:
-
-```bash
-SECRET="my_demo_secret"
-HASH=$(printf '%s' "$SECRET" | shasum -a 256 | awk '{print $1}')
-echo "$HASH"
-```
-
-Add the app to Walrus Memory server env:
-
-```txt
-APP_AUTH_CLIENTS_JSON=[{"client_id":"my_demo","client_secret_sha256":"PASTE_HASH_HERE","display_name":"My Demo App","allowed_redirect_uris":["https://my-demo-app.example.com/api/memwal/callback"],"fallback_uri":"https://my-demo-app.example.com/memwal/error","allowed_fallback_uris":["https://my-demo-app.example.com/memwal/error"]}]
-```
 
 Deploy this demo app with:
 
@@ -44,10 +30,8 @@ Deploy this demo app with:
 PORT=3000
 APP_BASE_URL=https://my-demo-app.example.com
 MEMWAL_WEB_URL=https://dev.memwal.ai
-MEMWAL_API_URL=https://api-dev.memwal.ai
-MEMWAL_CLIENT_ID=my_demo
-MEMWAL_CLIENT_SECRET=my_demo_secret
-APP_LABEL=My Demo App
+MEMWAL_API_URL=https://relayer.dev.memwal.ai
+APP_LABEL=Walrus Memory Demo App
 ```
 
 `APP_BASE_URL` is required on Railway and other deployed hosts. It makes the demo generate public HTTPS callback/fallback URLs behind the platform proxy and marks the state cookie `Secure`.
@@ -56,6 +40,46 @@ Railway service config is included at `apps/app-auth-demo/railway.json` and uses
 
 Google Console does not need every dApp callback URL. Google/Enoki auth is handled by Walrus Memory, so Google Console only needs Walrus Memory origins/callbacks such as `https://dev.memwal.ai` and `https://memwal.ai`.
 
+## How Other Dapps Access It
+
+Third-party apps do not integrate Enoki directly. They register their backend
+app once, redirect the browser to Walrus Memory hosted connect, and exchange the
+returned code server-side.
+
+Register the app from your backend:
+
+```bash
+curl -X POST "$MEMWAL_API_URL/api/app-auth/register" \
+  -H 'content-type: application/json' \
+  --data '{
+    "display_name": "My Dapp",
+    "redirect_uris": ["https://my-dapp.example.com/api/memwal/callback"],
+    "fallback_uris": ["https://my-dapp.example.com/memwal/error"]
+  }'
+```
+
+Store the returned `client_id` and `client_secret` in your backend env. Then
+send users to:
+
+```txt
+https://dev.memwal.ai/connect/app?client_id=CLIENT_ID&redirect_uri=https%3A%2F%2Fmy-dapp.example.com%2Fapi%2Fmemwal%2Fcallback&state=RANDOM_STATE&label=My%20Dapp&intent=sdk_delegate&fallback_uri=https%3A%2F%2Fmy-dapp.example.com%2Fmemwal%2Ferror
+```
+
+Walrus Memory handles Google/Enoki or wallet auth on `dev.memwal.ai`. Your dapp
+only receives `code + state`, then exchanges the code with HTTP Basic auth:
+
+```bash
+curl -X POST "$MEMWAL_API_URL/api/app-auth/token" \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -H 'content-type: application/json' \
+  --data '{
+    "grant_type": "authorization_code",
+    "code": "CODE_FROM_CALLBACK",
+    "redirect_uri": "https://my-dapp.example.com/api/memwal/callback",
+    "state": "ORIGINAL_RANDOM_STATE"
+  }'
+```
+
 ## Copy-Paste Vercel/Railway Shape
 
 Use these environment variables in the deployed app:
@@ -63,15 +87,6 @@ Use these environment variables in the deployed app:
 ```txt
 APP_BASE_URL=https://your-app.railway.app
 MEMWAL_WEB_URL=https://dev.memwal.ai
-MEMWAL_API_URL=https://api-dev.memwal.ai
-MEMWAL_CLIENT_ID=your_client_id
-MEMWAL_CLIENT_SECRET=your_client_secret
+MEMWAL_API_URL=https://relayer.dev.memwal.ai
 APP_LABEL=Your App
-```
-
-Then add the exact URLs to `APP_AUTH_CLIENTS_JSON` on Walrus Memory:
-
-```txt
-https://your-app.railway.app/api/memwal/callback
-https://your-app.railway.app/memwal/error
 ```

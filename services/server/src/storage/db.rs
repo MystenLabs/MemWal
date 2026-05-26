@@ -2,7 +2,7 @@ use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-use crate::types::{AppError, SearchHit};
+use crate::types::{AppAuthClientConfig, AppError, SearchHit};
 
 pub struct VectorDb {
     pool: PgPool,
@@ -90,6 +90,15 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        // ENG-1783: hosted app-auth dynamic client registration. Allows
+        // third-party dapps to register exact callback/fallback URLs without
+        // requiring operators to edit APP_AUTH_CLIENTS_JSON.
+        let migration_010 = include_str!("../../migrations/010_app_auth_clients.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -99,6 +108,98 @@ impl VectorDb {
     /// can run ad-hoc queries (e.g. `remember_jobs` status updates).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    pub async fn insert_app_auth_client(
+        &self,
+        client: &AppAuthClientConfig,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO app_auth_clients (
+                client_id,
+                client_secret_sha256,
+                display_name,
+                allowed_redirect_uris,
+                fallback_uri,
+                allowed_fallback_uris
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&client.client_id)
+        .bind(&client.client_secret_sha256)
+        .bind(&client.display_name)
+        .bind(&client.allowed_redirect_uris)
+        .bind(&client.fallback_uri)
+        .bind(&client.allowed_fallback_uris)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert app auth client: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.insert",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+        Ok(())
+    }
+
+    pub async fn fetch_app_auth_client(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<AppAuthClientConfig>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<
+            Option<(
+                String,
+                String,
+                String,
+                Vec<String>,
+                Option<String>,
+                Vec<String>,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT
+                    client_id,
+                    client_secret_sha256,
+                    display_name,
+                    allowed_redirect_uris,
+                    fallback_uri,
+                    allowed_fallback_uris
+                 FROM app_auth_clients
+                 WHERE client_id = $1
+                 LIMIT 1",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch app auth client: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.fetch",
+            db_status(&result),
+            started.elapsed(),
+        );
+
+        result.map(|row| {
+            row.map(
+                |(
+                    client_id,
+                    client_secret_sha256,
+                    display_name,
+                    allowed_redirect_uris,
+                    fallback_uri,
+                    allowed_fallback_uris,
+                )| AppAuthClientConfig {
+                    client_id,
+                    client_secret_sha256,
+                    display_name,
+                    allowed_redirect_uris,
+                    fallback_uri,
+                    allowed_fallback_uris,
+                },
+            )
+        })
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota).
