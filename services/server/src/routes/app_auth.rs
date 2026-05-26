@@ -32,8 +32,22 @@ use crate::types::{AppAuthClientConfig, AppError, AppState};
 
 const APP_AUTH_SESSION_TTL_SECS: u64 = 15 * 60;
 const APP_AUTH_CODE_TTL_SECS: u64 = 5 * 60;
+// ENG-1783 review B1 (2026-05-26): both delegate writes previously used
+// ttl_secs:None, leaking ~800B / completed flow into Redis indefinitely
+// (~560MB at 1M flows). 24h is long enough to cover the start→complete→
+// token-exchange window and any near-term re-read by a future "third-party
+// app calls MemWal via delegate_ref" feature, short enough that abandoned
+// or stale entries reclaim themselves automatically.
+const APP_AUTH_DELEGATE_TTL_SECS: u64 = 24 * 60 * 60;
 const APP_AUTH_INTENT: &str = "sdk_delegate";
 const DEFAULT_LABEL: &str = "Walrus Memory App";
+// ENG-1783 review N4 (2026-05-26): the `label` field is third-party-supplied
+// per-session text shown next to the trusted display_name on the consent
+// screen. 64 chars made it easy to spoof phrases like "MemWal Official Wallet"
+// even though display_name is the verified app identity. 32 chars is enough
+// for legitimate per-session context ("Login from Chrome — Mac") while
+// reducing the phishing surface.
+const APP_AUTH_LABEL_MAX_CHARS: usize = 32;
 
 #[derive(Debug, Deserialize)]
 pub struct AppAuthStartRequest {
@@ -233,7 +247,7 @@ pub async fn app_auth_start(
         state.as_ref(),
         &app_auth_delegate_key(&delegate_ref),
         &delegate,
-        None,
+        Some(APP_AUTH_DELEGATE_TTL_SECS),
     )
     .await?;
     set_redis_json(
@@ -250,7 +264,7 @@ pub async fn app_auth_start(
             client_id: client.client_id.clone(),
             display_name: client.display_name.clone(),
         },
-        redirect_host: url_host_label(&redirect_uri),
+        redirect_host: url_origin_label(&redirect_uri),
         label,
         expires_at,
         delegate: AppAuthStartDelegate {
@@ -319,7 +333,7 @@ pub async fn app_auth_complete(
         state.as_ref(),
         &app_auth_delegate_key(&session.delegate_ref),
         &delegate,
-        None,
+        Some(APP_AUTH_DELEGATE_TTL_SECS),
     )
     .await?;
     set_redis_json(
@@ -355,6 +369,22 @@ pub async fn app_auth_cancel(
     }))
 }
 
+/// OAuth-style token endpoint: exchanges a short-lived `code` for the
+/// account / delegate the user approved on the consent screen.
+///
+/// ENG-1783 review N2 (2026-05-26): two canonical OAuth attacks (code reuse
+/// and cross-client code exchange) are structurally prevented by three layers
+/// of defense, which must be preserved together by any future refactor:
+///   1. **Namespaced key.** `take_code` reads `app_auth:code:{client_id}:{hash}`.
+///      An attacker authenticating as client B looking up client A's code
+///      hits a different Redis key and gets `NotFound`. See
+///      `app_auth_code_key_namespaces_by_client_id` for the regression test.
+///   2. **GETDEL atomicity.** `take_code` uses Redis `GETDEL`, which atomically
+///      reads-and-deletes. The first successful exchange consumes the code;
+///      every subsequent exchange (replay) finds an empty key.
+///   3. **Equality re-check.** Even if a future refactor breaks the key
+///      namespacing, the `row.client_id != client_id` check below is
+///      defense-in-depth.
 pub async fn app_auth_token(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -378,6 +408,10 @@ pub async fn app_auth_token(
     let code_hash = hash_secret(&req.code);
     let row = take_code(state.as_ref(), &client_id, &code_hash).await?;
     if row.client_id != client_id {
+        // Defense-in-depth (layer 3 in the doc comment above). The namespaced
+        // key already guarantees miss for cross-client exchange; this guards
+        // against the case where someone refactors `take_code` to ignore the
+        // client_id parameter.
         return Err(AppError::Unauthorized(
             "client_id does not match authorization code".into(),
         ));
@@ -507,13 +541,25 @@ fn build_error_redirect(target_uri: &str, error: &str, state: &str) -> String {
     url.to_string()
 }
 
-fn url_host_label(raw: &str) -> String {
+fn url_origin_label(raw: &str) -> String {
     Url::parse(raw)
         .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .and_then(|url| {
+            let host = url.host_str()?;
+            let mut origin = format!("{}://{}", url.scheme(), host);
+            if let Some(port) = url.port() {
+                origin.push_str(&format!(":{port}"));
+            }
+            Some(origin)
+        })
         .unwrap_or_else(|| "registered app".to_string())
 }
 
+/// Sanitize the third-party-supplied per-session `label`. UNTRUSTED INPUT.
+/// The consent screen renders this **next to** the verified `display_name`,
+/// so spoofing pressure is real — see `APP_AUTH_LABEL_MAX_CHARS` for the
+/// rationale behind the char cap. The display layer must never substitute
+/// `label` for `display_name`; it's a per-session context string only.
 fn sanitize_label(raw: &str) -> String {
     let cleaned = raw
         .chars()
@@ -522,7 +568,7 @@ fn sanitize_label(raw: &str) -> String {
         .collect::<String>()
         .trim()
         .chars()
-        .take(64)
+        .take(APP_AUTH_LABEL_MAX_CHARS)
         .collect::<String>();
     if cleaned.is_empty() {
         DEFAULT_LABEL.to_string()
@@ -1105,6 +1151,55 @@ mod tests {
         );
         assert!(!params.contains_key("delegate_key"));
         assert!(!params.contains_key("token"));
+    }
+
+    #[test]
+    fn origin_label_includes_scheme_and_port() {
+        assert_eq!(
+            url_origin_label("https://demo-app.com/api/memwal/callback"),
+            "https://demo-app.com"
+        );
+        assert_eq!(
+            url_origin_label("http://localhost:3000/api/memwal/callback"),
+            "http://localhost:3000"
+        );
+    }
+
+    // ENG-1783 review N2 (2026-05-26): regression test for layer 1 of
+    // `app_auth_token`'s cross-client/replay defense (see doc comment on
+    // `app_auth_token`). The Redis key for an authorization code MUST include
+    // `client_id` so that client B's token request looks up a different key
+    // than client A's code was stored under. If a refactor ever changes
+    // `app_auth_code_key` to drop the client_id segment, this test fails and
+    // forces a review of the equality re-check (layer 3) before it's the only
+    // remaining barrier.
+    #[test]
+    fn app_auth_code_key_namespaces_by_client_id() {
+        let code_hash = "deadbeef";
+        let k_a = app_auth_code_key("client_a", code_hash);
+        let k_b = app_auth_code_key("client_b", code_hash);
+        assert_ne!(k_a, k_b);
+        assert!(k_a.contains("client_a"));
+        assert!(k_b.contains("client_b"));
+        assert!(k_a.contains(code_hash));
+    }
+
+    // ENG-1783 review N4 (2026-05-26): label sanitization tightened from 64
+    // to 32 chars. Lock the cap so a future bump back to 64 forces a fresh
+    // phishing-surface review.
+    #[test]
+    fn sanitize_label_caps_at_thirty_two_chars() {
+        let long = "X".repeat(100);
+        let cleaned = sanitize_label(&long);
+        assert_eq!(cleaned.chars().count(), APP_AUTH_LABEL_MAX_CHARS);
+        assert_eq!(APP_AUTH_LABEL_MAX_CHARS, 32);
+    }
+
+    #[test]
+    fn sanitize_label_falls_back_to_default_on_empty_or_only_stripped_chars() {
+        assert_eq!(sanitize_label(""), DEFAULT_LABEL);
+        assert_eq!(sanitize_label("   "), DEFAULT_LABEL);
+        assert_eq!(sanitize_label("<<<>>>"), DEFAULT_LABEL);
     }
 
     #[test]

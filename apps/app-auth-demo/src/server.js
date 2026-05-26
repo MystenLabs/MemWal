@@ -78,8 +78,15 @@ function redirect(res, location, headers = {}) {
   res.end()
 }
 
+function usesSecureCookies(req) {
+  if (APP_BASE_URL) {
+    return new URL(APP_BASE_URL).protocol === 'https:'
+  }
+  return requestOrigin(req).startsWith('https://')
+}
+
 function stateCookie(state, req) {
-  const secure = requestOrigin(req).startsWith('https://') ? '; Secure' : ''
+  const secure = usesSecureCookies(req) ? '; Secure' : ''
   return `${COOKIE_NAME}=${encodeURIComponent(state)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${secure}`
 }
 

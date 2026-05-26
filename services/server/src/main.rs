@@ -568,7 +568,12 @@ async fn main() {
     let app_auth_routes = Router::new()
         .route(
             "/api/app-auth/start",
-            post(routes::app_auth_start).layer(DefaultBodyLimit::max(16 * 1024)),
+            post(routes::app_auth_start)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_start_rate_limit_middleware,
+                )),
         )
         .route(
             "/api/app-auth/complete",

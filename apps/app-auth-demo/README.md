@@ -50,7 +50,9 @@ MEMWAL_CLIENT_SECRET=my_demo_secret
 APP_LABEL=My Demo App
 ```
 
-`APP_BASE_URL` makes the demo generate deployed callback/fallback URLs even when it is behind a platform proxy.
+`APP_BASE_URL` is required on Railway and other deployed hosts. It makes the demo generate public HTTPS callback/fallback URLs behind the platform proxy and marks the state cookie `Secure`.
+
+Railway service config is included at `apps/app-auth-demo/railway.json` and uses `apps/app-auth-demo/Dockerfile`. Set Railway Root Directory to the repo root (`/`) so the Dockerfile path resolves correctly.
 
 Google Console does not need every dApp callback URL. Google/Enoki auth is handled by Walrus Memory, so Google Console only needs Walrus Memory origins/callbacks such as `https://dev.memwal.ai` and `https://memwal.ai`.
 
@@ -59,7 +61,7 @@ Google Console does not need every dApp callback URL. Google/Enoki auth is handl
 Use these environment variables in the deployed app:
 
 ```txt
-APP_BASE_URL=https://your-app.vercel.app
+APP_BASE_URL=https://your-app.railway.app
 MEMWAL_WEB_URL=https://dev.memwal.ai
 MEMWAL_API_URL=https://api-dev.memwal.ai
 MEMWAL_CLIENT_ID=your_client_id
@@ -70,6 +72,6 @@ APP_LABEL=Your App
 Then add the exact URLs to `APP_AUTH_CLIENTS_JSON` on Walrus Memory:
 
 ```txt
-https://your-app.vercel.app/api/memwal/callback
-https://your-app.vercel.app/memwal/error
+https://your-app.railway.app/api/memwal/callback
+https://your-app.railway.app/memwal/error
 ```

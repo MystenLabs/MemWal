@@ -321,27 +321,32 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
-            app_auth_clients: parse_app_auth_clients(app_auth_enable_dev_localhost_wildcards),
+            app_auth_clients: parse_app_auth_clients(
+                &network,
+                app_auth_enable_dev_localhost_wildcards,
+            ),
             app_auth_enable_dev_localhost_wildcards,
             app_auth_delegate_secret: derive_app_auth_delegate_secret(),
         }
     }
 }
 
-fn parse_app_auth_clients(include_dev_localhost_client: bool) -> Vec<AppAuthClientConfig> {
+fn parse_app_auth_clients(
+    network: &str,
+    include_dev_localhost_client: bool,
+) -> Vec<AppAuthClientConfig> {
     let mut clients = match std::env::var("APP_AUTH_CLIENTS_JSON") {
-        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw)
-            .expect("APP_AUTH_CLIENTS_JSON must be a JSON array of app auth clients"),
-        _ => vec![AppAuthClientConfig {
-            client_id: "demo_dapp".to_string(),
-            // sha256("demo_dapp_secret") — test/dev only. Override in production.
-            client_secret_sha256:
-                "5619a8cdf18ecc129cf7301e0272f0bb4d04144ec1e72e2882de620436a5c577".to_string(),
-            display_name: "Demo Dapp".to_string(),
-            allowed_redirect_uris: vec!["https://demo-app.com/api/memwal/callback".to_string()],
-            fallback_uri: Some("https://demo-app.com/memwal/error".to_string()),
-            allowed_fallback_uris: vec!["https://demo-app.com/memwal/error".to_string()],
-        }],
+        Ok(raw) if !raw.trim().is_empty() => match serde_json::from_str(&raw) {
+            Ok(clients) => clients,
+            Err(err) => {
+                tracing::error!(
+                    "APP_AUTH_CLIENTS_JSON is invalid: {}; falling back to built-in non-mainnet app-auth clients",
+                    err
+                );
+                default_app_auth_clients_for_network(network)
+            }
+        },
+        _ => default_app_auth_clients_for_network(network),
     };
 
     if include_dev_localhost_client
@@ -370,6 +375,23 @@ fn parse_app_auth_clients(include_dev_localhost_client: bool) -> Vec<AppAuthClie
     clients
 }
 
+fn default_app_auth_clients_for_network(network: &str) -> Vec<AppAuthClientConfig> {
+    if network.eq_ignore_ascii_case("mainnet") {
+        Vec::new()
+    } else {
+        vec![AppAuthClientConfig {
+            client_id: "demo_dapp".to_string(),
+            // sha256("demo_dapp_secret") — test/dev only. Override in production.
+            client_secret_sha256:
+                "5619a8cdf18ecc129cf7301e0272f0bb4d04144ec1e72e2882de620436a5c577".to_string(),
+            display_name: "Demo Dapp".to_string(),
+            allowed_redirect_uris: vec!["https://example.invalid/api/memwal/callback".to_string()],
+            fallback_uri: Some("https://example.invalid/memwal/error".to_string()),
+            allowed_fallback_uris: vec!["https://example.invalid/memwal/error".to_string()],
+        }]
+    }
+}
+
 fn app_auth_dev_localhost_wildcards_enabled(network: &str) -> bool {
     app_auth_dev_localhost_wildcards_enabled_from_value(
         network,
@@ -378,7 +400,7 @@ fn app_auth_dev_localhost_wildcards_enabled(network: &str) -> bool {
 }
 
 fn app_auth_dev_localhost_wildcards_enabled_from_value(network: &str, enabled: bool) -> bool {
-    network != "mainnet" && enabled
+    !network.eq_ignore_ascii_case("mainnet") && enabled
 }
 
 fn derive_app_auth_delegate_secret() -> Option<SecretBytes> {
@@ -1371,12 +1393,23 @@ mod tests {
         assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
             "mainnet", true
         ));
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "Mainnet", true
+        ));
         assert!(app_auth_dev_localhost_wildcards_enabled_from_value(
             "testnet", true
         ));
         assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
             "testnet", false
         ));
+    }
+
+    #[test]
+    fn app_auth_demo_default_clients_are_not_injected_on_mainnet() {
+        assert!(default_app_auth_clients_for_network("mainnet").is_empty());
+        assert!(default_app_auth_clients_for_network("testnet")
+            .iter()
+            .any(|client| client.client_id == "demo_dapp"));
     }
 
     #[test]

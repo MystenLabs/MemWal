@@ -23,11 +23,9 @@ import {
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
 import { Transaction } from '@mysten/sui/transactions'
-import { AlertCircle, CheckCircle2, Loader2, LogIn, ShieldCheck, X } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
-import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'loading' | 'consent' | 'registering' | 'redirecting' | 'error'
 type Provider = 'wallet' | 'google'
@@ -266,26 +264,26 @@ export default function ConnectApp() {
         <div style={pageStyle}>
             <nav className="lp-nav">
                 <div className="lp-nav-inner">
-                    <Link to="/" className="lp-nav-brand" style={brandStyle}>
-                        <img src={memwalLogo} alt="Walrus Memory" height="28" />
-                        <span style={brandTextStyle}>Connect app</span>
+                    <Link to="/" className="lp-nav-brand" style={appNavBrandStyle}>
+                        <span style={memwalWordmarkStyle}>MemWal</span>
+                        <span style={mcpNavTitleStyle}>Connect App</span>
                     </Link>
                 </div>
             </nav>
 
             <main style={mainStyle}>
                 {step === 'loading' && (
-                    <section style={panelStyle}>
-                        <Loader2 size={28} style={spinStyle} />
-                        <h1 style={titleStyle}>Checking app request</h1>
-                        <p style={mutedStyle}>Walrus Memory is validating this connection request.</p>
+                    <section style={cardStyle} aria-busy="true">
+                        <p style={eyebrowStyle}>Secure request</p>
+                        <h1 style={h1Style}>Checking app request</h1>
+                        <p style={subtleStyle}>Walrus Memory is validating this connection request.</p>
                     </section>
                 )}
 
                 {step === 'consent' && session && (
-                    <section style={panelStyle}>
-                        <ShieldCheck size={34} color="#0f9f6e" />
-                        <h1 style={titleStyle}>Connect Walrus Memory</h1>
+                    <section style={cardStyle}>
+                        <p style={eyebrowStyle}>Third-party app access</p>
+                        <h1 style={h1Style}>Connect Walrus Memory</h1>
                         <p style={bodyStyle}>
                             {session.client.display_name} wants to connect to your Walrus Memory account.
                         </p>
@@ -296,7 +294,7 @@ export default function ConnectApp() {
                                 <div style={detailValueStyle}>{session.client.display_name}</div>
                             </div>
                             <div>
-                                <div style={detailLabelStyle}>Return host</div>
+                                <div style={detailLabelStyle}>Return origin</div>
                                 <div style={detailValueStyle}>{session.redirect_host}</div>
                             </div>
                             <div>
@@ -315,13 +313,13 @@ export default function ConnectApp() {
                             <div style={buttonRowStyle}>
                                 {hasGoogle && (
                                     <button style={primaryButtonStyle} onClick={handleGoogleConnect}>
-                                        <LogIn size={16} /> Continue with Google
+                                        Continue with Google
                                     </button>
                                 )}
                                 <ConnectModal
                                     trigger={(
                                         <button style={secondaryButtonStyle} onClick={() => setProvider('wallet')}>
-                                            <LogIn size={16} /> Connect Sui wallet
+                                            Connect Sui wallet
                                         </button>
                                     )}
                                     open={walletPickerOpen}
@@ -331,15 +329,15 @@ export default function ConnectApp() {
                         ) : (
                             <>
                                 <div style={connectedStyle}>
-                                    <CheckCircle2 size={15} color="#0f9f6e" />
+                                    <span style={connectedLabelStyle}>Wallet</span>
                                     <span>{currentAccount.address.slice(0, 8)}…{currentAccount.address.slice(-6)}</span>
                                 </div>
                                 <div style={buttonRowStyle}>
                                     <button style={primaryButtonStyle} onClick={handleAuthorize}>
-                                        <ShieldCheck size={16} /> Authorize app
+                                        Authorize app
                                     </button>
                                     <button style={secondaryButtonStyle} onClick={() => redirectWithError('access_denied')}>
-                                        <X size={16} /> Cancel
+                                        Cancel
                                     </button>
                                 </div>
                             </>
@@ -348,27 +346,27 @@ export default function ConnectApp() {
                 )}
 
                 {step === 'registering' && (
-                    <section style={panelStyle}>
-                        <Loader2 size={28} style={spinStyle} />
-                        <h1 style={titleStyle}>Registering delegate</h1>
-                        <p style={mutedStyle}>
+                    <section style={cardStyle} aria-busy="true">
+                        <p style={eyebrowStyle}>On-chain setup</p>
+                        <h1 style={h1Style}>Registering delegate</h1>
+                        <p style={subtleStyle}>
                             Walrus Memory is adding an app-specific delegate key on-chain.
                         </p>
                     </section>
                 )}
 
                 {step === 'redirecting' && (
-                    <section style={panelStyle}>
-                        <CheckCircle2 size={34} color="#0f9f6e" />
-                        <h1 style={titleStyle}>Connected</h1>
-                        <p style={mutedStyle}>Returning to the app.</p>
+                    <section style={cardStyle}>
+                        <p style={eyebrowStyle}>Connected</p>
+                        <h1 style={h1Style}>Connected</h1>
+                        <p style={subtleStyle}>Returning to the app.</p>
                     </section>
                 )}
 
                 {step === 'error' && (
-                    <section style={panelStyle}>
-                        <AlertCircle size={34} color="#dc2626" />
-                        <h1 style={titleStyle}>Connection failed</h1>
+                    <section style={cardStyle}>
+                        <p style={dangerEyebrowStyle}>Connection failed</p>
+                        <h1 style={h1Style}>Connection failed</h1>
                         <p style={errorStyle}>{errorMsg || 'This app connection request could not be completed.'}</p>
                         {session ? (
                             <div style={buttonRowStyle}>
@@ -380,7 +378,7 @@ export default function ConnectApp() {
                                 </button>
                             </div>
                         ) : (
-                            <p style={mutedStyle}>Walrus Memory did not redirect because the app request was not safe.</p>
+                            <p style={subtleStyle}>Walrus Memory did not redirect because the app request was not safe.</p>
                         )}
                     </section>
                 )}
@@ -392,56 +390,77 @@ export default function ConnectApp() {
 
 const pageStyle: CSSProperties = {
     minHeight: '100vh',
-    background: 'var(--bg-primary)',
-    color: 'var(--text-primary)',
+    background: '#FAF8F5',
+    color: '#1a1a1a',
 }
 
-const brandStyle: CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
+const appNavBrandStyle: CSSProperties = {
     gap: 12,
-    textDecoration: 'none',
 }
 
-const brandTextStyle: CSSProperties = {
-    fontSize: 14,
-    color: 'var(--text-secondary)',
+const memwalWordmarkStyle: CSSProperties = {
+    color: '#000',
+    fontSize: 26,
+    fontWeight: 900,
+    lineHeight: 1,
+}
+
+const mcpNavTitleStyle: CSSProperties = {
+    color: '#000',
+    fontSize: '1rem',
     fontWeight: 700,
+    lineHeight: 1,
+    transform: 'translateY(8px)',
 }
 
 const mainStyle: CSSProperties = {
-    minHeight: 'calc(100vh - 76px)',
-    display: 'grid',
-    placeItems: 'center',
-    padding: '32px 18px',
+    maxWidth: 640,
+    margin: '40px auto',
+    padding: '0 24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 24,
 }
 
-const panelStyle: CSSProperties = {
-    width: 'min(100%, 520px)',
-    border: '1px solid var(--border)',
-    background: 'var(--bg-secondary)',
-    borderRadius: 8,
+const cardStyle: CSSProperties = {
+    background: '#fff',
+    border: '2px solid #000',
+    borderRadius: 12,
     padding: 28,
-    boxShadow: '0 20px 60px rgba(15, 23, 42, 0.08)',
+    boxShadow: '4px 4px 0 #000',
 }
 
-const titleStyle: CSSProperties = {
-    margin: '16px 0 8px',
-    fontSize: 26,
-    lineHeight: 1.15,
+const h1Style: CSSProperties = {
+    margin: '0 0 12px',
+    fontSize: 22,
     fontWeight: 800,
     letterSpacing: 0,
 }
 
+const eyebrowStyle: CSSProperties = {
+    margin: '0 0 14px',
+    color: '#525252',
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: 0,
+    textTransform: 'uppercase',
+}
+
+const dangerEyebrowStyle: CSSProperties = {
+    ...eyebrowStyle,
+    color: '#dc2626',
+}
+
 const bodyStyle: CSSProperties = {
-    color: 'var(--text-secondary)',
+    color: '#525252',
     lineHeight: 1.55,
     margin: '0 0 22px',
 }
 
-const mutedStyle: CSSProperties = {
-    color: 'var(--text-muted)',
+const subtleStyle: CSSProperties = {
+    color: '#525252',
     lineHeight: 1.55,
+    margin: 0,
 }
 
 const errorStyle: CSSProperties = {
@@ -452,21 +471,23 @@ const errorStyle: CSSProperties = {
 const detailGridStyle: CSSProperties = {
     display: 'grid',
     gap: 12,
-    border: '1px solid var(--border)',
+    border: '2px solid #000',
     borderRadius: 8,
     padding: 16,
     margin: '20px 0',
+    background: '#FAF8F5',
 }
 
 const detailLabelStyle: CSSProperties = {
-    color: 'var(--text-muted)',
+    color: '#525252',
     fontSize: 12,
     fontWeight: 700,
     textTransform: 'uppercase',
+    letterSpacing: 0,
 }
 
 const detailValueStyle: CSSProperties = {
-    color: 'var(--text-primary)',
+    color: '#1a1a1a',
     fontSize: 14,
     overflowWrap: 'anywhere',
     marginTop: 3,
@@ -476,10 +497,18 @@ const connectedStyle: CSSProperties = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    color: 'var(--text-secondary)',
+    color: '#1a1a1a',
     fontFamily: 'var(--font-mono)',
     fontSize: 13,
     margin: '10px 0 18px',
+}
+
+const connectedLabelStyle: CSSProperties = {
+    color: '#525252',
+    fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    fontSize: 12,
+    fontWeight: 700,
+    textTransform: 'uppercase',
 }
 
 const buttonRowStyle: CSSProperties = {
@@ -492,13 +521,13 @@ const primaryButtonStyle: CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    border: '1px solid #111827',
-    background: '#111827',
-    color: '#fff',
+    border: '2px solid #000',
+    background: '#e8ff57',
+    color: '#1a1a1a',
     borderRadius: 8,
-    padding: '11px 14px',
-    fontWeight: 800,
+    boxShadow: '4px 4px 0 #000',
+    padding: '12px 16px',
+    fontWeight: 900,
     cursor: 'pointer',
 }
 
@@ -506,16 +535,11 @@ const secondaryButtonStyle: CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    border: '1px solid var(--border)',
-    background: 'var(--bg-primary)',
-    color: 'var(--text-primary)',
+    border: '2px solid #000',
+    background: '#fff',
+    color: '#1a1a1a',
     borderRadius: 8,
-    padding: '11px 14px',
+    padding: '12px 16px',
     fontWeight: 800,
     cursor: 'pointer',
-}
-
-const spinStyle: CSSProperties = {
-    animation: 'spin 0.9s linear infinite',
 }

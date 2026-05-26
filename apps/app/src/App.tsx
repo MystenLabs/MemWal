@@ -295,8 +295,22 @@ function AppContent() {
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/app" element={<ConnectApp />} />
       <Route path="/auth/enoki/callback" element={<EnokiCallback />} />
-      <Route path="/api/memwal/callback" element={<LocalAppAuthCallback />} />
-      <Route path="/memwal/error" element={<LocalAppAuthCallback />} />
+      {/* ENG-1783 review N1 (2026-05-26): LocalAppAuthCallback is for local
+          third-party dev only (when the demo app shares an origin with this
+          Vite dev server). Registering these routes in production builds
+          would let a malicious app register `memwal.ai/api/memwal/callback`
+          as an allowed redirect_uri — the consent screen would say "Return
+          to memwal.ai" (which looks safe to users), the code would land
+          here and silently render the query string, and the attacker would
+          observe nothing in the address bar. Code exchange still requires
+          client_secret so they can't escalate, but the UX confusion is the
+          phishing primitive — gating to DEV removes it entirely. */}
+      {import.meta.env.DEV && (
+        <>
+          <Route path="/api/memwal/callback" element={<LocalAppAuthCallback />} />
+          <Route path="/memwal/error" element={<LocalAppAuthCallback />} />
+        </>
+      )}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

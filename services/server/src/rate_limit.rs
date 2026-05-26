@@ -973,6 +973,138 @@ pub async fn sponsor_rate_limit_middleware(
     next.run(request).await
 }
 
+/// Rate limiting middleware for anonymous hosted app-auth session creation.
+///
+/// `/api/app-auth/start` creates Redis state and a fresh delegate keypair, so it
+/// gets the same per-IP budget as sponsor routes while using separate buckets.
+pub async fn app_auth_start_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip: Option<String> = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        });
+
+    let ip = match ip {
+        Some(ip) => ip,
+        None => {
+            tracing::warn!(
+                "app_auth_start_rate_limit_middleware: cannot determine client IP, denying"
+            );
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.sponsor_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:app_auth:start:ip:min:{}", ip);
+    let hr_key = format!("rate:app_auth:start:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    let mut redis_down = false;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "app-auth/start rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.per_minute
+            );
+            return rate_limit_response("app_auth_start_ip_burst", config.per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::warn!("app_auth_start_rate_limit_middleware: Redis error (minute bucket): {} — switching to in-memory fallback", e);
+            redis_down = true;
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    if !redis_down {
+        match check_and_record_window(
+            &mut redis,
+            &hr_key,
+            hr_window_start,
+            now + 0.1,
+            config.per_hour,
+            1,
+            3700,
+        )
+        .await
+        {
+            Ok(WindowCheckResult::Denied) => {
+                tracing::warn!(
+                    "app-auth/start rate limit [IP/hr]: ip={} denied (limit={})",
+                    ip,
+                    config.per_hour
+                );
+                return rate_limit_response(
+                    "app_auth_start_ip_sustained",
+                    config.per_hour,
+                    "hour",
+                    300,
+                );
+            }
+            Err(e) => {
+                tracing::warn!("app_auth_start_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
+                redis_down = true;
+            }
+            Ok(WindowCheckResult::Allowed) => {}
+        }
+    }
+
+    if redis_down {
+        tracing::warn!("app_auth_start_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
+        crate::observability::record_rate_limit_fallback("app_auth_start_ip");
+        let mut fallback = state.fallback_rate_limit.lock().await;
+
+        if !fallback.can_consume(&min_key, 1.0, config.per_minute as f64, 60.0) {
+            return rate_limit_response("app_auth_start_ip_burst", config.per_minute, "min", 60);
+        }
+        if !fallback.can_consume(&hr_key, 1.0, config.per_hour as f64, 3600.0) {
+            return rate_limit_response(
+                "app_auth_start_ip_sustained",
+                config.per_hour,
+                "hour",
+                300,
+            );
+        }
+
+        fallback.consume(&min_key, 1.0, config.per_minute as f64, 60.0);
+        fallback.consume(&hr_key, 1.0, config.per_hour as f64, 3600.0);
+
+        return next.run(request).await;
+    }
+
+    next.run(request).await
+}
+
 // ============================================================
 // Unit Tests
 // ============================================================

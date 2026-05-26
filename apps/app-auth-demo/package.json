@@ -5,6 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "node src/server.js",
-    "build": "node --check src/server.js"
+    "build": "node --check src/server.js",
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
