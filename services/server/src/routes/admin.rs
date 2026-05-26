@@ -209,9 +209,13 @@ pub async fn ask(
 
     // Step 1: Recall relevant memories
     let query_vector = state.embedder.embed(&body.question).await?;
+    // /api/ask hydrates the hits exactly like /api/recall, so it needs the
+    // same expiry filter — otherwise an expired blob in the top-K either
+    // wastes a Walrus 404 or feeds an empty memory to the LLM.
+    let current_epoch = super::recall::current_epoch_cached(&state).await;
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(&query_vector, owner, namespace, limit, current_epoch)
         .await?;
 
     // Hydrate the hits through the storage engine, concurrently — same
@@ -444,6 +448,20 @@ pub async fn restore(
         .map(|b| (b.blob_id.clone(), b.package_id.clone()))
         .collect();
 
+    // Restore is the one path that re-inserts existing blobs without a fresh
+    // upload result. The on-chain query already returns the object id + lease
+    // end epoch for each blob we're about to restore, so persist them — leaving
+    // them NULL would mean a near-expiry blob gets re-indexed as always-served
+    // (until the backfill caught up) and force a redundant on-chain re-scan.
+    let blob_object_ids: std::collections::HashMap<String, String> = on_chain_blobs
+        .iter()
+        .map(|b| (b.blob_id.clone(), b.object_id.clone()))
+        .collect();
+    let blob_end_epochs: std::collections::HashMap<String, i64> = on_chain_blobs
+        .iter()
+        .filter_map(|b| b.end_epoch.map(|e| (b.blob_id.clone(), e as i64)))
+        .collect();
+
     if total == 0 {
         return Ok(Json(RestoreResponse {
             restored: 0,
@@ -659,6 +677,11 @@ pub async fn restore(
                 // neutral "standard" bucket so restored memories rank as
                 // average — neither boosted nor penalized.
                 crate::services::extractor::IMPORTANCE_STANDARD,
+                // Lease state captured above from the on-chain query. end_epoch
+                // may be None if an older sidecar didn't surface it — that's
+                // still safe (NULL = always-served until the backfill fills it).
+                blob_end_epochs.get(blob_id).copied(),
+                blob_object_ids.get(blob_id).map(String::as_str),
             )
             .await?;
     }

@@ -973,6 +973,28 @@ function extractBlobObjectId(blob: any): string | null {
     return null;
 }
 
+// Pull the storage-lease end epoch out of the `writeBlobFlow` getBlob() result.
+// The `blobObject` here is the SDK's decoded shape (object id is at the top
+// level, lease state lives under `storage`) — different from the on-chain
+// content shape returned by getOwnedObjects/multiGetObjects (see
+// `endEpochFromBlobFields` below for that variant).
+// Returns null on a missing/unparseable field so the response can omit it
+// rather than fail — the server then stores NULL and the row is always-served.
+function extractBlobEndEpoch(blob: any): number | null {
+    const raw = blob?.blobObject?.storage?.end_epoch;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+        return raw;
+    }
+    // Some BCS decoders surface u32 as a string; tolerate that.
+    if (typeof raw === "string" && raw.trim() !== "") {
+        const n = Number(raw);
+        if (Number.isFinite(n)) {
+            return n;
+        }
+    }
+    return null;
+}
+
 async function setMetadataAndTransferBlobs(
     signer: Ed25519Keypair,
     blobs: MetadataTransferBlob[],
@@ -1046,6 +1068,31 @@ async function setMetadataAndTransferBlobs(
     await suiClient.waitForTransaction({ digest });
     return digest;
 }
+
+// Current Walrus epoch lookup for the recall expiry filter. Lives on the
+// sidecar because the Walrus SDK does — reading `stakingState()` from Rust
+// would mean reimplementing the staking-object decoding by hand. The Rust
+// side hits this endpoint once per recall window (cached behind Redis with
+// a long TTL), so per-recall cost is effectively zero.
+app.get("/walrus/current-epoch", async (_req: Request, res: Response) => {
+    try {
+        refreshWalrusClientIfStale();
+        const staking = await walrusClient.stakingState();
+        const epoch = staking?.epoch;
+        if (typeof epoch !== "number" || !Number.isFinite(epoch)) {
+            return res
+                .status(502)
+                .json({ error: "walrus stakingState returned no usable epoch" });
+        }
+        return res.json({ epoch, suiNetwork: SUI_NETWORK });
+    } catch (err: any) {
+        const message = err?.message || String(err);
+        console.error(`[walrus/current-epoch] failed: ${message}`);
+        // The caller (Rust recall path) treats any failure as fail-open
+        // (don't filter), so a 502 here never hides live memories.
+        return res.status(502).json({ error: `current-epoch lookup failed: ${message}` });
+    }
+});
 
 // HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
@@ -1175,6 +1222,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const blob = await flow.getBlob();
 
         const blobObjectId = extractBlobObjectId(blob);
+        // Same object the id came from already carries the lease state, so
+        // grab it now — the Rust write path stamps it onto the new row.
+        const blobEndEpoch = extractBlobEndEpoch(blob);
 
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
@@ -1216,6 +1266,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         console.log(`[walrus/upload] [${traceId}] ok ${JSON.stringify({
             blobId: blob.blobId,
             objectId: blobObjectId,
+            endEpoch: blobEndEpoch,
             transferStatus: deferTransfer ? "deferred" : "ok",
             keyIndex,
             bytes: blobBytesForLog,
@@ -1223,6 +1274,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         res.json({
             blobId: blob.blobId,
             objectId: blobObjectId,
+            endEpoch: blobEndEpoch,
             transferStatus: deferTransfer ? "deferred" : "ok",
         });
     } catch (err: any) {
@@ -1458,8 +1510,25 @@ type RecentBlobCandidate = {
 type RawBlobObj = {
     objectId: string;
     rawBlobId: string | number | null;
+    endEpoch: number | null;
     timestampMs?: string | null;
 };
+
+// Pull `storage.end_epoch` out of an on-chain Blob object's decoded
+// `content.fields` — the shape returned by getOwnedObjects/multiGetObjects.
+// This differs from `extractBlobEndEpoch` (which reads the writeBlobFlow
+// result): here the storage resource is a nested Move struct, hence the
+// `fields.storage.fields.end_epoch` path with a fallback for the flattened
+// variant some SDK versions produce.
+function endEpochFromBlobFields(fields: any): number | null {
+    const raw = fields?.storage?.fields?.end_epoch ?? fields?.storage?.end_epoch;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    if (typeof raw === "string" && raw.trim() !== "") {
+        const n = Number(raw);
+        if (Number.isFinite(n)) return n;
+    }
+    return null;
+}
 
 /**
  * Query newest transactions that transferred Walrus Blob objects to the owner.
@@ -1551,7 +1620,12 @@ async function fetchRawBlobObjects(candidates: RecentBlobCandidate[]): Promise<R
             if (typeof objectId !== "string" || !content || content.dataType !== "moveObject") return null;
             const fields = content.fields;
             const rawBlobId = fields?.blob_id ?? fields?.blobId ?? null;
-            return { objectId, rawBlobId, timestampMs: timestampByObject.get(objectId) ?? null };
+            return {
+                objectId,
+                rawBlobId,
+                endEpoch: endEpochFromBlobFields(fields),
+                timestampMs: timestampByObject.get(objectId) ?? null,
+            };
         })
         .filter((obj: RawBlobObj | null): obj is RawBlobObj => obj !== null);
 }
@@ -1650,7 +1724,11 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
                     const fields = (obj.data.content as any).fields;
                     if (!fields) continue;
                     const rawBlobId = fields.blob_id ?? fields.blobId ?? null;
-                    rawObjs.push({ objectId: obj.data.objectId, rawBlobId });
+                    rawObjs.push({
+                        objectId: obj.data.objectId,
+                        rawBlobId,
+                        endEpoch: endEpochFromBlobFields(fields),
+                    });
                 }
 
                 hasMore = result.hasNextPage;
@@ -1669,6 +1747,7 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
         type BlobMeta = {
             objectId: string;
             rawBlobId: string | number | null;
+            endEpoch: number | null;
             blobNamespace: string;
             blobOwner: string;
             blobPackageId: string;
@@ -1708,7 +1787,7 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
         });
 
         // Step 3: Filter + convert blob IDs
-        const blobs: { blobId: string; objectId: string; namespace: string; packageId: string; agentId: string }[] = [];
+        const blobs: { blobId: string; objectId: string; endEpoch: number | null; namespace: string; packageId: string; agentId: string }[] = [];
 
         for (const meta of metas) {
             // Filter by namespace if specified
@@ -1720,7 +1799,7 @@ app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), as
                 // blob_id from chain is a big integer (U256); convert to base64url (little-endian).
                 const blobIdStr = blobIdFromRaw(meta.rawBlobId);
                 if (blobIdStr) {
-                    blobs.push({ blobId: blobIdStr, objectId: meta.objectId, namespace: meta.blobNamespace, packageId: meta.blobPackageId, agentId: meta.blobAgentId });
+                    blobs.push({ blobId: blobIdStr, objectId: meta.objectId, endEpoch: meta.endEpoch, namespace: meta.blobNamespace, packageId: meta.blobPackageId, agentId: meta.blobAgentId });
                 }
             }
         }

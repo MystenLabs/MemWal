@@ -68,6 +68,89 @@ async fn generate_recall_embedding_cached(
 }
 
 // ============================================================
+// Current Walrus epoch cache (Redis)
+// ============================================================
+//
+// The blob-expiry filter in `search_similar` needs the current Walrus epoch.
+// Reading it on every recall would mean one chain round-trip per request via
+// the sidecar — wasteful, since epochs advance roughly daily on testnet and
+// every ~2 weeks on mainnet. So we cache it with a long positive TTL.
+//
+// Failures must NOT block recall: returning None tells `search_similar` to
+// fail open (serve everything; the 404 cleanup backstop still catches actual
+// dead blobs). A short negative-cache on failure prevents every concurrent
+// request from independently hammering the sidecar during an outage.
+
+/// Network-scoped key so a testnet↔mainnet switch can't surface a stale
+/// cross-network value. The `:v1:` segment matches the `memwal:…:v1` convention
+/// used elsewhere, leaving room to bump without a flush.
+fn current_epoch_cache_key(config: &Config) -> String {
+    format!("memwal:walrus:current_epoch:v1:{}", config.sui_network)
+}
+
+/// Positive-cache TTL. Epochs change roughly daily (testnet) or every ~2 weeks
+/// (mainnet), so an hour-stale value is at most a fraction of an epoch — and
+/// the 404 backstop still catches a blob whose lease ended within the window.
+const CURRENT_EPOCH_TTL_SECS: u64 = 3600;
+
+/// Negative-cache TTL. When a lookup fails we briefly cache a sentinel so a
+/// sidecar/RPC outage doesn't have every concurrent recall stampede the
+/// sidecar with the same failing call. 30s is short enough that the filter
+/// rearms promptly once the sidecar recovers.
+const CURRENT_EPOCH_NEG_TTL_SECS: u64 = 30;
+
+/// Sentinel meaning "lookup failed recently, stay fail-open". Real epochs are
+/// always ≥ 0, so any negative value is an unambiguous marker.
+const CURRENT_EPOCH_FAILED_SENTINEL: i64 = -1;
+
+/// Returns the current Walrus epoch for the expiry filter, or `None` to mean
+/// "fail open — don't filter". The caller (`search_similar`) MUST treat None
+/// as "serve everything"; that's what makes any transient chain/sidecar issue
+/// safe by construction (it can never hide a live memory, and the 404 path
+/// still catches truly-dead blobs).
+pub(crate) async fn current_epoch_cached(state: &AppState) -> Option<i64> {
+    let cache_key = current_epoch_cache_key(&state.config);
+    let mut redis = state.redis.clone();
+
+    match redis.get::<_, Option<i64>>(&cache_key).await {
+        // Negative-cache hit: a recent lookup failed; keep failing open without
+        // calling the sidecar again until the short negative-TTL expires.
+        Ok(Some(v)) if v < 0 => return None,
+        Ok(Some(epoch)) => return Some(epoch),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("current-epoch cache get failed: {}", e),
+    }
+
+    let epoch = match crate::storage::walrus::get_current_epoch(
+        &state.http_client,
+        &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e as i64,
+        Err(e) => {
+            // Best-effort negative-cache so the next N seconds of recalls skip
+            // the failing sidecar call. Failing to set is harmless: we just
+            // miss again next time.
+            tracing::warn!("current-epoch lookup failed (fail-open, not filtering): {}", e);
+            let _: redis::RedisResult<()> = redis
+                .set_ex(&cache_key, CURRENT_EPOCH_FAILED_SENTINEL, CURRENT_EPOCH_NEG_TTL_SECS)
+                .await;
+            return None;
+        }
+    };
+
+    let result: redis::RedisResult<()> =
+        redis.set_ex(&cache_key, epoch, CURRENT_EPOCH_TTL_SECS).await;
+    if let Err(e) = result {
+        tracing::warn!("current-epoch cache set failed: {}", e);
+    }
+
+    Some(epoch)
+}
+
+// ============================================================
 // Shared ranking for manual recall (ENG-1785)
 // ============================================================
 
@@ -182,10 +265,15 @@ pub async fn recall(
     // MED-3 fix: Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
+    // Read the current epoch ONCE per recall — `search_similar` uses it to
+    // filter out rows whose Walrus blob lease has ended before hydration even
+    // starts (the cache below is downstream and would otherwise serve dead
+    // ciphertext for the rest of its TTL).
+    let current_epoch = current_epoch_cached(&state).await;
     let t1 = std::time::Instant::now();
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(&query_vector, owner, namespace, limit, current_epoch)
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
     let hit_count = hits.len();
@@ -342,9 +430,13 @@ pub async fn recall_manual(
     // Search Vector DB — blob IDs + distances (+ created_at + importance).
     // MED-3 fix: Cap limit on recall_manual as well.
     let limit = body.limit.min(100);
+    // Manual recall hands the blob_ids back to the client to fetch themselves,
+    // so the expiry filter matters here too: returning a dead blob's id is just
+    // a guaranteed 404 on the client side.
+    let current_epoch = current_epoch_cached(&state).await;
     let hits = state
         .db
-        .search_similar(&body.vector, owner, namespace, limit)
+        .search_similar(&body.vector, owner, namespace, limit, current_epoch)
         .await?;
 
     // Apply the shared CompositeRanker so manual ordering matches

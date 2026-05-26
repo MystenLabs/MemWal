@@ -257,7 +257,18 @@ impl MemoryEngine for WalrusSealEngine {
         )
         .await?;
         let blob_id = upload.blob_id;
-        tracing::info!("engine.store_blob: walrus upload ok blob_id={}", blob_id);
+        // Capture before the upload struct is dropped. u64→i64 cast is safe:
+        // chain epochs are u32 (max ~4.3e9 ≪ i64::MAX). If either is None the
+        // row stores NULL, which the recall filter treats as always-served —
+        // the deliberate safe default for rows whose lease state we don't
+        // (yet) know.
+        let end_epoch = upload.end_epoch.map(|e| e as i64);
+        let object_id = upload.object_id;
+        tracing::info!(
+            "engine.store_blob: walrus upload ok blob_id={}, end_epoch={:?}",
+            blob_id,
+            end_epoch
+        );
 
         // MEM-37: warm the Redis blob cache with the just-uploaded ciphertext
         // so the first recall of this blob hits the cache instead of round-
@@ -270,7 +281,15 @@ impl MemoryEngine for WalrusSealEngine {
         let blob_size = bytes.len() as i64;
         self.db
             .insert_vector(
-                &id, owner, namespace, &blob_id, vector, blob_size, importance,
+                &id,
+                owner,
+                namespace,
+                &blob_id,
+                vector,
+                blob_size,
+                importance,
+                end_epoch,
+                object_id.as_deref(),
             )
             .await?;
 

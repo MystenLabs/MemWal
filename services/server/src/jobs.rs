@@ -415,6 +415,13 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             blob_size_bytes,
             importance,
         } => {
+            // Deferred metadata-transfer recovery: the original upload result
+            // is long gone, so end_epoch isn't on hand — but we DO have the
+            // blob object id (we're about to set its metadata). Persist that;
+            // the backfill can read end_epoch later from this object id
+            // without re-running the expensive per-owner wallet scan. NULL
+            // end_epoch is the safe default — the row stays always-served.
+            let recovery_object_id = blob_object_id.clone();
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
@@ -438,6 +445,8 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                             &vector,
                             blob_size_bytes,
                             importance,
+                            None,
+                            Some(recovery_object_id.as_str()),
                             enqueued_wallet_index,
                         )
                         .await
@@ -510,6 +519,11 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             blob_size_bytes,
             importance,
         } => {
+            // Index-only retry after a finalization failure. The job variant
+            // doesn't carry the lease state, so end_epoch + object_id go in
+            // NULL — the row stays always-served until the backfill picks it
+            // up (the safe direction; a real expired row will still 404 and
+            // be cleaned up by the recall backstop).
             insert_vector_and_mark_remember_done(
                 state,
                 remember_job_id.as_deref(),
@@ -519,6 +533,8 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 &vector,
                 blob_size_bytes,
                 importance,
+                None,
+                None,
                 enqueued_wallet_index,
             )
             .await
@@ -588,6 +604,9 @@ async fn insert_vector_and_mark_remember_done(
     vector: &[f32],
     blob_size_bytes: i64,
     importance: f32,
+    // Lease state from the upload (None on recovery paths that lack it).
+    end_epoch: Option<i64>,
+    object_id: Option<&str>,
     wallet_index: usize,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
@@ -604,6 +623,8 @@ async fn insert_vector_and_mark_remember_done(
             vector,
             blob_size_bytes,
             importance,
+            end_epoch,
+            object_id,
         )
         .await
     {
@@ -839,6 +860,10 @@ async fn execute_upload_and_transfer(
         }
     };
     let blob_id = upload.blob_id.clone();
+    // Lease state from the upload — chain epoch is u32, so the i64 cast is
+    // lossless for any value Walrus will ever produce.
+    let end_epoch = upload.end_epoch.map(|e| e as i64);
+    let object_id = upload.object_id.clone();
 
     warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
 
@@ -863,6 +888,8 @@ async fn execute_upload_and_transfer(
         &vector,
         encrypted.len() as i64,
         importance,
+        end_epoch,
+        object_id.as_deref(),
         wallet_index,
     )
     .await
@@ -1132,6 +1159,10 @@ pub async fn execute_remember(
         Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
     };
     let blob_id = upload.blob_id.clone();
+    // Lease state from the upload (see `insert_vector_and_mark_remember_done`
+    // for the u64→i64 rationale).
+    let end_epoch = upload.end_epoch.map(|e| e as i64);
+    let object_id = upload.object_id.clone();
 
     warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
 
@@ -1152,6 +1183,8 @@ pub async fn execute_remember(
             // new requests go through WalletOperation::UploadAndTransfer
             // which carries importance through end-to-end.
             crate::services::extractor::IMPORTANCE_STANDARD,
+            end_epoch,
+            object_id.as_deref(),
         )
         .await
     {

@@ -25,41 +25,87 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
-        // Run migrations
+        // Serialize migrations across concurrent app boots via a session-level
+        // advisory lock on a single dedicated connection. Two instances booting
+        // together can otherwise both pass an `IF NOT EXISTS` check and race —
+        // `CREATE INDEX` in particular is not idempotent against a concurrent
+        // creator and crash-loops the loser with "already exists". Holding the
+        // lock makes the second boot wait until the first finishes, at which
+        // point its migrations are clean no-ops. Session-level (not xact)
+        // because some DDL can't be wrapped in one transaction; we release
+        // explicitly in every exit path.
+        const MIGRATION_LOCK_KEY: i64 = 0x454E47_31373838;
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to acquire migration conn: {}", e)))?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to acquire migration lock: {}", e)))?;
+
+        let migration_result = Self::run_migrations(&mut conn).await;
+
+        // Release before returning the connection to the pool. A leaked session
+        // lock would block every subsequent boot on this same physical
+        // connection; logging on failure surfaces that fact (the conn drop
+        // below would force-release on disconnect anyway).
+        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&mut *conn)
+            .await
+        {
+            tracing::warn!("Failed to release migration advisory lock (will be released on conn drop): {}", e);
+        }
+        drop(conn);
+        migration_result?;
+
+        tracing::info!("database connected and migrations applied");
+
+        Ok(Self { pool })
+    }
+
+    /// Run all schema migrations on a single connection (held under the boot
+    /// advisory lock — see `new`). Each migration is `IF NOT EXISTS`-guarded, so
+    /// re-running every boot is a cheap no-op once applied.
+    async fn run_migrations(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    ) -> Result<(), AppError> {
         let migration_001 = include_str!("../../migrations/001_init.sql");
         sqlx::raw_sql(migration_001)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
 
         let migration_002 = include_str!("../../migrations/002_add_namespace.sql");
         sqlx::raw_sql(migration_002)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
 
         let migration_003 = include_str!("../../migrations/003_rate_limiter.sql");
         sqlx::raw_sql(migration_003)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
 
         let migration_004 = include_str!("../../migrations/004_delegate_key_cache_expires.sql");
         sqlx::raw_sql(migration_004)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
 
         let migration_005 = include_str!("../../migrations/005_remember_jobs.sql");
         sqlx::raw_sql(migration_005)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
 
         // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
         let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
         sqlx::raw_sql(migration_006)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
@@ -69,7 +115,7 @@ impl VectorDb {
         // wallet + retry handling is sufficient.
         let migration_007 = include_str!("../../migrations/007_collapse_wallet_queues.sql");
         sqlx::raw_sql(migration_007)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
 
@@ -79,20 +125,26 @@ impl VectorDb {
         // with MEM-35's 007_collapse_wallet_queues.sql.
         let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
         sqlx::raw_sql(migration_008)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
 
         // MEM-54: importance signal column on vector_entries.
         let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
         sqlx::raw_sql(migration_009)
-            .execute(&pool)
+            .execute(&mut **conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
-        tracing::info!("database connected and migrations applied");
+        // Blob-expiry tracking: end_epoch + object_id columns. Additive +
+        // nullable; the recall filter treats NULL as always-served.
+        let migration_010 = include_str!("../../migrations/010_blob_end_epoch.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&mut **conn)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
-        Ok(Self { pool })
+        Ok(())
     }
 
     /// Expose a reference to the underlying `PgPool` so job handlers
@@ -118,20 +170,31 @@ impl VectorDb {
         vector: &[f32],
         blob_size_bytes: i64,
         importance: f32,
+        // Lease state for the Walrus blob, captured from the upload result.
+        // Either being `None` writes NULL — the recall filter treats NULL as
+        // always-served, so a missing value is the safe direction (never
+        // wrongly hides a memory; backfill resolves it later).
+        end_epoch: Option<i64>,
+        object_id: Option<&str>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, end_epoch, object_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                -- COALESCE the lease columns so a recovery/restore upsert
+                -- bearing NULL can't overwrite a previously-recorded value.
+                -- A real new value (fresh upload) still overwrites.
+                end_epoch = COALESCE(EXCLUDED.end_epoch, vector_entries.end_epoch),
+                object_id = COALESCE(EXCLUDED.object_id, vector_entries.object_id)",
         )
         .bind(id)
         .bind(owner)
@@ -140,6 +203,8 @@ impl VectorDb {
         .bind(embedding)
         .bind(blob_size_bytes)
         .bind(importance)
+        .bind(end_epoch)
+        .bind(object_id)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
@@ -260,6 +325,12 @@ impl VectorDb {
         owner: &str,
         namespace: &str,
         limit: usize,
+        // Current Walrus epoch for the expiry filter. `None` means the
+        // sidecar/cache lookup failed; we fail open by binding a sentinel
+        // (`i64::MIN`) that never excludes any row, instead of branching the
+        // SQL. The 404 backstop in the hydration path still guards against
+        // serving a blob Walrus has actually GC'd.
+        current_epoch: Option<i64>,
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
@@ -268,12 +339,20 @@ impl VectorDb {
         // without a second round-trip. Both NOT NULL (migration 001 for
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
+        //
+        // Expiry filter `end_epoch IS NULL OR end_epoch > $5` runs INSIDE the
+        // WHERE so dead rows can't take up LIMIT slots. NULL always passes —
+        // benchmark rows and any row not yet backfilled stay always-served,
+        // which is the safe direction (a row can only be wrongly hidden if
+        // its end_epoch was explicitly set, never by NULL).
+        let epoch_threshold = current_epoch.unwrap_or(i64::MIN);
         let started = std::time::Instant::now();
         let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
             sqlx::query_as(
                 "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
+               AND (end_epoch IS NULL OR end_epoch > $5)
              ORDER BY embedding <=> $1
              LIMIT $4",
             )
@@ -281,6 +360,7 @@ impl VectorDb {
             .bind(owner)
             .bind(namespace)
             .bind(limit as i64)
+            .bind(epoch_threshold)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));

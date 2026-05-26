@@ -5,14 +5,21 @@ use std::time::Duration;
 
 const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(180);
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
+/// Current-epoch lookup is on the recall hot path and the caller already fails
+/// open, so it gets a tight timeout — not the long upload budget.
+const CURRENT_EPOCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Result of a Walrus blob upload
 pub struct UploadResult {
     /// Walrus content-addressed blob ID (base64url)
     pub blob_id: String,
     /// Sui object ID of the Blob object (hex, e.g. "0x...")
-    #[allow(dead_code)]
     pub object_id: Option<String>,
+    /// Storage lease end epoch (`blobObject.storage.end_epoch`), read from
+    /// the upload result with no extra chain call. `None` if the sidecar
+    /// didn't surface it (older sidecar, or a code path that doesn't expose
+    /// it); persisted as NULL, which the recall filter treats as always-served.
+    pub end_epoch: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -66,6 +73,11 @@ pub struct OnChainBlob {
     /// Walrus Memory package ID from on-chain metadata
     #[serde(rename = "packageId", default)]
     pub package_id: String,
+    /// Storage lease end epoch — read by the sidecar from the on-chain object's
+    /// `storage.end_epoch` during the query, with no extra chain call. Lets
+    /// restore persist the real lease state instead of relying on the backfill.
+    #[serde(rename = "endEpoch", default)]
+    pub end_epoch: Option<u64>,
 }
 
 /// Response from sidecar query-blobs endpoint
@@ -73,6 +85,67 @@ pub struct OnChainBlob {
 struct QueryBlobsResponse {
     blobs: Vec<OnChainBlob>,
     total: usize,
+}
+
+/// Response from the sidecar `/walrus/current-epoch` endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct CurrentEpochResponse {
+    epoch: u64,
+}
+
+/// Read the current Walrus epoch from the sidecar, which owns the Walrus SDK
+/// client. Callers cache the result (the per-recall Redis cache lives in the
+/// recall route) — this performs the actual uncached chain read. On any
+/// failure the caller treats it as fail-open (serve everything), so an `Err`
+/// here can never wrongly hide a live memory.
+pub async fn get_current_epoch(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+) -> Result<u64, AppError> {
+    let url = format!("{}/walrus/current-epoch", sidecar_url);
+
+    // Tight timeout — this is on the recall hot path and the caller already
+    // fails open, so we'd rather give up fast than ride the shared client's
+    // 30s default while the sidecar is hung.
+    let mut req = client.get(&url).timeout(CURRENT_EPOCH_TIMEOUT);
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "walrus_current_epoch",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("walrus_current_epoch", "transport_error");
+        AppError::Internal(format!("Sidecar walrus/current-epoch failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_current_epoch",
+        &status_label,
+        started.elapsed(),
+    );
+
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_current_epoch", "http_error");
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "walrus current-epoch failed: {}",
+            body
+        )));
+    }
+
+    let result: CurrentEpochResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!("Failed to parse current-epoch response: {}", e))
+    })?;
+
+    Ok(result.epoch)
 }
 
 /// Request/response types for sidecar HTTP API
@@ -97,6 +170,11 @@ struct WalrusUploadResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    /// Storage lease end epoch from the on-chain Blob object. `#[serde(default)]`
+    /// so an older sidecar that omits the field parses as `None` rather than
+    /// erroring (forwards-compatible deploy).
+    #[serde(default)]
+    end_epoch: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -293,6 +371,7 @@ async fn upload_blob_inner(
     Ok(UploadResult {
         blob_id: result.blob_id,
         object_id: result.object_id,
+        end_epoch: result.end_epoch,
     })
 }
 

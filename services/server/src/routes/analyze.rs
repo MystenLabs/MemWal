@@ -194,6 +194,11 @@ pub async fn analyze(
         match input_vector_opt {
             None => Vec::new(),
             Some(input_vector) => {
+                // Apply the blob-expiry filter here too: pre-extraction context
+                // feeds the LLM, and surfacing a dead blob's row would either
+                // waste a fetch on the 404 path or (worse) bias the extractor on
+                // content that's about to vanish. Cached + fail-open.
+                let current_epoch = super::recall::current_epoch_cached(&state).await;
                 let search_t = std::time::Instant::now();
                 let search_result = tokio::time::timeout(
                     std::time::Duration::from_millis(SEARCH_TIMEOUT_MS),
@@ -202,6 +207,7 @@ pub async fn analyze(
                         owner,
                         namespace,
                         PRE_EXTRACTION_CONTEXT_LIMIT,
+                        current_epoch,
                     ),
                 )
                 .await;
