@@ -1075,6 +1075,9 @@ mod tests {
             benchmark_mode: false,
             slack_webhook_url: None,
             env_label: "test".to_string(),
+            health_check_interval_secs: 30,
+            health_check_fail_threshold: 3,
+            wallet_pool_drain_window: None,
         }
     }
 

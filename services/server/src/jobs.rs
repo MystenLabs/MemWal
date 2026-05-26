@@ -310,6 +310,79 @@ fn spawn_slack_remember_failed_alert(
     });
 }
 
+/// ENG-1784: fire-and-forget infra-level Slack alert. Same fire-and-forget
+/// contract as `spawn_slack_remember_failed_alert` — Slack POST cannot
+/// block the wallet worker and a Slack-side outage cannot fail the job.
+/// The infra alerter dedups by variant kind, so repeated calls for the
+/// same `InfraFailureKind` within `DEDUP_WINDOW` only post once.
+pub(crate) fn spawn_slack_infra_alert(
+    slack: Option<&Arc<crate::slack::SlackClient>>,
+    kind: crate::slack::InfraFailureKind,
+) {
+    let Some(client) = slack else {
+        return;
+    };
+    let client = client.clone();
+    tokio::spawn(async move {
+        let alert = crate::slack::InfraFailureAlert { kind };
+        if let Err(err) = client.notify_infra_failure(alert).await {
+            tracing::warn!("Slack infra alert failed: {}", err);
+        }
+    });
+}
+
+/// ENG-1784: detect "wallet pool drained" — every wallet returning
+/// `Transient` errors for `drain_window` consecutive attempts means the
+/// pool is effectively unable to make progress (typically every wallet is
+/// out of gas / hit `balance::split`). Currently silent because the
+/// per-job classifier only alerts on `Permanent` — this hook is what
+/// surfaces the system-blocking state to ops.
+///
+/// Called from the central wallet-job result branch. `outcome_is_transient`
+/// = `true` means this job ended in `WalletJobError::Transient`; any other
+/// outcome (success or `Permanent`) resets the streak.
+pub(crate) fn track_wallet_pool_health(
+    state: &crate::types::AppState,
+    outcome_is_transient: bool,
+) {
+    let pool_size = state.key_pool.len();
+    if pool_size == 0 {
+        // Empty pool is a separate `NoSuiKeysConfigured` alert, fired
+        // once at boot. Nothing to track here.
+        return;
+    }
+    if !outcome_is_transient {
+        state.key_pool.reset_transient_streak();
+        return;
+    }
+    let streak = state.key_pool.record_transient_failure();
+    // Default drain window = MAX_ATTEMPTS × pool_size — every wallet has
+    // been tried `MAX_ATTEMPTS` times in a row. Override via env var if
+    // operators want a tighter / looser trigger.
+    let drain_window = state
+        .config
+        .wallet_pool_drain_window
+        .unwrap_or_else(|| (MAX_ATTEMPTS as u64) * (pool_size as u64));
+    // Fire exactly on the threshold crossing. If the streak keeps
+    // growing, the dedup window in `SlackClient` collapses repeats.
+    // Using `==` instead of `>=` keeps the spawn count bounded in case
+    // a slow Slack POST and a fast retry loop race.
+    if streak == drain_window {
+        tracing::error!(
+            pool_size = pool_size,
+            consecutive_transient = streak,
+            "wallet pool drained — firing infra alert"
+        );
+        spawn_slack_infra_alert(
+            state.slack.as_ref(),
+            crate::slack::InfraFailureKind::WalletPoolDrained {
+                pool_size,
+                consecutive_transient: streak,
+            },
+        );
+    }
+}
+
 async fn classify_wallet_remember_handoff_failure(
     pool: &sqlx::PgPool,
     slack: Option<&Arc<crate::slack::SlackClient>>,
@@ -644,6 +717,14 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
             .await
         }
     };
+
+    // ENG-1784: track wallet pool health centrally — only the dispatcher
+    // sees every outcome of a WalletJob, so it's the right hook for
+    // "every wallet returned Transient for N attempts in a row" detection.
+    track_wallet_pool_health(
+        state,
+        matches!(result, Err(WalletJobError::Transient(_))),
+    );
 
     result.map_err(|err| {
         if let WalletJobError::Permanent(ref msg) = err {
@@ -1156,10 +1237,15 @@ pub async fn execute_remember(
     .execute(state.db.pool())
     .await;
 
-    // Helper: mark failed and return Err
+    // Helper: mark failed and return Err.
+    // ENG-1784: per-job failures here are NOT system-blocking (one job
+    // per user), so they DO NOT page Slack — the counter feeds the
+    // `memwal_remember_per_job_failed_total` Prometheus metric instead.
+    // `$kind` is a stable label for that metric.
     macro_rules! fail {
-        ($msg:expr) => {{
+        ($kind:literal, $msg:expr) => {{
             let msg = $msg.to_string();
+            crate::observability::record_remember_per_job_failure("legacy", $kind);
             tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
             let _ = sqlx::query(
                 "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
@@ -1175,13 +1261,13 @@ pub async fn execute_remember(
     // ── Step 2: decode ciphertext (already SEAL-encrypted in route handler) ──
     let encrypted = match base64::engine::general_purpose::STANDARD.decode(&job.encrypted_b64) {
         Ok(b) => b,
-        Err(e) => fail!(format!("base64 decode failed: {}", e)),
+        Err(e) => fail!("base64_decode", format!("base64 decode failed: {}", e)),
     };
     // vector is also pre-computed in route handler — no network call needed here.
 
     let key_index = match state.key_pool.next_index() {
         Some(idx) => idx,
-        None => fail!("No Sui keys configured in pool"),
+        None => fail!("no_keys", "No Sui keys configured in pool"),
     };
 
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
@@ -1264,7 +1350,9 @@ pub async fn execute_remember(
             );
             return Ok(());
         }
-        Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
+        Err(UploadBlobError::App(e)) => {
+            fail!("walrus_upload", format!("walrus upload failed: {}", e))
+        }
     };
     let blob_id = upload.blob_id.clone();
 
@@ -1290,7 +1378,7 @@ pub async fn execute_remember(
         )
         .await
     {
-        fail!(format!("insert_vector failed: {}", e));
+        fail!("insert_vector", format!("insert_vector failed: {}", e));
     }
 
     // ── Step 5: mark done ────────────────────────────────────────
@@ -1423,6 +1511,16 @@ pub async fn execute_bulk_remember(
             })
             .await
             .map_err(|e| {
+                // ENG-1784: per-item fan-out failure is per-user (one
+                // item in one bulk request), not system-blocking. Bump
+                // the metric so a sustained spike is dashboard-visible;
+                // do NOT page Slack. If the broader queue layer is
+                // wedged, the `ApalisQueueStuck` infra alert will catch
+                // it instead.
+                crate::observability::record_remember_per_job_failure(
+                    "bulk_fanout",
+                    "queue_push",
+                );
                 BulkRememberError::Internal(format!(
                     "failed to enqueue wallet job for {}: {}",
                     job_id, e

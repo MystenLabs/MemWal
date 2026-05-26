@@ -81,6 +81,34 @@ async fn main() {
         tracing::warn!("⚠️  Unset RATE_LIMIT_DISABLED to restore protection.");
     }
 
+    // ENG-1784: build the Slack alerter EARLY (right after config) so the
+    // sidecar heartbeat + the per-dependency health probes can all clone
+    // the same handle. Only enabled when SLACK_WEBHOOK_URL is set; None
+    // disables every alert path without disturbing any other code path.
+    // The server commit + env label are baked in so each alert's footer
+    // identifies which deployment fired it.
+    let slack: Option<Arc<crate::slack::SlackClient>> =
+        config.slack_webhook_url.as_ref().map(|url| {
+            let commit = std::env::var("GIT_SHA")
+                .or_else(|_| std::env::var("GITHUB_SHA"))
+                .or_else(|_| std::env::var("RAILWAY_GIT_COMMIT_SHA"))
+                .ok()
+                .map(|v| v.chars().take(7).collect::<String>());
+            tracing::info!(
+                "  Slack alerter: enabled (env={}, commit={})",
+                config.env_label,
+                commit.as_deref().unwrap_or("-"),
+            );
+            Arc::new(crate::slack::SlackClient::new(
+                url.clone(),
+                config.env_label.clone(),
+                commit,
+            ))
+        });
+    if slack.is_none() {
+        tracing::info!("  Slack alerter: disabled (set SLACK_WEBHOOK_URL to enable)");
+    }
+
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
     tracing::info!("  sidecar: starting at {}", sidecar_url);
@@ -129,10 +157,20 @@ async fn main() {
 
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
     // Enoki/Walrus failures from the sidecar process becoming unavailable.
+    //
+    // ENG-1784: also fire `InfraFailureKind::SidecarDown` to Slack when
+    // consecutive failures cross the configured threshold (default 3 ≈
+    // 90s sustained outage). The Slack client itself dedups per variant
+    // for 5 minutes so a real outage produces ~1 page per window, not
+    // one per failed probe.
     let sidecar_watch_client = http_client.clone();
     let sidecar_watch_url = health_url.clone();
+    let sidecar_fail_threshold = config.health_check_fail_threshold;
+    let sidecar_interval_secs = config.health_check_interval_secs;
+    let slack_handle = slack.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(sidecar_interval_secs));
         let mut consecutive_failures = 0u32;
         loop {
             interval.tick().await;
@@ -158,6 +196,14 @@ async fn main() {
                         resp.status(),
                         consecutive_failures
                     );
+                    if consecutive_failures == sidecar_fail_threshold {
+                        crate::jobs::spawn_slack_infra_alert(
+                            slack_handle.as_ref(),
+                            crate::slack::InfraFailureKind::SidecarDown {
+                                consecutive_failures,
+                            },
+                        );
+                    }
                 }
                 Err(e) => {
                     consecutive_failures += 1;
@@ -166,6 +212,14 @@ async fn main() {
                         consecutive_failures,
                         e
                     );
+                    if consecutive_failures == sidecar_fail_threshold {
+                        crate::jobs::spawn_slack_infra_alert(
+                            slack_handle.as_ref(),
+                            crate::slack::InfraFailureKind::SidecarDown {
+                                consecutive_failures,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -237,6 +291,15 @@ async fn main() {
         );
     } else {
         tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
+        // ENG-1784: page on-call once at boot — without a key pool every
+        // remember job will fail, but the per-job classifier currently
+        // returns the same Permanent error per request and dedup
+        // collapses them. Surfacing it explicitly at startup is cheaper
+        // than waiting for the first user complaint.
+        crate::jobs::spawn_slack_infra_alert(
+            slack.as_ref(),
+            crate::slack::InfraFailureKind::NoSuiKeysConfigured,
+        );
     }
 
     // Build wallet key holder.
@@ -329,44 +392,19 @@ async fn main() {
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
-    // ENG-1784: Slack alerter — only enabled if SLACK_WEBHOOK_URL is set.
-    // The server commit + env label are baked into the SlackClient so the
-    // footer of every alert identifies which deployment fired it. We pull
-    // the commit from the same env vars compatibility.rs uses (kept
-    // deliberately loose so Railway / CI / Nautilus can each set whichever
-    // var they already expose).
-    let slack = config.slack_webhook_url.as_ref().map(|url| {
-        let commit = std::env::var("GIT_SHA")
-            .or_else(|_| std::env::var("GITHUB_SHA"))
-            .or_else(|_| std::env::var("RAILWAY_GIT_COMMIT_SHA"))
-            .ok()
-            .map(|v| v.chars().take(7).collect::<String>());
-        tracing::info!(
-            "  Slack alerter: enabled (env={}, commit={})",
-            config.env_label,
-            commit.as_deref().unwrap_or("-"),
-        );
-        Arc::new(crate::slack::SlackClient::new(
-            url.clone(),
-            config.env_label.clone(),
-            commit,
-        ))
-    });
-    if slack.is_none() {
-        tracing::info!("  Slack alerter: disabled (set SLACK_WEBHOOK_URL to enable)");
-    }
-
-    // Shared application state
+    // Shared application state. http_client + slack are cloned (rather
+    // than moved) so the ENG-1784 health probes spawned below can hold
+    // their own handles; Arc + reqwest::Client are both cheap to clone.
     let state = Arc::new(AppState {
-        db,
+        db: db.clone(),
         config: Arc::clone(&config),
-        http_client,
+        http_client: http_client.clone(),
         key_pool,
         engine,
         embedder,
         extractor,
         ranker,
-        redis,
+        redis: redis.clone(),
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
@@ -374,7 +412,7 @@ async fn main() {
         blob_cache_ttl,
         blob_cache_max_bytes,
         embedding_cache_ttl,
-        slack,
+        slack: slack.clone(),
     });
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
@@ -504,6 +542,166 @@ async fn main() {
             }
         }
     });
+
+    // ENG-1784: infra-health probes — three lightweight pollers that
+    // detect when a hard dependency is down and the whole relayer can't
+    // make progress. Each probe runs at `health_check_interval_secs`,
+    // counts consecutive failures, and fires the matching
+    // `InfraFailureKind` exactly when the count crosses
+    // `health_check_fail_threshold`. Slack-side dedup collapses repeats
+    // for `DEDUP_WINDOW` so the channel sees one page per real incident.
+    // All probes are no-ops if `SLACK_WEBHOOK_URL` is unset — logs still
+    // surface the state.
+
+    // Probe 1: Postgres reachability + pool saturation
+    {
+        let probe_state = state.clone();
+        let probe_slack = slack.clone();
+        let interval_secs = config.health_check_interval_secs;
+        let fail_threshold = config.health_check_fail_threshold;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut consecutive_failures = 0u32;
+            loop {
+                interval.tick().await;
+                // `SELECT 1` is the standard cheap reachability probe — if
+                // it can't even acquire a connection or run the query, the
+                // pool is wedged.
+                let probe = sqlx::query_scalar::<_, i32>("SELECT 1")
+                    .fetch_one(probe_state.db.pool())
+                    .await;
+                match probe {
+                    Ok(_) => {
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                "  postgres probe: recovered after {} failed checks",
+                                consecutive_failures
+                            );
+                        }
+                        consecutive_failures = 0;
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::error!(
+                            "  postgres probe: failed (consecutive={}): {}",
+                            consecutive_failures,
+                            e
+                        );
+                        if consecutive_failures == fail_threshold {
+                            crate::jobs::spawn_slack_infra_alert(
+                                probe_slack.as_ref(),
+                                crate::slack::InfraFailureKind::PostgresDown {
+                                    reason: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Probe 2: Redis reachability via PING
+    {
+        let probe_slack = slack.clone();
+        let mut probe_redis = state.redis.clone();
+        let interval_secs = config.health_check_interval_secs;
+        let fail_threshold = config.health_check_fail_threshold;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut consecutive_failures = 0u32;
+            loop {
+                interval.tick().await;
+                let ping: redis::RedisResult<String> = redis::cmd("PING")
+                    .query_async(&mut probe_redis)
+                    .await;
+                match ping {
+                    Ok(_) => {
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                "  redis probe: recovered after {} failed checks",
+                                consecutive_failures
+                            );
+                        }
+                        consecutive_failures = 0;
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::error!(
+                            "  redis probe: PING failed (consecutive={}): {}",
+                            consecutive_failures,
+                            e
+                        );
+                        if consecutive_failures == fail_threshold {
+                            crate::jobs::spawn_slack_infra_alert(
+                                probe_slack.as_ref(),
+                                crate::slack::InfraFailureKind::RedisDown {
+                                    consecutive_failures,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Probe 3: Sui RPC reachability via JSON-RPC. We send the cheapest
+    // valid method (`sui_getLatestCheckpointSequenceNumber`, no params)
+    // because a bare HEAD/GET will 405 against a JSON-RPC endpoint.
+    {
+        let probe_slack = slack.clone();
+        let probe_client = http_client.clone();
+        let probe_rpc_url = config.sui_rpc_url.clone();
+        let interval_secs = config.health_check_interval_secs;
+        let fail_threshold = config.health_check_fail_threshold;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut consecutive_failures = 0u32;
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sui_getLatestCheckpointSequenceNumber",
+                "params": []
+            });
+            loop {
+                interval.tick().await;
+                let resp = probe_client
+                    .post(&probe_rpc_url)
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await;
+                let healthy = match resp {
+                    Ok(r) if r.status().is_success() => true,
+                    Ok(_) | Err(_) => false,
+                };
+                if healthy {
+                    if consecutive_failures > 0 {
+                        tracing::info!(
+                            "  sui_rpc probe: recovered after {} failed checks",
+                            consecutive_failures
+                        );
+                    }
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                    tracing::error!(
+                        "  sui_rpc probe: failed (consecutive={})",
+                        consecutive_failures,
+                    );
+                    if consecutive_failures == fail_threshold {
+                        crate::jobs::spawn_slack_infra_alert(
+                            probe_slack.as_ref(),
+                            crate::slack::InfraFailureKind::SuiRpcDown {
+                                consecutive_failures,
+                            },
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)

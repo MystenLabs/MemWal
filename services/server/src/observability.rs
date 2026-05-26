@@ -109,6 +109,20 @@ static SIDECAR_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("register memwal_sidecar_failures_total")
 });
 
+/// ENG-1784: count of per-job remember failures that are NOT routed to
+/// Slack (per lead policy: only system-blocking events page on-call). The
+/// counter lets Grafana dashboards still surface trends, and a sustained
+/// spike here is the input signal for a future system-level alert
+/// ("remember-fail rate per minute" — currently out of scope).
+static REMEMBER_PER_JOB_FAILED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "memwal_remember_per_job_failed_total",
+        "Per-job remember failures (legacy + bulk fan-out paths) that update DB state but do not page Slack.",
+        &["path", "kind"]
+    )
+    .expect("register memwal_remember_per_job_failed_total")
+});
+
 static DB_QUERY_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     prometheus::register_histogram_vec!(
         HistogramOpts::new(
@@ -293,6 +307,17 @@ pub fn observe_external(
 pub fn record_sidecar_failure(operation: &'static str, reason: &'static str) {
     SIDECAR_FAILURES_TOTAL
         .with_label_values(&[operation, reason])
+        .inc();
+}
+
+/// ENG-1784: bump the per-job remember failure counter. `path` is one of
+/// `"legacy"` (legacy `execute_remember`) or `"bulk_fanout"`
+/// (`execute_bulk_remember` enqueue failure). `kind` is a short label for
+/// the specific failure (e.g. `"base64_decode"`, `"no_keys"`,
+/// `"walrus_upload"`, `"insert_vector"`, `"queue_push"`).
+pub fn record_remember_per_job_failure(path: &'static str, kind: &'static str) {
+    REMEMBER_PER_JOB_FAILED_TOTAL
+        .with_label_values(&[path, kind])
         .inc();
 }
 

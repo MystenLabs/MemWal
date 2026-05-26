@@ -6,7 +6,7 @@ use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
 use crate::services::{Embedder, Extractor, Ranker};
 use crate::storage::db::VectorDb;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// ENG-1408: Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
@@ -124,9 +124,20 @@ pub struct AppState {
 /// Wallet key holder for distributing Walrus uploads across configured server
 /// keys. Apalis retries call `next_index()` again at execution time, so a
 /// transient sponsor/RPC failure can move to the next wallet in the pool.
+///
+/// ENG-1784: also tracks consecutive transient failures across the whole pool
+/// so the relayer can detect "every wallet drained" and alert on it. Each
+/// `Transient` wallet error increments `consecutive_transient_failures`; any
+/// `Permanent` result OR a successful wallet job resets it to 0. When the
+/// counter exceeds the configured `wallet_pool_drain_window`, the system
+/// fires a one-shot infra alert — the same value would otherwise loop
+/// silently because the per-job classifier only alerts on `Permanent`.
 pub struct KeyPool {
     keys: Vec<String>,
     cursor: AtomicUsize,
+    /// Count of consecutive `Transient` wallet errors across the pool.
+    /// Reset on any successful wallet job or any `Permanent` outcome.
+    consecutive_transient_failures: AtomicU64,
 }
 
 impl KeyPool {
@@ -134,6 +145,7 @@ impl KeyPool {
         Self {
             keys,
             cursor: AtomicUsize::new(0),
+            consecutive_transient_failures: AtomicU64::new(0),
         }
     }
 
@@ -160,9 +172,30 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Record one `Transient` wallet error and return the new running count.
+    /// Caller compares against the configured drain window to decide whether
+    /// to fire the `WalletPoolDrained` alert.
+    pub fn record_transient_failure(&self) -> u64 {
+        self.consecutive_transient_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    /// Reset the consecutive-transient counter. Called after any successful
+    /// wallet job or any `Permanent` outcome — both indicate the pool is
+    /// not silently spinning in a refillable state.
+    pub fn reset_transient_streak(&self) {
+        self.consecutive_transient_failures
+            .store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn current_transient_streak(&self) -> u64 {
+        self.consecutive_transient_failures.load(Ordering::Relaxed)
     }
 }
 
@@ -226,6 +259,21 @@ pub struct Config {
     /// Environment label included in the Slack alert footer
     /// (e.g. `prod` / `staging` / `dev`). Falls back to `unknown`.
     pub env_label: String,
+    /// ENG-1784: interval between infra-health probes (sidecar, Postgres,
+    /// Redis, Sui RPC). The first failure does NOT alert — the alert fires
+    /// only after `health_check_fail_threshold` consecutive failures so a
+    /// single flapping probe doesn't page on-call.
+    pub health_check_interval_secs: u64,
+    /// ENG-1784: consecutive health-probe failures before firing the
+    /// matching `InfraFailureKind` alert. Counts reset on the first
+    /// successful probe.
+    pub health_check_fail_threshold: u32,
+    /// ENG-1784: consecutive `Transient` wallet errors across the whole
+    /// pool before firing `WalletPoolDrained`. When unset, defaults to
+    /// `apalis MAX_ATTEMPTS × pool_size` (every wallet has been tried
+    /// `MAX_ATTEMPTS` times in a row). Set explicitly to tune sensitivity
+    /// without changing pool size.
+    pub wallet_pool_drain_window: Option<u64>,
 }
 
 impl Config {
@@ -320,6 +368,28 @@ impl Config {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "unknown".to_string()),
+            // ENG-1784: 30s default = 2 probes per minute per dependency, well
+            // under any rate limit and gives ops a sub-minute alert latency.
+            health_check_interval_secs: std::env::var("MEMWAL_HEALTH_CHECK_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(30),
+            // ENG-1784: 3 consecutive failures ≈ 90s of sustained downtime at
+            // the default 30s interval — enough to dodge a single network blip
+            // but fast enough that real outages page within ~1.5 min.
+            health_check_fail_threshold: std::env::var("MEMWAL_HEALTH_CHECK_FAIL_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(3),
+            // ENG-1784: when None, the worker computes the default at runtime
+            // from MAX_ATTEMPTS × pool_size. Setting it explicitly forces a
+            // fixed window regardless of pool size.
+            wallet_pool_drain_window: std::env::var("MEMWAL_WALLET_POOL_DRAIN_WINDOW")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0),
         }
     }
 }
@@ -1286,6 +1356,35 @@ mod tests {
         assert_eq!(pool.next_index(), Some(0));
         assert_eq!(pool.next_index(), Some(1));
         assert_eq!(pool.next_index(), Some(0));
+    }
+
+    // ENG-1784: drain counter starts at 0, increments on each transient
+    // failure, returns the new running count, and resets via either
+    // `reset_transient_streak()` or a `current_transient_streak()` read
+    // showing the rollback.
+    #[test]
+    fn key_pool_transient_streak_counts_and_resets() {
+        let pool = KeyPool::new(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(pool.current_transient_streak(), 0);
+        assert_eq!(pool.record_transient_failure(), 1);
+        assert_eq!(pool.record_transient_failure(), 2);
+        assert_eq!(pool.record_transient_failure(), 3);
+        assert_eq!(pool.current_transient_streak(), 3);
+        pool.reset_transient_streak();
+        assert_eq!(pool.current_transient_streak(), 0);
+        // Counter keeps working after a reset (not stuck at 0).
+        assert_eq!(pool.record_transient_failure(), 1);
+    }
+
+    #[test]
+    fn key_pool_transient_streak_independent_of_round_robin_cursor() {
+        // The drain counter must NOT be the same atomic as the round-robin
+        // cursor — otherwise next_index() would also affect the streak.
+        let pool = KeyPool::new(vec!["a".into(), "b".into()]);
+        pool.next_index();
+        pool.next_index();
+        pool.next_index();
+        assert_eq!(pool.current_transient_streak(), 0);
     }
 
     // ── SponsorRateLimitConfig defaults ─────────────────────────────────

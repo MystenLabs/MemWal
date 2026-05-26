@@ -130,6 +130,112 @@ pub struct RememberJobFailedAlert<'a> {
     pub kind: FailureKind,
 }
 
+/// Infra-level failure that blocks the WHOLE system (every user impacted).
+///
+/// Distinct from [`FailureKind`], which surfaces individual remember-job
+/// terminal failures: those are per-job and the per-signature dedup window
+/// keeps them from flooding the channel. Infra failures page on-call
+/// because nothing will succeed until the dependency is restored, and lead
+/// guidance is to only Slack things that block the whole system.
+///
+/// Each variant carries enough detail for the channel body to be useful
+/// (consecutive-failure counts, pool sizes, reason strings); the variant
+/// itself is used as the dedup signature so the same outage doesn't fan
+/// out into many alerts as the probe loops.
+#[derive(Debug, Clone)]
+pub enum InfraFailureKind {
+    /// Sidecar `/health` returning errors for sustained period. SEAL
+    /// encrypt/decrypt and Walrus upload route through the sidecar — all
+    /// writes fail when it's down.
+    SidecarDown { consecutive_failures: u32 },
+    /// Postgres unreachable (pool exhausted or connection rejected). All
+    /// DB-backed routes fail.
+    PostgresDown { reason: String },
+    /// Redis unavailable for sustained period. Rate limiter falls back
+    /// to in-memory; dedup window resets per-process.
+    RedisDown { consecutive_failures: u32 },
+    /// Sui RPC returning errors for sustained period. Auth verification
+    /// fails for everyone (delegate-key check requires Sui RPC).
+    SuiRpcDown { consecutive_failures: u32 },
+    /// Every wallet in the configured pool returned `Transient` errors
+    /// for `consecutive_transient` consecutive attempts (typically
+    /// `balance::split` MoveAbort / insufficient gas across the whole
+    /// pool). Remember jobs will never succeed until the pool is refilled.
+    WalletPoolDrained {
+        pool_size: usize,
+        consecutive_transient: u64,
+    },
+    /// `SERVER_SUI_PRIVATE_KEYS` / `SERVER_SUI_PRIVATE_KEY` both unset at
+    /// boot. Fires once during startup; uploads will fail for everyone
+    /// until a key is configured and the process restarts.
+    NoSuiKeysConfigured,
+}
+
+impl InfraFailureKind {
+    fn headline(&self) -> &'static str {
+        match self {
+            InfraFailureKind::SidecarDown { .. } => "🚨 MemWal Infra — Sidecar Down",
+            InfraFailureKind::PostgresDown { .. } => "🚨 MemWal Infra — Postgres Down",
+            InfraFailureKind::RedisDown { .. } => "🚨 MemWal Infra — Redis Down",
+            InfraFailureKind::SuiRpcDown { .. } => "🚨 MemWal Infra — Sui RPC Down",
+            InfraFailureKind::WalletPoolDrained { .. } => {
+                "🚨 MemWal Infra — Wallet Pool Drained"
+            }
+            InfraFailureKind::NoSuiKeysConfigured => "🚨 MemWal Infra — No Sui Keys Configured",
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            InfraFailureKind::SidecarDown { consecutive_failures } => format!(
+                "Sidecar /health failed {} consecutive checks. SEAL encrypt + Walrus upload broken until recovery.",
+                consecutive_failures
+            ),
+            InfraFailureKind::PostgresDown { reason } => {
+                format!("Postgres unreachable: {}", reason)
+            }
+            InfraFailureKind::RedisDown { consecutive_failures } => format!(
+                "Redis PING failed {} consecutive checks. Rate limiter on in-memory fallback; dedup window weakened.",
+                consecutive_failures
+            ),
+            InfraFailureKind::SuiRpcDown { consecutive_failures } => format!(
+                "Sui RPC failed {} consecutive checks. Auth verification (delegate-key onchain check) failing for everyone.",
+                consecutive_failures
+            ),
+            InfraFailureKind::WalletPoolDrained {
+                pool_size,
+                consecutive_transient,
+            } => format!(
+                "Every wallet in pool (size {}) returned transient failures for {} consecutive attempts — likely all out of gas / balance::split.",
+                pool_size, consecutive_transient
+            ),
+            InfraFailureKind::NoSuiKeysConfigured => {
+                "Server started with empty key pool — SERVER_SUI_PRIVATE_KEYS and SERVER_SUI_PRIVATE_KEY both unset. All Walrus uploads will fail."
+                    .to_string()
+            }
+        }
+    }
+
+    /// Stable dedup signature — repeated alerts of the same kind collapse
+    /// to one Slack message per dedup window so a probe loop firing on
+    /// each tick doesn't spam the channel.
+    fn dedup_signature(&self) -> &'static str {
+        match self {
+            InfraFailureKind::SidecarDown { .. } => "infra:sidecar_down",
+            InfraFailureKind::PostgresDown { .. } => "infra:postgres_down",
+            InfraFailureKind::RedisDown { .. } => "infra:redis_down",
+            InfraFailureKind::SuiRpcDown { .. } => "infra:sui_rpc_down",
+            InfraFailureKind::WalletPoolDrained { .. } => "infra:wallet_pool_drained",
+            InfraFailureKind::NoSuiKeysConfigured => "infra:no_sui_keys",
+        }
+    }
+}
+
+/// Inputs to a single infra-level Slack alert.
+pub struct InfraFailureAlert {
+    pub kind: InfraFailureKind,
+}
+
 #[derive(Debug, Serialize)]
 struct SlackMessage {
     text: String,
@@ -223,6 +329,28 @@ impl SlackClient {
         self.send_with_retry(&payload).await
     }
 
+    /// Notify Slack of an infra-level failure (system-blocking event).
+    /// Dedups by variant kind, NOT by the detail message, so a probe loop
+    /// firing each tick collapses to one alert per `DEDUP_WINDOW`.
+    ///
+    /// Same fire-and-forget contract as `notify_remember_job_failed`:
+    /// suppressed (dedup / rate-cap) returns `Ok(())`. The caller must
+    /// spawn this; the Slack POST is timed but blocking on the awaiter.
+    pub async fn notify_infra_failure(&self, alert: InfraFailureAlert) -> SlackResult<()> {
+        let signature = alert.kind.dedup_signature();
+
+        if self.should_suppress_with_key(signature) {
+            info!(
+                infra_kind = %signature,
+                "Slack infra alert suppressed (dedup or global rate cap)"
+            );
+            return Ok(());
+        }
+
+        let payload = self.build_infra_payload(&alert);
+        self.send_with_retry(&payload).await
+    }
+
     /// Send a simple text notification. Retained for unit tests and any
     /// one-off operator-driven message; production paths should use the
     /// typed helpers so the format stays consistent across alerts.
@@ -239,7 +367,14 @@ impl SlackClient {
     /// `DEDUP_WINDOW`, OR if the global rate cap is exhausted. Both
     /// checks happen under one lock so a burst can't slip past both.
     fn should_suppress(&self, sanitized_error_msg: &str) -> bool {
-        let key = hash_error(sanitized_error_msg);
+        self.should_suppress_with_key(&hash_error(sanitized_error_msg))
+    }
+
+    /// Variant of `should_suppress` that takes a pre-computed dedup key.
+    /// Infra alerts dedup on the variant discriminant (stable string)
+    /// rather than the error message, so the detail-string text doesn't
+    /// affect grouping.
+    fn should_suppress_with_key(&self, key: &str) -> bool {
         let now = Instant::now();
 
         let mut state = match self.state.lock() {
@@ -262,8 +397,9 @@ impl SlackClient {
         }
 
         // Per-error dedup: if we already alerted on this signature within
-        // the window, suppress regardless of global budget.
-        if let Some(last) = state.dedup.get(&key) {
+        // the window, suppress regardless of global budget. HashMap<String, _>
+        // supports lookup by &str via the Borrow impl.
+        if let Some(last) = state.dedup.get(key) {
             if now.duration_since(*last) < DEDUP_WINDOW {
                 return true;
             }
@@ -284,7 +420,7 @@ impl SlackClient {
         // Record the send intent. We do this under the same lock so two
         // simultaneous callers can't both see "below cap" and both send,
         // exceeding the cap by one or two messages.
-        state.dedup.insert(key, now);
+        state.dedup.insert(key.to_string(), now);
         state.recent_sends.push_back(now);
         false
     }
@@ -369,6 +505,78 @@ impl SlackClient {
         SlackMessage {
             text: fallback_text,
             blocks: Some(vec![header, fields, error_block, context]),
+        }
+    }
+
+    /// Build the Slack message body for an infra alert. Format mirrors
+    /// `build_payload` (header / fields / detail / footer) so the channel
+    /// looks consistent, but the field set is different — infra alerts
+    /// have no per-job context (job_id / owner / namespace) and the
+    /// "failure mode" field carries the variant description instead of a
+    /// stack trace.
+    fn build_infra_payload(&self, alert: &InfraFailureAlert) -> SlackMessage {
+        let headline = alert.kind.headline();
+        let detail = alert.kind.detail();
+        let dedup_sig = alert.kind.dedup_signature();
+
+        let fallback_text = format!("{} — {}", headline, truncate(&detail, 200));
+
+        let header = SlackBlock {
+            block_type: "header".to_string(),
+            text: Some(SlackText {
+                text_type: "plain_text".to_string(),
+                text: headline.to_string(),
+            }),
+            fields: None,
+            elements: None,
+        };
+
+        let fields = SlackBlock {
+            block_type: "section".to_string(),
+            text: None,
+            fields: Some(vec![
+                SlackText {
+                    text_type: "mrkdwn".to_string(),
+                    text: format!("*Kind*\n`{}`", dedup_sig),
+                },
+                SlackText {
+                    text_type: "mrkdwn".to_string(),
+                    text: format!("*Env*\n`{}`", self.env_label),
+                },
+            ]),
+            elements: None,
+        };
+
+        let detail_block = SlackBlock {
+            block_type: "section".to_string(),
+            text: Some(SlackText {
+                text_type: "mrkdwn".to_string(),
+                // Truncate to fit Slack's per-text 3000-char limit. Infra
+                // details are short by design but Postgres / sidecar error
+                // messages can include long traceback context.
+                text: format!("```{}```", truncate(&detail, 2800)),
+            }),
+            fields: None,
+            elements: None,
+        };
+
+        let footer_text = match &self.server_commit {
+            Some(sha) => format!("server commit `{}` · env `{}`", sha, self.env_label),
+            None => format!("env `{}`", self.env_label),
+        };
+        let context = SlackBlock {
+            block_type: "context".to_string(),
+            text: None,
+            fields: None,
+            elements: Some(vec![SlackText {
+                text_type: "mrkdwn".to_string(),
+                text: footer_text,
+            }]),
+        };
+
+        SlackMessage {
+            text: fallback_text,
+            blocks: Some(vec![header, fields, detail_block, context]),
         }
     }
 
@@ -561,6 +769,148 @@ mod tests {
             "test".to_string(),
             Some("abcdef1".to_string()),
         )
+    }
+
+    // ============================================================
+    // ENG-1784: InfraFailureKind — dedup signature stability + payload
+    // ============================================================
+
+    #[test]
+    fn infra_failure_dedup_signature_is_stable_per_variant() {
+        // The dedup key MUST NOT depend on per-instance fields (reason,
+        // counts). If it did, every probe tick would mint a new signature
+        // and dedup would collapse to one alert per probe — exactly the
+        // noise pattern this work is meant to avoid.
+        assert_eq!(
+            InfraFailureKind::SidecarDown { consecutive_failures: 3 }.dedup_signature(),
+            InfraFailureKind::SidecarDown { consecutive_failures: 999 }.dedup_signature(),
+        );
+        assert_eq!(
+            InfraFailureKind::PostgresDown { reason: "conn refused".to_string() }
+                .dedup_signature(),
+            InfraFailureKind::PostgresDown { reason: "pool exhausted".to_string() }
+                .dedup_signature(),
+        );
+        assert_eq!(
+            InfraFailureKind::WalletPoolDrained {
+                pool_size: 3,
+                consecutive_transient: 9,
+            }
+            .dedup_signature(),
+            InfraFailureKind::WalletPoolDrained {
+                pool_size: 5,
+                consecutive_transient: 25,
+            }
+            .dedup_signature(),
+        );
+    }
+
+    #[test]
+    fn infra_failure_each_variant_has_distinct_signature() {
+        // A bug where two variants collide would shadow one outage with
+        // another — pin that they're distinct.
+        let sigs = [
+            InfraFailureKind::SidecarDown { consecutive_failures: 1 }.dedup_signature(),
+            InfraFailureKind::PostgresDown { reason: "x".to_string() }.dedup_signature(),
+            InfraFailureKind::RedisDown { consecutive_failures: 1 }.dedup_signature(),
+            InfraFailureKind::SuiRpcDown { consecutive_failures: 1 }.dedup_signature(),
+            InfraFailureKind::WalletPoolDrained {
+                pool_size: 1,
+                consecutive_transient: 1,
+            }
+            .dedup_signature(),
+            InfraFailureKind::NoSuiKeysConfigured.dedup_signature(),
+        ];
+        let mut sorted = sigs.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), sigs.len(), "infra variants must not collide");
+    }
+
+    #[test]
+    fn infra_failure_headline_mentions_subsystem() {
+        // Pin the user-visible headlines — lead reads these in #memwal-ops
+        // first; a rename is a deliberate change, not a typo.
+        assert!(InfraFailureKind::SidecarDown { consecutive_failures: 3 }
+            .headline()
+            .contains("Sidecar"));
+        assert!(InfraFailureKind::PostgresDown { reason: "x".into() }
+            .headline()
+            .contains("Postgres"));
+        assert!(InfraFailureKind::RedisDown { consecutive_failures: 3 }
+            .headline()
+            .contains("Redis"));
+        assert!(InfraFailureKind::SuiRpcDown { consecutive_failures: 3 }
+            .headline()
+            .contains("Sui RPC"));
+        assert!(InfraFailureKind::WalletPoolDrained {
+            pool_size: 3,
+            consecutive_transient: 9
+        }
+        .headline()
+        .contains("Wallet Pool"));
+        assert!(InfraFailureKind::NoSuiKeysConfigured
+            .headline()
+            .contains("No Sui Keys"));
+    }
+
+    #[test]
+    fn infra_failure_detail_includes_dynamic_fields() {
+        // detail() is the channel body — must include the per-instance
+        // info ops needs (counts, reasons), even though dedup ignores them.
+        let detail = InfraFailureKind::SidecarDown { consecutive_failures: 7 }.detail();
+        assert!(detail.contains("7"));
+
+        let detail = InfraFailureKind::PostgresDown {
+            reason: "connection refused by 10.0.0.42".to_string(),
+        }
+        .detail();
+        assert!(detail.contains("connection refused"));
+
+        let detail = InfraFailureKind::WalletPoolDrained {
+            pool_size: 5,
+            consecutive_transient: 15,
+        }
+        .detail();
+        assert!(detail.contains("5"));
+        assert!(detail.contains("15"));
+    }
+
+    #[test]
+    fn infra_alert_payload_uses_headline_and_detail() {
+        // The wire payload must serialize the headline as the Slack
+        // header block and the detail in the code block. We don't probe
+        // the full JSON — that's brittle — just confirm both strings
+        // make it into the rendered body.
+        let client = new_client();
+        let payload = client.build_infra_payload(&InfraFailureAlert {
+            kind: InfraFailureKind::WalletPoolDrained {
+                pool_size: 4,
+                consecutive_transient: 12,
+            },
+        });
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("Wallet Pool Drained"));
+        assert!(json.contains("infra:wallet_pool_drained"));
+        assert!(json.contains("12 consecutive attempts"));
+    }
+
+    #[test]
+    fn infra_should_suppress_dedups_per_variant_not_per_detail() {
+        // Detail differs, variant identical → second call must suppress.
+        let client = new_client();
+        let sig = InfraFailureKind::PostgresDown {
+            reason: "first detail".to_string(),
+        }
+        .dedup_signature();
+        assert!(!client.should_suppress_with_key(sig));
+        // Even with completely different detail, same variant = same sig.
+        let sig2 = InfraFailureKind::PostgresDown {
+            reason: "completely different detail".to_string(),
+        }
+        .dedup_signature();
+        assert_eq!(sig, sig2);
+        assert!(client.should_suppress_with_key(sig2));
     }
 
     // ============================================================
