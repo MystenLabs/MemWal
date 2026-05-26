@@ -96,6 +96,13 @@ async function main() {
             ? "https://upload-relay.testnet.walrus.space"
             : "https://upload-relay.mainnet.walrus.space"
     );
+    // WALM-52: keep parity with sidecar so this CLI honors the same no-tip toggle.
+    const sendTipRaw = (process.env.WALRUS_UPLOAD_RELAY_SEND_TIP ?? "true").trim().toLowerCase();
+    const WALRUS_UPLOAD_RELAY_SEND_TIP = sendTipRaw !== "0" && sendTipRaw !== "false" && sendTipRaw !== "no";
+    const tipMaxParsed = Number.parseInt(process.env.WALRUS_UPLOAD_RELAY_TIP_MAX_MIST || "", 10);
+    const WALRUS_UPLOAD_RELAY_TIP_MAX_MIST = Number.isFinite(tipMaxParsed) && tipMaxParsed > 0
+        ? tipMaxParsed
+        : 10_000_000;
 
     // Create Sui JSON-RPC client
     const suiClient = new SuiJsonRpcClient({
@@ -107,10 +114,14 @@ async function main() {
     const walrusClient = new WalrusClient({
         network: SUI_NETWORK,
         suiClient: suiClient as any,
-        uploadRelay: {
-            host: WALRUS_UPLOAD_RELAY_URL,
-            sendTip: { max: 10_000_000 },
-        },
+        uploadRelay: WALRUS_UPLOAD_RELAY_SEND_TIP
+            ? {
+                host: WALRUS_UPLOAD_RELAY_URL,
+                sendTip: { max: WALRUS_UPLOAD_RELAY_TIP_MAX_MIST },
+            }
+            : {
+                host: WALRUS_UPLOAD_RELAY_URL,
+            },
     });
 
     // writeBlobFlow is a stateful object — each step stores results internally

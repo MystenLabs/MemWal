@@ -21,6 +21,11 @@ import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
+import {
+    extractTipMistFromBalanceChanges,
+    relayHostLabel,
+    renderWalmTipMetrics,
+} from "./walm52-tip-metrics.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -72,6 +77,16 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         ? "https://upload-relay.testnet.walrus.space"
         : "https://upload-relay.mainnet.walrus.space"
 );
+// WALM-52: explicit opt-out of relay tipping for self-hosted no-tip relays.
+// Default true keeps the public Walrus relay path unchanged.
+const WALRUS_UPLOAD_RELAY_SEND_TIP = (() => {
+    const raw = (process.env.WALRUS_UPLOAD_RELAY_SEND_TIP ?? "true").trim().toLowerCase();
+    return raw !== "0" && raw !== "false" && raw !== "no";
+})();
+const WALRUS_UPLOAD_RELAY_TIP_MAX_MIST = (() => {
+    const parsed = Number.parseInt(process.env.WALRUS_UPLOAD_RELAY_TIP_MAX_MIST || "", 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000_000;
+})();
 
 const MAX_WALRUS_EPOCHS = 5;
 const DEFAULT_WALRUS_EPOCHS = (() => {
@@ -99,10 +114,14 @@ function createWalrusClient(): WalrusClient {
     return new WalrusClient({
         network: SUI_NETWORK,
         suiClient: suiClient as any,
-        uploadRelay: {
-            host: WALRUS_UPLOAD_RELAY_URL,
-            sendTip: { max: 10_000_000 },
-        },
+        uploadRelay: WALRUS_UPLOAD_RELAY_SEND_TIP
+            ? {
+                host: WALRUS_UPLOAD_RELAY_URL,
+                sendTip: { max: WALRUS_UPLOAD_RELAY_TIP_MAX_MIST },
+            }
+            : {
+                host: WALRUS_UPLOAD_RELAY_URL,
+            },
     });
 }
 
@@ -196,6 +215,15 @@ const sidecarMetrics = {
     walletSubmittedTotal: 0,
     walletLockErrorsTotal: 0,
     walletPermanentFailuresTotal: 0,
+};
+
+// WALM-52: per-process counters for upload-relay tip outflow. Single host +
+// send-tip mode per sidecar instance, so no per-label aggregation is needed —
+// labels are emitted at scrape time from the static config values below.
+const WALRUS_UPLOAD_RELAY_HOST_LABEL = relayHostLabel(WALRUS_UPLOAD_RELAY_URL);
+const walmTipMetrics = {
+    uploadsTotal: 0,
+    tipMistTotal: 0n,
 };
 
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
@@ -336,6 +364,9 @@ function sidecarStateSnapshot(): Record<string, unknown> {
         walletSubmittedTotal: sidecarMetrics.walletSubmittedTotal,
         walletLockErrorsTotal: sidecarMetrics.walletLockErrorsTotal,
         walletPermanentFailuresTotal: sidecarMetrics.walletPermanentFailuresTotal,
+        uploadRelayHost: WALRUS_UPLOAD_RELAY_URL,
+        uploadRelaySendTip: WALRUS_UPLOAD_RELAY_SEND_TIP,
+        uploadRelayTipMaxMist: WALRUS_UPLOAD_RELAY_SEND_TIP ? WALRUS_UPLOAD_RELAY_TIP_MAX_MIST : null,
         uploadRelayTipCache:
             uploadRelayTipAddressCache === undefined
                 ? "uninitialized"
@@ -653,6 +684,18 @@ app.get("/metrics/wallet", (_req: Request, res: Response) => {
         enokiEnabled: !!enokiApiKey,
         suiNetwork: SUI_NETWORK,
     });
+});
+
+// WALM-52: Prometheus text-exposition endpoint for upload-relay tip outflow.
+// Kept above the bearer auth middleware so prometheus can scrape without the
+// SIDECAR_AUTH_TOKEN (matches /metrics/wallet posture).
+app.get("/metrics/walrus", (_req: Request, res: Response) => {
+    res.type("text/plain; version=0.0.4").send(
+        renderWalmTipMetrics(walmTipMetrics, {
+            host: WALRUS_UPLOAD_RELAY_HOST_LABEL,
+            sendTip: WALRUS_UPLOAD_RELAY_SEND_TIP,
+        }),
+    );
 });
 
 // Shared-secret authentication — protects all routes registered after this point.
@@ -1058,6 +1101,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
     let namespaceForLog: unknown;
     let signerAddressForLog: string | undefined;
     let blobBytesForLog: number | undefined;
+    // WALM-52: hoisted so `finally` can await the counter-update side effect even
+    // when upload/certify fails after register-confirm.
+    let tipMistPromise: Promise<bigint> = Promise.resolve(0n);
     activeWalrusUploads += 1;
     try {
         const {
@@ -1145,13 +1191,18 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         // Enoki rejects GasCoin as tx argument, but relay requires the tip.
         // After patching, signer pays tip from own SUI; Enoki sponsors gas.
         patchGasCoinIntents(registerTx);
-        const tipRecipient = await getUploadRelayTipAddress();
+        // WALM-52: skip tip-config fetch entirely in no-tip mode so a misconfigured
+        // self-hosted relay can't silently leak tips back into the tx.
+        const tipRecipient = WALRUS_UPLOAD_RELAY_SEND_TIP
+            ? await getUploadRelayTipAddress()
+            : null;
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
         phase = "register_sponsor";
         console.log(`[walrus/upload] [${traceId}] register_sponsor ${JSON.stringify({
             keyIndex,
             signer: shortAddress(signerAddress),
             tipRecipient: shortAddress(tipRecipient),
+            sendTip: WALRUS_UPLOAD_RELAY_SEND_TIP,
             allowedAddresses: registerAllowedAddresses.map(shortAddress),
         })}`);
         const registerDigest = await submitWalletTransaction(
@@ -1161,6 +1212,32 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         );
         phase = "register_wait";
         await suiClient.waitForTransaction({ digest: registerDigest });
+
+        // WALM-52: the relay tip is paid inside the register tx. Once register is
+        // confirmed, the SUI is already gone — counters MUST reflect that even if
+        // upload/certify/metadata fail downstream. We launch this IIFE here (after
+        // register_wait) and let it run in parallel with the sliver upload. The
+        // IIFE owns the counter mutation, so the increment fires regardless of
+        // whether the caller ever awaits the resulting MIST value. The `finally`
+        // block awaits the promise to guarantee the microtask completes before
+        // the request ends.
+        tipMistPromise = (async (): Promise<bigint> => {
+            let mist = 0n;
+            if (WALRUS_UPLOAD_RELAY_SEND_TIP && tipRecipient) {
+                try {
+                    const txResp = await suiClient.getTransactionBlock({
+                        digest: registerDigest,
+                        options: { showBalanceChanges: true },
+                    });
+                    mist = extractTipMistFromBalanceChanges(txResp.balanceChanges, tipRecipient);
+                } catch (tipErr: any) {
+                    console.warn(`[walm-52] [${traceId}] tip-mist fetch failed digest=${registerDigest}: ${tipErr?.message || tipErr}`);
+                }
+            }
+            walmTipMetrics.uploadsTotal += 1;
+            walmTipMetrics.tipMistTotal += mist;
+            return mist;
+        })();
 
         phase = "upload_blob";
         await flow.upload({ digest: registerDigest });
@@ -1213,12 +1290,20 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         }
 
         phase = "respond";
+        // WALM-52: counter mutation lives inside tipMistPromise so it fires on
+        // register-confirm regardless of downstream success. Here we only read
+        // the resolved value for the success log.
+        const registerTipMist = await tipMistPromise;
         console.log(`[walrus/upload] [${traceId}] ok ${JSON.stringify({
             blobId: blob.blobId,
             objectId: blobObjectId,
             transferStatus: deferTransfer ? "deferred" : "ok",
             keyIndex,
             bytes: blobBytesForLog,
+            uploadRelayHost: WALRUS_UPLOAD_RELAY_HOST_LABEL,
+            uploadRelaySendTip: WALRUS_UPLOAD_RELAY_SEND_TIP,
+            tipRecipient: shortAddress(tipRecipient),
+            registerTipMist: registerTipMist.toString(),
         })}`);
         res.json({
             blobId: blob.blobId,
@@ -1254,6 +1339,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
         res.status(500).json({ error: message, traceId });
     } finally {
+        // WALM-52: ensure the register-tip IIFE settles before the request ends,
+        // so the counter increment is never lost to a dangling microtask.
+        try { await tipMistPromise; } catch { /* counter mutation already swallowed errors */ }
         activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
     }
 });

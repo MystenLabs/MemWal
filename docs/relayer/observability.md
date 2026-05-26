@@ -124,3 +124,71 @@ If your APM supports custom spans, map `memwal_external_request_duration_seconds
 - `sidecar / seal_decrypt_batch`
 - `sidecar / walrus_upload`
 - `walrus / download_blob`
+
+## WALM-52: Upload-Relay Tip Spend
+
+The sidecar emits two Prometheus counters that track SUI MIST paid as Walrus upload-relay tip. Use these to decide whether self-hosting the upload relay reduces pool burn (Henry's hypothesis is "at high usage, self-host wins"). Gas for register/certify is Enoki-sponsored separately and is **not** part of this metric.
+
+### Scrape
+
+The counters are exposed in Prometheus text format at `GET <SIDECAR_URL>/metrics/walrus` — separate from the JSON `/metrics/wallet` endpoint and reachable without the sidecar bearer token (same posture as `/metrics/wallet`). Add a second scrape target:
+
+```yaml
+scrape_configs:
+  - job_name: memwal-sidecar-walrus
+    metrics_path: /metrics/walrus
+    static_configs:
+      - targets: ["sidecar.example.com:9000"]
+```
+
+### Metrics
+
+| Metric | Labels | Notes |
+| --- | --- | --- |
+| `walrus_upload_relay_uploads_total` | `host`, `send_tip` | Successful uploads since sidecar start. `host` is the parsed hostname from `WALRUS_UPLOAD_RELAY_URL`. `send_tip` is `"true"` / `"false"` from `WALRUS_UPLOAD_RELAY_SEND_TIP`. |
+| `walrus_upload_relay_tip_mist_total` | `host`, `send_tip` | Sum of MIST attributed to the relay tip recipient in register-tx balance changes. Increments by 0 in no-tip mode. |
+
+Each sidecar process emits a single label combination (the config is per-instance), so multi-instance comparison is by **deploy**, not by relabeling — i.e. run a canary sidecar with a different `WALRUS_UPLOAD_RELAY_URL` / `WALRUS_UPLOAD_RELAY_SEND_TIP` to get a second label combination in Grafana.
+
+### Panels
+
+All PromQL examples below are copy-paste valid for Prometheus / Grafana — aggregation operators (`sum by`) wrap the `rate(...)` calls so labels are explicit, and division aggregates each side before dividing.
+
+| Panel | PromQL |
+| --- | --- |
+| Tip burn rate per host | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h]))` |
+| Upload rate per host | `sum by (host, send_tip) (rate(walrus_upload_relay_uploads_total[1h]))` |
+| Tip per upload (MIST) | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h])) / sum by (host, send_tip) (rate(walrus_upload_relay_uploads_total[1h]))` |
+| Daily SUI projection | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h])) * 86400 / 1e9` |
+
+### Alerts
+
+| Alert | Condition |
+| --- | --- |
+| Public relay tip spike | `sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h])) > 2 * quantile_over_time(0.5, sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h]))[7d:1h])` for 30m |
+| Canary tip non-zero | `sum(rate(walrus_upload_relay_tip_mist_total{send_tip="false"}[5m])) > 0` (means a misconfigured self-hosted relay is still charging a tip) |
+
+### Independent on-chain audit
+
+The Prometheus counter is an observed proxy. For ground truth (and for one-off reporting like Henry's "2.67 SUI in 12h" measurement), run the standalone audit. The relay tip recipient is configurable per relay and can change — always fetch it from `<relay>/v1/tip-config` rather than hardcoding:
+
+```bash
+# 1. Fetch the live tip recipient (per network; verify before each audit).
+TIP_ADDR=$(curl -s https://upload-relay.mainnet.walrus.space/v1/tip-config | jq -r '.send_tip.address')
+echo "$TIP_ADDR"  # e.g. 0x765a6ff2c13b47e2603416d0b5a156df498a5c51bc8085be3838e43e06086256
+
+# 2. Run the audit against the pool wallets for the window of interest.
+npx tsx services/server/scripts/walrus-tip-audit.ts \
+  --pool-address 0x<pool-wallet-1> --pool-address 0x<pool-wallet-2> \
+  --relay-tip-address "$TIP_ADDR" \
+  --from 2026-05-24T05:00:00Z --to 2026-05-25T05:00:00Z
+```
+
+Current known recipients (verify with the `curl` above — they are not part of any static config):
+
+| Network | Relay tip address (as of this writing) |
+| --- | --- |
+| mainnet | `0x765a6ff2c13b47e2603416d0b5a156df498a5c51bc8085be3838e43e06086256` |
+| testnet | `0x4b6a7439159cf10533147fc3d678cf10b714f2bc998f6cb1f1b0b9594cdc52b6` |
+
+Output is CSV: `date,pool_address,relay_tip_mist,relay_tip_sui,upload_count_estimate,other_mist`. The script queries Sui RPC directly and does not depend on the sidecar. See [WALM-52 Canary](/relayer/walm-52-canary) for the trial procedure.
