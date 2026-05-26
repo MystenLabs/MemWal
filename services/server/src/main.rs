@@ -23,6 +23,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
+use sqlx::postgres::PgPoolOptions;
 
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
@@ -180,13 +181,29 @@ async fn main() {
 
     // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
     // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
-    let apalis_pool = sqlx::PgPool::connect(&config.database_url)
+    let apalis_pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL for Apalis");
     // setup() is defined only on PostgresStorage<()> — creates schema tables.
-    PostgresStorage::<()>::setup(&apalis_pool)
-        .await
-        .expect("Apalis postgres migration failed");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        PostgresStorage::<()>::setup(&apalis_pool),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            panic!("Apalis postgres migration failed: {}", err);
+        }
+        Err(_) => {
+            tracing::error!(
+                "Apalis postgres migration timed out after 15s; continuing with existing tables"
+            );
+        }
+    }
     let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
     let remember_job_storage: PostgresStorage<RememberJob> =
         PostgresStorage::new(apalis_pool.clone());
