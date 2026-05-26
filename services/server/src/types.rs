@@ -1387,6 +1387,78 @@ mod tests {
         assert_eq!(pool.current_transient_streak(), 0);
     }
 
+    // The drain counter sits on the hot path of every wallet job (Apalis
+    // dispatches concurrently, up to WALLET_JOB_CONCURRENCY default=8).
+    // Verify the AtomicU64 increment is contention-correct: N concurrent
+    // record_transient_failure() calls must produce a final count of
+    // exactly N, with no lost or duplicated increments.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn key_pool_transient_streak_atomic_under_contention() {
+        use std::sync::Arc;
+        let pool = Arc::new(KeyPool::new(vec!["a".into()]));
+        const TASKS: usize = 200;
+        const INCREMENTS_PER_TASK: usize = 50;
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for _ in 0..TASKS {
+            let pool = Arc::clone(&pool);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..INCREMENTS_PER_TASK {
+                    pool.record_transient_failure();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            pool.current_transient_streak(),
+            (TASKS * INCREMENTS_PER_TASK) as u64,
+            "concurrent increments must add up exactly — no lost updates"
+        );
+    }
+
+    // Concurrent record + reset race: workers incrementing while another
+    // task resets must end in a defined state (either 0 or N — never
+    // garbage). Documents the semantic that reset wins last-writer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn key_pool_reset_during_concurrent_increments_is_safe() {
+        use std::sync::Arc;
+        let pool = Arc::new(KeyPool::new(vec!["a".into()]));
+
+        let incrementer = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move {
+                for _ in 0..1_000 {
+                    pool.record_transient_failure();
+                }
+            })
+        };
+        let resetter = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move {
+                for _ in 0..100 {
+                    pool.reset_transient_streak();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        incrementer.await.unwrap();
+        resetter.await.unwrap();
+
+        // Final value is unpredictable (race) but must be in [0, 1000].
+        // The test asserts the operation didn't poison the atomic or
+        // overflow — both would be observable as a huge / negative-shaped
+        // value.
+        let final_streak = pool.current_transient_streak();
+        assert!(
+            final_streak <= 1_000,
+            "race produced impossible streak: {}",
+            final_streak
+        );
+    }
+
     // ── SponsorRateLimitConfig defaults ─────────────────────────────────
 
     #[test]

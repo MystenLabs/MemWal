@@ -331,6 +331,75 @@ pub(crate) fn spawn_slack_infra_alert(
     });
 }
 
+/// Outcome of `track_wallet_pool_health` — exposed so the unit test can
+/// assert the decision branch deterministically without spinning up a
+/// real `tokio::spawn` Slack POST.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PoolHealthAction {
+    /// No-op: empty pool (separate boot-time alert handles that case).
+    Skipped,
+    /// Streak was reset to 0 — outcome was success or `Permanent`.
+    Reset,
+    /// Streak incremented but not yet at the drain threshold.
+    IncrementedBelowThreshold { streak: u64, threshold: u64 },
+    /// Streak just hit the drain threshold — caller fired the alert.
+    FiredDrainAlert {
+        streak: u64,
+        threshold: u64,
+        pool_size: usize,
+    },
+    /// Streak above threshold — alert already fired earlier in this
+    /// streak. Dedup window on `SlackClient` collapses any further posts.
+    AboveThresholdNoOp { streak: u64, threshold: u64 },
+}
+
+/// Decide what wallet-pool-health action to take given a fresh outcome.
+/// Pure function over (pool_size, override, KeyPool counter) — kept
+/// separate from the alert-spawning wrapper below so unit tests can
+/// assert the decision matrix exhaustively without an `AppState`.
+///
+/// Mutates `KeyPool` (records / resets the streak) but does not touch
+/// the Slack client. The caller is responsible for firing the alert on
+/// `FiredDrainAlert`.
+pub(crate) fn decide_wallet_pool_health_action(
+    key_pool: &crate::types::KeyPool,
+    drain_window_override: Option<u64>,
+    outcome_is_transient: bool,
+) -> PoolHealthAction {
+    let pool_size = key_pool.len();
+    if pool_size == 0 {
+        // Empty pool is a separate `NoSuiKeysConfigured` alert, fired
+        // once at boot. Nothing to track here.
+        return PoolHealthAction::Skipped;
+    }
+    if !outcome_is_transient {
+        key_pool.reset_transient_streak();
+        return PoolHealthAction::Reset;
+    }
+    let streak = key_pool.record_transient_failure();
+    // Default drain window = MAX_ATTEMPTS × pool_size — every wallet has
+    // been tried `MAX_ATTEMPTS` times in a row. Override via env var if
+    // operators want a tighter / looser trigger.
+    let threshold = drain_window_override.unwrap_or_else(|| (MAX_ATTEMPTS as u64) * (pool_size as u64));
+    // Fire exactly on the threshold crossing. If the streak keeps
+    // growing, the dedup window in `SlackClient` collapses repeats —
+    // but we ALSO short-circuit the spawn here so we don't queue dozens
+    // of tasks that will all suppress.
+    match streak.cmp(&threshold) {
+        std::cmp::Ordering::Less => {
+            PoolHealthAction::IncrementedBelowThreshold { streak, threshold }
+        }
+        std::cmp::Ordering::Equal => PoolHealthAction::FiredDrainAlert {
+            streak,
+            threshold,
+            pool_size,
+        },
+        std::cmp::Ordering::Greater => {
+            PoolHealthAction::AboveThresholdNoOp { streak, threshold }
+        }
+    }
+}
+
 /// ENG-1784: detect "wallet pool drained" — every wallet returning
 /// `Transient` errors for `drain_window` consecutive attempts means the
 /// pool is effectively unable to make progress (typically every wallet is
@@ -345,29 +414,17 @@ pub(crate) fn track_wallet_pool_health(
     state: &crate::types::AppState,
     outcome_is_transient: bool,
 ) {
-    let pool_size = state.key_pool.len();
-    if pool_size == 0 {
-        // Empty pool is a separate `NoSuiKeysConfigured` alert, fired
-        // once at boot. Nothing to track here.
-        return;
-    }
-    if !outcome_is_transient {
-        state.key_pool.reset_transient_streak();
-        return;
-    }
-    let streak = state.key_pool.record_transient_failure();
-    // Default drain window = MAX_ATTEMPTS × pool_size — every wallet has
-    // been tried `MAX_ATTEMPTS` times in a row. Override via env var if
-    // operators want a tighter / looser trigger.
-    let drain_window = state
-        .config
-        .wallet_pool_drain_window
-        .unwrap_or_else(|| (MAX_ATTEMPTS as u64) * (pool_size as u64));
-    // Fire exactly on the threshold crossing. If the streak keeps
-    // growing, the dedup window in `SlackClient` collapses repeats.
-    // Using `==` instead of `>=` keeps the spawn count bounded in case
-    // a slow Slack POST and a fast retry loop race.
-    if streak == drain_window {
+    let action = decide_wallet_pool_health_action(
+        &state.key_pool,
+        state.config.wallet_pool_drain_window,
+        outcome_is_transient,
+    );
+    if let PoolHealthAction::FiredDrainAlert {
+        streak,
+        threshold: _,
+        pool_size,
+    } = action
+    {
         tracing::error!(
             pool_size = pool_size,
             consecutive_transient = streak,
@@ -1546,9 +1603,11 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, mark_remember_job_failed,
-        update_remember_job_after_wallet_error, WalletJobError,
+        classify_wallet_remember_handoff_failure, decide_wallet_pool_health_action,
+        mark_remember_job_failed, update_remember_job_after_wallet_error, PoolHealthAction,
+        WalletJobError, MAX_ATTEMPTS,
     };
+    use crate::types::KeyPool;
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -1574,6 +1633,181 @@ mod tests {
             .unwrap();
 
         pool
+    }
+
+    // ============================================================
+    // ENG-1784: decide_wallet_pool_health_action — pure decision
+    // function, no DB required. Tests cover every branch of the
+    // streak-vs-threshold matrix so a refactor can't silently move
+    // the alert-fire point.
+    // ============================================================
+
+    fn pool(size: usize) -> KeyPool {
+        KeyPool::new((0..size).map(|i| format!("key_{}", i)).collect())
+    }
+
+    #[test]
+    fn pool_health_empty_pool_is_skipped_regardless_of_outcome() {
+        let key_pool = pool(0);
+        assert_eq!(
+            decide_wallet_pool_health_action(&key_pool, None, true),
+            PoolHealthAction::Skipped
+        );
+        assert_eq!(
+            decide_wallet_pool_health_action(&key_pool, None, false),
+            PoolHealthAction::Skipped
+        );
+        // Counter never moved.
+        assert_eq!(key_pool.current_transient_streak(), 0);
+    }
+
+    #[test]
+    fn pool_health_success_outcome_resets_streak() {
+        let key_pool = pool(3);
+        // Seed the streak so a reset would actually be visible.
+        key_pool.record_transient_failure();
+        key_pool.record_transient_failure();
+        assert_eq!(key_pool.current_transient_streak(), 2);
+        let action = decide_wallet_pool_health_action(&key_pool, None, false);
+        assert_eq!(action, PoolHealthAction::Reset);
+        assert_eq!(key_pool.current_transient_streak(), 0);
+    }
+
+    #[test]
+    fn pool_health_transient_below_threshold_increments_no_alert() {
+        let key_pool = pool(3); // threshold = MAX_ATTEMPTS × 3 = 9
+        let action = decide_wallet_pool_health_action(&key_pool, None, true);
+        let threshold = MAX_ATTEMPTS as u64 * 3;
+        assert_eq!(
+            action,
+            PoolHealthAction::IncrementedBelowThreshold {
+                streak: 1,
+                threshold,
+            }
+        );
+        assert_eq!(key_pool.current_transient_streak(), 1);
+    }
+
+    #[test]
+    fn pool_health_transient_at_threshold_fires_alert_exactly_once() {
+        let key_pool = pool(2); // threshold = MAX_ATTEMPTS × 2 = 6
+        let threshold = MAX_ATTEMPTS as u64 * 2;
+
+        // Climb to one BELOW threshold without firing.
+        for _ in 0..(threshold - 1) {
+            let a = decide_wallet_pool_health_action(&key_pool, None, true);
+            assert!(matches!(
+                a,
+                PoolHealthAction::IncrementedBelowThreshold { .. }
+            ));
+        }
+        // Crossing tick = alert fires.
+        let action = decide_wallet_pool_health_action(&key_pool, None, true);
+        assert_eq!(
+            action,
+            PoolHealthAction::FiredDrainAlert {
+                streak: threshold,
+                threshold,
+                pool_size: 2,
+            }
+        );
+
+        // Next tick = above threshold, no re-fire.
+        let action = decide_wallet_pool_health_action(&key_pool, None, true);
+        assert_eq!(
+            action,
+            PoolHealthAction::AboveThresholdNoOp {
+                streak: threshold + 1,
+                threshold,
+            }
+        );
+    }
+
+    #[test]
+    fn pool_health_permanent_outcome_resets_streak_too() {
+        // A Permanent error means a job ended deterministically — the
+        // pool is producing *some* signal beyond stale-state Transients,
+        // so the streak resets the same way success does.
+        let key_pool = pool(3);
+        for _ in 0..5 {
+            decide_wallet_pool_health_action(&key_pool, None, true);
+        }
+        assert_eq!(key_pool.current_transient_streak(), 5);
+        // outcome_is_transient = false covers both success and Permanent.
+        let action = decide_wallet_pool_health_action(&key_pool, None, false);
+        assert_eq!(action, PoolHealthAction::Reset);
+        assert_eq!(key_pool.current_transient_streak(), 0);
+    }
+
+    #[test]
+    fn pool_health_env_override_takes_precedence_over_default() {
+        // Default for pool(5) would be MAX_ATTEMPTS × 5 = 15. Override to
+        // 3 to test that operators can tune the trigger without changing
+        // pool size.
+        let key_pool = pool(5);
+        // Climb to 2 — under override of 3.
+        decide_wallet_pool_health_action(&key_pool, Some(3), true);
+        let a = decide_wallet_pool_health_action(&key_pool, Some(3), true);
+        assert!(matches!(
+            a,
+            PoolHealthAction::IncrementedBelowThreshold { streak: 2, threshold: 3 }
+        ));
+        // Third Transient = exactly threshold = fire.
+        let a = decide_wallet_pool_health_action(&key_pool, Some(3), true);
+        assert_eq!(
+            a,
+            PoolHealthAction::FiredDrainAlert {
+                streak: 3,
+                threshold: 3,
+                pool_size: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn pool_health_streak_resumes_after_reset() {
+        // Verifies the reset isn't sticky — a healthy stretch followed
+        // by a fresh wave of transients still re-triggers the alert.
+        let key_pool = pool(2);
+        let threshold = MAX_ATTEMPTS as u64 * 2;
+
+        // First drain → fire.
+        for _ in 0..threshold {
+            decide_wallet_pool_health_action(&key_pool, None, true);
+        }
+        // Success → reset.
+        let action = decide_wallet_pool_health_action(&key_pool, None, false);
+        assert_eq!(action, PoolHealthAction::Reset);
+        // Drain again → fire again.
+        for _ in 0..(threshold - 1) {
+            decide_wallet_pool_health_action(&key_pool, None, true);
+        }
+        let action = decide_wallet_pool_health_action(&key_pool, None, true);
+        assert!(matches!(
+            action,
+            PoolHealthAction::FiredDrainAlert { .. }
+        ));
+    }
+
+    #[test]
+    fn pool_health_single_wallet_pool_threshold_is_max_attempts() {
+        // pool(1) → threshold = MAX_ATTEMPTS × 1. Defends against an
+        // off-by-one where `pool_size == 1` would never fire (the math
+        // is the same as a single wallet exhausting its retry budget).
+        let key_pool = pool(1);
+        let threshold = MAX_ATTEMPTS as u64;
+        for _ in 0..(threshold - 1) {
+            decide_wallet_pool_health_action(&key_pool, None, true);
+        }
+        let action = decide_wallet_pool_health_action(&key_pool, None, true);
+        assert_eq!(
+            action,
+            PoolHealthAction::FiredDrainAlert {
+                streak: threshold,
+                threshold,
+                pool_size: 1,
+            }
+        );
     }
 
     #[test]

@@ -1324,6 +1324,273 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    // ============================================================
+    // ENG-1784: notify_infra_failure — end-to-end mock-webhook tests
+    // ============================================================
+
+    /// One distinct variant kind that doesn't conflict with the other
+    /// infra-alert tests in this file — each test uses a fresh client
+    /// so dedup state is isolated.
+    fn fresh_client_for(url: String) -> SlackClient {
+        SlackClient::new(url, "infra-test".to_string(), Some("e2ee2ee".to_string()))
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_posts_with_correct_body_shape() {
+        let (url, body, hits) = spawn_mock_with_status_sequence(vec![200]).await;
+        let client = fresh_client_for(url);
+
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::PostgresDown {
+                    reason: "connection refused by 10.0.0.1:5432".to_string(),
+                },
+            })
+            .await
+            .expect("infra POST should succeed against a 200 mock");
+
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let received = body.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let payload = &received[0];
+
+        // Top-level `text` is the fallback for clients with rich block
+        // rendering disabled — must include the headline and detail head.
+        let text = payload["text"].as_str().expect("text field");
+        assert!(text.contains("Postgres Down"), "got text: {}", text);
+        assert!(
+            text.contains("connection refused"),
+            "got text: {}",
+            text
+        );
+
+        // Blocks: header / fields / detail / footer
+        let blocks = payload["blocks"].as_array().expect("blocks");
+        assert_eq!(blocks.len(), 4, "expected 4 blocks, got {}", blocks.len());
+
+        // Block 0: header with headline.
+        assert_eq!(blocks[0]["type"], "header");
+        assert!(blocks[0]["text"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Postgres Down"));
+
+        // Block 1: fields — must include dedup signature + env, NOT the
+        // reason string (reason is in the detail block, which is the
+        // pre-formatted code block).
+        let fields = blocks[1]["fields"].as_array().expect("fields");
+        let joined: String = fields
+            .iter()
+            .map(|f| f["text"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(joined.contains("infra:postgres_down"), "fields: {}", joined);
+        assert!(joined.contains("infra-test"), "fields: {}", joined);
+
+        // Block 2: code block with detail.
+        let detail = blocks[2]["text"]["text"].as_str().unwrap();
+        assert!(detail.contains("connection refused"));
+        // Code-block fence preserved so the channel renders monospace.
+        assert!(detail.starts_with("```") && detail.ends_with("```"));
+
+        // Block 3: footer with commit + env.
+        let footer = blocks[3]["elements"][0]["text"].as_str().unwrap();
+        assert!(footer.contains("e2ee2ee"));
+        assert!(footer.contains("infra-test"));
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_dedups_same_variant_with_different_detail() {
+        // The most important behavioural test: a probe loop firing every
+        // 30s on a stuck dependency must only post ONCE per dedup
+        // window, even though the per-instance reason / counters change.
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![200, 200, 200]).await;
+        let client = fresh_client_for(url);
+
+        // First call: posts.
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SidecarDown { consecutive_failures: 3 },
+            })
+            .await
+            .expect("first infra POST");
+        // Second call: same variant, different count → must suppress.
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SidecarDown { consecutive_failures: 7 },
+            })
+            .await
+            .expect("second infra returns Ok via suppression");
+        // Third call: same variant, yet another count → still suppress.
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SidecarDown {
+                    consecutive_failures: 99,
+                },
+            })
+            .await
+            .expect("third infra returns Ok via suppression");
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "dedup must collapse same-variant repeats to ONE Slack POST"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_distinct_variants_both_post() {
+        // Two different infra alerts within the dedup window are both
+        // independently meaningful — Postgres down and Redis down are
+        // different incidents even if they happen simultaneously.
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![200, 200]).await;
+        let client = fresh_client_for(url);
+
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::PostgresDown {
+                    reason: "x".to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::RedisDown {
+                    consecutive_failures: 3,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "different variants are different incidents — both must post"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_does_not_block_on_dedup_with_remember_job_alert() {
+        // Regression guard: the dedup map is shared with
+        // notify_remember_job_failed. If an infra signature ever
+        // collided with a remember-job error hash, one would silently
+        // shadow the other. Test that the two alert paths post
+        // independently even when the underlying error strings are
+        // similar.
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![200, 200]).await;
+        let client = fresh_client_for(url);
+
+        client
+            .notify_remember_job_failed(RememberJobFailedAlert {
+                job_id: Some("job-123"),
+                owner: Some("0xabc"),
+                namespace: Some("ns"),
+                error_msg: "postgres down: connection refused",
+                kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+            })
+            .await
+            .unwrap();
+
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::PostgresDown {
+                    reason: "postgres down: connection refused".to_string(),
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "infra alert key space is disjoint from remember-job hashes"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_recovers_via_retry_on_5xx() {
+        // Same retry behaviour as remember-job alerts — one transient
+        // upstream blip should not drop the page.
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![503, 200]).await;
+        let client = fresh_client_for(url);
+
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SuiRpcDown {
+                    consecutive_failures: 3,
+                },
+            })
+            .await
+            .expect("retry should recover");
+
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_with_unreachable_webhook_returns_err_not_panic() {
+        // Operational safety: Slack-side outage must surface as Err to
+        // the fire-and-forget caller, NEVER panic. The caller logs it
+        // and moves on — the wallet job is unaffected.
+        let client = fresh_client_for("http://127.0.0.1:1/webhook".to_string());
+        let res = client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::NoSuiKeysConfigured,
+            })
+            .await;
+        assert!(res.is_err(), "unreachable webhook should return Err");
+    }
+
+    #[tokio::test]
+    async fn notify_infra_failure_suppressed_when_global_cap_exhausted() {
+        // The global rate cap is shared across all alert paths that go
+        // through `should_suppress*` — so 30 distinct remember-job
+        // alerts (each a unique error string) should saturate it, after
+        // which any infra alert returns Ok via suppression. Note: we do
+        // NOT use `send_notification` here because it deliberately
+        // bypasses both dedup AND the rate cap; only the typed `notify_*`
+        // methods participate in the cap.
+        let (url, _body, hits) = spawn_mock_with_status_sequence(vec![200; 35]).await;
+        let client = fresh_client_for(url);
+
+        for i in 0..GLOBAL_RATE_MAX {
+            client
+                .notify_remember_job_failed(RememberJobFailedAlert {
+                    job_id: Some(&format!("storm-{:02}", i)),
+                    owner: Some("0xabc"),
+                    namespace: Some("ns"),
+                    error_msg: &format!(
+                        "unique upstream error #{:02} so per-error dedup doesn't apply",
+                        i
+                    ),
+                    kind: FailureKind::TerminalWalletFailure { attempts: 3 },
+                })
+                .await
+                .expect("preamble post");
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            GLOBAL_RATE_MAX,
+            "preamble should fill the cap exactly"
+        );
+
+        // Cap is now full. The next infra POST must suppress.
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::WalletPoolDrained {
+                    pool_size: 5,
+                    consecutive_transient: 15,
+                },
+            })
+            .await
+            .expect("rate-cap suppression returns Ok, not Err");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            GLOBAL_RATE_MAX,
+            "global cap must suppress infra alerts the same way it suppresses job alerts"
+        );
+    }
+
     #[tokio::test]
     async fn retry_recovers_when_first_call_is_503() {
         let (url, _body, hits) = spawn_mock_with_status_sequence(vec![503, 200]).await;
