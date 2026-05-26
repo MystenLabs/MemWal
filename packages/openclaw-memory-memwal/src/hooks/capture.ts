@@ -2,7 +2,7 @@
  * Auto-capture hook — agent_end.
  *
  * After the LLM finishes a turn, extracts conversation text, filters
- * for capturable content, and sends to MemWal's analyze() endpoint
+ * for capturable content, and sends to Walrus Memory's analyze() endpoint
  * for server-side fact extraction.
  */
 

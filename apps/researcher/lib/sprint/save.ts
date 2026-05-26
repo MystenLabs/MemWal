@@ -7,7 +7,7 @@ import { rememberSprintReport } from "./memwal";
 import type { SourceMeta, SaveSprintResult } from "./types";
 
 /**
- * Save a research sprint: generate report, store in MemWal, persist to DB.
+ * Save a research sprint: generate report, store in Walrus Memory, persist to DB.
  */
 export async function saveSprint({
   chatId,
@@ -66,8 +66,8 @@ export async function saveSprint({
     }
   }
 
-  // 5. Store in MemWal
-  console.log("[sprint:save] Storing in MemWal...");
+  // 5. Store in Walrus Memory
+  console.log("[sprint:save] Storing in Walrus Memory...");
   const memwalResult = await rememberSprintReport({
     key: memwalKey,
     title: report.title,
@@ -76,7 +76,7 @@ export async function saveSprint({
     sources,
   });
   console.log(
-    `[sprint:save] MemWal stored. blobId=${memwalResult.blob_id}`
+    `[sprint:save] Walrus Memory stored. blobId=${memwalResult.blob_id}`
   );
 
   // 6. Save to DB

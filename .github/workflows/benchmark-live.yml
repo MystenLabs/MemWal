@@ -16,7 +16,7 @@ on:
           - dev
           - staging
       server_url:
-        description: MemWal server URL. Empty uses BENCH_SERVER_URL environment variable.
+        description: Walrus Memory server URL. Empty uses BENCH_SERVER_URL environment variable.
         required: false
         default: ''
       namespace:

@@ -158,12 +158,12 @@ export default function Dashboard() {
             !normalizedRelayerUrl.includes('staging') &&
             !normalizedRelayerUrl.includes('dev'))
     const dashboardSubtitle = delegateKey
-        ? 'manage your memwal account and delegate keys'
+        ? 'manage your Walrus Memory account and delegate keys'
         : loadingAccount
-            ? 'checking your memwal account...'
+            ? 'checking your Walrus Memory account...'
             : hasResolvedAccount
                 ? 'remove an old delegate key, then create a new one'
-                : 'no memwal account found for this wallet'
+                : 'no Walrus Memory account found for this wallet'
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
 
     // ============================================================
@@ -366,7 +366,7 @@ const result = await generateText({
             <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
@@ -389,7 +389,7 @@ const result = await generateText({
                 {isRecoveringExistingAccount && (
                     <div className="warning-box" style={{ marginBottom: 24 }}>
                         <p>
-                            your wallet already has a MemWal account, but this browser does not have a saved delegate key.
+                            your wallet already has a Walrus Memory account, but this browser does not have a saved delegate key.
                             remove an old on-chain key below or create a new delegate key.
                         </p>
                     </div>
@@ -398,7 +398,7 @@ const result = await generateText({
                 {isNewAccount && (
                     <div className="warning-box" style={{ marginBottom: 24 }}>
                         <p>
-                            no MemWal account found for this wallet.
+                            no Walrus Memory account found for this wallet.
                             create a delegate key to get started.
                         </p>
                     </div>
@@ -590,7 +590,7 @@ const result = await generateText({
                         <div>
                             <div className="card-title">delegate keys (on-chain)</div>
                             <div className="card-subtitle">
-                                all Ed25519 keys registered on your MemWalAccount
+                                all Ed25519 keys registered on your Walrus Memory account
                             </div>
                         </div>
                         <div className="card-header-actions">
@@ -728,7 +728,7 @@ const result = await generateText({
                         </div>
                     ) : !effectiveAccountObjectId ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            no MemWal account found for this wallet. create a delegate key to get started.
+                            no Walrus Memory account found for this wallet. create a delegate key to get started.
                         </div>
                     ) : onChainKeys.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
@@ -781,7 +781,7 @@ const result = await generateText({
                     <div className="card-header">
                         <div>
                             <div className="card-title">quick start — SDK</div>
-                            <div className="card-subtitle">use the memwal SDK to remember and recall</div>
+                            <div className="card-subtitle">use the Walrus Memory SDK to remember and recall</div>
                         </div>
                     </div>
                     <div style={{ position: 'relative' }}>

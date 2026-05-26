@@ -1,5 +1,5 @@
 /**
- * Setup Wizard — Generate delegate key + create MemWalAccount onchain
+ * Setup Wizard — Generate delegate key + create Walrus Memory account onchain
  *
  * Steps:
  * 1. Intro — explain delegate keys, "generate delegate key" button
@@ -285,7 +285,7 @@ export default function SetupWizard() {
         try {
             const accountId = await getAccountObjectId(suiClient, address)
             if (!accountId) {
-                throw new Error('no MemWal account found for this wallet. generate a new delegate key first.')
+                throw new Error('no Walrus Memory account found for this wallet. generate a new delegate key first.')
             }
 
             const { pubHex } = await deriveDelegateKey(normalizedKey)
@@ -346,7 +346,7 @@ export default function SetupWizard() {
             <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="MemWal" style={{ height: 22 }} />
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
@@ -370,7 +370,7 @@ export default function SetupWizard() {
                                 create your delegate key
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 32 }}>
-                                a delegate key lets your AI apps access memwal on your behalf.
+                                a delegate key lets your AI apps access Walrus Memory on your behalf.
                                 it's a lightweight Ed25519 keypair — separate from your wallet.
                             </p>
 
@@ -388,7 +388,7 @@ export default function SetupWizard() {
                                     <div>
                                         <strong style={{ fontSize: '0.9rem' }}>revocable</strong>
                                         <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
-                                            remove anytime from your memwal dashboard
+                                            remove anytime from your Walrus Memory dashboard
                                         </p>
                                     </div>
                                 </div>
@@ -469,7 +469,7 @@ export default function SetupWizard() {
                             <div className="warning-box">
                                 <p>
                                     <strong>save this private key now!</strong> it will not be shown again.
-                                    store it securely — you'll need it to configure the memwal SDK.
+                                    store it securely — you'll need it to configure the Walrus Memory SDK.
                                 </p>
                             </div>
 

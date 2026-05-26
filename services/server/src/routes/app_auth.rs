@@ -33,7 +33,7 @@ use crate::types::{AppAuthClientConfig, AppError, AppState};
 const APP_AUTH_SESSION_TTL_SECS: u64 = 15 * 60;
 const APP_AUTH_CODE_TTL_SECS: u64 = 5 * 60;
 const APP_AUTH_INTENT: &str = "sdk_delegate";
-const DEFAULT_LABEL: &str = "MemWal App";
+const DEFAULT_LABEL: &str = "Walrus Memory App";
 
 #[derive(Debug, Deserialize)]
 pub struct AppAuthStartRequest {

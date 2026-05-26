@@ -1,9 +1,9 @@
 """
-memwal — Core Types
+Walrus Memory — Core Types
 
 Dataclasses for all API request options and response types.
 Ed25519 delegate key based SDK that communicates with
-the MemWal Rust server (TEE).
+the Walrus Memory Rust server (TEE).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ DEFAULT_SERVER_URL = "http://localhost:8000"
 
 #: Named relayer environments. Mirrors the TypeScript SDK / MCP package
 #: ``--prod`` / ``--dev`` / ``--staging`` / ``--local`` presets so the same
-#: shorthand works across every MemWal client.
+#: shorthand works across every Walrus Memory client.
 ENV_PRESETS = {
     "prod": "https://relayer.memwal.ai",
     "dev": "https://relayer.dev.memwal.ai",
@@ -33,11 +33,12 @@ ENV_PRESETS = {
 
 @dataclass
 class MemWalConfig:
-    """Configuration for creating a MemWal client.
+    """Configuration for creating a Walrus Memory client.
 
     Attributes:
-        key: Ed25519 private key (hex string). This is the delegate key from app.memwal.com.
-        account_id: MemWalAccount object ID on Sui.
+        key: Ed25519 private key (hex string). This is the delegate key from the
+            Walrus Memory dashboard.
+        account_id: Walrus Memory account object ID on Sui.
         server_url: Server URL (default: http://localhost:8000). An explicit
             non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
@@ -97,6 +98,37 @@ class RecallResult:
 
     results: List[RecallMemory]
     total: int
+
+
+@dataclass
+class ScoringWeights:
+    """Optional composite-scoring weights for recall ranking.
+
+    Attributes:
+        semantic: Weight applied to semantic similarity (default: 1).
+        recency: Weight applied to recency decay (default: 0).
+        recency_half_life_days: Half-life for the recency term, in days (default: 30).
+        importance: Weight applied to memory importance (default: 0).
+    """
+
+    semantic: Optional[float] = None
+    recency: Optional[float] = None
+    recency_half_life_days: Optional[float] = None
+    importance: Optional[float] = None
+
+    def to_wire(self) -> Dict[str, float]:
+        """Return the snake_case payload expected by the relayer."""
+
+        payload: Dict[str, float] = {}
+        if self.semantic is not None:
+            payload["semantic"] = self.semantic
+        if self.recency is not None:
+            payload["recency"] = self.recency
+        if self.recency_half_life_days is not None:
+            payload["recency_half_life_days"] = self.recency_half_life_days
+        if self.importance is not None:
+            payload["importance"] = self.importance
+        return payload
 
 
 @dataclass
@@ -212,11 +244,13 @@ class RecallManualOptions:
         vector: Pre-computed query embedding vector.
         limit: Max number of results (default: 10).
         namespace: Namespace (default: config namespace or "default").
+        scoring_weights: Optional composite-scoring weights applied before returning hits.
     """
 
     vector: List[float]
     limit: int = 10
     namespace: Optional[str] = None
+    scoring_weights: Optional[ScoringWeights] = None
 
 
 @dataclass

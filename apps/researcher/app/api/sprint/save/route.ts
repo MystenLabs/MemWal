@@ -34,12 +34,12 @@ export async function POST(request: Request) {
     return new ChatbotError("bad_request:api").toResponse();
   }
 
-  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
   const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   if (!memwalKey) {
     return new ChatbotError(
       "bad_request:api",
-      "No MemWal key provided"
+      "No Walrus Memory key provided"
     ).toResponse();
   }
 
@@ -125,9 +125,9 @@ export async function POST(request: Request) {
         console.log(`[sprint:save] ${sources.length} unique sources`);
         send("step", { step: "build-sources", status: "done", message: `${sources.length} sources processed` });
 
-        // Step 5: Store in MemWal
-        send("step", { step: "store-memwal", status: "start", message: "Storing in MemWal..." });
-        console.log(`[sprint:save] Storing in MemWal...`);
+        // Step 5: Store in Walrus Memory
+        send("step", { step: "store-memwal", status: "start", message: "Storing in Walrus Memory..." });
+        console.log(`[sprint:save] Storing in Walrus Memory...`);
 
         const memwalResult = await rememberSprintReport({
           key: memwalKey,
@@ -138,8 +138,8 @@ export async function POST(request: Request) {
           sources,
         });
 
-        console.log(`[sprint:save] MemWal stored. blobId=${memwalResult.blob_id}`);
-        send("step", { step: "store-memwal", status: "done", message: "Stored in MemWal" });
+        console.log(`[sprint:save] Walrus Memory stored. blobId=${memwalResult.blob_id}`);
+        send("step", { step: "store-memwal", status: "done", message: "Stored in Walrus Memory" });
 
         // Step 6: Save to database
         send("step", { step: "save-db", status: "start", message: "Saving to database..." });

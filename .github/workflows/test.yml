@@ -1,4 +1,4 @@
-name: "[QA] Add automated tests to CI (unit + integration + e2e) for MemWal"
+name: "[QA] Add automated tests to CI (unit + integration + e2e) for Walrus Memory"
 
 on:
   pull_request:

@@ -262,8 +262,8 @@ function page({ title, eyebrow, body, result, req }) {
         <div><dt>Mode</dt><dd>${htmlEscape(modeLabel())}</dd></div>
         <div><dt>App base URL</dt><dd>${htmlEscape(APP_BASE_URL || 'request host')}</dd></div>
         <div><dt>Client</dt><dd>${htmlEscape(MEMWAL_CLIENT_ID)}</dd></div>
-        <div><dt>MemWal web</dt><dd>${htmlEscape(MEMWAL_WEB_URL)}</dd></div>
-        <div><dt>MemWal API</dt><dd>${htmlEscape(MEMWAL_API_URL)}</dd></div>
+        <div><dt>Walrus Memory web</dt><dd>${htmlEscape(MEMWAL_WEB_URL)}</dd></div>
+        <div><dt>Walrus Memory API</dt><dd>${htmlEscape(MEMWAL_API_URL)}</dd></div>
         <div><dt>Callback</dt><dd>${htmlEscape(callback)}</dd></div>
         <div><dt>Fallback</dt><dd>${htmlEscape(fallback)}</dd></div>
       </dl>
@@ -276,13 +276,13 @@ function page({ title, eyebrow, body, result, req }) {
 
 function home(req, res) {
   writeHtml(res, 200, page({
-    title: 'MemWal App Auth Demo',
+    title: 'Walrus Memory App Auth Demo',
     eyebrow: 'Local backend app',
     body: `
-      <h1>Connect MemWal from another app</h1>
-      <p class="copy">This demo behaves like a third-party app with its own backend. It sends the browser to MemWal, then exchanges the returned one-time code server-side.</p>
+      <h1>Connect Walrus Memory from another app</h1>
+      <p class="copy">This demo behaves like a third-party app with its own backend. It sends the browser to Walrus Memory, then exchanges the returned one-time code server-side.</p>
       <div class="actions">
-        <a class="button" href="/connect/memwal">Connect MemWal</a>
+        <a class="button" href="/connect/memwal">Connect Walrus Memory</a>
         <a class="button secondary" href="${htmlEscape(MEMWAL_WEB_URL)}/connect/app?client_id=${encodeURIComponent(MEMWAL_CLIENT_ID)}&redirect_uri=${encodeURIComponent(callbackUrl(req))}&state=preview_state&label=${encodeURIComponent(APP_LABEL)}&intent=sdk_delegate&fallback_uri=${encodeURIComponent(errorUrl(req))}">Preview auth URL</a>
       </div>
     `,
@@ -313,7 +313,7 @@ async function handleCallback(req, res, url) {
 
   if (!expectedState || !sameState(expectedState, state)) {
     writeHtml(res, 400, page({
-      title: 'MemWal callback failed',
+      title: 'Walrus Memory callback failed',
       eyebrow: 'State mismatch',
       body: `
         <h1 class="error">State check failed</h1>
@@ -327,11 +327,11 @@ async function handleCallback(req, res, url) {
 
   if (!code) {
     writeHtml(res, 400, page({
-      title: 'MemWal callback missing code',
+      title: 'Walrus Memory callback missing code',
       eyebrow: 'Missing code',
       body: `
         <h1 class="error">No code returned</h1>
-        <p class="copy">MemWal did not return an authorization code.</p>
+        <p class="copy">Walrus Memory did not return an authorization code.</p>
         <div class="actions"><a class="button secondary" href="/">Back</a></div>
       `,
       req,
@@ -361,11 +361,11 @@ async function handleCallback(req, res, url) {
     }
 
     writeHtml(res, 200, page({
-      title: 'MemWal connected',
+      title: 'Walrus Memory connected',
       eyebrow: 'Connected',
       result: payload,
       body: `
-        <h1>MemWal connected</h1>
+        <h1>Walrus Memory connected</h1>
         <p class="copy">The browser only received a short-lived code. This backend exchanged it for account and delegate reference data.</p>
         <div class="actions"><a class="button secondary" href="/">Run again</a></div>
       `,
@@ -373,7 +373,7 @@ async function handleCallback(req, res, url) {
     }))
   } catch (err) {
     writeHtml(res, 502, page({
-      title: 'MemWal token exchange failed',
+      title: 'Walrus Memory token exchange failed',
       eyebrow: 'Exchange failed',
       body: `
         <h1 class="error">Token exchange failed</h1>
@@ -387,12 +387,12 @@ async function handleCallback(req, res, url) {
 
 function handleError(req, res, url) {
   writeHtml(res, 200, page({
-    title: 'MemWal connect cancelled',
-    eyebrow: 'MemWal returned an error',
+    title: 'Walrus Memory connect cancelled',
+    eyebrow: 'Walrus Memory returned an error',
     result: Object.fromEntries(url.searchParams.entries()),
     body: `
       <h1 class="error">Connect was not completed</h1>
-      <p class="copy">MemWal redirected to this safe fallback route with an error and the original state.</p>
+      <p class="copy">Walrus Memory redirected to this safe fallback route with an error and the original state.</p>
       <div class="actions"><a class="button secondary" href="/">Back</a></div>
     `,
     req,
@@ -419,5 +419,5 @@ const server = createServer((req, res) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`MemWal app-auth demo running at http://localhost:${PORT}`)
+  console.log(`Walrus Memory app-auth demo running at http://localhost:${PORT}`)
 })

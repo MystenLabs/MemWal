@@ -1,7 +1,7 @@
 """
-memwal — SDK Client
+Walrus Memory — SDK Client
 
-Ed25519 delegate key based client that communicates with the MemWal
+Ed25519 delegate key based client that communicates with the Walrus Memory
 Rust server (TEE). All data processing (encryption, embedding, Walrus)
 happens server-side -- the SDK just signs requests and sends text.
 
@@ -58,7 +58,6 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
-    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -124,7 +123,7 @@ def _is_transient_polling_status(status: int) -> bool:
 
 
 class MemWal:
-    """Async-native MemWal client.
+    """Async-native Walrus Memory client.
 
     All API methods are ``async``. For synchronous usage, wrap calls with
     ``asyncio.run()`` or use the :class:`MemWalSync` convenience wrapper.
@@ -152,11 +151,11 @@ class MemWal:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWal":
-        """Create a new MemWal client instance.
+        """Create a new Walrus Memory client instance.
 
         Args:
             key: Ed25519 private key hex string (the delegate key).
-            account_id: MemWalAccount object ID on Sui.
+            account_id: Walrus Memory account object ID on Sui.
             server_url: Server URL (default: ``http://localhost:8000``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
             env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
@@ -728,14 +727,18 @@ class MemWal:
         Returns:
             :class:`RecallManualResult` with blob_id + distance pairs.
         """
+        body: Dict[str, Any] = {
+            "vector": opts.vector,
+            "limit": opts.limit,
+            "namespace": opts.namespace or self._namespace,
+        }
+        if opts.scoring_weights is not None:
+            body["scoring_weights"] = opts.scoring_weights.to_wire()
+
         data = await self._signed_request(
             "POST",
             "/api/recall/manual",
-            {
-                "vector": opts.vector,
-                "limit": opts.limit,
-                "namespace": opts.namespace or self._namespace,
-            },
+            body,
             include_seal_session=False,
         )
         hits = [
@@ -774,14 +777,14 @@ class MemWal:
                 health_response = await self._http.get(f"{self._server_url}/health")
                 if health_response.status_code != 200:
                     raise MemWalError(
-                        "MemWal compatibility check failed: "
+                        "Walrus Memory compatibility check failed: "
                         f"GET /version returned {version_response.status_code}, "
                         f"and GET /health returned {health_response.status_code}"
                     )
                 metadata = health_response.json()
             else:
                 raise MemWalError(
-                    "MemWal compatibility check failed: "
+                    "Walrus Memory compatibility check failed: "
                     f"GET /version returned {version_response.status_code}"
                 )
 
@@ -840,7 +843,8 @@ class MemWal:
                     version = obj.get("version")
         if str(version) != "1":
             raise MemWalError(
-                f"SEAL package {package_id} must be at version 1 to build x-seal-session, got {version!r}"
+                f"SEAL package {package_id} must be at version 1 to build "
+                f"x-seal-session, got {version!r}"
             )
 
     async def _build_seal_session_inner(self) -> str:
@@ -920,7 +924,7 @@ class MemWal:
             - ``x-timestamp``: Unix seconds string
             - ``x-nonce``: UUID v4 replay-protection nonce
             - ``x-seal-session``: Base64-encoded exported session envelope
-            - ``x-account-id``: MemWalAccount object ID
+            - ``x-account-id``: Walrus Memory account object ID
             - ``Content-Type``: application/json
         """
         import uuid
@@ -969,7 +973,7 @@ class MemWal:
             err_text = response.text
             if response.status_code == 426:
                 raise MemWalCompatibilityError(
-                    "MemWal relayer rejected this SDK as unsupported "
+                    "Walrus Memory relayer rejected this SDK as unsupported "
                     f"(HTTP 426 Upgrade Required). Relayer response: "
                     f"{err_text[:300] or 'upgrade required'}"
                 )
@@ -982,7 +986,7 @@ class MemWal:
 
 
 class MemWalError(Exception):
-    """Exception raised for MemWal API errors."""
+    """Exception raised for Walrus Memory API errors."""
 
     pass
 
@@ -1005,7 +1009,7 @@ class _HttpStatusError(MemWalError):
         if status == 401:
             super().__init__(AUTH_REJECTED_MESSAGE)
         else:
-            super().__init__(f"MemWal API error ({status}): {body}")
+            super().__init__(f"Walrus Memory API error ({status}): {body}")
         self.status = status
         self.body = body
 
@@ -1068,7 +1072,7 @@ class MemWalSync:
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWalSync":
-        """Create a synchronous MemWal client.
+        """Create a synchronous Walrus Memory client.
 
         Same parameters as :meth:`MemWal.create` (including the ``env``
         relayer preset).

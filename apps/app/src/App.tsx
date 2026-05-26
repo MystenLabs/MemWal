@@ -1,5 +1,5 @@
 /**
- * memwal — Web App
+ * Walrus Memory — Web App
  *
  * Enoki zkLogin integration with @mysten/dapp-kit
  * Flow: Landing → Sign in with Google (Enoki) → Setup Wizard → Dashboard
@@ -50,7 +50,7 @@ interface DelegateKeyState {
   delegateKey: string | null
   /** Ed25519 delegate public key (hex) */
   delegatePublicKey: string | null
-  /** Onchain MemWalAccount object ID */
+  /** Onchain Walrus Memory account object ID */
   accountObjectId: string | null
 }
 
@@ -234,7 +234,7 @@ function LocalAppAuthCallback() {
         boxShadow: '0 20px 60px rgba(15, 23, 42, 0.08)',
       }}>
         <h1 style={{ margin: '0 0 8px', fontSize: 24, letterSpacing: 0 }}>
-          Local MemWal callback
+          Local Walrus Memory callback
         </h1>
         <p style={{ color: 'var(--text-secondary)', lineHeight: 1.5, margin: '0 0 18px' }}>
           This local test page only shows the browser callback result. The app backend must exchange the code server-side.

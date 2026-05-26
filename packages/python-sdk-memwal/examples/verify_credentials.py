@@ -26,7 +26,7 @@ def normalize_hex(value: str) -> str:
 
 
 def main() -> None:
-    private_key = os.environ.get("MEMWAL_PRIVATE_KEY") or os.environ.get("MEMWAL_KEY") or ""
+    private_key = os.environ.get("MEMWAL_PRIVATE_KEY") or ""
     account_id = os.environ.get("MEMWAL_ACCOUNT_ID") or ""
     expected_public_key = os.environ.get("MEMWAL_DELEGATE_PUBLIC_KEY") or ""
     server_url = os.environ.get("MEMWAL_SERVER_URL") or ""
@@ -47,7 +47,7 @@ def main() -> None:
             "You may have pasted a public key or a key from another account."
         )
 
-    print("MemWal credentials look parseable.")
+    print("Walrus Memory credentials look parseable.")
     print(f"Derived delegate public key: {derived_public_key}")
     if account_id:
         print(f"Account ID: {account_id}")

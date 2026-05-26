@@ -479,8 +479,10 @@ mod tests {
             })
             .collect();
         let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
-        let non_manual_order: Vec<&str> =
-            non_manual.iter().map(|r| r.memory.blob_id.as_str()).collect();
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
 
         assert_eq!(
             manual_order, non_manual_order,
@@ -577,8 +579,12 @@ mod tests {
     /// Empty hit list ranks to empty (no panic, no spurious entries).
     #[test]
     fn manual_ranking_empty_hits_returns_empty() {
-        let ranked =
-            super::rank_search_hits(&CompositeRanker, vec![], &ScoringWeights::default(), t_now());
+        let ranked = super::rank_search_hits(
+            &CompositeRanker,
+            vec![],
+            &ScoringWeights::default(),
+            t_now(),
+        );
         assert!(ranked.is_empty());
     }
 
@@ -615,8 +621,10 @@ mod tests {
         let manual = super::rank_search_hits(&CompositeRanker, hits.clone(), &weights, t_now());
 
         // Expected: reversed (highest importance = hit0 first ... hit7 last).
-        let manual_pairs: Vec<(String, f64)> =
-            manual.iter().map(|h| (h.blob_id.clone(), h.distance)).collect();
+        let manual_pairs: Vec<(String, f64)> = manual
+            .iter()
+            .map(|h| (h.blob_id.clone(), h.distance))
+            .collect();
         let expected: Vec<(String, f64)> = (0..8)
             .map(|i| (format!("hit{i}"), 0.10 + (i as f64) * 0.05))
             .collect();
@@ -637,8 +645,10 @@ mod tests {
             })
             .collect();
         let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
-        let non_manual_order: Vec<&str> =
-            non_manual.iter().map(|r| r.memory.blob_id.as_str()).collect();
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
         let manual_order: Vec<&str> = manual.iter().map(|h| h.blob_id.as_str()).collect();
         assert_eq!(manual_order, non_manual_order);
     }
@@ -649,7 +659,9 @@ mod tests {
     #[test]
     fn manual_ranking_combined_weights_matches_non_manual() {
         use crate::engine::HydratedMemory;
-        use crate::services::extractor::{IMPORTANCE_STANDARD, IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
+        use crate::services::extractor::{
+            IMPORTANCE_STANDARD, IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL,
+        };
 
         let weights = ScoringWeights {
             semantic: 0.3,
@@ -679,8 +691,10 @@ mod tests {
             })
             .collect();
         let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
-        let non_manual_order: Vec<&str> =
-            non_manual.iter().map(|r| r.memory.blob_id.as_str()).collect();
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
 
         assert_eq!(
             manual_order, non_manual_order,
@@ -723,8 +737,10 @@ mod tests {
             })
             .collect();
         let non_manual = CompositeRanker.rank(hydrated, &weights, t_now());
-        let non_manual_order: Vec<&str> =
-            non_manual.iter().map(|r| r.memory.blob_id.as_str()).collect();
+        let non_manual_order: Vec<&str> = non_manual
+            .iter()
+            .map(|r| r.memory.blob_id.as_str())
+            .collect();
 
         assert_eq!(manual_order, non_manual_order);
         assert_eq!(manual_order, vec!["newer", "older"]);

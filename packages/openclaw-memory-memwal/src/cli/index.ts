@@ -15,7 +15,7 @@ export function registerCli(api: any, client: MemWal, config: PluginConfig): voi
     ({ program }: any) => {
       const cmd = program
         .command("memwal")
-        .description("MemWal memory plugin commands");
+        .description("Walrus Memory plugin commands");
 
       registerSearchCommand(cmd, client, config);
       registerStatsCommand(cmd, client, config);

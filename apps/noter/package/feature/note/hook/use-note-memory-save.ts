@@ -4,7 +4,7 @@
  * Memory Save Hook (v2 SDK)
  *
  * Simplified workflow — saves a memory highlight via server-side tRPC call.
- * No wallet signing needed: MemWal server handles everything.
+ * No wallet signing needed: Walrus Memory server handles everything.
  *
  * Stages (UI feedback):
  * 1. saving → Calling server API

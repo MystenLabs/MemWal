@@ -646,7 +646,7 @@ function PureMemWalButton({
           variant="ghost"
           title={useMemWal ? "Memory enabled" : "Memory disabled"}
         >
-          <img src="/memwal-icon.png" alt="MemWal" className="size-4" />
+          <img src="/memwal-icon.png" alt="Walrus Memory" className="size-4" />
           <span className="hidden sm:inline">{useMemWal ? "Memory" : "No Memory"}</span>
         </Button>
         {useMemWal && (
@@ -700,7 +700,7 @@ function PureMemWalButton({
             />
           </div>
           <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            account ID (MemWalAccount object ID)
+            account ID (Walrus Memory account object ID)
           </div>
           <div className="flex gap-1.5">
             <input

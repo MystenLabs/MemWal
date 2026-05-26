@@ -1,5 +1,5 @@
 """
-memwal — AI Middleware
+Walrus Memory — AI Middleware
 
 Wraps LangChain and OpenAI SDK clients with automatic memory management.
 Before each LLM call, relevant memories are recalled and injected.
@@ -145,7 +145,7 @@ def with_memwal_langchain(
     debug: bool = False,
     env: Optional[str] = None,
 ) -> "BaseChatModel":
-    """Wrap a LangChain ``BaseChatModel`` with MemWal memory management.
+    """Wrap a LangChain ``BaseChatModel`` with Walrus Memory management.
 
     Before each call:
         - Recall relevant memories for the last user message
@@ -157,8 +157,8 @@ def with_memwal_langchain(
     Args:
         llm: A LangChain ``BaseChatModel`` instance.
         key: Ed25519 delegate key (hex).
-        account_id: MemWalAccount object ID.
-        server_url: MemWal server URL.
+        account_id: Walrus Memory account object ID.
+        server_url: Walrus Memory server URL.
         namespace: Default namespace.
         max_memories: Max memories to inject per request.
         auto_save: Auto-save new facts from conversation.
@@ -168,7 +168,7 @@ def with_memwal_langchain(
             ``"local"``). Same precedence as :meth:`MemWal.create`.
 
     Returns:
-        A wrapped ``BaseChatModel`` that automatically uses MemWal memory.
+        A wrapped ``BaseChatModel`` that automatically uses Walrus Memory.
     """
     try:
         from langchain_core.messages import HumanMessage, SystemMessage  # noqa: F811
@@ -208,7 +208,7 @@ def with_memwal_langchain(
                 return messages
 
             memory_context = _format_memories(relevant)
-            log(f"[MemWal] Found {len(relevant)} relevant memories")
+            log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
 
             # Insert memory system message before the last user message
             result = list(messages)
@@ -226,7 +226,7 @@ def with_memwal_langchain(
 
             return result
         except Exception as e:
-            log(f"[MemWal] Memory search failed: {e}")
+            log(f"[Walrus Memory] Memory search failed: {e}")
             return messages
 
     async def _post_analyze(messages: List[BaseMessage]) -> None:
@@ -238,7 +238,7 @@ def with_memwal_langchain(
             try:
                 await memwal.analyze(user_text, namespace)
             except Exception as e:
-                log(f"[MemWal] Auto-save failed: {e}")
+                log(f"[Walrus Memory] Auto-save failed: {e}")
 
     async def patched_agenerate(
         messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
@@ -304,7 +304,7 @@ def with_memwal_openai(
     debug: bool = False,
     env: Optional[str] = None,
 ) -> Any:
-    """Wrap an OpenAI client with MemWal memory management.
+    """Wrap an OpenAI client with Walrus Memory management.
 
     Works with both ``openai.OpenAI`` (sync) and ``openai.AsyncOpenAI`` (async).
 
@@ -318,8 +318,8 @@ def with_memwal_openai(
     Args:
         client: An ``openai.OpenAI`` or ``openai.AsyncOpenAI`` instance.
         key: Ed25519 delegate key (hex).
-        account_id: MemWalAccount object ID.
-        server_url: MemWal server URL.
+        account_id: Walrus Memory account object ID.
+        server_url: Walrus Memory server URL.
         namespace: Default namespace.
         max_memories: Max memories to inject per request.
         auto_save: Auto-save new facts from conversation.
@@ -329,7 +329,7 @@ def with_memwal_openai(
             ``"local"``). Same precedence as :meth:`MemWal.create`.
 
     Returns:
-        The same client, with ``chat.completions.create`` wrapped to use MemWal.
+        The same client, with ``chat.completions.create`` wrapped to use Walrus Memory.
     """
     memwal = MemWal.create(
         key=key,
@@ -379,14 +379,14 @@ def _wrap_async_openai(
                 ]
                 if relevant:
                     memory_context = _format_memories(relevant)
-                    log(f"[MemWal] Found {len(relevant)} relevant memories")
+                    log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
                     messages = _inject_openai_memory(list(messages), memory_context)
                     if "messages" in kwargs:
                         kwargs["messages"] = messages
                     elif args:
                         args = (messages,) + args[1:]
             except Exception as e:
-                log(f"[MemWal] Memory search failed: {e}")
+                log(f"[Walrus Memory] Memory search failed: {e}")
 
         result = await original_create(*args, **kwargs)
 
@@ -396,7 +396,7 @@ def _wrap_async_openai(
                 try:
                     await memwal.analyze(user_text, namespace)
                 except Exception as e:
-                    log(f"[MemWal] Auto-save failed: {e}")
+                    log(f"[Walrus Memory] Auto-save failed: {e}")
 
             _fire_and_forget(_analyze())
 
@@ -437,14 +437,14 @@ def _wrap_sync_openai(
                 ]
                 if relevant:
                     memory_context = _format_memories(relevant)
-                    log(f"[MemWal] Found {len(relevant)} relevant memories")
+                    log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
                     messages = _inject_openai_memory(list(messages), memory_context)
                     if "messages" in kwargs:
                         kwargs["messages"] = messages
                     elif args:
                         args = (messages,) + args[1:]
             except Exception as e:
-                log(f"[MemWal] Memory search failed: {e}")
+                log(f"[Walrus Memory] Memory search failed: {e}")
 
         result = original_create(*args, **kwargs)
 
@@ -454,7 +454,7 @@ def _wrap_sync_openai(
                 try:
                     await memwal.analyze(user_text, namespace)
                 except Exception as e:
-                    log(f"[MemWal] Auto-save failed: {e}")
+                    log(f"[Walrus Memory] Auto-save failed: {e}")
 
             _fire_and_forget(_analyze())
 

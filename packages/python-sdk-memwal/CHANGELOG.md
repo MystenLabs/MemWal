@@ -1,11 +1,4 @@
----
-title: "Changelog"
-description: "Release history for the MemWal Python SDK."
----
-
-Track what's new, changed, and fixed in `memwal` (Python).
-
-For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+# memwal
 
 ## 0.1.2
 
@@ -17,6 +10,7 @@ For the latest version, see the [PyPI project page](https://pypi.org/project/mem
 ### Changed
 
 - Updated docs/examples to use `MEMWAL_PRIVATE_KEY`.
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ### Fixed
 

@@ -134,7 +134,7 @@ export async function POST(request: Request) {
     const modelMessages = await convertToModelMessages(uiMessages);
 
     // Resolve sprint context — pre-built during preparation and stored on chat record
-    const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+    const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
     const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
     const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
     const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;
@@ -143,7 +143,7 @@ export async function POST(request: Request) {
 
     let systemPrompt = researchPrompt;
     if (prebuiltSprintContext) {
-      // Use pre-built context from sprint preparation (LLM-generated queries → MemWal recall)
+      // Use pre-built context from sprint preparation (LLM-generated queries → Walrus Memory recall)
       systemPrompt = getSprintResumePrompt(prebuiltSprintContext);
       console.log(`[sprint:context] Using pre-built sprint context: ${prebuiltSprintContext.length} chars`);
       console.log(`[sprint:context] Final system prompt length=${systemPrompt.length} chars (base=${researchPrompt.length}, sprint addition=${systemPrompt.length - researchPrompt.length})`);

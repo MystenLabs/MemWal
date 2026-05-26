@@ -1,5 +1,5 @@
 /**
- * Connect App — hosted MemWal app-auth flow for third-party backend apps.
+ * Connect App — hosted Walrus Memory app-auth flow for third-party backend apps.
  *
  * Flow:
  *   1. Read /connect/app query params and ask the relayer to create a
@@ -195,7 +195,7 @@ export default function ConnectApp() {
         }
 
         if (!accountId) {
-            throw new Error('could not resolve or create a MemWal account for this wallet')
+            throw new Error('could not resolve or create a Walrus Memory account for this wallet')
         }
 
         const addTx = new Transaction()
@@ -267,7 +267,7 @@ export default function ConnectApp() {
             <nav className="lp-nav">
                 <div className="lp-nav-inner">
                     <Link to="/" className="lp-nav-brand" style={brandStyle}>
-                        <img src={memwalLogo} alt="MemWal" height="28" />
+                        <img src={memwalLogo} alt="Walrus Memory" height="28" />
                         <span style={brandTextStyle}>Connect app</span>
                     </Link>
                 </div>
@@ -278,16 +278,16 @@ export default function ConnectApp() {
                     <section style={panelStyle}>
                         <Loader2 size={28} style={spinStyle} />
                         <h1 style={titleStyle}>Checking app request</h1>
-                        <p style={mutedStyle}>MemWal is validating this connection request.</p>
+                        <p style={mutedStyle}>Walrus Memory is validating this connection request.</p>
                     </section>
                 )}
 
                 {step === 'consent' && session && (
                     <section style={panelStyle}>
                         <ShieldCheck size={34} color="#0f9f6e" />
-                        <h1 style={titleStyle}>Connect MemWal</h1>
+                        <h1 style={titleStyle}>Connect Walrus Memory</h1>
                         <p style={bodyStyle}>
-                            {session.client.display_name} wants to connect to your MemWal account.
+                            {session.client.display_name} wants to connect to your Walrus Memory account.
                         </p>
 
                         <div style={detailGridStyle}>
@@ -352,7 +352,7 @@ export default function ConnectApp() {
                         <Loader2 size={28} style={spinStyle} />
                         <h1 style={titleStyle}>Registering delegate</h1>
                         <p style={mutedStyle}>
-                            MemWal is adding an app-specific delegate key on-chain.
+                            Walrus Memory is adding an app-specific delegate key on-chain.
                         </p>
                     </section>
                 )}
@@ -380,7 +380,7 @@ export default function ConnectApp() {
                                 </button>
                             </div>
                         ) : (
-                            <p style={mutedStyle}>MemWal did not redirect because the app request was not safe.</p>
+                            <p style={mutedStyle}>Walrus Memory did not redirect because the app request was not safe.</p>
                         )}
                     </section>
                 )}

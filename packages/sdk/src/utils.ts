@@ -1,8 +1,10 @@
 /**
- * memwal — Shared Utilities
+ * Walrus Memory — Shared Utilities
  *
  * Common crypto and encoding helpers used across the SDK.
  */
+
+import type { ScoringWeights } from "./types.js";
 
 // ============================================================
 // SHA-256 (Isomorphic)
@@ -63,6 +65,17 @@ export function bytesToHex(bytes: Uint8Array): string {
     return Array.from(bytes)
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
+}
+
+export function scoringWeightsToWire(weights?: ScoringWeights): object | undefined {
+    if (!weights) return undefined;
+
+    return {
+        semantic: weights.semantic,
+        recency: weights.recency,
+        recency_half_life_days: weights.recencyHalfLifeDays,
+        importance: weights.importance,
+    };
 }
 
 // ============================================================
@@ -150,7 +163,7 @@ export function sanitizeServerError(
     const stripped = text.replace(/[\u0000-\u001F\u007F]/g, " ").trim();
     const truncated =
         stripped.length > MAX ? `${stripped.slice(0, MAX)}...` : stripped;
-    const message = `MemWal server error (${status}): ${truncated || "<no message>"}`;
+    const message = `Walrus Memory server error (${status}): ${truncated || "<no message>"}`;
     return { message, raw: rawBody, serverCode };
 }
 

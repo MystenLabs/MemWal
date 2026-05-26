@@ -39,7 +39,7 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function main() {
-  const privKeyHex = process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+  const privKeyHex = process.env.MEMWAL_PRIVATE_KEY;
   if (!privKeyHex) {
     console.error("MEMWAL_PRIVATE_KEY env var is required");
     process.exit(1);

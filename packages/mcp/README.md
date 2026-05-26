@@ -1,12 +1,12 @@
-# MemWal MCP
+# Walrus Memory MCP
 
-MemWal MCP is a stdio Model Context Protocol server for MemWal. It lets MCP clients such as Cursor, Claude Desktop, Antigravity, and Claude Code connect to the MemWal relayer without manually configuring remote headers or auth tokens.
+Walrus Memory MCP is a stdio Model Context Protocol server for Walrus Memory. It lets MCP clients such as Cursor, Claude Desktop, Antigravity, and Claude Code connect to the Walrus Memory relayer without manually configuring remote headers or auth tokens.
 
 On first use, the package advertises a `memwal_login` tool to the MCP client. The agent can call it inline — no separate CLI command needed. The tool opens a browser-based wallet login flow and stores local credentials at `~/.memwal/credentials.json`. A matching `memwal_logout` tool clears the saved credentials.
 
 ## Quick Start
 
-Add MemWal MCP to your MCP client config:
+Add Walrus Memory MCP to your MCP client config:
 
 ```json
 {
@@ -40,13 +40,13 @@ memwal-mcp --help
 
 ## Options
 
-Use CLI flags or environment variables to override the default MemWal endpoints.
+Use CLI flags or environment variables to override the default Walrus Memory endpoints.
 
 | CLI flag | Environment variable | Description |
 | --- | --- | --- |
 | `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the web app URL used during login. |
-| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in MemWal. |
+| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in Walrus Memory. |
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace applied when the agent omits one. |
 
 Enable verbose stderr logging with `MEMWAL_MCP_DEBUG=1`.

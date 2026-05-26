@@ -82,7 +82,7 @@ from memwal import MemWal
 
 async def main():
     memwal = MemWal.create(
-        key=os.environ["MEMWAL_KEY"],
+        key=os.environ["MEMWAL_PRIVATE_KEY"],
         account_id=os.environ["MEMWAL_ACCOUNT_ID"],
         env="prod",
         namespace="demo",

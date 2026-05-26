@@ -21,7 +21,7 @@ export function assertCompatibleRelayer(
         typeof metadata.minSupportedSdk !== "object"
     ) {
         throw new MemWalCompatibilityError(
-            `MemWal relayer at ${serverUrl} does not expose compatibility metadata. ` +
+            `Walrus Memory relayer at ${serverUrl} does not expose compatibility metadata. ` +
                 "Upgrade the relayer to a version that serves GET /version, or use an older SDK.",
         );
     }
@@ -29,14 +29,14 @@ export function assertCompatibleRelayer(
     const apiMajor = semverMajor(metadata.apiVersion);
     if (apiMajor === null) {
         throw new MemWalCompatibilityError(
-            `MemWal relayer at ${serverUrl} returned invalid apiVersion ` +
+            `Walrus Memory relayer at ${serverUrl} returned invalid apiVersion ` +
                 `"${metadata.apiVersion}".`,
         );
     }
 
     if (apiMajor !== SUPPORTED_RELAYER_API_MAJOR) {
         throw new MemWalCompatibilityError(
-            `This MemWal TypeScript SDK supports relayer API ` +
+            `This Walrus Memory TypeScript SDK supports relayer API ` +
                 `${SUPPORTED_RELAYER_API_MAJOR}.x, but ${serverUrl} reports ` +
                 `apiVersion ${metadata.apiVersion}. Upgrade or downgrade the SDK/relayer pair.`,
         );
@@ -45,18 +45,18 @@ export function assertCompatibleRelayer(
     const minSdk = metadata.minSupportedSdk.typescript;
     if (!minSdk) {
         throw new MemWalCompatibilityError(
-            `MemWal relayer at ${serverUrl} did not report minSupportedSdk.typescript.`,
+            `Walrus Memory relayer at ${serverUrl} did not report minSupportedSdk.typescript.`,
         );
     }
     if (semverMajor(minSdk) === null) {
         throw new MemWalCompatibilityError(
-            `MemWal relayer at ${serverUrl} returned invalid ` +
+            `Walrus Memory relayer at ${serverUrl} returned invalid ` +
                 `minSupportedSdk.typescript "${minSdk}".`,
         );
     }
     if (compareSemver(MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION, minSdk) < 0) {
         throw new MemWalCompatibilityError(
-            `MemWal relayer at ${serverUrl} requires TypeScript SDK >= ${minSdk}, ` +
+            `Walrus Memory relayer at ${serverUrl} requires TypeScript SDK >= ${minSdk}, ` +
                 `but this SDK supports the ${MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION} ` +
                 "compatibility baseline. Upgrade " +
                 "@mysten-incubation/memwal or use an older compatible relayer.",
@@ -68,7 +68,7 @@ export function compatibilityErrorFromStatus(status: number, body: string): MemW
     if (status !== 426) return null;
 
     return new MemWalCompatibilityError(
-        "MemWal relayer rejected this SDK as unsupported (HTTP 426 Upgrade Required). " +
+        "Walrus Memory relayer rejected this SDK as unsupported (HTTP 426 Upgrade Required). " +
             `SDK compatibility baseline: ${MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION}. ` +
             `Relayer response: ${body.slice(0, 300) || "upgrade required"}`,
     );

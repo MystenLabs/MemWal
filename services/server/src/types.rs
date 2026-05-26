@@ -1031,7 +1031,7 @@ pub struct AuthInfo {
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)
     pub owner: String,
-    /// MemWalAccount object ID (set after onchain verification)
+    /// Walrus Memory account object ID (set after onchain verification)
     pub account_id: String,
     /// Delegate private key (hex) — legacy path for SEAL decrypt. Optional;
     /// modern SDKs send `seal_session` instead. Retained during the

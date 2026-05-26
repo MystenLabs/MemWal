@@ -45,12 +45,12 @@ export async function POST(request: Request) {
   }
 
   const { chatId, sprintIds, visibility = "private" } = body;
-  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY || process.env.MEMWAL_KEY;
+  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
   const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
   const userId = session.user.id;
 
   if (!memwalKey) {
-    return new ChatbotError("bad_request:api", "MemWal key is required for sprint preparation").toResponse();
+    return new ChatbotError("bad_request:api", "Walrus Memory key is required for sprint preparation").toResponse();
   }
 
   console.log(`[sprint:prepare] memwalKey source=${session.user.privateKey ? "session" : "env"}, key=${memwalKey.slice(0, 8)}...`);
@@ -97,7 +97,7 @@ export async function POST(request: Request) {
         console.log(`[sprint:prepare] Chat created: ${chatId}`);
         send("step", { step: "create-chat", status: "done", message: "Session created" });
 
-        // Step 3: Per-sprint — LLM query generation → MemWal recall → context assembly
+        // Step 3: Per-sprint — LLM query generation → Walrus Memory recall → context assembly
         send("step", { step: "build-context", status: "start", message: "Retrieving sprint research..." });
 
         const sprintContextBlocks: string[] = [];
@@ -223,7 +223,7 @@ Sprint metadata:
           "## Previous Research Sprints",
           "",
           "The user has selected the following previous research sprints as context for this conversation.",
-          "The findings below were retrieved from long-term research memory (MemWal).",
+          "The findings below were retrieved from long-term research memory (Walrus Memory).",
           "",
           ...sprintContextBlocks,
         ].join("\n");

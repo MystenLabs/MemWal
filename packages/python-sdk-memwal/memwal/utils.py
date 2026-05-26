@@ -1,5 +1,5 @@
 """
-memwal — Shared Utilities
+Walrus Memory — Shared Utilities
 
 Crypto and encoding helpers for Ed25519 signing and SHA-256 hashing.
 Uses PyNaCl (nacl.signing) as the primary Ed25519 implementation.
@@ -119,7 +119,7 @@ def build_signature_message(
         path: URL path with query (e.g. ``"/api/remember"``).
         body_sha256: SHA-256 hex digest of the JSON body string.
         nonce: UUID v4 sent as the ``x-nonce`` header (required).
-        account_id: MemWalAccount object ID sent as ``x-account-id``
+        account_id: Walrus Memory account object ID sent as ``x-account-id``
             (required; empty string here will mismatch on server).
     """
     return f"{timestamp}.{method}.{path}.{body_sha256}.{nonce}.{account_id}"

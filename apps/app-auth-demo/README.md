@@ -1,6 +1,6 @@
-# MemWal App Auth Demo
+# Walrus Memory App Auth Demo
 
-Tiny backend-served demo app for testing `Connect MemWal` from a third-party app.
+Tiny backend-served demo app for testing `Connect Walrus Memory` from a third-party app.
 
 ## Local
 
@@ -18,11 +18,11 @@ MEMWAL_CLIENT_ID=dev_localhost
 MEMWAL_CLIENT_SECRET=dev_localhost_secret
 ```
 
-MemWal server must run with `APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS=true` on a non-mainnet network for the built-in `dev_localhost` client.
+Walrus Memory server must run with `APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS=true` on a non-mainnet network for the built-in `dev_localhost` client.
 
 ## Deployed Demo App
 
-For deployed testing, register the exact deployed callback and fallback URLs in MemWal's env-backed client list.
+For deployed testing, register the exact deployed callback and fallback URLs in Walrus Memory's env-backed client list.
 
 Generate a client secret hash:
 
@@ -32,7 +32,7 @@ HASH=$(printf '%s' "$SECRET" | shasum -a 256 | awk '{print $1}')
 echo "$HASH"
 ```
 
-Add the app to MemWal server env:
+Add the app to Walrus Memory server env:
 
 ```txt
 APP_AUTH_CLIENTS_JSON=[{"client_id":"my_demo","client_secret_sha256":"PASTE_HASH_HERE","display_name":"My Demo App","allowed_redirect_uris":["https://my-demo-app.example.com/api/memwal/callback"],"fallback_uri":"https://my-demo-app.example.com/memwal/error","allowed_fallback_uris":["https://my-demo-app.example.com/memwal/error"]}]
@@ -52,7 +52,7 @@ APP_LABEL=My Demo App
 
 `APP_BASE_URL` makes the demo generate deployed callback/fallback URLs even when it is behind a platform proxy.
 
-Google Console does not need every dApp callback URL. Google/Enoki auth is handled by MemWal, so Google Console only needs MemWal origins/callbacks such as `https://dev.memwal.ai` and `https://memwal.ai`.
+Google Console does not need every dApp callback URL. Google/Enoki auth is handled by Walrus Memory, so Google Console only needs Walrus Memory origins/callbacks such as `https://dev.memwal.ai` and `https://memwal.ai`.
 
 ## Copy-Paste Vercel/Railway Shape
 
@@ -67,7 +67,7 @@ MEMWAL_CLIENT_SECRET=your_client_secret
 APP_LABEL=Your App
 ```
 
-Then add the exact URLs to `APP_AUTH_CLIENTS_JSON` on MemWal:
+Then add the exact URLs to `APP_AUTH_CLIENTS_JSON` on Walrus Memory:
 
 ```txt
 https://your-app.vercel.app/api/memwal/callback

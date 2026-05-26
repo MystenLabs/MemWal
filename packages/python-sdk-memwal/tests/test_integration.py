@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration tests for the MemWal Python SDK against a live server.
+Integration tests for the Walrus Memory Python SDK against a live server.
 
 Targets MEMWAL_SERVER_URL (default: https://relayer.dev.memwal.ai).
 
@@ -53,7 +53,7 @@ from memwal.utils import build_signature_message, bytes_to_hex
 # ── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.dev.memwal.ai")
-PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY") or os.environ.get("MEMWAL_KEY", "")
+PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 
 HAS_KEY = bool(PRIVATE_KEY_HEX and ACCOUNT_ID)

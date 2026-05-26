@@ -1,5 +1,5 @@
 """
-memwal — Privacy-first AI memory SDK
+Walrus Memory — Privacy-first AI memory SDK
 
 Ed25519 delegate key auth + server-side TEE processing.
 
@@ -32,7 +32,6 @@ from .client import (
     MemWalSync,
 )
 from .middleware import with_memwal_langchain, with_memwal_openai
-from .utils import delegate_key_to_sui_address, delegate_key_to_public_key
 from .types import (
     ENV_PRESETS,
     AnalyzedFact,
@@ -61,7 +60,9 @@ from .types import (
     RememberManualResult,
     RememberResult,
     RestoreResult,
+    ScoringWeights,
 )
+from .utils import delegate_key_to_public_key, delegate_key_to_sui_address
 
 # JS-style alias for developers coming from the TypeScript SDK
 withMemWal = with_memwal_langchain
@@ -105,6 +106,7 @@ __all__ = [
     "AnalyzedFact",
     "HealthResult",
     "RestoreResult",
+    "ScoringWeights",
     "RememberManualOptions",
     "RememberManualResult",
     "RecallManualOptions",

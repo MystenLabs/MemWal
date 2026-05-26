@@ -67,7 +67,7 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
             };
           }
 
-          // MemWal returns L2 distance — convert to similarity % for readability
+          // Walrus Memory returns L2 distance — convert to similarity % for readability
           const formatted = safe
             .map((r: any, i: number) => {
               const relevance = Math.round((1 - r.distance) * 100);

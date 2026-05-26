@@ -1,7 +1,7 @@
 {
     "name": "@mysten-incubation/memwal-mcp",
     "version": "0.0.2",
-    "description": "MemWal MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the MemWal relayer. Handles browser-based wallet login on first run.",
+    "description": "Walrus Memory MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the Walrus Memory relayer. Handles browser-based wallet login on first run.",
     "type": "module",
     "engines": {
         "node": ">=20.0.0"
@@ -41,6 +41,8 @@
         "ai",
         "mcp",
         "model-context-protocol",
+        "walrus-memory",
+        "walrus",
         "memwal",
         "memory",
         "claude",

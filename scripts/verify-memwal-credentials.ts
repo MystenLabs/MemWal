@@ -10,8 +10,7 @@ function normalizeHex(value: string): string {
 }
 
 async function main() {
-    const privateKey =
-        process.env.MEMWAL_PRIVATE_KEY ?? process.env.MEMWAL_KEY ?? "";
+    const privateKey = process.env.MEMWAL_PRIVATE_KEY ?? "";
     const accountId = process.env.MEMWAL_ACCOUNT_ID ?? "";
     const expectedPublicKey = process.env.MEMWAL_DELEGATE_PUBLIC_KEY ?? "";
     const serverUrl = process.env.MEMWAL_SERVER_URL ?? "";
@@ -40,7 +39,7 @@ async function main() {
         }
     }
 
-    console.log("MemWal credentials look parseable.");
+    console.log("Walrus Memory credentials look parseable.");
     console.log(`Derived delegate public key: ${derivedPublicKey}`);
     if (accountId) console.log(`Account ID: ${accountId}`);
     if (serverUrl) console.log(`Relayer URL: ${serverUrl}`);
