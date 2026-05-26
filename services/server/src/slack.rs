@@ -1918,6 +1918,98 @@ mod tests {
             delivered_count, suppressed_count
         );
 
+        // ── Scenarios 7–13: ENG-1784 infra alerts ────────────────────
+        // Each fires one of the new InfraFailureKind variants. The
+        // alerter's per-variant dedup keeps these from collapsing
+        // against each other; we pause briefly so the channel renders
+        // in order and a reviewer can match each Slack message to the
+        // scenario name printed here.
+
+        pause("scenario 7", 60).await; // long pause so rate-cap window from #6 elapses
+        println!("\n[7/13] InfraFailureKind::SidecarDown");
+        let client = make_live_client("scenario-7-sidecar").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SidecarDown {
+                    consecutive_failures: 5,
+                },
+            })
+            .await
+            .expect("scenario 7 should deliver");
+        pause("scenario 8", 3).await;
+
+        println!("\n[8/13] InfraFailureKind::PostgresDown");
+        let client = make_live_client("scenario-8-postgres").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::PostgresDown {
+                    reason: "connection refused by 10.0.0.42:5432 — pool exhausted".to_string(),
+                },
+            })
+            .await
+            .expect("scenario 8 should deliver");
+        pause("scenario 9", 3).await;
+
+        println!("\n[9/13] InfraFailureKind::RedisDown");
+        let client = make_live_client("scenario-9-redis").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::RedisDown {
+                    consecutive_failures: 4,
+                },
+            })
+            .await
+            .expect("scenario 9 should deliver");
+        pause("scenario 10", 3).await;
+
+        println!("\n[10/13] InfraFailureKind::SuiRpcDown");
+        let client = make_live_client("scenario-10-sui-rpc").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::SuiRpcDown {
+                    consecutive_failures: 6,
+                },
+            })
+            .await
+            .expect("scenario 10 should deliver");
+        pause("scenario 11", 3).await;
+
+        println!("\n[11/13] InfraFailureKind::WalletPoolDrained");
+        let client = make_live_client("scenario-11-wallet-drain").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::WalletPoolDrained {
+                    pool_size: 5,
+                    consecutive_transient: 15,
+                },
+            })
+            .await
+            .expect("scenario 11 should deliver");
+        pause("scenario 12", 3).await;
+
+        println!("\n[12/13] InfraFailureKind::ApalisQueueStuck");
+        let client = make_live_client("scenario-12-apalis-stuck").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::ApalisQueueStuck {
+                    backlog: 437,
+                    stuck_for_secs: 600,
+                    consecutive_samples: 5,
+                },
+            })
+            .await
+            .expect("scenario 12 should deliver");
+        pause("scenario 13", 3).await;
+
+        println!("\n[13/13] InfraFailureKind::NoSuiKeysConfigured (boot-time)");
+        let client = make_live_client("scenario-13-no-keys").unwrap();
+        client
+            .notify_infra_failure(InfraFailureAlert {
+                kind: InfraFailureKind::NoSuiKeysConfigured,
+            })
+            .await
+            .expect("scenario 13 should deliver");
+
         println!("\n✅ Live demo complete. Verify in #target-channel that you see:");
         println!("   1× scenario 1 (wallet retries exhausted, Enoki)");
         println!("   1× scenario 2 (handoff enqueue failed)");
@@ -1925,5 +2017,12 @@ mod tests {
         println!("   1× scenario 4 (sanitized credentials — no passwords)");
         println!("   1× scenario 5 (UTF-8 — Japanese + emoji)");
         println!("   1× scenario 6 header + ~30× rate-cap entries (35 sent, 5 dropped)");
+        println!("   1× scenario 7  (🚨 Sidecar Down)");
+        println!("   1× scenario 8  (🚨 Postgres Down — reason redacted? sanitizer was OFF for this path)");
+        println!("   1× scenario 9  (🚨 Redis Down)");
+        println!("   1× scenario 10 (🚨 Sui RPC Down)");
+        println!("   1× scenario 11 (🚨 Wallet Pool Drained — backlog signal)");
+        println!("   1× scenario 12 (🚨 Apalis Queue Stuck — 437 / 600s / 5 samples)");
+        println!("   1× scenario 13 (🚨 No Sui Keys Configured — boot-time)");
     }
 }

@@ -67,9 +67,23 @@ SLACK_WEBHOOK_URL=$STAGING_SLACK_WEBHOOK \
   --bin memwal-server -- --ignored --nocapture
 ```
 
-Verifies all 6 scenarios (terminal wallet failure, queue handoff,
-dedup, sanitization, multi-byte, global rate cap) land in the channel
-without a real relayer needed.
+Verifies all 13 scenarios land in the channel without a real relayer:
+
+1. Terminal wallet failure (Enoki `balance::split`)
+2. Handoff enqueue failure (queue layer down after upload)
+3. Dedup (same error twice → 1 message)
+4. Credential sanitization (`redis://` / `postgres://` strings)
+5. Multi-byte UTF-8 (Japanese + emoji)
+6. Global rate cap (35 distinct errors → 30 delivered)
+7. `InfraFailureKind::SidecarDown` (≈ 60s cooldown after #6 so rate-cap window elapses)
+8. `InfraFailureKind::PostgresDown`
+9. `InfraFailureKind::RedisDown`
+10. `InfraFailureKind::SuiRpcDown`
+11. `InfraFailureKind::WalletPoolDrained`
+12. `InfraFailureKind::ApalisQueueStuck`
+13. `InfraFailureKind::NoSuiKeysConfigured`
+
+Total live run: ~95s (rate-cap cooldown between scenario 6 and 7 dominates).
 
 ## Verification
 
