@@ -646,6 +646,82 @@ async fn main() {
         });
     }
 
+    // Probe 4: Apalis backlog stuck-queue detection.
+    //
+    // Counts Pending jobs whose `run_at` is at least
+    // `apalis_backlog_stuck_secs` in the past — i.e. jobs that were
+    // ready to run more than ~5 min ago but no worker has claimed them.
+    // Above `apalis_backlog_threshold` AND that condition sustained for
+    // `health_check_fail_threshold` consecutive samples → queue is
+    // wedged (workers dead, deadlocked, or under-provisioned).
+    //
+    // Schema reminder: apalis-sql writes to schema-qualified
+    // `apalis.jobs` (NOT a flat `apalis_jobs`). Status values are
+    // capitalized strings: 'Pending', 'Running', 'Done', 'Failed'.
+    {
+        let probe_state = state.clone();
+        let probe_slack = slack.clone();
+        let interval_secs = config.health_check_interval_secs;
+        let fail_threshold = config.health_check_fail_threshold;
+        let backlog_threshold = config.apalis_backlog_threshold;
+        let stuck_secs = config.apalis_backlog_stuck_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut consecutive_over_threshold = 0u32;
+            // Cast to i32 once — `make_interval(...)` only accepts i32.
+            // 5-min default (300s) is comfortably within i32 range.
+            let stuck_secs_i32: i32 = stuck_secs.try_into().unwrap_or(i32::MAX);
+            loop {
+                interval.tick().await;
+                let probe = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::bigint FROM apalis.jobs \
+                     WHERE status = 'Pending' \
+                       AND done_at IS NULL \
+                       AND run_at < now() - make_interval(secs => $1)",
+                )
+                .bind(stuck_secs_i32)
+                .fetch_one(probe_state.db.pool())
+                .await;
+                match probe {
+                    Ok(backlog) if backlog >= backlog_threshold => {
+                        consecutive_over_threshold += 1;
+                        tracing::warn!(
+                            "  apalis probe: backlog={} threshold={} consecutive_over={}",
+                            backlog,
+                            backlog_threshold,
+                            consecutive_over_threshold
+                        );
+                        if consecutive_over_threshold == fail_threshold {
+                            crate::jobs::spawn_slack_infra_alert(
+                                probe_slack.as_ref(),
+                                crate::slack::InfraFailureKind::ApalisQueueStuck {
+                                    backlog,
+                                    stuck_for_secs: stuck_secs,
+                                    consecutive_samples: consecutive_over_threshold,
+                                },
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        if consecutive_over_threshold > 0 {
+                            tracing::info!(
+                                "  apalis probe: backlog drained after {} over-threshold samples",
+                                consecutive_over_threshold
+                            );
+                        }
+                        consecutive_over_threshold = 0;
+                    }
+                    Err(e) => {
+                        // Query failure is its own signal — but Postgres
+                        // outages already page via the postgres probe,
+                        // so we just log here to avoid double-alerting.
+                        tracing::error!("  apalis probe: query failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // Probe 3: Sui RPC reachability via JSON-RPC. We send the cheapest
     // valid method (`sui_getLatestCheckpointSequenceNumber`, no params)
     // because a bare HEAD/GET will 405 against a JSON-RPC endpoint.

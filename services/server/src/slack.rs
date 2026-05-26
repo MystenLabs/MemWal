@@ -165,6 +165,17 @@ pub enum InfraFailureKind {
         pool_size: usize,
         consecutive_transient: u64,
     },
+    /// Apalis queue has >= `backlog` Pending jobs that have been ready
+    /// to run for at least `stuck_for_secs` seconds AND the backlog
+    /// stayed above the configured threshold for `consecutive_samples`
+    /// probe cycles. Workers are either dead, stuck, or vastly under-
+    /// provisioned — nothing is being drained. Distinct from a single
+    /// slow job: this fires only when the QUEUE itself is wedged.
+    ApalisQueueStuck {
+        backlog: i64,
+        stuck_for_secs: u64,
+        consecutive_samples: u32,
+    },
     /// `SERVER_SUI_PRIVATE_KEYS` / `SERVER_SUI_PRIVATE_KEY` both unset at
     /// boot. Fires once during startup; uploads will fail for everyone
     /// until a key is configured and the process restarts.
@@ -181,6 +192,7 @@ impl InfraFailureKind {
             InfraFailureKind::WalletPoolDrained { .. } => {
                 "🚨 MemWal Infra — Wallet Pool Drained"
             }
+            InfraFailureKind::ApalisQueueStuck { .. } => "🚨 MemWal Infra — Apalis Queue Stuck",
             InfraFailureKind::NoSuiKeysConfigured => "🚨 MemWal Infra — No Sui Keys Configured",
         }
     }
@@ -209,6 +221,14 @@ impl InfraFailureKind {
                 "Every wallet in pool (size {}) returned transient failures for {} consecutive attempts — likely all out of gas / balance::split.",
                 pool_size, consecutive_transient
             ),
+            InfraFailureKind::ApalisQueueStuck {
+                backlog,
+                stuck_for_secs,
+                consecutive_samples,
+            } => format!(
+                "Apalis queue has {} Pending jobs ready to run for >= {}s, observed across {} consecutive probe samples. Workers are wedged or under-provisioned — no jobs draining.",
+                backlog, stuck_for_secs, consecutive_samples
+            ),
             InfraFailureKind::NoSuiKeysConfigured => {
                 "Server started with empty key pool — SERVER_SUI_PRIVATE_KEYS and SERVER_SUI_PRIVATE_KEY both unset. All Walrus uploads will fail."
                     .to_string()
@@ -226,6 +246,7 @@ impl InfraFailureKind {
             InfraFailureKind::RedisDown { .. } => "infra:redis_down",
             InfraFailureKind::SuiRpcDown { .. } => "infra:sui_rpc_down",
             InfraFailureKind::WalletPoolDrained { .. } => "infra:wallet_pool_drained",
+            InfraFailureKind::ApalisQueueStuck { .. } => "infra:apalis_queue_stuck",
             InfraFailureKind::NoSuiKeysConfigured => "infra:no_sui_keys",
         }
     }
@@ -803,6 +824,24 @@ mod tests {
             }
             .dedup_signature(),
         );
+        // ApalisQueueStuck: same variant across different backlog sizes /
+        // sample counts must collapse to one dedup signature. Critical
+        // because the apalis probe samples every 30s — without this, a
+        // 5-minute stuck queue would post 10 alerts in a row.
+        assert_eq!(
+            InfraFailureKind::ApalisQueueStuck {
+                backlog: 120,
+                stuck_for_secs: 300,
+                consecutive_samples: 3,
+            }
+            .dedup_signature(),
+            InfraFailureKind::ApalisQueueStuck {
+                backlog: 9_999,
+                stuck_for_secs: 7_200,
+                consecutive_samples: 100,
+            }
+            .dedup_signature(),
+        );
     }
 
     #[test]
@@ -819,12 +858,51 @@ mod tests {
                 consecutive_transient: 1,
             }
             .dedup_signature(),
+            InfraFailureKind::ApalisQueueStuck {
+                backlog: 1,
+                stuck_for_secs: 1,
+                consecutive_samples: 1,
+            }
+            .dedup_signature(),
             InfraFailureKind::NoSuiKeysConfigured.dedup_signature(),
         ];
         let mut sorted = sigs.to_vec();
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), sigs.len(), "infra variants must not collide");
+    }
+
+    #[test]
+    fn infra_apalis_queue_stuck_detail_includes_all_signal_fields() {
+        // The body must surface backlog, stuck duration, and sample
+        // count — operators need all three to triage (is this 100 jobs
+        // delayed 5 min, or 10,000 jobs delayed 1 hour?).
+        let detail = InfraFailureKind::ApalisQueueStuck {
+            backlog: 437,
+            stuck_for_secs: 600,
+            consecutive_samples: 5,
+        }
+        .detail();
+        assert!(detail.contains("437"), "missing backlog: {}", detail);
+        assert!(detail.contains("600"), "missing stuck duration: {}", detail);
+        assert!(detail.contains("5"), "missing sample count: {}", detail);
+    }
+
+    #[test]
+    fn infra_apalis_queue_stuck_headline_distinct_from_other_queue_signals() {
+        // ApalisQueueStuck should NOT use the same headline as
+        // HandoffEnqueueFailure (per-job queue push) — they're different
+        // failure modes routed by ops differently.
+        let stuck_headline = InfraFailureKind::ApalisQueueStuck {
+            backlog: 100,
+            stuck_for_secs: 300,
+            consecutive_samples: 3,
+        }
+        .headline();
+        let handoff_headline = FailureKind::HandoffEnqueueFailure.headline();
+        assert_ne!(stuck_headline, handoff_headline);
+        assert!(stuck_headline.contains("Apalis"));
+        assert!(stuck_headline.contains("Stuck"));
     }
 
     #[test]

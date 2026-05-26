@@ -1078,6 +1078,8 @@ mod tests {
             health_check_interval_secs: 30,
             health_check_fail_threshold: 3,
             wallet_pool_drain_window: None,
+            apalis_backlog_threshold: 100,
+            apalis_backlog_stuck_secs: 300,
         }
     }
 

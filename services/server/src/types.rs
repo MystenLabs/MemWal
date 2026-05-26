@@ -274,6 +274,17 @@ pub struct Config {
     /// `MAX_ATTEMPTS` times in a row). Set explicitly to tune sensitivity
     /// without changing pool size.
     pub wallet_pool_drain_window: Option<u64>,
+    /// ENG-1784: minimum number of `Pending` Apalis jobs (ready to run
+    /// for >= `apalis_backlog_stuck_secs`) that triggers the
+    /// `ApalisQueueStuck` candidate condition. Default 100 — enough
+    /// headroom for healthy bursts; low enough that a wedged queue
+    /// pages within minutes.
+    pub apalis_backlog_threshold: i64,
+    /// ENG-1784: a Pending job is only counted toward the backlog if
+    /// its `run_at` is at least this many seconds in the past. Default
+    /// 300 (5 min) — a job that's been ready but unclaimed for 5 min is
+    /// clearly not just "in flight"; the queue is wedged.
+    pub apalis_backlog_stuck_secs: u64,
 }
 
 impl Config {
@@ -390,6 +401,16 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|v| *v > 0),
+            apalis_backlog_threshold: std::env::var("MEMWAL_APALIS_BACKLOG_ALERT_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(100),
+            apalis_backlog_stuck_secs: std::env::var("MEMWAL_APALIS_BACKLOG_STUCK_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(300),
         }
     }
 }
