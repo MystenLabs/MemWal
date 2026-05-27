@@ -220,11 +220,12 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     return parsed.data;
 }
 
-function transactionForSponsor(tx: Transaction, options: WalletTransactionOptions): Transaction {
+async function transactionForSponsor(tx: Transaction, options: WalletTransactionOptions): Promise<Transaction> {
     if (!options.patchGasCoinIntentsForSponsor) {
         return tx;
     }
 
+    await tx.prepareForSerialization({ supportedIntents: [COIN_WITH_BALANCE_INTENT] });
     const sponsorTx = Transaction.from(tx);
     patchGasCoinIntents(sponsorTx);
     return sponsorTx;
@@ -250,7 +251,7 @@ async function executeWithEnokiSponsor(
     }
 
     try {
-        const sponsorTx = transactionForSponsor(tx, options);
+        const sponsorTx = await transactionForSponsor(tx, options);
         const txKindBytes = await sponsorTx.build({
             client: suiClient as any,
             onlyTransactionKind: true,
