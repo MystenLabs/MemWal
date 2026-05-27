@@ -51,7 +51,7 @@ function getEnokiRedirectUrl() {
     const port = window.location.port ? `:${window.location.port}` : ''
     return `${window.location.protocol}//localhost${port}${ENOKI_CALLBACK_PATH}`
   }
-  return window.location.href.split('#')[0]
+  return `${window.location.origin}${ENOKI_CALLBACK_PATH}`
 }
 
 // ============================================================
