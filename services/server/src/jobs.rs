@@ -1290,7 +1290,32 @@ pub async fn execute_remember(
             );
             return Ok(());
         }
-        Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
+        Err(UploadBlobError::App(e)) => {
+            let msg = format!("walrus upload failed: {}", e);
+            // MEM-34: EWrongVersion is transient — the sidecar already refreshed
+            // the cached @mysten/walrus client; Apalis should retry against
+            // the new package metadata instead of marking this row failed.
+            // Fire the informational Slack alert (deduped per network) and
+            // return Err WITHOUT writing status='failed' so the next attempt
+            // is uncontaminated.
+            if is_walrus_package_version_mismatch(&msg) {
+                maybe_alert_walrus_package_upgrade_detected(
+                    state,
+                    Some(&job.job_id),
+                    Some(&job.owner),
+                    Some(&job.namespace),
+                    &msg,
+                )
+                .await;
+                tracing::warn!(
+                    "[remember-job] walrus package upgrade detected, returning Err for Apalis retry job_id={} msg={}",
+                    job.job_id,
+                    msg
+                );
+                return Err(RememberJobError::Internal(msg));
+            }
+            fail!(msg);
+        }
     };
     let blob_id = upload.blob_id.clone();
 
