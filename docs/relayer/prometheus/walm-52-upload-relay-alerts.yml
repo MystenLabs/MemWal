@@ -1,0 +1,29 @@
+groups:
+  - name: walm-52-upload-relay-cost
+    rules:
+      - alert: Walm52PublicRelayTipSpike
+        expr: sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h])) > 2 * quantile_over_time(0.5, sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h]))[7d:1h])
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Public Walrus relay tip burn is more than 2x trailing 7-day median"
+          description: "Pool-funded public relay tips are burning faster than the recent baseline. Check upload volume and decide whether to expand the self-hosted relay canary or request more pool funding."
+
+      - alert: Walm52CanaryTipNonZero
+        expr: sum(rate(walrus_upload_relay_tip_mist_total{send_tip="false"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Self-hosted no-tip relay canary is still paying relay tips"
+          description: "A sidecar labeled send_tip=false emitted non-zero relay tip spend. Verify WALRUS_UPLOAD_RELAY_SEND_TIP=false and that WALRUS_UPLOAD_RELAY_URL points at a no-tip self-hosted relay."
+
+      - alert: Walm52WalrusMetricsMirrorDown
+        expr: memwal_sidecar_walrus_metrics_scrape_success == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Relayer cannot mirror WALM-52 sidecar metrics"
+          description: "The relayer /metrics endpoint could not fetch sidecar /metrics/walrus. Existing relayer metrics are still served, but WALM-52 tip-spend panels may be stale or missing."

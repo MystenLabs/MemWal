@@ -97,7 +97,7 @@ export function renderWalmTipMetrics(
     const sendTip = labels.sendTip ? "true" : "false";
     const labelSet = `{host="${host}",send_tip="${sendTip}"}`;
     return [
-        "# HELP walrus_upload_relay_uploads_total Successful Walrus upload-relay register flows since sidecar start.",
+        "# HELP walrus_upload_relay_uploads_total Register-confirmed Walrus upload-relay attempts since sidecar start.",
         "# TYPE walrus_upload_relay_uploads_total counter",
         `walrus_upload_relay_uploads_total${labelSet} ${state.uploadsTotal}`,
         "# HELP walrus_upload_relay_tip_mist_total SUI MIST paid as upload-relay tip since sidecar start (parsed from register-tx balance changes).",

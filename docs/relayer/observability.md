@@ -131,7 +131,19 @@ The sidecar emits two Prometheus counters that track SUI MIST paid as Walrus upl
 
 ### Scrape
 
-The counters are exposed in Prometheus text format at `GET <SIDECAR_URL>/metrics/walrus` — separate from the JSON `/metrics/wallet` endpoint and reachable without the sidecar bearer token (same posture as `/metrics/wallet`). Add a second scrape target:
+The TypeScript sidecar exposes the source counters in Prometheus text format at `GET <SIDECAR_URL>/metrics/walrus`. The Rust relayer also mirrors those counters into its existing `GET /metrics` output on every scrape when the sidecar is reachable, so existing relayer scrape jobs pick up WALM-52 without a second target.
+
+Existing scrape path:
+
+```yaml
+scrape_configs:
+  - job_name: memwal-relayer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["relayer.example.com"]
+```
+
+Optional direct sidecar scrape:
 
 ```yaml
 scrape_configs:
@@ -145,8 +157,9 @@ scrape_configs:
 
 | Metric | Labels | Notes |
 | --- | --- | --- |
-| `walrus_upload_relay_uploads_total` | `host`, `send_tip` | Successful uploads since sidecar start. `host` is the parsed hostname from `WALRUS_UPLOAD_RELAY_URL`. `send_tip` is `"true"` / `"false"` from `WALRUS_UPLOAD_RELAY_SEND_TIP`. |
+| `walrus_upload_relay_uploads_total` | `host`, `send_tip` | Register-confirmed upload-relay attempts since sidecar start. `host` is the parsed hostname from `WALRUS_UPLOAD_RELAY_URL`. `send_tip` is `"true"` / `"false"` from `WALRUS_UPLOAD_RELAY_SEND_TIP`. |
 | `walrus_upload_relay_tip_mist_total` | `host`, `send_tip` | Sum of MIST attributed to the relay tip recipient in register-tx balance changes. Increments by 0 in no-tip mode. |
+| `memwal_sidecar_walrus_metrics_scrape_success` | none | `1` when the relayer successfully mirrored `/metrics/walrus` into `/metrics` on the latest scrape; `0` if the sidecar scrape failed/timed out. |
 
 Each sidecar process emits a single label combination (the config is per-instance), so multi-instance comparison is by **deploy**, not by relabeling — i.e. run a canary sidecar with a different `WALRUS_UPLOAD_RELAY_URL` / `WALRUS_UPLOAD_RELAY_SEND_TIP` to get a second label combination in Grafana.
 
@@ -157,7 +170,7 @@ All PromQL examples below are copy-paste valid for Prometheus / Grafana — aggr
 | Panel | PromQL |
 | --- | --- |
 | Tip burn rate per host | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h]))` |
-| Upload rate per host | `sum by (host, send_tip) (rate(walrus_upload_relay_uploads_total[1h]))` |
+| Register-confirmed upload-attempt rate per host | `sum by (host, send_tip) (rate(walrus_upload_relay_uploads_total[1h]))` |
 | Tip per upload (MIST) | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h])) / sum by (host, send_tip) (rate(walrus_upload_relay_uploads_total[1h]))` |
 | Daily SUI projection | `sum by (host, send_tip) (rate(walrus_upload_relay_tip_mist_total[1h])) * 86400 / 1e9` |
 
@@ -167,6 +180,9 @@ All PromQL examples below are copy-paste valid for Prometheus / Grafana — aggr
 | --- | --- |
 | Public relay tip spike | `sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h])) > 2 * quantile_over_time(0.5, sum(rate(walrus_upload_relay_tip_mist_total{send_tip="true"}[1h]))[7d:1h])` for 30m |
 | Canary tip non-zero | `sum(rate(walrus_upload_relay_tip_mist_total{send_tip="false"}[5m])) > 0` (means a misconfigured self-hosted relay is still charging a tip) |
+| WALM metric mirror down | `memwal_sidecar_walrus_metrics_scrape_success == 0` for 10m |
+
+Grafana dashboard JSON for these panels lives at `docs/relayer/grafana/walm-52-upload-relay-cost.json`. Prometheus alert rules live at `docs/relayer/prometheus/walm-52-upload-relay-alerts.yml`.
 
 ### Independent on-chain audit
 

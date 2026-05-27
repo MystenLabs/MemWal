@@ -10,8 +10,8 @@ import {
     renderWalmTipMetrics,
 } from "../walm52-tip-metrics.js";
 
-const RELAY_TIP_ADDR = "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77";
-const SIGNER_ADDR = "0xaaaa000000000000000000000000000000000000000000000000000000000001";
+const RELAY_TIP_ADDR = `0x${"22".repeat(32)}`;
+const SIGNER_ADDR = `0x${"aa".repeat(32)}`;
 
 function change(amount: string, ownerAddr: string, coinType: string = SUI_COIN_TYPE): SuiBalanceChange {
     return { amount, coinType, owner: { AddressOwner: ownerAddr } };

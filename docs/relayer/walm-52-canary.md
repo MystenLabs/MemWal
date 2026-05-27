@@ -12,7 +12,7 @@ Pool wallets fund only the relay tip. Gas for register/certify is sponsored by E
 
 - Self-hosted `walrus-upload-relay` reachable from at least one MemWal sidecar host (config: `tip_config: !no_tip`).
 - Existing public-relay sidecar(s) continue running as the **control**.
-- Prometheus scraping the sidecar `/metrics/walrus` endpoint (see [Observability](/relayer/observability#walm-52-upload-relay-tip-spend)).
+- Prometheus scraping relayer `/metrics`, which mirrors sidecar `/metrics/walrus` when the sidecar is reachable (see [Observability](/relayer/observability#walm-52-upload-relay-tip-spend)).
 
 ## Canary env
 
@@ -56,7 +56,7 @@ Run the canary for **24-48h** before flipping the remaining instances. Compare c
 | Signal | Canary expectation | PromQL |
 | --- | --- | --- |
 | Tip burn rate | drops to **0 SUI/hr** | `rate(walrus_upload_relay_tip_mist_total{send_tip="false"}[1h])` |
-| Upload success rate | matches control within noise | `rate(walrus_upload_relay_uploads_total[1h])` by `host` vs sidecar error logs |
+| Register-confirmed upload-attempt rate | matches control within noise | `rate(walrus_upload_relay_uploads_total[1h])` by `host` vs sidecar error logs |
 | Upload p50 / p95 latency | no material regression vs control | existing `memwal_external_request_duration_seconds{service="sidecar",operation="walrus_upload"}` |
 | Self-hosted relay CPU / bandwidth | within operating budget | infra-side metrics on the relay box |
 

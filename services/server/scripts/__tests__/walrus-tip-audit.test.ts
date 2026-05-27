@@ -19,8 +19,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = resolve(HERE, "..", "walrus-tip-audit.ts");
 
 const POOL = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const TIP_A = "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77";
-const TIP_B = "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66";
+const TIP_A = `0x${"22".repeat(32)}`;
+const TIP_B = `0x${"33".repeat(32)}`;
 const TIPS: ReadonlySet<string> = new Set([TIP_A, TIP_B].map((a) => a.toLowerCase()));
 
 function change(amount: string, ownerAddr: string, coinType: string = SUI_COIN_TYPE): SuiBalanceChange {

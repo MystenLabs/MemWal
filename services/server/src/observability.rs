@@ -109,6 +109,14 @@ static SIDECAR_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("register memwal_sidecar_failures_total")
 });
 
+static SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_sidecar_walrus_metrics_scrape_success",
+        "Whether the relayer was able to mirror WALM-52 sidecar Walrus metrics into /metrics on the latest scrape."
+    )
+    .expect("register memwal_sidecar_walrus_metrics_scrape_success")
+});
+
 static DB_QUERY_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     prometheus::register_histogram_vec!(
         HistogramOpts::new(
@@ -213,21 +221,94 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
 }
 
 pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    let sidecar_walrus_metrics = scrape_sidecar_walrus_metrics(&state).await;
     update_db_pool_metrics(state.db.pool());
 
     let encoder = prometheus::TextEncoder::new();
     let mut buffer = Vec::new();
     match encoder.encode(&prometheus::gather(), &mut buffer) {
-        Ok(()) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, encoder.format_type())
-            .body(Body::from(buffer))
-            .expect("build metrics response"),
+        Ok(()) => {
+            if let Some(sidecar_text) = sidecar_walrus_metrics {
+                buffer.extend_from_slice(b"\n");
+                buffer.extend_from_slice(sidecar_text.as_bytes());
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, encoder.format_type())
+                .body(Body::from(buffer))
+                .expect("build metrics response")
+        }
         Err(err) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .body(Body::from(format!("failed to encode metrics: {}", err)))
             .expect("build metrics error response"),
+    }
+}
+
+async fn scrape_sidecar_walrus_metrics(state: &AppState) -> Option<String> {
+    let url = format!(
+        "{}/metrics/walrus",
+        state.config.sidecar_url.trim_end_matches('/')
+    );
+    let started = Instant::now();
+    let request = state.http_client.get(&url);
+    match tokio::time::timeout(Duration::from_secs(2), request.send()).await {
+        Ok(Ok(resp)) => {
+            let status = resp.status();
+            observe_external(
+                "sidecar",
+                "metrics_walrus",
+                &status.as_u16().to_string(),
+                started.elapsed(),
+            );
+            if !status.is_success() {
+                SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(0);
+                record_sidecar_failure("metrics_walrus", "http_error");
+                tracing::warn!(
+                    status = status.as_u16(),
+                    "sidecar WALM-52 metrics scrape returned non-success"
+                );
+                return None;
+            }
+            match tokio::time::timeout(Duration::from_secs(2), resp.text()).await {
+                Ok(Ok(text)) => {
+                    SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(1);
+                    Some(text)
+                }
+                Ok(Err(err)) => {
+                    SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(0);
+                    record_sidecar_failure("metrics_walrus", "body_error");
+                    tracing::warn!(error = %err, "sidecar WALM-52 metrics body read failed");
+                    None
+                }
+                Err(_) => {
+                    SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(0);
+                    record_sidecar_failure("metrics_walrus", "body_timeout");
+                    tracing::warn!("sidecar WALM-52 metrics body read timed out");
+                    None
+                }
+            }
+        }
+        Ok(Err(err)) => {
+            observe_external(
+                "sidecar",
+                "metrics_walrus",
+                "transport_error",
+                started.elapsed(),
+            );
+            SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(0);
+            record_sidecar_failure("metrics_walrus", "transport_error");
+            tracing::warn!(error = %err, "sidecar WALM-52 metrics scrape failed");
+            None
+        }
+        Err(_) => {
+            observe_external("sidecar", "metrics_walrus", "timeout", started.elapsed());
+            SIDECAR_WALRUS_METRICS_SCRAPE_SUCCESS.set(0);
+            record_sidecar_failure("metrics_walrus", "timeout");
+            tracing::warn!("sidecar WALM-52 metrics scrape timed out");
+            None
+        }
     }
 }
 
