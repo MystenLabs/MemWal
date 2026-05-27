@@ -1073,6 +1073,11 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            app_auth_clients: vec![],
+            app_auth_public_client_registration_enabled: false,
+            app_auth_admin_token: None,
+            app_auth_enable_dev_localhost_wildcards: false,
+            app_auth_delegate_secret: None,
         }
     }
 

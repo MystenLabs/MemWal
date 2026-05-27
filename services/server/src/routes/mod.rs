@@ -16,6 +16,7 @@
 
 mod admin;
 mod analyze;
+mod app_auth;
 mod recall;
 mod remember;
 mod sponsor;
@@ -24,6 +25,10 @@ mod sponsor;
 // without having to know which submodule each handler lives in.
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
+pub use app_auth::{
+    app_auth_block_client, app_auth_cancel, app_auth_complete, app_auth_create_client,
+    app_auth_register, app_auth_start, app_auth_token,
+};
 pub use recall::{recall, recall_manual};
 pub use remember::{
     remember, remember_bulk, remember_bulk_status, remember_manual, remember_status,

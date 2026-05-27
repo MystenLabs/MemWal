@@ -9,6 +9,7 @@
     "dev:noter": "pnpm --filter noter dev",
     "dev:chatbot": "pnpm --filter chatbot dev",
     "dev:app": "pnpm --filter app dev",
+    "dev:app-auth-demo": "pnpm --filter @memwal/app-auth-demo dev",
     "dev:researcher": "pnpm --filter researcher dev",
     "dev:docs": "pnpm --filter memwal-docs dev",
     "build:docs": "pnpm --filter memwal-docs build",

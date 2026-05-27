@@ -24,6 +24,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
+use sqlx::postgres::PgPoolOptions;
 
 use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
@@ -72,6 +73,14 @@ async fn main() {
         "  sponsor rate limit: {}/min, {}/hr per IP+sender",
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
+    );
+    tracing::info!(
+        "  app auth public client registration: {}",
+        if config.app_auth_public_client_registration_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
@@ -182,13 +191,29 @@ async fn main() {
 
     // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
     // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
-    let apalis_pool = sqlx::PgPool::connect(&config.database_url)
+    let apalis_pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&config.database_url)
         .await
         .expect("Failed to connect to PostgreSQL for Apalis");
     // setup() is defined only on PostgresStorage<()> — creates schema tables.
-    PostgresStorage::<()>::setup(&apalis_pool)
-        .await
-        .expect("Apalis postgres migration failed");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        PostgresStorage::<()>::setup(&apalis_pool),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            panic!("Apalis postgres migration failed: {}", err);
+        }
+        Err(_) => {
+            tracing::error!(
+                "Apalis postgres migration timed out after 15s; continuing with existing tables"
+            );
+        }
+    }
     let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
     let remember_job_storage: PostgresStorage<RememberJob> =
         PostgresStorage::new(apalis_pool.clone());
@@ -575,6 +600,55 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
+    // Hosted app auth routes — OAuth-style connect flow for third-party web
+    // apps. Browser-facing endpoints create/complete a short-lived session;
+    // the token endpoint is server-to-server and requires HTTP Basic client
+    // authentication.
+    let app_auth_routes = Router::new()
+        .route(
+            "/api/app-auth/clients",
+            post(routes::app_auth_create_client)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_clients_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/app-auth/register",
+            post(routes::app_auth_register)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_clients_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/block",
+            post(routes::app_auth_block_client).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/app-auth/start",
+            post(routes::app_auth_start)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_start_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/app-auth/complete",
+            post(routes::app_auth_complete).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/cancel",
+            post(routes::app_auth_cancel).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/token",
+            post(routes::app_auth_token).layer(DefaultBodyLimit::max(4 * 1024)),
+        );
+
     // Public routes
     // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -599,7 +673,8 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(sponsor_routes)
-        .merge(mcp_routes);
+        .merge(mcp_routes)
+        .merge(app_auth_routes);
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
@@ -638,6 +713,7 @@ async fn main() {
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
                     "x-request-id".parse::<header::HeaderName>().unwrap(),
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
+                    "x-admin-token".parse::<header::HeaderName>().unwrap(),
                     // ENG-1697: SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
