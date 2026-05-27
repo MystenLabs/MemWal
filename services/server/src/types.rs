@@ -170,6 +170,10 @@ impl KeyPool {
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
+    pub fn from_string(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
@@ -190,6 +194,15 @@ pub struct AppAuthClientConfig {
     pub fallback_uri: Option<String>,
     #[serde(default)]
     pub allowed_fallback_uris: Vec<String>,
+    #[serde(default = "default_app_auth_client_status")]
+    pub status: String,
+}
+
+pub const APP_AUTH_CLIENT_STATUS_ACTIVE: &str = "active";
+pub const APP_AUTH_CLIENT_STATUS_BLOCKED: &str = "blocked";
+
+fn default_app_auth_client_status() -> String {
+    APP_AUTH_CLIENT_STATUS_ACTIVE.to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -241,8 +254,11 @@ pub struct Config {
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
     /// Legacy/static confidential clients for hosted web app auth. Real dapps
-    /// should use `/api/app-auth/register`, which stores clients in Postgres.
+    /// should use `/api/app-auth/clients`, which stores clients in Postgres.
     pub app_auth_clients: Vec<AppAuthClientConfig>,
+    /// Optional operator token for hosted app-auth admin actions, such as
+    /// blocking a dynamically registered client.
+    pub app_auth_admin_token: Option<SecretBytes>,
     /// Dev/test only: allow configured localhost callback paths on any port.
     pub app_auth_enable_dev_localhost_wildcards: bool,
     /// AES key material derived from APP_AUTH_DELEGATE_ENCRYPTION_KEY or
@@ -325,6 +341,11 @@ impl Config {
                 &network,
                 app_auth_enable_dev_localhost_wildcards,
             ),
+            app_auth_admin_token: std::env::var("APP_AUTH_ADMIN_TOKEN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(SecretBytes::from_string),
             app_auth_enable_dev_localhost_wildcards,
             app_auth_delegate_secret: derive_app_auth_delegate_secret(),
         }
@@ -369,6 +390,7 @@ fn parse_app_auth_clients(
                 "http://localhost:*/memwal/error".to_string(),
                 "http://127.0.0.1:*/memwal/error".to_string(),
             ],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
         });
     }
 
@@ -388,6 +410,7 @@ fn default_app_auth_clients_for_network(network: &str) -> Vec<AppAuthClientConfi
             allowed_redirect_uris: vec!["https://example.invalid/api/memwal/callback".to_string()],
             fallback_uri: Some("https://example.invalid/memwal/error".to_string()),
             allowed_fallback_uris: vec!["https://example.invalid/memwal/error".to_string()],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
         }]
     }
 }

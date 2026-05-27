@@ -14,13 +14,13 @@ Default local config:
 PORT=3000
 MEMWAL_WEB_URL=http://localhost:5173
 MEMWAL_API_URL=http://localhost:8000
-APP_LABEL=Walrus Memory Demo App
+APP_LABEL=Demo App
 ```
 
-On first connect, the demo registers itself with `POST /api/app-auth/register`
-using its exact callback/fallback URLs. For localhost registration, the Walrus
-Memory server must run with `APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS=true` on a
-non-mainnet network.
+On first connect, the demo registers itself with `POST /api/app-auth/clients`
+using its exact HTTPS callback/fallback URLs. Public self-registration rejects
+localhost and `*.memwal.ai` URLs; for local demos, use the optional static
+`dev_localhost` client instead.
 
 ## Deployed Demo App
 
@@ -31,7 +31,7 @@ PORT=3000
 APP_BASE_URL=https://my-demo-app.example.com
 MEMWAL_WEB_URL=https://dev.memwal.ai
 MEMWAL_API_URL=https://relayer.dev.memwal.ai
-APP_LABEL=Walrus Memory Demo App
+APP_LABEL=Demo App
 ```
 
 `APP_BASE_URL` is required on Railway and other deployed hosts. It makes the demo generate public HTTPS callback/fallback URLs behind the platform proxy and marks the state cookie `Secure`.
@@ -49,7 +49,7 @@ returned code server-side.
 Register the app from your backend:
 
 ```bash
-curl -X POST "$MEMWAL_API_URL/api/app-auth/register" \
+curl -X POST "$MEMWAL_API_URL/api/app-auth/clients" \
   -H 'content-type: application/json' \
   --data '{
     "display_name": "My Dapp",
@@ -58,8 +58,9 @@ curl -X POST "$MEMWAL_API_URL/api/app-auth/register" \
   }'
 ```
 
-Store the returned `client_id` and `client_secret` in your backend env. Then
-send users to:
+Store the returned `client_id` and `client_secret` in your backend env. The
+client is active immediately unless an operator later blocks it. Then send
+users to:
 
 ```txt
 https://dev.memwal.ai/connect/app?client_id=CLIENT_ID&redirect_uri=https%3A%2F%2Fmy-dapp.example.com%2Fapi%2Fmemwal%2Fcallback&state=RANDOM_STATE&label=My%20Dapp&intent=sdk_delegate&fallback_uri=https%3A%2F%2Fmy-dapp.example.com%2Fmemwal%2Ferror

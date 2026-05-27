@@ -8,7 +8,7 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, HeaderMap},
     Json,
 };
@@ -28,7 +28,10 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::storage::sui::verify_delegate_key_onchain;
-use crate::types::{AppAuthClientConfig, AppError, AppState};
+use crate::types::{
+    AppAuthClientConfig, AppError, AppState, APP_AUTH_CLIENT_STATUS_ACTIVE,
+    APP_AUTH_CLIENT_STATUS_BLOCKED,
+};
 
 const APP_AUTH_SESSION_TTL_SECS: u64 = 15 * 60;
 const APP_AUTH_CODE_TTL_SECS: u64 = 5 * 60;
@@ -78,6 +81,13 @@ pub struct AppAuthRegisterResponse {
     pub allowed_redirect_uris: Vec<String>,
     pub fallback_uri: Option<String>,
     pub allowed_fallback_uris: Vec<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthAdminClientResponse {
+    pub client_id: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,16 +209,28 @@ struct AppAuthDelegateStore {
 /// APP_AUTH_CLIENTS_JSON" path for real dapps. The returned `client_secret` is
 /// shown once and must be stored by the third-party backend, never in browser
 /// JavaScript.
+pub async fn app_auth_create_client(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AppAuthRegisterRequest>,
+) -> Result<Json<AppAuthRegisterResponse>, AppError> {
+    create_app_auth_client(state, req).await
+}
+
+/// Backward-compatible alias for early demo deployments. New dapps should use
+/// `POST /api/app-auth/clients`.
 pub async fn app_auth_register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AppAuthRegisterRequest>,
 ) -> Result<Json<AppAuthRegisterResponse>, AppError> {
+    create_app_auth_client(state, req).await
+}
+
+async fn create_app_auth_client(
+    state: Arc<AppState>,
+    req: AppAuthRegisterRequest,
+) -> Result<Json<AppAuthRegisterResponse>, AppError> {
     let display_name = sanitize_client_display_name(&req.display_name)?;
-    let allowed_redirect_uris = validate_registration_urls(
-        "redirect_uris",
-        &req.redirect_uris,
-        state.config.app_auth_enable_dev_localhost_wildcards,
-    )?;
+    let allowed_redirect_uris = validate_registration_urls("redirect_uris", &req.redirect_uris)?;
 
     let mut requested_fallback_uris = req.fallback_uris;
     if let Some(fallback_uri) = req.fallback_uri {
@@ -217,11 +239,7 @@ pub async fn app_auth_register(
     let allowed_fallback_uris = if requested_fallback_uris.is_empty() {
         Vec::new()
     } else {
-        validate_registration_urls(
-            "fallback_uris",
-            &requested_fallback_uris,
-            state.config.app_auth_enable_dev_localhost_wildcards,
-        )?
+        validate_registration_urls("fallback_uris", &requested_fallback_uris)?
     };
     let fallback_uri = allowed_fallback_uris.first().cloned();
 
@@ -234,6 +252,7 @@ pub async fn app_auth_register(
         allowed_redirect_uris: allowed_redirect_uris.clone(),
         fallback_uri: fallback_uri.clone(),
         allowed_fallback_uris: allowed_fallback_uris.clone(),
+        status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
     };
 
     state.db.insert_app_auth_client(&client).await?;
@@ -245,6 +264,31 @@ pub async fn app_auth_register(
         allowed_redirect_uris,
         fallback_uri,
         allowed_fallback_uris,
+        status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
+    }))
+}
+
+pub async fn app_auth_block_client(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> Result<Json<AppAuthAdminClientResponse>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref())?;
+    if client_id.trim().is_empty() || client_id.len() > 160 {
+        return Err(AppError::BadRequest("client_id is invalid".into()));
+    }
+
+    let updated = state
+        .db
+        .update_app_auth_client_status(&client_id, APP_AUTH_CLIENT_STATUS_BLOCKED)
+        .await?;
+    if !updated {
+        return Err(AppError::BadRequest("unknown app client".into()));
+    }
+
+    Ok(Json(AppAuthAdminClientResponse {
+        client_id,
+        status: APP_AUTH_CLIENT_STATUS_BLOCKED.to_string(),
     }))
 }
 
@@ -515,15 +559,44 @@ async fn load_client(
     state: &AppState,
     client_id: &str,
 ) -> Result<Option<AppAuthClientConfig>, AppError> {
-    if let Some(client) = state
-        .config
-        .app_auth_clients
-        .iter()
-        .find(|client| client.client_id == client_id)
-    {
+    if let Some(client) = state.config.app_auth_clients.iter().find(|client| {
+        client.client_id == client_id && client.status == APP_AUTH_CLIENT_STATUS_ACTIVE
+    }) {
         return Ok(Some(client.clone()));
     }
     state.db.fetch_app_auth_client(client_id).await
+}
+
+fn require_app_auth_admin(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
+    let configured =
+        state.config.app_auth_admin_token.as_ref().ok_or_else(|| {
+            AppError::Unauthorized("app auth admin token is not configured".into())
+        })?;
+    let presented = headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        })
+        .ok_or_else(|| AppError::Unauthorized("missing app auth admin token".into()))?;
+    if presented.trim().is_empty() {
+        return Err(AppError::Unauthorized(
+            "missing app auth admin token".into(),
+        ));
+    }
+
+    let configured_hash = Sha256::digest(configured.as_slice());
+    let presented_hash = Sha256::digest(presented.as_bytes());
+    if !constant_time_eq(configured_hash.as_slice(), presented_hash.as_slice()) {
+        return Err(AppError::Unauthorized(
+            "invalid app auth admin token".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn select_fallback_uri(
@@ -578,10 +651,10 @@ fn validated_redirect_url(raw: &str) -> Option<Url> {
     Some(url)
 }
 
-fn validated_registration_url(raw: &str, allow_dev_localhost_http: bool) -> Option<String> {
+fn validated_registration_url(raw: &str) -> Option<String> {
     let url = validated_redirect_url(raw)?;
     let host = url.host_str()?;
-    if url.scheme() == "http" && is_loopback_host(host) && !allow_dev_localhost_http {
+    if url.scheme() != "https" || is_loopback_host(host) || is_reserved_memwal_host(host) {
         return None;
     }
     Some(url.as_str().to_string())
@@ -618,6 +691,11 @@ fn localhost_wildcard_matches(
 
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_reserved_memwal_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "memwal.ai" || host.ends_with(".memwal.ai")
 }
 
 fn build_success_redirect(redirect_uri: &str, code: &str, state: &str) -> String {
@@ -684,16 +762,25 @@ fn sanitize_client_display_name(raw: &str) -> Result<String, AppError> {
         .collect::<String>();
     if cleaned.is_empty() {
         Err(AppError::BadRequest("display_name is required".into()))
+    } else if display_name_uses_reserved_brand(&cleaned) {
+        Err(AppError::BadRequest(
+            "display_name cannot use Walrus Memory branding".into(),
+        ))
     } else {
         Ok(cleaned)
     }
 }
 
-fn validate_registration_urls(
-    field: &str,
-    values: &[String],
-    allow_dev_localhost_http: bool,
-) -> Result<Vec<String>, AppError> {
+fn display_name_uses_reserved_brand(raw: &str) -> bool {
+    let normalized = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    normalized.contains("memwal") || normalized.contains("walrusmemory")
+}
+
+fn validate_registration_urls(field: &str, values: &[String]) -> Result<Vec<String>, AppError> {
     if values.is_empty() || values.len() > APP_AUTH_MAX_REGISTERED_URLS {
         return Err(AppError::BadRequest(format!(
             "{} must contain 1-{} URLs",
@@ -703,7 +790,7 @@ fn validate_registration_urls(
 
     let mut urls = Vec::with_capacity(values.len());
     for value in values {
-        let url = validated_registration_url(value, allow_dev_localhost_http)
+        let url = validated_registration_url(value)
             .ok_or_else(|| AppError::BadRequest(format!("{} contains an invalid URL", field)))?;
         if !urls.iter().any(|existing| existing == &url) {
             urls.push(url);
@@ -1006,6 +1093,7 @@ mod tests {
             ],
             fallback_uri: Some("https://demo-app.com/memwal/error".into()),
             allowed_fallback_uris: vec!["https://demo-app.com/memwal/error".into()],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
         }
     }
 
@@ -1042,6 +1130,7 @@ mod tests {
             ],
             fallback_uri: Some("https://deployed-demo.example.com/memwal/error".into()),
             allowed_fallback_uris: vec!["https://deployed-demo.example.com/memwal/error".into()],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
         };
 
         assert_eq!(
@@ -1242,6 +1331,7 @@ mod tests {
             allowed_redirect_uris: vec![],
             fallback_uri: None,
             allowed_fallback_uris: vec!["http://localhost:*/memwal/error".into()],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
         };
         assert_eq!(
             select_fallback_uri(&client, Some("http://localhost:5174/memwal/error"), true)
@@ -1345,23 +1435,26 @@ mod tests {
     }
 
     #[test]
-    fn registration_url_validation_requires_https_except_dev_localhost() {
+    fn public_registration_url_validation_requires_deployed_https() {
         assert_eq!(
-            validated_registration_url("https://example.com/api/memwal/callback", false).as_deref(),
+            validated_registration_url("https://example.com/api/memwal/callback").as_deref(),
             Some("https://example.com/api/memwal/callback")
         );
         assert_eq!(
-            validated_registration_url("http://example.com/api/memwal/callback", true),
+            validated_registration_url("http://example.com/api/memwal/callback"),
             None
         );
         assert_eq!(
-            validated_registration_url("http://localhost:3000/api/memwal/callback", false),
+            validated_registration_url("http://localhost:3000/api/memwal/callback"),
             None
         );
         assert_eq!(
-            validated_registration_url("http://localhost:3000/api/memwal/callback", true)
-                .as_deref(),
-            Some("http://localhost:3000/api/memwal/callback")
+            validated_registration_url("https://dev.memwal.ai/api/memwal/callback"),
+            None
+        );
+        assert_eq!(
+            validated_registration_url("https://memwal.ai/api/memwal/callback"),
+            None
         );
     }
 
@@ -1372,6 +1465,8 @@ mod tests {
             "My DemoApp"
         );
         assert!(sanitize_client_display_name("<<>>").is_err());
+        assert!(sanitize_client_display_name("MemWal Official App").is_err());
+        assert!(sanitize_client_display_name("Walrus-Memory Login").is_err());
         assert_eq!(
             sanitize_client_display_name(&"x".repeat(100))
                 .unwrap()
@@ -1389,7 +1484,6 @@ mod tests {
                 "https://example.com/api/memwal/callback".into(),
                 "https://example.com/api/memwal/callback".into(),
             ],
-            false,
         )
         .unwrap();
         assert_eq!(urls, vec!["https://example.com/api/memwal/callback"]);
@@ -1397,7 +1491,7 @@ mod tests {
         let too_many = (0..=APP_AUTH_MAX_REGISTERED_URLS)
             .map(|idx| format!("https://example.com/callback/{idx}"))
             .collect::<Vec<_>>();
-        assert!(validate_registration_urls("redirect_uris", &too_many, false).is_err());
+        assert!(validate_registration_urls("redirect_uris", &too_many).is_err());
     }
 
     #[test]

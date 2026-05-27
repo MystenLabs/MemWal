@@ -1105,6 +1105,103 @@ pub async fn app_auth_start_rate_limit_middleware(
     next.run(request).await
 }
 
+/// Rate limiting middleware for public dynamic client registration.
+///
+/// `/api/app-auth/clients` is intentionally self-serve, but each successful
+/// call creates a confidential client row. Keep this tighter than `/start`.
+pub async fn app_auth_clients_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    const CLIENT_REGISTRATIONS_PER_HOUR: i64 = 5;
+
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip: Option<String> = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        });
+
+    let ip = match ip {
+        Some(ip) => ip,
+        None => {
+            tracing::warn!(
+                "app_auth_clients_rate_limit_middleware: cannot determine client IP, denying"
+            );
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let hr_key = format!("rate:app_auth:clients:ip:hr:{}", ip);
+    let hr_window_start = now - 3_600_000.0;
+    let mut redis_down = false;
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now,
+        CLIENT_REGISTRATIONS_PER_HOUR,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "app-auth/clients rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                CLIENT_REGISTRATIONS_PER_HOUR
+            );
+            return rate_limit_response(
+                "app_auth_clients_ip_sustained",
+                CLIENT_REGISTRATIONS_PER_HOUR,
+                "hour",
+                300,
+            );
+        }
+        Err(e) => {
+            tracing::warn!("app_auth_clients_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
+            redis_down = true;
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    if redis_down {
+        tracing::warn!("app_auth_clients_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
+        crate::observability::record_rate_limit_fallback("app_auth_clients_ip");
+        let mut fallback = state.fallback_rate_limit.lock().await;
+
+        if !fallback.can_consume(&hr_key, 1.0, CLIENT_REGISTRATIONS_PER_HOUR as f64, 3600.0) {
+            return rate_limit_response(
+                "app_auth_clients_ip_sustained",
+                CLIENT_REGISTRATIONS_PER_HOUR,
+                "hour",
+                300,
+            );
+        }
+
+        fallback.consume(&hr_key, 1.0, CLIENT_REGISTRATIONS_PER_HOUR as f64, 3600.0);
+        return next.run(request).await;
+    }
+
+    next.run(request).await
+}
+
 // ============================================================
 // Unit Tests
 // ============================================================

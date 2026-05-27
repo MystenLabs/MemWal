@@ -122,9 +122,10 @@ impl VectorDb {
                 display_name,
                 allowed_redirect_uris,
                 fallback_uri,
-                allowed_fallback_uris
+                allowed_fallback_uris,
+                status
              )
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&client.client_id)
         .bind(&client.client_secret_sha256)
@@ -132,6 +133,7 @@ impl VectorDb {
         .bind(&client.allowed_redirect_uris)
         .bind(&client.fallback_uri)
         .bind(&client.allowed_fallback_uris)
+        .bind(&client.status)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert app auth client: {}", e)));
@@ -157,6 +159,7 @@ impl VectorDb {
                 Vec<String>,
                 Option<String>,
                 Vec<String>,
+                String,
             )>,
             AppError,
         > = sqlx::query_as(
@@ -166,9 +169,11 @@ impl VectorDb {
                     display_name,
                     allowed_redirect_uris,
                     fallback_uri,
-                    allowed_fallback_uris
+                    allowed_fallback_uris,
+                    status
                  FROM app_auth_clients
                  WHERE client_id = $1
+                   AND status = 'active'
                  LIMIT 1",
         )
         .bind(client_id)
@@ -190,6 +195,7 @@ impl VectorDb {
                     allowed_redirect_uris,
                     fallback_uri,
                     allowed_fallback_uris,
+                    status,
                 )| AppAuthClientConfig {
                     client_id,
                     client_secret_sha256,
@@ -197,9 +203,36 @@ impl VectorDb {
                     allowed_redirect_uris,
                     fallback_uri,
                     allowed_fallback_uris,
+                    status,
                 },
             )
         })
+    }
+
+    pub async fn update_app_auth_client_status(
+        &self,
+        client_id: &str,
+        status: &str,
+    ) -> Result<bool, AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "UPDATE app_auth_clients
+             SET status = $2,
+                 updated_at = NOW()
+             WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to update app auth client status: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.update_status",
+            db_status(&result),
+            started.elapsed(),
+        );
+
+        result.map(|done| done.rows_affected() > 0)
     }
 
     /// Insert a vector entry (with blob size tracking for storage quota).

@@ -6,12 +6,21 @@ const MEMWAL_WEB_URL = process.env.MEMWAL_WEB_URL || 'http://localhost:5173'
 const MEMWAL_API_URL = process.env.MEMWAL_API_URL || 'http://localhost:8000'
 const STATIC_MEMWAL_CLIENT_ID = (process.env.MEMWAL_CLIENT_ID || '').trim()
 const STATIC_MEMWAL_CLIENT_SECRET = (process.env.MEMWAL_CLIENT_SECRET || '').trim()
-const APP_LABEL = process.env.APP_LABEL || 'Walrus Memory Demo App'
+const APP_LABEL = safeAppLabel(process.env.APP_LABEL || 'Demo App')
 const APP_BASE_URL = normalizeAppBaseUrl(process.env.APP_BASE_URL)
 const COOKIE_NAME = 'memwal_demo_state'
 
 let dynamicClient = null
 let dynamicClientPromise = null
+
+function safeAppLabel(raw) {
+  const label = String(raw || '').trim() || 'Demo App'
+  const normalized = label.replace(/[^a-z0-9]/gi, '').toLowerCase()
+  if (normalized.includes('memwal') || normalized.includes('walrusmemory')) {
+    return 'Demo App'
+  }
+  return label
+}
 
 function normalizeAppBaseUrl(raw) {
   if (!raw || !raw.trim()) return ''
@@ -106,7 +115,7 @@ function hasStaticClient() {
 }
 
 async function registerDynamicClient(req) {
-  const response = await fetch(new URL('/api/app-auth/register', MEMWAL_API_URL), {
+  const response = await fetch(new URL('/api/app-auth/clients', MEMWAL_API_URL), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -121,6 +130,9 @@ async function registerDynamicClient(req) {
   }
   if (!payload.client_id || !payload.client_secret) {
     throw new Error('client registration did not return credentials')
+  }
+  if (payload.status && payload.status !== 'active') {
+    throw new Error(`client registration returned ${payload.status} credentials`)
   }
   return {
     origin: requestOrigin(req),

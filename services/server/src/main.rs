@@ -584,13 +584,26 @@ async fn main() {
     // authentication.
     let app_auth_routes = Router::new()
         .route(
+            "/api/app-auth/clients",
+            post(routes::app_auth_create_client)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_clients_rate_limit_middleware,
+                )),
+        )
+        .route(
             "/api/app-auth/register",
             post(routes::app_auth_register)
                 .layer(DefaultBodyLimit::max(16 * 1024))
                 .layer(middleware::from_fn_with_state(
                     state.clone(),
-                    rate_limit::app_auth_start_rate_limit_middleware,
+                    rate_limit::app_auth_clients_rate_limit_middleware,
                 )),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/block",
+            post(routes::app_auth_block_client).layer(DefaultBodyLimit::max(4 * 1024)),
         )
         .route(
             "/api/app-auth/start",
@@ -678,6 +691,7 @@ async fn main() {
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
                     "x-request-id".parse::<header::HeaderName>().unwrap(),
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
+                    "x-admin-token".parse::<header::HeaderName>().unwrap(),
                     // ENG-1697: SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
