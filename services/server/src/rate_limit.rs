@@ -1,13 +1,13 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
 use percent_encoding::percent_decode_str;
 use std::sync::Arc;
 
-use crate::types::{AppError, AppState, AuthInfo};
+use crate::types::{AppError, AppState, AuthInfo, SecretBytes};
 
 // ============================================================
 // Sponsor Rate Limit Result
@@ -362,6 +362,43 @@ fn rate_limiter_unavailable_response() -> Response {
             serde_json::to_string(&body).unwrap(),
         ))
         .unwrap()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn app_auth_admin_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-admin-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        })
+}
+
+fn is_valid_app_auth_admin_token(headers: &HeaderMap, configured: Option<&SecretBytes>) -> bool {
+    let Some(configured) = configured else {
+        return false;
+    };
+    let Some(presented) = app_auth_admin_token_from_headers(headers) else {
+        return false;
+    };
+    if presented.trim().is_empty() {
+        return false;
+    }
+
+    constant_time_eq(configured.as_slice(), presented.as_bytes())
 }
 
 // ============================================================
@@ -1120,6 +1157,13 @@ pub async fn app_auth_clients_rate_limit_middleware(
         return next.run(request).await;
     }
 
+    if is_valid_app_auth_admin_token(
+        request.headers(),
+        state.config.app_auth_admin_token.as_ref(),
+    ) {
+        return next.run(request).await;
+    }
+
     let ip: Option<String> = request
         .headers()
         .get("x-forwarded-for")
@@ -1285,6 +1329,41 @@ mod tests {
         let resp = rate_limit_response("account_burst", 60, "min", 60);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(resp.headers().contains_key("retry-after"));
+    }
+
+    #[test]
+    fn app_auth_admin_token_accepts_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer secret-value".parse().unwrap(),
+        );
+        let configured = SecretBytes::from_string("secret-value".to_string());
+
+        assert!(is_valid_app_auth_admin_token(&headers, Some(&configured)));
+    }
+
+    #[test]
+    fn app_auth_admin_token_accepts_admin_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-admin-token", "secret-value".parse().unwrap());
+        let configured = SecretBytes::from_string("secret-value".to_string());
+
+        assert!(is_valid_app_auth_admin_token(&headers, Some(&configured)));
+    }
+
+    #[test]
+    fn app_auth_admin_token_rejects_missing_or_invalid_values() {
+        let configured = SecretBytes::from_string("secret-value".to_string());
+        assert!(!is_valid_app_auth_admin_token(
+            &HeaderMap::new(),
+            Some(&configured)
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer wrong-value".parse().unwrap());
+        assert!(!is_valid_app_auth_admin_token(&headers, Some(&configured)));
+        assert!(!is_valid_app_auth_admin_token(&headers, None));
     }
 
     // ---- MED-19: Atomic Lua script structure ----
