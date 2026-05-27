@@ -1292,12 +1292,11 @@ pub async fn execute_remember(
         }
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
-            // MEM-34: EWrongVersion is transient — the sidecar already refreshed
-            // the cached @mysten/walrus client; Apalis should retry against
-            // the new package metadata instead of marking this row failed.
-            // Fire the informational Slack alert (deduped per network) and
-            // return Err WITHOUT writing status='failed' so the next attempt
-            // is uncontaminated.
+            // EWrongVersion is transient: the sidecar's catch path refreshes
+            // the cached @mysten/walrus client before bubbling this error up,
+            // so the next Apalis attempt sees fresh package metadata. We must
+            // not write `status='failed'` here — that would make the row read
+            // as terminal even though the upload is about to succeed on retry.
             if is_walrus_package_version_mismatch(&msg) {
                 maybe_alert_walrus_package_upgrade_detected(
                     state,
