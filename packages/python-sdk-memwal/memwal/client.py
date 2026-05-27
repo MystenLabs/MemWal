@@ -49,6 +49,7 @@ from .types import (
     RecallManualOptions,
     RecallManualResult,
     RecallMemory,
+    RecallParams,
     RecallResult,
     RememberAcceptedResult,
     RememberBulkAcceptedResult,
@@ -473,7 +474,7 @@ class MemWal:
 
     async def recall(
         self,
-        query: str,
+        query: "str | RecallParams",
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
@@ -482,18 +483,40 @@ class MemWal:
 
         Server handles: verify -> embed query -> search -> Walrus download -> decrypt.
 
+        WALM-53 — **preferred call style** is to pass a :class:`RecallParams`
+        object so the call site reads self-describingly:
+
+            await client.recall(RecallParams(
+                query="food allergies", limit=5, namespace="profile"))
+
+        The legacy positional call ``client.recall(query, limit, namespace)``
+        is still supported but is easy to mis-read as
+        ``recall(query, namespace)``. Prefer kwargs at minimum.
+
         Args:
-            query: Search query.
-            limit: Max number of results (default: 10).
-            namespace: Override the default namespace.
-            max_distance: Optional client-side relevance threshold. Memories with
-                ``distance >= max_distance`` are dropped.
+            query: Search query, or a :class:`RecallParams` carrying query +
+                limit + namespace + max_distance in one object.
+            limit: Max number of results (default: 10). Ignored when ``query``
+                is a :class:`RecallParams`.
+            namespace: Override the default namespace. Ignored when ``query``
+                is a :class:`RecallParams`.
+            max_distance: Optional client-side relevance threshold. Memories
+                with ``distance >= max_distance`` are dropped. Ignored when
+                ``query`` is a :class:`RecallParams`.
 
         Returns:
             :class:`RecallResult` with decrypted text results.
         """
+        if isinstance(query, RecallParams):
+            params = query
+            query_text = params.query
+            limit = params.limit
+            namespace = params.namespace
+            max_distance = params.max_distance
+        else:
+            query_text = query
         data = await self._signed_request("POST", "/api/recall", {
-            "query": query,
+            "query": query_text,
             "limit": limit,
             "namespace": namespace or self._namespace,
         })
@@ -630,18 +653,42 @@ class MemWal:
             memories=memories,
         )
 
-    async def restore(self, namespace: str, limit: int = 50) -> RestoreResult:
-        """Restore a namespace.
+    async def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
+        """Rebuild missing local index entries for ``namespace`` from Walrus.
 
-        Server downloads all blobs from Walrus, decrypts with delegate key,
-        re-embeds, and re-indexes.
+        The relayer queries Walrus for blobs the caller owns in ``namespace``,
+        ignores blobs already indexed locally, downloads the missing ones,
+        SEAL-decrypts them with the delegate key, re-embeds the plaintext, and
+        inserts a fresh vector row per blob.
+
+        WALM-53 — Response semantics:
+
+        * ``restored`` — blobs that completed the full
+          download → decrypt → embed → DB insert pipeline this call.
+        * ``skipped`` — on-chain blobs already present in the local index
+          (no work needed). Decrypt / embed failures are dropped silently and
+          do **not** count as either restored or skipped.
+        * ``total`` — count of on-chain blobs the relayer saw for
+          ``(owner, namespace)`` before the limit was applied.
 
         Args:
-            namespace: Namespace to restore.
-            limit: Max entries to restore (default: 50).
+            namespace: Namespace to restore. Exact match — no prefix or
+                hierarchy semantics (see SKILL.md "Namespace Semantics").
+            limit: Max blobs the relayer will *inspect* this call (default:
+                10, matches the server-side default and the TypeScript SDK).
+                The relayer fetches blobs newest-first and caps the work at
+                this number; it does **not** cap ``restored`` separately.
 
         Returns:
-            :class:`RestoreResult` with count of restored entries.
+            :class:`RestoreResult`.
+
+        Notes:
+            * **No pagination cursor** — restore is single-shot. To rebuild a
+              large namespace, call repeatedly with a growing ``limit`` or
+              prune the local index first.
+            * **Performance** scales linearly in ``limit``: up to 10 Walrus
+              downloads in parallel, then 3 SEAL decrypts in parallel, then
+              embeddings. Expect seconds-per-blob on cold caches.
         """
         data = await self._signed_request("POST", "/api/restore", {
             "namespace": namespace,
@@ -1189,12 +1236,13 @@ class MemWalSync:
 
     def recall(
         self,
-        query: str,
+        query: "str | RecallParams",
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
     ) -> RecallResult:
-        """Synchronous version of :meth:`MemWal.recall`."""
+        """Synchronous version of :meth:`MemWal.recall` (accepts
+        :class:`RecallParams` for the recommended object-style call)."""
         return self._run(self._inner.recall(query, limit, namespace, max_distance))
 
     def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
@@ -1218,8 +1266,9 @@ class MemWalSync:
         """Synchronous version of :meth:`MemWal.ask`."""
         return self._run(self._inner.ask(question, limit, namespace))
 
-    def restore(self, namespace: str, limit: int = 50) -> RestoreResult:
-        """Synchronous version of :meth:`MemWal.restore`."""
+    def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
+        """Synchronous version of :meth:`MemWal.restore`. Default limit is 10
+        (matches server + TypeScript SDK as of WALM-53)."""
         return self._run(self._inner.restore(namespace, limit))
 
     def health(self) -> HealthResult:
