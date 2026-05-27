@@ -89,9 +89,10 @@ test("unrelated network errors do not match", () => {
 });
 
 test("empty / nullish-string inputs do not match", () => {
+    // Cast to string so this stays clean under any tsconfig strictness — the
+    // helper's runtime guard against undefined / null is the contract we're
+    // testing, not the static type narrowing.
     assert.equal(isWalrusPackageVersionMismatch(""), false);
-    // @ts-expect-error — defensive guard for runtime callers that may pass undefined
-    assert.equal(isWalrusPackageVersionMismatch(undefined), false);
-    // @ts-expect-error
-    assert.equal(isWalrusPackageVersionMismatch(null), false);
+    assert.equal(isWalrusPackageVersionMismatch(undefined as unknown as string), false);
+    assert.equal(isWalrusPackageVersionMismatch(null as unknown as string), false);
 });
