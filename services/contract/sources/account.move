@@ -10,7 +10,7 @@
 /// - DelegateKey: struct with public_key, sui_address, label, created_at
 /// - seal_approve: SEAL policy — authorizes owner OR delegate key holder to decrypt
 ///
-/// ## Versioning (HIGH-14 / SEC-303)
+/// ## Versioning
 /// Both `AccountRegistry` and `MemWalAccount` carry a version stored as a dynamic
 /// field on their `UID`. Every mutating entry function asserts the version equals
 /// the current `VERSION` constant. Migration paths are provided so that:
@@ -63,7 +63,7 @@ module memwal::account {
     const MAX_DELEGATE_KEYS: u64 = 20;
     /// Expected length of an Ed25519 public key in bytes
     const ED25519_PUBLIC_KEY_LENGTH: u64 = 32;
-    /// Maximum allowed length of a delegate key label, in bytes (LOW-21)
+    /// Maximum allowed length of a delegate key label, in bytes
     const MAX_LABEL_LENGTH: u64 = 64;
 
     /// Current package version. Bump when shipping an upgrade that changes
@@ -182,7 +182,7 @@ module memwal::account {
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
-        // Version gating (HIGH-14): the registry must be on the current VERSION
+        // Version gating: the registry must be on the current VERSION
         // before any state mutation is allowed.
         assert_object_version(&registry.id);
 
@@ -228,7 +228,7 @@ module memwal::account {
         clock: &Clock,
         ctx: &TxContext,
     ) {
-        // Version gating (HIGH-14)
+        // Version gating
         assert_object_version(&account.id);
 
         // Verify caller is the owner
@@ -240,7 +240,7 @@ module memwal::account {
         // Validate Ed25519 public key length (must be exactly 32 bytes)
         assert!(public_key.length() == ED25519_PUBLIC_KEY_LENGTH, EInvalidPublicKeyLength);
 
-        // Validate label length (LOW-21 / SEC-282) — labels are stored on-chain
+        // Validate label length — labels are stored on-chain
         // for the lifetime of the account, so cap the byte length to keep
         // storage costs predictable.
         assert!(label.as_bytes().length() <= MAX_LABEL_LENGTH, ELabelTooLong);
@@ -284,7 +284,7 @@ module memwal::account {
     /// Remove a delegate key from the account.
     /// Only the owner can remove delegate keys.
     ///
-    /// LOW-20 / SEC-281: Removal is allowed even when the account is
+    /// Removal is allowed even when the account is
     /// deactivated, so the owner can purge a compromised key after freezing.
     ///
     /// * `public_key` - Ed25519 public key bytes to remove
@@ -293,13 +293,13 @@ module memwal::account {
         public_key: vector<u8>,
         ctx: &TxContext,
     ) {
-        // Version gating (HIGH-14)
+        // Version gating
         assert_object_version(&account.id);
 
         // Verify caller is the owner
         assert!(account.owner == ctx.sender(), ENotOwner);
 
-        // NOTE: deliberately no `account.active` check — see LOW-20.
+        // NOTE: deliberately no `account.active` check; owners must be able to purge keys after freezing.
 
         // Find and remove the key
         let mut found = false;
@@ -334,13 +334,13 @@ module memwal::account {
     /// When deactivated: SEAL access is denied, delegate keys cannot be added.
     /// Only the owner can deactivate.
     ///
-    /// LOW-19 / SEC-279: Calling on an already-deactivated account aborts to
+    /// Calling on an already-deactivated account aborts to
     /// avoid emitting spurious `AccountDeactivated` events.
     entry fun deactivate_account(
         account: &mut MemWalAccount,
         ctx: &TxContext,
     ) {
-        // Version gating (HIGH-14)
+        // Version gating
         assert_object_version(&account.id);
 
         assert!(account.owner == ctx.sender(), ENotOwner);
@@ -356,12 +356,12 @@ module memwal::account {
     /// Reactivate a previously deactivated account.
     /// Only the owner can reactivate.
     /// Aborts with `EAccountAlreadyActive` if the account is already active
-    /// (mirror of LOW-19 idempotent guard).
+    /// This mirrors the deactivate-account idempotency guard.
     entry fun reactivate_account(
         account: &mut MemWalAccount,
         ctx: &TxContext,
     ) {
-        // Version gating (HIGH-14)
+        // Version gating
         assert_object_version(&account.id);
 
         assert!(account.owner == ctx.sender(), ENotOwner);
@@ -375,7 +375,7 @@ module memwal::account {
     }
 
     // ============================================================
-    // Migration (HIGH-14 / SEC-303)
+    // Migration
     // ============================================================
 
     /// Owner-initiated migration of a `MemWalAccount` to the current VERSION.
@@ -500,13 +500,13 @@ module memwal::account {
     }
 
     /// Read the on-chain version of a MemWalAccount.
-    /// Returns 1 for legacy accounts created before HIGH-14 was deployed.
+    /// Returns 1 for legacy accounts created before versioned objects were introduced.
     public fun account_version(account: &MemWalAccount): u64 {
         get_version(&account.id)
     }
 
     /// Read the on-chain version of an AccountRegistry.
-    /// Returns 1 for legacy registries created before HIGH-14 was deployed.
+    /// Returns 1 for legacy registries created before versioned objects were introduced.
     public fun registry_version(registry: &AccountRegistry): u64 {
         get_version(&registry.id)
     }
@@ -533,7 +533,7 @@ module memwal::account {
         account: &MemWalAccount,
         ctx: &TxContext,
     ) {
-        // Version gating (HIGH-14)
+        // Version gating
         assert_object_version(&account.id);
 
         // Account must be active

@@ -56,14 +56,14 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
 
-        // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
+        // composite index on (owner, status, updated_at DESC) for bulk poll
         let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
         sqlx::raw_sql(migration_006)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
-        // MEM-35: collapse per-wallet Apalis queues to a single `wallet_jobs`
+        // collapse per-wallet Apalis queues to a single `wallet_jobs`
         // queue. Equivocation locks are no longer a practical concern on Sui
         // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
         // wallet + retry handling is sufficient.
@@ -73,17 +73,17 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
 
-        // ENG-1747: nullable `plaintext` column for benchmark-mode storage
+        // nullable `plaintext` column for benchmark-mode storage
         // (PlaintextEngine). NULL for all production rows — additive.
         // Renumbered from 007 → 008 during rebase onto dev to avoid collision
-        // with MEM-35's 007_collapse_wallet_queues.sql.
+        // with the wallet-queue collapse migration.
         let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
         sqlx::raw_sql(migration_008)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
 
-        // MEM-54: importance signal column on vector_entries.
+        // importance signal column on vector_entries.
         let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
         sqlx::raw_sql(migration_009)
             .execute(&pool)
@@ -103,7 +103,7 @@ impl VectorDb {
 
     /// Insert a vector entry (with blob size tracking for storage quota).
     ///
-    /// MEM-54: `importance` is the per-fact score set at extraction time
+    /// `importance` is the per-fact score set at extraction time
     /// (0.0–1.0, mapped from the extractor LLM's vital/standard/trivial
     /// bucket via `services::extractor::importance_for_bucket`). Stored
     /// on the new `importance` column (migration 009) so the recall
@@ -224,7 +224,7 @@ impl VectorDb {
     /// Returns `Ok(None)` when the row exists but `plaintext` is NULL (a
     /// production row in a benchmark DB — shouldn't happen, handled gracefully).
     ///
-    /// LOW-S1 / MED-1: scoped to `owner` so a recall hit on one user's
+    /// scoped to `owner` so a recall hit on one user's
     /// blob can't surface another user's plaintext. The upstream
     /// `search_similar` already filters by owner; this is defence-in-depth
     /// against a bug there.
@@ -390,7 +390,7 @@ impl VectorDb {
 
     /// Delete a vector entry by blob_id (used for expired blob cleanup).
     /// Called reactively when Walrus returns 404 during blob download.
-    /// LOW-10: Requires owner to prevent cross-user blob deletion.
+    /// Requires owner to prevent cross-user blob deletion.
     pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
         let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
@@ -524,7 +524,7 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// LOW-3 fix: Immediately remove a single stale/revoked delegate key from the cache.
+    /// Immediately remove a single stale/revoked delegate key from the cache.
     ///
     /// Called when `verify_delegate_key_onchain` returns `Err` for a cached entry,
     /// meaning the key has been revoked on-chain. Without this, every subsequent
@@ -540,7 +540,7 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!(
-                "LOW-3: evicted stale/revoked delegate key from cache: {}",
+                "evicted stale/revoked delegate key from cache: {}",
                 public_key_hex
             );
         }
@@ -553,7 +553,7 @@ impl VectorDb {
 
     /// Acquire an advisory lock and get storage used within a single transaction.
     ///
-    /// MED-21 bugfix: using `pg_advisory_lock` with a connection pool causes deadlocks
+    /// Using `pg_advisory_lock` with a connection pool causes deadlocks
     /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
     /// transaction so the lock is automatically released on commit/rollback.
     pub async fn get_storage_used_with_lock(

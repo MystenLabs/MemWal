@@ -2,7 +2,7 @@
 
 A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemEval) against Walrus Memory and compares composite scoring presets against pure cosine similarity. Results are saved as JSON artifacts with per-query detail for inspection.
 
-> **Scope.** This is the **AI-quality** harness — it measures *memory-retrieval quality* (given a question, does the right memory come back). It is the complement to the **latency** benchmarks under `services/server/scripts/bench-*.ts` (ENG-1409), which measure Walrus throughput / SEAL decrypt latency / sidecar concurrency. Different concerns, different tools.
+> **Scope.** This is the **AI-quality** harness — it measures *memory-retrieval quality* (given a question, does the right memory come back). It is the complement to the **latency** benchmarks under `services/server/scripts/bench-*.ts`, which measure Walrus throughput / SEAL decrypt latency / sidecar concurrency. Different concerns, different tools.
 >
 > It runs against the server in **`BENCHMARK_MODE=true`** (the `PlaintextEngine` path — memories stored as plaintext in Postgres, bypassing SEAL + Walrus). `analyze` in that mode ingests *synchronously* (the response carries the stored ids and `status: "done"`), matching the SDK's pre-async analyze contract this harness was written against. Running through the production path would burn Walrus testnet quota measuring something this benchmark isn't testing. `BENCHMARK_MODE` is off by default and **not for production use**.
 
@@ -58,9 +58,9 @@ The rest of this doc is the detailed reference behind each step.
 | LOCOMO | ✅ Validated | ~$3-9 | ~60-90 min |
 | LongMemEval | ✅ Validated | ~$2-4 | ~2-2.5 hr |
 
-Runtime scales with the pre-extraction context work (MEM-57) — each
+Runtime scales with the pre-extraction context work — each
 `/api/analyze` call now does an extra embed + search + decrypt round-trip
-before extraction, so ingest is slower than the pre-MEM-57 numbers. LME
+before extraction, so ingest is slower than the earlier numbers. LME
 is the longer run (10,960 turns vs LOCOMO's 5,882).
 
 Run artifacts are written to `results/` (gitignored). Each run produces
@@ -226,10 +226,10 @@ Available presets (in `presets/`). Weights shown as
 The signals the ranker actually consumes:
 
 - **semantic** — `1 - cosine_distance` (always available)
-- **recency** — `2^(-age_days / recency_half_life_days)` from `created_at` (MEM-53)
+- **recency** — `2^(-age_days / recency_half_life_days)` from `created_at`
 - **importance** — the per-fact bucket score (`vital`/`standard`/`trivial`
   → `0.9`/`0.5`/`0.2`) the extractor emits at write time, persisted on
-  `vector_entries.importance` (MEM-54). Default-0 weight means it's
+  `vector_entries.importance`. Default-0 weight means it's
   opt-in; presets that set it non-zero activate it.
 
 ### Splitting ingestion and eval
@@ -268,7 +268,7 @@ results/
   <run-id>-<benchmark>-session_map.json  # session → memory-id map (shared across presets)
 ```
 
-For example, the MEM-57 LME run produced:
+For example, the LME run produced:
 
 ```
 mem57-lme-20260520T144014Z-longmemeval-baseline.json
@@ -278,7 +278,7 @@ mem57-lme-20260520T144014Z-longmemeval-session_map.json
 
 Each per-preset artifact contains:
 - `config` — scoring weights, models, recall limit, timestamp
-- `prompt_versions` — `{ extract, ask }` (MEM-56) so deltas attribute to the prompt
+- `prompt_versions` — `{ extract, ask }` so deltas attribute to the prompt
 - `metrics_overall` + `metrics_by_category` — the J-scores (the headline numbers)
 - `query_results` — per-query detail (question, ground truth, retrieved
   memories, generated answer, judge scores) for failure-mode inspection
@@ -287,7 +287,7 @@ Each per-preset artifact contains:
 ### Seeing the comparison table
 
 The `full` and `compare` commands **print a comparison table to stdout**
-at the end of the run (presets side-by-side, with published Mem0 / Zep /
+at the end of the run (presets side-by-side, with published memory-system /
 Supermemory reference columns from `reference_scores/`). It is not
 written to a file — to regenerate it later from the saved artifacts:
 
@@ -301,7 +301,7 @@ python run.py report                         # all benchmarks present in results
 The harness does **not** write a markdown summary (no `summary.md` /
 `detailed-report.md`) — only the JSON artifacts and the stdout
 comparison table. Per-category analysis, comparison with published
-numbers (Mem0 / Zep / Supermemory), failure-mode breakdowns, and
+numbers (published memory-system baselines), failure-mode breakdowns, and
 root-cause notes when numbers don't match expectations are written by
 hand from the JSON `query_results`. The published reference numbers the
 comparison table uses are in `reference_scores/{locomo,longmemeval}.yaml`.
@@ -327,7 +327,7 @@ Variance across runs is ~±2-3 points due to judge non-determinism. Retrieval it
   (`services/server/src/auth.rs`). `client.py::_sign_request` must send an
   `x-nonce` header (UUIDv4) and sign the 6-field canonical message
   `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`. If you see
-  426 on every request, the harness predates the MED-1 nonce / LOW-23
+  426 on every request, the harness predates the current nonce / account-id
   account-id-in-message changes — update `_sign_request` to match `auth.rs` and
   `packages/sdk/src/memwal.ts`.
 

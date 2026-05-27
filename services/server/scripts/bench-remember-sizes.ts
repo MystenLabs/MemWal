@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * bench-remember-sizes.ts — ENG-1407 size + content-type harness
+ * bench-remember-sizes.ts — size + content-type harness
  *
- * /api/remember is asynchronous as of ENG-1406 v3 (PR #121): POST returns
+ * /api/remember is asynchronous: POST returns
  * HTTP 202 with a job_id, and the embed/encrypt/Walrus pipeline runs in a
  * background worker. This harness drives each fixture from
  * bench-fixtures.json through the full async lifecycle:
@@ -12,7 +12,7 @@
  *   3. POST /api/recall              → sanity hit on the read path
  *
  * Three timings are tracked per fixture: enqueueMs (request → 202),
- * workerMs (202 → done, the actual ENG-1407 work), and recallMs. The
+ * workerMs (202 → done, the background work), and recallMs. The
  * worker timing is the meaningful one for evaluating chunked
  * summarization at scale.
  *
@@ -249,9 +249,9 @@ async function main() {
         r.err = `expected ${f.expect_status}, got ${remResp.status}: ${JSON.stringify(remResp.json).slice(0, 200)}`;
         console.log(`❌ ${remResp.status} (${r.enqueueMs.toFixed(0)} ms)`);
       } else if (remResp.status === 202) {
-        // ENG-1406 v3: poll the job until the worker finishes the
+        // Poll the job until the worker finishes the
         // embed/encrypt/Walrus pipeline. workerMs is the meaningful
-        // ENG-1407 timing — enqueueMs is just request acceptance.
+        // Worker timing — enqueueMs is just request acceptance.
         r.jobId = remResp.json?.job_id;
         if (!r.jobId) {
           r.err = `202 with no job_id: ${JSON.stringify(remResp.json).slice(0, 200)}`;

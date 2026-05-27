@@ -184,7 +184,7 @@ type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
 
-// MEM-35: in-memory counters surfaced via /metrics/wallet.
+// in-memory counters surfaced via /metrics/wallet.
 // Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
 // locks coin objects on equivocation, so the original multi-wallet routing
 // is unnecessary. We use a single wallet concurrently and rely on Apalis
@@ -449,7 +449,7 @@ async function executeSponsoredTransactionOnce(
         new Uint8Array(Buffer.from(sponsored.bytes, "base64"))
     );
 
-    // LOW-15: Defense-in-depth — encode digest before path interpolation.
+    // Defense-in-depth — encode digest before path interpolation.
     const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
     const executed = await callEnoki<EnokiExecuteResponse>(
         `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
@@ -550,7 +550,7 @@ async function submitWalletTransaction(
 // ============================================================
 
 const app = express();
-// HIGH-13 / ENG-1407: JSON body limits are per-route. A global app.use(json())
+// JSON body limits are per-route. A global app.use(json)
 // would parse and reject oversize bodies before any per-route json() ran
 // (Express middleware fires in declaration order; whichever json() consumes
 // the body first wins). We declare named limits and apply them explicitly
@@ -637,7 +637,7 @@ mountMcpRoutes(app, {
     relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",
 });
 
-// Wallet-execution metrics (MEM-35 observability). Placed before auth so
+// Wallet-execution metrics (observability). Placed before auth so
 // operators / scrapers don't need a token.
 //
 // `walletLockErrorsTotal` is the canary for the simplification: it should
@@ -681,7 +681,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ============================================================
 // POST /seal/encrypt
 // ============================================================
-// ENG-1407: receives the full plaintext for SEAL encryption. Must accept up
+// receives the full plaintext for SEAL encryption. Must accept up
 // to PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) of plaintext plus base64 + JSON
 // framing overhead.
 app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
@@ -709,7 +709,7 @@ app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), asyn
 });
 
 /**
- * ENG-1697: Resolve a SEAL SessionKey from the request headers.
+ * Resolve a SEAL SessionKey from the request headers.
  *
  * Preferred path: `x-seal-session` contains a base64-encoded
  * `ExportedSessionKey` (built by the SDK on the client). We import it and
@@ -742,7 +742,7 @@ async function resolveSessionKey(
         const { secretKey } = decodeSuiPrivateKey(privateKey);
         keypair = Ed25519Keypair.fromSecretKey(secretKey);
     } else {
-        // LOW-12: Validate hex format before parsing to prevent injection
+        // Validate hex format before parsing to prevent injection
         if (!/^[0-9a-fA-F]+$/.test(privateKey) || privateKey.length !== 64) {
             throw new Error("privateKey must be 64-char hex string or suiprivkey bech32");
         }
@@ -772,7 +772,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
         }
 
         phase = "resolve_session";
-        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
         if (!sessionKey) {
@@ -833,7 +833,7 @@ app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), asyn
 // Decrypt multiple SEAL-encrypted blobs with a single SessionKey.
 // Avoids "Not enough shares" errors when decrypting many blobs at once.
 // ============================================================
-// HIGH-13: batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
+// batch body can be large (up to 25 × ~320 KiB max-item = ~8 MB).
 app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
     let phase = "validate";
     try {
@@ -841,7 +841,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
         }
-        // HIGH-13 / MED-13: Cap items. 25 × max-item body = ~8 MB (matches the
+        // Cap items. 25 × max-item body = ~8 MB (matches the
         // per-route body limit above). Tightened from 50 to 25 so worst-case
         // in-memory allocation stays bounded even at the new limit.
         if (items.length > 25) {
@@ -852,7 +852,7 @@ app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BA
         }
 
         phase = "resolve_session";
-        // ENG-1697: resolve credential (x-seal-session preferred; legacy
+        // resolve credential (x-seal-session preferred; legacy
         // x-delegate-key supported during the deprecation window).
         const sessionKey = await resolveSessionKey(req, packageId);
         if (!sessionKey) {
@@ -1047,7 +1047,7 @@ async function setMetadataAndTransferBlobs(
     return digest;
 }
 
-// HIGH-13: /walrus/upload receives a base64-encoded SEAL ciphertext which can
+// /walrus/upload receives a base64-encoded SEAL ciphertext which can
 // be up to ~87 KiB per 64 KiB plaintext (SEAL overhead + base64 ≈ 1.37×).
 // 10 MB sits well above any realistic single-memory upload size.
 app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
@@ -1073,7 +1073,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         keyIndexForLog = keyIndex;
         ownerForLog = owner;
         namespaceForLog = namespace;
-        // LOW-17: Cap epochs to prevent accidental large storage purchases.
+        // Cap epochs to prevent accidental large storage purchases.
         const epochs = clampWalrusEpochs(rawEpochs);
 
         if (!data || keyIndex === undefined) {
@@ -1085,12 +1085,12 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
         }
 
-        // LOW-16: Validate packageId resembles a Sui address to prevent injection
+        // Validate packageId resembles a Sui address to prevent injection
         if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
             return res.status(400).json({ error: "Invalid packageId format" });
         }
 
-        // MED-11: Validate owner address format
+        // Validate owner address format
         if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
             return res.status(400).json({ error: "Invalid owner address format" });
         }
@@ -1193,7 +1193,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                     namespace: namespace || "default",
                 })}`);
             } catch (metaErr: any) {
-                // LOW-14: Previously the metadata-set + transfer failure was swallowed
+                // Previously the metadata-set + transfer failure was swallowed
                 // and /walrus/upload returned 200 with the blob_id, leaving the blob
                 // owned by the server wallet and the client unable to observe the
                 // failure. We still can't delete the blob from Walrus (no delete
@@ -1752,7 +1752,7 @@ app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, r
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        // LOW-18: Redact full sender address (PII / deanonymisation) — log only
+        // Redact full sender address (PII / deanonymisation) — log only
         // a short prefix for correlation. Never log the full digest here either.
         const senderPrefix = typeof sender === "string" ? sender.slice(0, 10) : "unknown";
         console.log(`[sponsor] creating sponsored tx for sender=${senderPrefix}...`);
@@ -1789,7 +1789,7 @@ app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async
             return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
         }
 
-        // LOW-15: Percent-encode digest before path interpolation. The digest is
+        // Percent-encode digest before path interpolation. The digest is
         // attacker-controlled when the sidecar is reached directly (no auth,
         // S1 in audit) or via the Rust proxy which validates base58 but the
         // sidecar must not rely on that. encodeURIComponent neutralises any
@@ -1801,7 +1801,7 @@ app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async
             { digest, signature }
         );
 
-        // LOW-18: Redact digest from console logs — it's a high-cardinality
+        // Redact digest from console logs — it's a high-cardinality
         // value that ties log lines to individual user transactions. Log only
         // a length indicator for diagnostics.
         console.log(`[sponsor/execute] executed sponsored tx (digest_len=${digest.length})`);

@@ -137,7 +137,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
             # ~7% of oracle instances ship sessions out of date order (annotator
             # artefact, never >1 day off). Real users don't hand a memory system
             # turns out of sequence — sorting here keeps ingest-order realistic
-            # and matches what Mem0's own runner does. Sessions whose date
+            # and matches the published runner behavior. Sessions whose date
             # fails to parse fall back to their original position, sorted last.
             sess_indices = list(range(len(sessions_raw)))
             sess_indices.sort(

@@ -13,7 +13,7 @@
 //!   `exp(-age_days * ln(2) / half_life_days)`). A true half-life decay
 //!   that puts a memory aged exactly `half_life` days at 0.5, twice that
 //!   at 0.25, and so on.
-//! - **Importance** (MEM-54) — the per-fact bucket score persisted on
+//! - **Importance** — the per-fact bucket score persisted on
 //!   `vector_entries.importance` (vital / standard / trivial → 0.9 /
 //!   0.5 / 0.2). The column is `NOT NULL DEFAULT 0.5` so legacy rows fall
 //!   into the neutral bucket and don't reorder anything when this signal
@@ -128,7 +128,7 @@ impl CompositeRanker {
             0.0
         };
 
-        // MEM-54: importance term. `vector_entries.importance` is already
+        // importance term. `vector_entries.importance` is already
         // in [0.0, 1.0] (bucket values are 0.2 / 0.5 / 0.9), so we don't
         // need a normalisation step — just multiply by the weight.
         //
@@ -218,7 +218,7 @@ mod tests {
         }
     }
 
-    /// Variant for MEM-54 importance tests: lets the test pin the bucket
+    /// Variant for importance tests: lets the test pin the bucket
     /// value (vital / standard / trivial) per hit.
     fn hit_imp(blob_id: &str, distance: f64, age_days: i64, importance: f32) -> HydratedMemory {
         HydratedMemory {
@@ -423,7 +423,7 @@ mod tests {
         }
     }
 
-    // ── MEM-54: importance signal tests ───────────────────────────────
+    // ── importance signal tests ───────────────────────────────
 
     #[test]
     fn importance_only_promotes_vital_over_trivial() {

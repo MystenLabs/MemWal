@@ -230,7 +230,7 @@ def stage_ingest(
     # turns/chunks are processed serially. This (a) mirrors real-time
     # message ordering that a chatbot would produce, (b) avoids advisory
     # lock contention because all serial calls share a namespace, and (c)
-    # is how Mem0's own LOCOMO evaluation replays conversations.
+    # mirrors the published LOCOMO evaluation replay protocol.
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = [pool.submit(ingest_one_conversation, t) for t in conv_tasks]
@@ -407,7 +407,7 @@ def stage_eval(
         overall = {}
         by_category = {}
 
-    # MEM-56: pin the server's prompt versions into the run artifact.
+    # pin the server's prompt versions into the run artifact.
     # The harness fails fast at startup if these are missing, so by the
     # time we get here `_server_prompt_versions` is guaranteed present
     # for any run kicked off via `main()`. The `or {}` guard is just for
@@ -650,10 +650,10 @@ def main():
     # with warning" rather than abort, so this check works against both
     # refactored and pre-refactor servers.
     #
-    # MEM-56: `prompt_versions` is the newer field. It's NOT optional — a
+    # `prompt_versions` is the newer field. It's NOT optional — a
     # server that doesn't expose it can't produce attributable run
     # artifacts, so we abort rather than silently recording empty
-    # versions. See the validation gate on MEM-56.
+    # versions. See the validation gate below.
     try:
         health = client.health()
         version = health.get("version", "?")
@@ -677,7 +677,7 @@ def main():
         if not isinstance(prompt_versions, dict) or "extract" not in prompt_versions or "ask" not in prompt_versions:
             print(
                 "ERROR: Server /health response missing `prompt_versions.extract` "
-                "and/or `prompt_versions.ask`. MEM-56 requires every run artifact "
+                "and/or `prompt_versions.ask`. Every run artifact "
                 "to pin the prompt versions; aborting rather than recording empty "
                 "metadata. Upgrade the server to a build that exposes these fields."
             )

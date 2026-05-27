@@ -15,7 +15,7 @@ use crate::types::{AppState, AuthInfo};
 /// Maximum signed-JSON body the auth middleware will buffer before computing
 /// the SHA-256 digest. Must be ≥ the largest per-route body limit so the auth
 /// layer never rejects requests the routes themselves would accept.
-/// Today the bulk-remember route is the largest at 2 MiB (ENG-1408).
+/// Today the bulk-remember route is the largest at 2 MiB.
 pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Ed25519 signature verification + onchain delegate key verification middleware
@@ -35,7 +35,7 @@ pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// 4. Cache the mapping for future requests
 /// 5. Store AuthInfo { public_key, owner } in request extensions
 ///
-/// LOW-2 fix: Normalize response timing across all auth failure paths.
+/// Normalize response timing across all auth failure paths.
 /// Returns UNAUTHORIZED after a constant 100 ms delay so that an attacker
 /// cannot distinguish "account does not exist" (fast RPC fail) from
 /// "account exists but key not found" (slow delegate_keys array scan)
@@ -83,7 +83,7 @@ pub async fn verify_signature(
         .map(String::from);
 
     // Optional delegate private key (hex) for SEAL decrypt — legacy path.
-    // Modern clients send `x-seal-session` instead (ENG-1697).
+    // Modern clients send `x-seal-session` instead.
     let delegate_key_hex = headers
         .get("x-delegate-key")
         .and_then(|v| v.to_str().ok())
@@ -104,7 +104,7 @@ pub async fn verify_signature(
         );
     }
     if seal_session.is_none() && delegate_key_hex.is_some() {
-        // ENG-1697 telemetry: log (without value) so we can count legacy
+        // Deprecation telemetry: log (without value) so we can count legacy
         // header usage per SDK version during the deprecation window.
         tracing::warn!(
             target: "memwal::deprecation",
@@ -112,7 +112,7 @@ pub async fn verify_signature(
         );
     }
 
-    // MED-1 fix: Extract nonce for replay protection.
+    // Extract nonce for replay protection.
     // Nonce must be a UUID v4, checked against Redis to prevent replay attacks.
     // TTL = 600s (10 min) > timestamp window (300s) so no replay is possible.
     let nonce = headers
@@ -137,7 +137,7 @@ pub async fn verify_signature(
     }
 
     // Validate timestamp (5 minute window)
-    // INFO-2 fix: Use checked_sub to avoid potential overflow with user-supplied timestamps
+    // Use checked_sub to avoid potential overflow with user-supplied timestamps
     let timestamp: i64 = timestamp_str
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -149,7 +149,7 @@ pub async fn verify_signature(
             timestamp,
             now
         );
-        // LOW-2: Use constant_time_reject to normalize timing on timestamp failures
+        // Use constant_time_reject to normalize timing on timestamp failures
         return Err(constant_time_reject().await);
     }
 
@@ -165,7 +165,7 @@ pub async fn verify_signature(
     let signature = Signature::from_bytes(&sig_array);
 
     // Build the signed message: "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}"
-    // LOW-1: Include query parameters in signed message to prevent query-param tampering
+    // Include query parameters in signed message to prevent query-param tampering
     let method = request.method().as_str().to_string();
     let path = request
         .uri()
@@ -181,8 +181,8 @@ pub async fn verify_signature(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
-    // MED-1 fix: Include nonce in signed message to prevent replay attacks.
-    // LOW-23: Include x-account-id in the signed canonical message so an
+    // Include nonce in signed message to prevent replay attacks.
+    // Include x-account-id in the signed canonical message so an
     //         intermediary cannot swap the account hint. The header MUST be
     //         present — the SDK now always sends it. If absent we use an
     //         empty string so the signature will mismatch and the request
@@ -202,7 +202,7 @@ pub async fn verify_signature(
     );
 
     // Step 1: Verify Ed25519 signature
-    // LOW-2: Use constant_time_reject so signature failures take the same wall-clock
+    // Use constant_time_reject so signature failures take the same wall-clock
     // time as account-resolution failures, preventing differential timing attacks.
     if verifying_key
         .verify(message.as_bytes(), &signature)
@@ -214,7 +214,7 @@ pub async fn verify_signature(
 
     tracing::debug!("signature verified for key: {}", public_key_hex);
 
-    // MED-1 fix: Check and record nonce in Redis to block replays.
+    // Check and record nonce in Redis to block replays.
     // Done AFTER signature verify so we don't waste Redis writes on bad requests.
     {
         let nonce_key = format!("nonce:{}", nonce);
@@ -240,13 +240,13 @@ pub async fn verify_signature(
                 nonce,
                 &public_key_hex[..16.min(public_key_hex.len())]
             );
-            // LOW-2: uniform timing even for replay rejections
+            // uniform timing even for replay rejections
             return Err(constant_time_reject().await);
         }
     }
 
     // Step 2: Resolve account — cache → signed header hint/config fallback → registry scan
-    // LOW-2: Always use constant_time_reject so that timing of the resolution error
+    // Always use constant_time_reject so that timing of the resolution error
     // ("account not found" vs "key not in account") cannot be observed by callers.
     let (account_id, owner) =
         match resolve_account(&state, &public_key_hex, &pk_array, account_id_hint).await {
@@ -305,7 +305,7 @@ async fn resolve_account(
                 return Ok((cached_account_id, owner));
             }
             Err(_) => {
-                // LOW-3 fix: Key was revoked on-chain. Delete the stale cache row
+                // Key was revoked on-chain. Delete the stale cache row
                 // immediately so subsequent requests don't loop: cache-hit → RPC fail →
                 // fall-through, burning RPC quota and generating log noise on every call.
                 tracing::warn!(
@@ -320,7 +320,7 @@ async fn resolve_account(
 
     // Strategy 2: Use exact account hint/config fallback before any registry scan.
     //
-    // Modern SDKs always send x-account-id and LOW-23 includes it in the
+    // Modern SDKs always send x-account-id and sign it in the
     // canonical signature, so an intermediary cannot swap this hint. Verifying
     // the signed object directly avoids an expensive AccountRegistry scan that
     // fetches many account objects on cache miss.
@@ -400,7 +400,7 @@ mod tests {
         assert!(body.len() <= PROTECTED_BODY_LIMIT_BYTES);
     }
 
-    // ── MED-1: Nonce must be valid UUID v4 ──────────────────────────────
+    // ── Nonce must be valid UUID v4 ──────────────────────────────
 
     #[test]
     fn nonce_valid_uuid_accepted() {
@@ -427,7 +427,7 @@ mod tests {
         }
     }
 
-    // ── INFO-2: checked_sub prevents overflow ───────────────────────────
+    // ── checked_sub prevents overflow ───────────────────────────
 
     #[test]
     fn checked_sub_handles_underflow() {
@@ -487,7 +487,7 @@ mod tests {
         assert!(age_expired > 300);
     }
 
-    // ── LOW-1: Query parameters included in signed message ──────────────
+    // ── Query parameters included in signed message ──────────────
 
     #[test]
     fn signed_message_includes_query_params() {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(path, "/api/remember");
     }
 
-    // ── LOW-2: constant_time_reject returns 401 ─────────────────────────
+    // ── constant_time_reject returns 401 ─────────────────────────
 
     #[tokio::test]
     async fn constant_time_reject_returns_unauthorized() {
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(unsupported_legacy_sdk(), StatusCode::UPGRADE_REQUIRED);
     }
 
-    // ── LOW-23: account_id included in signed canonical message ─────────
+    // ── account_id included in signed canonical message ─────────
 
     #[test]
     fn canonical_message_format_with_account_id() {
@@ -563,7 +563,7 @@ mod tests {
         assert!(message.ends_with('.'));
     }
 
-    // ── MED-1: Full signature + nonce verification flow ─────────────────
+    // ── Full signature + nonce verification flow ─────────────────
 
     #[test]
     fn signed_message_all_fields_present() {
@@ -647,14 +647,14 @@ mod tests {
         let msg = "1700000000.POST./api/recall.hash.nonce.0xaccount_a";
         let signature = signing_key.sign(msg.as_bytes());
 
-        // Swapping account_id → signature fails (LOW-23)
+        // Swapping account_id makes signature verification fail.
         let swapped = "1700000000.POST./api/recall.hash.nonce.0xaccount_b";
         assert!(verifying_key
             .verify(swapped.as_bytes(), &signature)
             .is_err());
     }
 
-    // ── ENG-1696: Manual-mode trust boundary ────────────────────────────
+    // ── Manual-mode trust boundary ────────────────────────────
     //
     // Manual-mode routes (/api/remember/manual, /api/recall/manual) must
     // succeed without the `x-delegate-key` header. The SDK no longer emits
@@ -675,7 +675,7 @@ mod tests {
         };
         assert!(auth.delegate_key.is_none());
         assert!(auth.seal_session.is_none());
-        // Verify Debug impl still redacts (LOW-5 / ENG-1697) — even in
+        // Verify Debug impl still redacts — even in
         // Manual mode we must never leak any credential material in logs.
         let debug_str = format!("{:?}", auth);
         assert!(debug_str.contains("None"));

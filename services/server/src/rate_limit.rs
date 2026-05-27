@@ -120,7 +120,7 @@ impl RateLimitConfig {
 /// Expensive endpoints (embedding + encrypt + Walrus upload + LLM)
 /// consume more of the rate limit budget than cheap read endpoints.
 ///
-/// MED-20 (full fix):
+/// Endpoint weight normalization:
 ///   1. Percent-decode the path to neutralise URL-encoded variants
 ///      (e.g. `/api/anal%79ze` → `/api/analyze`).
 ///   2. Strip any trailing slash so `/api/analyze/` == `/api/analyze`.
@@ -166,7 +166,7 @@ pub async fn create_redis_client(
 }
 
 // ============================================================
-// Sliding Window Helpers — MED-19: Atomic Lua Script
+// Sliding Window Helpers — Atomic Lua Script
 // ============================================================
 
 /// Lua script that atomically:
@@ -175,7 +175,7 @@ pub async fn create_redis_client(
 ///   3. If count < limit: adds `weight` new timestamped entries and refreshes TTL.
 ///   4. Returns 1 (allowed) or 0 (denied).
 ///
-/// MED-19 fix: This replaces the previous two-step check_window + record_in_window
+/// This replaces the previous two-step check_window + record_in_window
 /// pattern which had a TOCTOU race where concurrent requests could both pass the
 /// check then both record, collectively exceeding the limit.
 /// A Lua script runs atomically on the Redis server — no other command can execute
@@ -219,7 +219,7 @@ enum WindowCheckResult {
 
 /// Atomically check the sliding window and record entries if within limit.
 ///
-/// MED-19 fix: Replaces the separate check_window + record_in_window calls.
+/// Replaces the separate check_window + record_in_window calls.
 /// The Lua script executes as a single atomic Redis operation, preventing the
 /// TOCTOU race where two concurrent requests could both pass the check before
 /// either records, then both record and collectively exceed the limit.
@@ -346,7 +346,7 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
 
 /// Build a 503 response when Redis is completely unreachable and the
 /// in-memory fallback also cannot be used (e.g., lock poisoned).
-/// HIGH-2 fix: previously Redis errors silently allowed requests through.
+/// previously Redis errors silently allowed requests through.
 fn rate_limiter_unavailable_response() -> Response {
     crate::observability::record_app_error("rate_limiter_unavailable");
     let body = serde_json::json!({
@@ -380,10 +380,10 @@ fn rate_limiter_unavailable_response() -> Response {
 ///
 /// Returns 429 Too Many Requests with JSON body if any layer exceeds its limit.
 ///
-/// MED-19 fix: Returns 503 Service Unavailable (fail-closed) if Redis
+/// Returns 503 Service Unavailable (fail-closed) if Redis
 /// is unreachable — previously was fail-open (silently allowed all requests).
 ///
-/// MED-20 fix: Normalizes trailing slash in path before cost weight lookup.
+/// Normalizes trailing slash in path before cost weight lookup.
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -412,7 +412,7 @@ pub async fn rate_limit_middleware(
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
-    // Determine cost weight based on endpoint (MED-20: path is normalized inside endpoint_weight)
+    // Determine cost weight based on endpoint; path is normalized inside endpoint_weight.
     let weight = endpoint_weight(request.uri().path());
 
     // --- Key definitions for all three rate-limit buckets ---
@@ -424,9 +424,9 @@ pub async fn rate_limit_middleware(
     let burst_window_start = now - 60_000.0; // 1-min window (ms)
     let hourly_window_start = now - 3_600_000.0; // 1-hr  window (ms)
 
-    // --- MED-19: Atomic check-and-record via Lua script for all 3 layers ---
+    // --- Atomic check-and-record via Lua script for all 3 layers ---
     // Each layer is checked+recorded atomically. If Redis is unavailable,
-    // we fall through to the in-memory token-bucket fallback (HIGH-2 fix).
+    // we fall through to the in-memory token-bucket fallback.
 
     let mut redis_down = false;
 
@@ -607,7 +607,7 @@ pub async fn rate_limit_middleware(
 /// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
 /// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
 ///
-/// MED-21 fix: Uses PostgreSQL advisory lock per-owner to prevent
+/// Uses PostgreSQL advisory lock per-owner to prevent
 /// TOCTOU race where concurrent requests all pass quota check then
 /// all write, collectively exceeding the limit.
 pub async fn check_storage_quota(
@@ -622,7 +622,7 @@ pub async fn check_storage_quota(
         return Ok(());
     }
 
-    // MED-21 fix: Acquire a per-owner PostgreSQL advisory lock.
+    // Acquire a per-owner PostgreSQL advisory lock.
     // This serializes concurrent quota checks for the same owner,
     // preventing TOCTOU race conditions.
     // We use a stable hash of the owner string as the lock key.
@@ -677,7 +677,7 @@ fn stable_hash_i64(s: &str) -> i64 {
 /// Returns `SponsorRlResult::Allowed` when the request can proceed, or the
 /// appropriate `MinuteLimitExceeded` / `HourLimitExceeded` variant otherwise.
 ///
-/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
+/// On Redis error, falls back to the in-memory token-bucket
 /// fallback. Returns `Err(())` only if both Redis and the fallback are
 /// unavailable (lock poisoned), in which case callers should deny or log.
 pub async fn check_sender_rate_limit(
@@ -696,7 +696,7 @@ pub async fn check_sender_rate_limit(
 
     let mut redis_down = false;
 
-    // --- MED-19: Atomic check-and-record for minute bucket ---
+    // --- Atomic check-and-record for minute bucket ---
     match check_and_record_window(
         &mut redis,
         &min_key,
@@ -719,7 +719,7 @@ pub async fn check_sender_rate_limit(
         Ok(WindowCheckResult::Allowed) => {}
     }
 
-    // --- MED-19: Atomic check-and-record for hour bucket ---
+    // --- Atomic check-and-record for hour bucket ---
     if !redis_down {
         match check_and_record_window(
             &mut redis,
@@ -744,7 +744,7 @@ pub async fn check_sender_rate_limit(
         }
     }
 
-    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
+    // --- In-memory fallback when Redis is down ---
     if redis_down {
         crate::observability::record_rate_limit_fallback("sponsor_sender");
         let mut fallback = state.fallback_rate_limit.lock().await;
@@ -815,7 +815,7 @@ pub async fn charge_explicit_weight(
     let burst_key = format!("rate:{}", auth.owner);
     let hr_key = format!("rate:hr:{}", auth.owner);
 
-    // MED-19: Use the same atomic Lua script for explicit weight charges
+    // Use the same atomic Lua script for explicit weight charges
     // (called from /api/analyze after fact count is known).
     // Ignore WindowCheckResult here — this is a post-hoc charge after
     // the expensive work is done; we prefer not to block the response.
@@ -845,7 +845,7 @@ pub async fn charge_explicit_weight(
 /// Enforces a per-IP sliding-window limit using the same Redis counters as
 /// the authenticated middleware. Defaults: 10 req/min, 30 req/hr per IP.
 ///
-/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
+/// On Redis error, falls back to the in-memory token-bucket
 /// instead of failing open. If the fallback mutex is also unavailable,
 /// returns 503 (fail-closed). Per-sender limits in the route handler itself
 /// provide an additional backstop.
@@ -895,7 +895,7 @@ pub async fn sponsor_rate_limit_middleware(
 
     let mut redis_down = false;
 
-    // --- MED-19: Atomic check-and-record for minute bucket (IP-based) ---
+    // --- Atomic check-and-record for minute bucket (IP-based) ---
     match check_and_record_window(
         &mut redis,
         &min_key,
@@ -922,7 +922,7 @@ pub async fn sponsor_rate_limit_middleware(
         Ok(WindowCheckResult::Allowed) => {}
     }
 
-    // --- MED-19: Atomic check-and-record for hour bucket (IP-based) ---
+    // --- Atomic check-and-record for hour bucket (IP-based) ---
     if !redis_down {
         match check_and_record_window(
             &mut redis,
@@ -951,7 +951,7 @@ pub async fn sponsor_rate_limit_middleware(
         }
     }
 
-    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
+    // --- In-memory fallback when Redis is down ---
     if redis_down {
         tracing::warn!("sponsor_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
         crate::observability::record_rate_limit_fallback("sponsor_ip");
@@ -981,7 +981,7 @@ pub async fn sponsor_rate_limit_middleware(
 mod tests {
     use super::*;
 
-    // ---- MED-20: Path normalization ----
+    // ---- Path normalization ----
 
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {
@@ -992,7 +992,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
 
-        // With trailing slash — must return SAME weight (MED-20 fix)
+        // With trailing slash — must return SAME weight.
         assert_eq!(
             endpoint_weight("/api/analyze/"),
             5,
@@ -1041,7 +1041,7 @@ mod tests {
         let _ = h; // just verify no panic
     }
 
-    // ---- MED-19: fail-closed response ----
+    // ---- fail-closed response ----
 
     #[test]
     fn test_rate_limiter_unavailable_response_is_503() {
@@ -1058,7 +1058,7 @@ mod tests {
         assert!(resp.headers().contains_key("retry-after"));
     }
 
-    // ---- MED-19: Atomic Lua script structure ----
+    // ---- Atomic Lua script structure ----
 
     /// Verify the Lua script constant is non-empty and contains the critical
     /// idempotency guard (`count + weight > limit`). If the guard disappears,
@@ -1097,7 +1097,7 @@ mod tests {
         assert_ne!(allowed, denied, "Allowed and Denied must be distinct");
     }
 
-    // ---- MED-20: Percent-encoded path normalization ----
+    // ---- Percent-encoded path normalization ----
 
     #[test]
     fn test_endpoint_weight_percent_encoded_analyze() {
@@ -1146,7 +1146,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/%ZZ/bad"), 1);
     }
 
-    // ---- HIGH-2: In-memory token bucket fallback ----
+    // ---- In-memory token bucket fallback ----
 
     #[test]
     fn test_fallback_token_bucket_new_starts_full() {
@@ -1232,7 +1232,7 @@ mod tests {
         assert!(fb.can_consume("k2", 1.0, 10.0, 60.0));
     }
 
-    // ---- MED-19: Analyze weight calculations ----
+    // ---- Analyze weight calculations ----
 
     #[test]
     fn test_analyze_additional_weight() {

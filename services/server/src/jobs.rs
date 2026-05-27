@@ -41,10 +41,10 @@ pub enum WalletOperation {
         encrypted_b64: String,
         /// Pre-computed embedding vector (1536-dim).
         vector: Vec<f32>,
-        /// MEM-54: per-fact importance set at extraction time. Persisted
+        /// per-fact importance set at extraction time. Persisted
         /// on `vector_entries.importance` after Walrus upload completes.
         /// `#[serde(default = "default_importance")]` so legacy job rows
-        /// enqueued before MEM-54 land at the neutral "standard" bucket
+        /// land at the neutral "standard" bucket
         /// rather than failing deserialisation.
         #[serde(default = "default_importance")]
         importance: f32,
@@ -88,9 +88,9 @@ pub enum WalletOperation {
         /// Encrypted blob size to record with the vector row.
         #[serde(default)]
         blob_size_bytes: Option<i64>,
-        /// MEM-54: per-fact importance score, indexed alongside the vector
+        /// per-fact importance score, indexed alongside the vector
         /// when this recovery job finalises the upload. Defaulted to
-        /// `IMPORTANCE_STANDARD` so legacy / pre-MEM-54 rows degrade to the
+        /// `IMPORTANCE_STANDARD` so legacy rows degrade to the
         /// neutral bucket rather than failing deserialisation.
         #[serde(default = "default_importance")]
         importance: f32,
@@ -106,7 +106,7 @@ pub enum WalletOperation {
         blob_id: String,
         vector: Vec<f32>,
         blob_size_bytes: i64,
-        /// MEM-54: same as on `UploadAndTransfer` — persisted on the
+        /// same as on `UploadAndTransfer` — persisted on the
         /// `vector_entries.importance` column. Defaulted to
         /// `IMPORTANCE_STANDARD` for backwards compatibility with in-flight
         /// recovery jobs enqueued before this field existed.
@@ -120,7 +120,7 @@ fn default_epochs() -> u32 {
     configured_walrus_storage_epochs(&network)
 }
 
-/// MEM-54: serde default for `WalletOperation::UploadAndTransfer.importance`
+/// serde default for `WalletOperation::UploadAndTransfer.importance`
 /// so legacy job rows enqueued before this field existed degrade to the
 /// neutral "standard" bucket on dequeue.
 fn default_importance() -> f32 {
@@ -1044,7 +1044,7 @@ impl std::fmt::Display for WalletJobError {
 impl std::error::Error for WalletJobError {}
 
 // ============================================================
-// RememberJob — full async pipeline (ENG-1406 v3)
+// RememberJob — full async pipeline
 // ============================================================
 
 /// Payload for the full async remember pipeline stored in `apalis_jobs`.
@@ -1193,7 +1193,7 @@ pub async fn execute_remember(
                         blob_id: Some(blob_id.clone()),
                         vector: Some(job.vector.clone()),
                         blob_size_bytes: Some(encrypted.len() as i64),
-                        // MEM-54: legacy RememberJob payload predates the
+                        // legacy RememberJob payload predates the
                         // importance field. Drain the queue at the neutral
                         // "standard" bucket; new requests go through
                         // WalletOperation::UploadAndTransfer which carries
@@ -1235,7 +1235,7 @@ pub async fn execute_remember(
             &blob_id,
             &job.vector,
             blob_size,
-            // MEM-54: legacy RememberJob payload predates the importance
+            // legacy RememberJob payload predates the importance
             // field. Drains the queue at the neutral "standard" bucket;
             // new requests go through WalletOperation::UploadAndTransfer
             // which carries importance through end-to-end.
@@ -1266,7 +1266,7 @@ pub async fn execute_remember(
 }
 
 // ============================================================
-// BulkRememberJob — ENG-1408
+// BulkRememberJob
 //
 // Fans a preprocessed bulk request out into per-item wallet jobs.
 // ============================================================
@@ -1283,7 +1283,7 @@ pub struct BulkRememberItem {
     pub namespace: String,
     /// Wallet index assigned at enqueue time.
     pub wallet_index: usize,
-    /// MEM-54: per-item importance score (defaults to "standard" 0.5 when
+    /// per-item importance score (defaults to "standard" 0.5 when
     /// the bulk-remember route doesn't run extraction — e.g. SDK passes
     /// pre-formed memories). `#[serde(default)]` so legacy bulk job rows
     /// drain cleanly at the neutral default.
@@ -1329,7 +1329,7 @@ impl std::error::Error for BulkRememberError {}
 // execute_bulk_remember — Apalis handler
 // ─────────────────────────────────────────────────────────────
 
-/// Apalis worker handler for BulkRememberJob (ENG-1408).
+/// Apalis worker handler for BulkRememberJob.
 ///
 /// The bulk worker intentionally does not perform wallet work itself. It fans
 /// out already-prepared items into the shared WalletJob queue so single-item

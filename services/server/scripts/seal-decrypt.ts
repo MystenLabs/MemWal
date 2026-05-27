@@ -124,7 +124,7 @@ async function main() {
     );
 
     // Step 2: Create session key (auto-signs with signer)
-    // LOW-13: Reduced from 30 to 5 minutes to match sidecar policy.
+    // Reduced from 30 to 5 minutes to match sidecar policy.
     const sessionKey = await SessionKey.create({
         address: adminAddress,
         packageId,
