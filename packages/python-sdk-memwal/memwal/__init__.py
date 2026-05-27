@@ -14,7 +14,7 @@ Quick start::
 
     # Async
     result = await memwal.remember("I love coffee")
-    matches = await memwal.recall("beverage preferences")
+    matches = await memwal.recall(RecallParams(query="beverage preferences"))
 
     # Sync wrapper
     from memwal import MemWalSync

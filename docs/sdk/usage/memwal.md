@@ -31,7 +31,7 @@ const job = await memwal.remember("User prefers dark mode and works in TypeScrip
 await memwal.waitForRememberJob(job.job_id);
 
 // Recall relevant memories
-const result = await memwal.recall("What do we know about this user?", 5);
+const result = await memwal.recall({ query: "What do we know about this user?", limit: 5 });
 
 // Extract and store facts from longer text
 const analyzed = await memwal.analyze(

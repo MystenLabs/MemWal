@@ -13,7 +13,7 @@ The recommended default client. The relayer handles embeddings, SEAL encryption,
 4. `recall` searches by namespace and returns decrypted matches
 
 ```python
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(
     key="<your-ed25519-private-key>",
@@ -33,7 +33,7 @@ done = await memwal.remember_and_wait("User prefers dark mode and works in Pytho
 print(done.blob_id)
 
 # Recall relevant memories
-result = await memwal.recall("What do we know about this user?", limit=5)
+result = await memwal.recall(RecallParams(query="What do we know about this user?", limit=5))
 for memory in result.results:
     print(memory.text, memory.distance)
 

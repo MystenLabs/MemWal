@@ -103,7 +103,7 @@ await memwal.rememberAndWait(
 );
 
 // Recall by meaning
-const result = await memwal.recall("What are the user's preferences?");
+const result = await memwal.recall({ query: "What are the user's preferences?" });
 console.log(result.results);
 
 // Extract facts from free-form text and wait until all accepted facts are indexed.
@@ -565,6 +565,17 @@ Lifecycle hooks run automatically:
 | `forget` expectations are unclear | Current relayer `POST /api/forget` removes vector index rows so memories are unrecallable; Walrus blobs persist until epoch expiry |
 
 ---
+
+## Brand Terminology
+
+Until product confirms a canonical naming pass (tracked separately from WALM-53), these are the **working** assumptions reflected across this doc, the SDKs, and the relayer. Treat them as descriptive, not authoritative.
+
+| Surface | Canonical term | Notes |
+|---|---|---|
+| Product / docs / UI | **Walrus Memory** | Used in marketing copy, user-facing dashboards, and prose docs |
+| Package / env vars / internal shorthand | **memwal** | Used in `@mysten-incubation/memwal`, `pip install memwal`, `MEMWAL_*` env vars, internal logs, and codepaths |
+
+If you're writing user-facing copy, prefer "Walrus Memory". If you're writing an env var, import path, or grep-target, prefer `memwal`. Don't mass-rename existing identifiers — that requires a coordinated migration outside this skill's scope.
 
 ## Links
 

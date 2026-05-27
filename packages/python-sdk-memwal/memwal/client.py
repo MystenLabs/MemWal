@@ -20,7 +20,7 @@ Example::
 
     # Async usage
     result = await memwal.remember("I'm allergic to peanuts")
-    matches = await memwal.recall("food allergies")
+    matches = await memwal.recall(RecallParams(query="food allergies"))
 """
 
 from __future__ import annotations
@@ -1100,11 +1100,11 @@ class MemWalSync:
 
     Example::
 
-        from memwal import MemWalSync
+        from memwal import MemWalSync, RecallParams
 
         client = MemWalSync.create(key="...", account_id="0x...")
         result = client.remember("I love coffee")
-        matches = client.recall("coffee preferences")
+        matches = client.recall(RecallParams(query="coffee preferences"))
     """
 
     def __init__(self, inner: MemWal) -> None:

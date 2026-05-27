@@ -36,7 +36,7 @@ must stay server-side.
 ```python
 import asyncio
 import os
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 async def main():
     memwal = MemWal.create(
@@ -50,7 +50,7 @@ async def main():
     print(result.blob_id)
 
     # Recall memories
-    matches = await memwal.recall("food allergies", limit=10, max_distance=0.7)
+    matches = await memwal.recall(RecallParams(query="food allergies", limit=10, max_distance=0.7))
     for memory in matches.results:
         print(f"{memory.text} (relevance: {1 - memory.distance:.2f})")
 
@@ -68,7 +68,7 @@ asyncio.run(main())
 
 ```python
 import os
-from memwal import MemWalSync
+from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
@@ -77,7 +77,7 @@ client = MemWalSync.create(
 )
 
 result = client.remember("I'm allergic to peanuts")
-matches = client.recall("food allergies")
+matches = client.recall(RecallParams(query="food allergies"))
 client.close()
 ```
 

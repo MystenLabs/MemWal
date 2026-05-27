@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from memwal import (  # noqa: E402
     MemWal,
     MemWalRememberJobFailed,
+    RecallParams,
     RememberBulkItem,
     RememberBulkOptions,
 )
@@ -119,7 +120,7 @@ async def main() -> None:
 
         # 5. recall — confirm the memories are searchable
         _section("5. recall('coffee')")
-        rc = await memwal.recall("coffee", limit=3)
+        rc = await memwal.recall(RecallParams(query="coffee", limit=3))
         print(f"  found {len(rc.results)} / total={rc.total}")
         for m in rc.results[:3]:
             print(f"    [{m.distance:.3f}] {m.text[:80]}")

@@ -241,7 +241,7 @@ await memwal.health();
 const memory = `TEE smoke memory ${new Date().toISOString()}`;
 const job = await memwal.remember(memory);
 await memwal.waitForRememberJob(job.job_id);
-const recall = await memwal.recall("What smoke memory was stored?", 5);
+const recall = await memwal.recall({ query: "What smoke memory was stored?", limit: 5 });
 
 if (!recall.results.some((item) => item.text.includes("TEE smoke memory"))) {
   throw new Error("TEE remember/recall smoke test failed");

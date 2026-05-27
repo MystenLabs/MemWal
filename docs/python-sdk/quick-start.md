@@ -78,7 +78,7 @@ Precedence: an explicit non-default `server_url` > `env` > the default. An unkno
 ```python
 import asyncio
 import os
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 async def main():
     memwal = MemWal.create(
@@ -91,7 +91,7 @@ async def main():
     await memwal.health()
     await memwal.remember_and_wait("I live in Hanoi and prefer dark mode.")
 
-    result = await memwal.recall("What do we know about this user?")
+    result = await memwal.recall(RecallParams(query="What do we know about this user?"))
     for memory in result.results:
         print(memory.text, f"(distance: {memory.distance:.3f})")
 
