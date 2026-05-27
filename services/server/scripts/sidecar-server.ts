@@ -146,6 +146,9 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
 type EnokiDataWrapper<T> = { data: T };
 type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
+type WalletTransactionOptions = {
+    patchGasCoinIntentsForSponsor?: boolean;
+};
 
 // MEM-35: in-memory counters surfaced via /metrics/wallet.
 // Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
@@ -217,7 +220,22 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     return parsed.data;
 }
 
-async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, allowedAddresses?: string[]): Promise<string> {
+function transactionForSponsor(tx: Transaction, options: WalletTransactionOptions): Transaction {
+    if (!options.patchGasCoinIntentsForSponsor) {
+        return tx;
+    }
+
+    const sponsorTx = Transaction.from(tx);
+    patchGasCoinIntents(sponsorTx);
+    return sponsorTx;
+}
+
+async function executeWithEnokiSponsor(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+    options: WalletTransactionOptions = {},
+): Promise<string> {
     if (!enokiApiKey) {
         if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
             throw new Error("ENOKI_API_KEY is not configured and ENOKI_FALLBACK_TO_DIRECT_SIGN=false");
@@ -232,7 +250,8 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
     }
 
     try {
-        const txKindBytes = await tx.build({
+        const sponsorTx = transactionForSponsor(tx, options);
+        const txKindBytes = await sponsorTx.build({
             client: suiClient as any,
             onlyTransactionKind: true,
         });
@@ -284,9 +303,10 @@ async function submitWalletTransaction(
     tx: Transaction,
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
+    options: WalletTransactionOptions = {},
 ): Promise<string> {
     try {
-        const digest = await executeWithEnokiSponsor(tx, signer, allowedAddresses);
+        const digest = await executeWithEnokiSponsor(tx, signer, allowedAddresses, options);
         sidecarMetrics.walletSubmittedTotal += 1;
         return digest;
     } catch (err: any) {
@@ -792,20 +812,15 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             },
         });
 
-        // Patch: convert GasCoin intents → sender's SUI coins.
-        // Enoki rejects GasCoin as tx argument, but relay requires the tip.
-        // After patching, signer pays tip from own SUI; Enoki sponsors gas.
-        // Only apply when Enoki sponsorship is enabled — direct signing
-        // resolves gas normally and the patch would break it.
-        if (enokiApiKey) {
-            patchGasCoinIntents(registerTx);
-        }
+        // Enoki rejects GasCoin tx arguments, but direct signing needs them for
+        // normal gas selection. Patch only the cloned sponsor transaction.
         const tipRecipient = await getUploadRelayTipAddress();
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
         const registerDigest = await submitWalletTransaction(
             registerTx,
             signer,
             registerAllowedAddresses,
+            { patchGasCoinIntentsForSponsor: true },
         );
         await suiClient.waitForTransaction({ digest: registerDigest });
 
