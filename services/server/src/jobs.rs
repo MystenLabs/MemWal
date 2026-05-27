@@ -19,6 +19,7 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::WalrusUploadExhaustedAlert;
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
@@ -332,17 +333,53 @@ pub async fn execute_meta_transfer(
 }
 
 // ============================================================
-// Retry policy (Tower middleware)
+// Retry constants
 // ============================================================
 
 /// Maximum number of attempts (1 initial + N-1 retries).
 #[allow(dead_code)]
-pub const MAX_ATTEMPTS: u32 = 3;
+pub const MAX_ATTEMPTS: u32 = 5;
 
-/// Exponential back-off: attempt 1→2s, 2→4s, 3→8s.
+/// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
 #[allow(dead_code)]
 pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
+}
+
+pub(crate) fn wallet_job_request(
+    job: WalletJob,
+) -> Request<WalletJob, apalis_sql::context::SqlContext> {
+    let mut context = apalis_sql::context::SqlContext::new();
+    context.set_max_attempts(MAX_ATTEMPTS as i32);
+    Request::new_with_ctx(job, context)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WalletJobAttemptInfo {
+    current: usize,
+    max: usize,
+}
+
+impl WalletJobAttemptInfo {
+    fn exhausted_by(&self, error: &WalletJobError) -> bool {
+        !error.is_permanent() && self.current >= self.max
+    }
+}
+
+impl FromRequest<Request<WalletJob, apalis_sql::context::SqlContext>> for WalletJobAttemptInfo {
+    fn from_request(
+        req: &Request<WalletJob, apalis_sql::context::SqlContext>,
+    ) -> Result<Self, Error> {
+        let mut max =
+            usize::try_from(req.parts.context.max_attempts()).unwrap_or(MAX_ATTEMPTS as usize);
+        if max == 0 {
+            max = MAX_ATTEMPTS as usize;
+        }
+        Ok(Self {
+            current: req.parts.attempt.current(),
+            max,
+        })
+    }
 }
 
 // ============================================================
@@ -355,7 +392,11 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
 /// queue. Upload jobs select a fresh wallet index at execution time; legacy
 /// metadata-transfer jobs keep their pinned wallet because the blob object is
 /// owned by the wallet that registered/certified it.
-pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Result<(), Error> {
+pub(crate) async fn execute_wallet_job(
+    job: WalletJob,
+    ctx: Data<Arc<AppState>>,
+    attempt_info: WalletJobAttemptInfo,
+) -> Result<(), Error> {
     let state: &AppState = &ctx;
     let enqueued_wallet_index = job.wallet_index;
 
@@ -400,6 +441,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 agent_public_key,
                 remember_job_id,
                 epochs,
+                attempt_info,
             )
             .await
         }
@@ -654,7 +696,7 @@ async fn enqueue_finalize_uploaded_blob(
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
-        .push(WalletJob {
+        .push_request(wallet_job_request(WalletJob {
             wallet_index,
             operation: WalletOperation::FinalizeUploadedBlob {
                 owner,
@@ -665,7 +707,7 @@ async fn enqueue_finalize_uploaded_blob(
                 blob_size_bytes,
                 importance,
             },
-        })
+        }))
         .await
         .map_err(|e| {
             WalletJobError::Transient(format!(
@@ -693,6 +735,7 @@ async fn execute_upload_and_transfer(
     agent_public_key: Option<String>,
     remember_job_id: Option<String>,
     epochs: u32,
+    attempt_info: WalletJobAttemptInfo,
 ) -> Result<(), WalletJobError> {
     // ── Mark running ───────────────────────────────────────────
     if let Some(ref jid) = remember_job_id {
@@ -779,7 +822,7 @@ async fn execute_upload_and_transfer(
             let recovery_remember_job_id = remember_job_id.clone();
             let mut storage = state.wallet_storage.clone();
             if let Err(e) = storage
-                .push(WalletJob {
+                .push_request(wallet_job_request(WalletJob {
                     wallet_index,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
@@ -793,7 +836,7 @@ async fn execute_upload_and_transfer(
                         blob_size_bytes: Some(encrypted.len() as i64),
                         importance,
                     },
-                })
+                }))
                 .await
             {
                 let classified = classify_wallet_remember_handoff_failure(
@@ -821,6 +864,17 @@ async fn execute_upload_and_transfer(
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
             let classified = WalletJobError::classify_sidecar_error(&msg);
+            maybe_alert_walrus_upload_exhausted(
+                state,
+                &classified,
+                attempt_info,
+                remember_job_id.as_deref(),
+                &owner,
+                &namespace,
+                wallet_index,
+                &msg,
+            )
+            .await;
             update_remember_job_after_wallet_error(
                 state,
                 remember_job_id.as_deref(),
@@ -866,6 +920,40 @@ async fn execute_upload_and_transfer(
         wallet_index,
     )
     .await
+}
+
+async fn maybe_alert_walrus_upload_exhausted(
+    state: &AppState,
+    error: &WalletJobError,
+    attempt_info: WalletJobAttemptInfo,
+    remember_job_id: Option<&str>,
+    owner: &str,
+    namespace: &str,
+    wallet_index: usize,
+    msg: &str,
+) {
+    if !attempt_info.exhausted_by(error) {
+        return;
+    }
+
+    let alert = WalrusUploadExhaustedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.to_string(),
+        namespace: namespace.to_string(),
+        attempt: attempt_info.current,
+        max_attempts: attempt_info.max,
+        wallet_index,
+        configured_wallets: state.key_pool.len(),
+        sui_network: state.config.sui_network.clone(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state.alerts.notify_walrus_upload_exhausted(alert).await {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for exhausted Walrus upload retries: {}",
+            err
+        );
+    }
 }
 
 // ============================================================
@@ -1093,7 +1181,7 @@ pub async fn execute_remember(
 
             let mut storage = state.wallet_storage.clone();
             if let Err(e) = storage
-                .push(WalletJob {
+                .push_request(wallet_job_request(WalletJob {
                     wallet_index: key_index,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
@@ -1112,7 +1200,7 @@ pub async fn execute_remember(
                         // importance through end-to-end.
                         importance: crate::services::extractor::IMPORTANCE_STANDARD,
                     },
-                })
+                }))
                 .await
             {
                 let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
@@ -1272,7 +1360,7 @@ pub async fn execute_bulk_remember(
         let namespace = item.namespace.clone();
         let wallet_index = item.wallet_index;
         storage
-            .push(WalletJob {
+            .push_request(wallet_job_request(WalletJob {
                 wallet_index,
                 operation: WalletOperation::UploadAndTransfer {
                     encrypted_b64: item.encrypted_b64,
@@ -1285,7 +1373,7 @@ pub async fn execute_bulk_remember(
                     remember_job_id: Some(job_id.clone()),
                     epochs: job.epochs,
                 },
-            })
+            }))
             .await
             .map_err(|e| {
                 BulkRememberError::Internal(format!(
@@ -1314,7 +1402,8 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
+        classify_wallet_remember_handoff_failure, mark_remember_job_failed, wallet_job_request,
+        WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -1423,6 +1512,37 @@ mod tests {
     fn transient_errors_remain_retryable() {
         let error = WalletJobError::Transient("timeout".to_string()).into_apalis_error();
         assert!(matches!(error, apalis::prelude::Error::Failed(_)));
+    }
+
+    #[test]
+    fn alert_gate_only_opens_on_final_transient_attempt() {
+        let transient = WalletJobError::Transient("timeout".to_string());
+        assert!(!WalletJobAttemptInfo { current: 4, max: 5 }.exhausted_by(&transient));
+        assert!(WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&transient));
+    }
+
+    #[test]
+    fn alert_gate_stays_closed_for_permanent_errors() {
+        let permanent = WalletJobError::Permanent("move abort".to_string());
+        assert!(!WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&permanent));
+    }
+
+    #[test]
+    fn wallet_job_request_sets_explicit_max_attempts() {
+        let req = wallet_job_request(WalletJob {
+            wallet_index: 0,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner: "0xowner".to_string(),
+                namespace: "default".to_string(),
+                remember_job_id: None,
+                blob_id: "blob".to_string(),
+                vector: vec![],
+                blob_size_bytes: 0,
+                importance: crate::services::extractor::IMPORTANCE_STANDARD,
+            },
+        });
+
+        assert_eq!(req.parts.context.max_attempts(), MAX_ATTEMPTS as i32);
     }
 
     #[tokio::test]

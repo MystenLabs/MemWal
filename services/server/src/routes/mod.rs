@@ -32,7 +32,7 @@ pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
 
 use futures::stream::{self, StreamExt};
 
-use crate::jobs::{WalletJob, WalletOperation};
+use crate::jobs::{wallet_job_request, WalletJob, WalletOperation};
 use crate::storage::db::VectorDb;
 use crate::types::*;
 
@@ -54,10 +54,10 @@ pub async fn enqueue_wallet_job(
 ) -> Result<usize, AppError> {
     let mut storage = state.wallet_storage.clone();
     storage
-        .push(WalletJob {
+        .push_request(wallet_job_request(WalletJob {
             wallet_index,
             operation,
-        })
+        }))
         .await
         .map_err(|e| AppError::Internal(format!("Failed to enqueue WalletJob: {}", e)))?;
     Ok(wallet_index)

@@ -1,3 +1,4 @@
+mod alerts;
 mod auth;
 mod compatibility;
 mod engine;
@@ -24,6 +25,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 
+use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
@@ -328,12 +330,15 @@ async fn main() {
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
+    let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
         config: Arc::clone(&config),
         http_client,
         key_pool,
+        alerts,
         engine,
         embedder,
         extractor,
@@ -347,6 +352,15 @@ async fn main() {
         blob_cache_max_bytes,
         embedding_cache_ttl,
     });
+
+    tracing::info!(
+        "  alerts: Slack {} via ALERT_TO_SLACK",
+        if state.alerts.slack_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
     {

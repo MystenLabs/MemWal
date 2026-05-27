@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::alerts::AlertManager;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
@@ -62,6 +63,9 @@ pub struct AppState {
     /// `Arc` so the engine + handlers share one immutable config.
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
+    /// Alert dispatchers for operational notifications. Individual alert
+    /// paths decide when failures are terminal enough to notify.
+    pub alerts: Arc<AlertManager>,
     /// Round-robin pool of Sui private keys for parallel Walrus uploads.
     /// `Arc` so the engine's `store_blob` can draw from the same pool.
     pub key_pool: Arc<KeyPool>,
