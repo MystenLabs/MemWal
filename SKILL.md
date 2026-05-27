@@ -152,7 +152,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 |---|---|---|
 | `remember(text, namespace?)` | Accept one memory job immediately | `{ job_id, status }` |
 | `rememberAndWait(text, namespace?, opts?)` | Store one memory and wait for completion | `{ id, job_id, blob_id, owner, namespace }` |
-| `recall(query, limitOrOptions?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
+| `recall({ query, limit?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
 | `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
 | `analyzeAndWait(text, namespace?, opts?)` | Extract facts and wait for all fact jobs to complete | `{ results, facts, total, succeeded, failed, owner }` |
 | `restore(namespace, limit?)` | Rebuild missing index entries from Walrus | `{ restored, skipped, total, namespace, owner }` |
@@ -307,6 +307,79 @@ interface HealthResult {
 aligns with the accepted fact jobs; use `analyzeAndWait()` when the UI needs
 those facts indexed before continuing.
 
+### Namespace Semantics
+
+A namespace is an **opaque, flat string label** scoped to a single owner. It is the unit of memory isolation: a recall in namespace `A` will never surface entries written to namespace `B`, even for the same owner, and never surfaces other owners' entries even in the same namespace.
+
+#### Validation
+
+The server accepts any non-empty string as a namespace. There is no length cap, no character whitelist, no normalization (whitespace, case, Unicode). Whatever you send is stored verbatim and matched with exact equality. If you omit the namespace, the server falls back to the literal string `"default"`.
+
+> **Implication:** `"my-app"`, `" my-app"` (leading space), `"My-App"`, and `"my-app/"` are four distinct namespaces. Pick a convention and stick to it.
+
+#### Flat, not hierarchical
+
+Slashes and dots have **no special meaning**. `"chat/user-42"` is a single opaque label, not a path. The server uses `WHERE namespace = $1` exact-equality for every read; there is no prefix matching, no parent/child traversal, and no wildcard query. If you need hierarchy, build it in the application layer (e.g. recall across known namespaces and merge client-side).
+
+#### Overwrite behavior — `remember()` is **always append, never upsert**
+
+Every accepted `remember()` call creates a **new memory entry** with a freshly generated UUID. Sending the same text to the same `(owner, namespace)` twice will produce **two separate entries** that both surface in future recalls. The namespace is metadata for filtering, not a key for deduplication.
+
+```ts
+await memwal.remember("I prefer dark mode", "prefs");
+await memwal.remember("I prefer dark mode", "prefs");
+// recall("preferences", { namespace: "prefs" }) → 2 entries, both with the same text
+```
+
+If you need uniqueness, either dedupe before calling `remember()`, or delete the prior entry first.
+
+#### Isolation guarantees
+
+| Scenario | Visible to recall? |
+|---|---|
+| Same owner, same namespace | ✅ |
+| Same owner, different namespace | ❌ |
+| Different owner, same namespace | ❌ |
+| Different owner, different namespace | ❌ |
+
+Cross-namespace and cross-owner reads are not just filtered out of results — the server's SQL `WHERE` clause excludes them entirely, so they are never decrypted or transferred.
+
+### Restore Semantics
+
+`restore(namespace, limit?)` rebuilds **missing** local index entries for a namespace from Walrus. It is a recovery operation, not a sync — already-indexed blobs are left alone.
+
+#### Response fields
+
+| Field | Counts | Notes |
+|---|---|---|
+| `restored` | Blobs the relayer just rebuilt this call | Pulled from Walrus → SEAL decrypted → re-embedded → inserted as a new row |
+| `skipped` | On-chain blobs already in the local index | No work needed; relayer left them as-is |
+| `total` | All on-chain blobs the relayer saw for `(owner, namespace)` | Before the limit was applied |
+| `namespace` | Echo of the request | |
+| `owner` | Resolved owner address | |
+
+**Silent drops.** A blob that *cannot* be decrypted or embedded (e.g. wrong delegate key, malformed ciphertext, embedding API down) is dropped without counting in `restored` *or* `skipped`. `restored + skipped` is therefore a lower bound on healthy entries, not a strict equality with `total`.
+
+#### Default and limit
+
+* `limit` defaults to `10` in both TypeScript and Python SDKs and matches the server-side default. The Python SDK historically defaulted to `50`; WALM-53 brings it back in line.
+* `limit` caps the **inspected** blob set, newest-first. It does not cap `restored` independently — if all 10 inspected blobs are already indexed, `restored = 0` and `skipped = 10`.
+* There is no enforced server-side maximum, but very large limits will dominate latency (see below).
+
+#### Pagination
+
+**Restore is single-shot — there is no cursor.** To rebuild a namespace larger than your chosen `limit`, call again with a larger `limit`, or delete local rows you want re-imported first. Pagination is on the roadmap; until it lands, treat `restore()` as a "top up to N most recent" operation.
+
+#### Performance
+
+Latency scales linearly in `limit`:
+
+* Up to **10 concurrent** Walrus aggregator downloads
+* Up to **3 concurrent** SEAL decrypts (CPU-bound, capped intentionally)
+* Embedding requests in parallel (bounded by the relayer's embedding pool)
+
+Expect **seconds per blob** on a cold cache. Use small limits (≤ 50) for interactive flows and run larger restores out-of-band.
+
 ### Recall Distance and Filtering
 
 `recall()` returns the closest K memories by vector distance. There is no
@@ -325,8 +398,9 @@ Lower distance means more similar:
 Use SDK-side filtering when you only want clearly relevant results:
 
 ```ts
-const memories = await memwal.recall("what did I eat yesterday?", {
-  topK: 10,
+const memories = await memwal.recall({
+  query: "what did I eat yesterday?",
+  limit: 10,
   namespace: "reading-tracker",
   maxDistance: 0.7,
 });
@@ -335,7 +409,11 @@ const memories = await memwal.recall("what did I eat yesterday?", {
 Equivalent manual filtering:
 
 ```ts
-const memories = await memwal.recall("what did I eat yesterday?", 10, "reading-tracker");
+const memories = await memwal.recall({
+  query: "what did I eat yesterday?",
+  limit: 10,
+  namespace: "reading-tracker",
+});
 const relevant = memories.results.filter((memory) => memory.distance < 0.7);
 ```
 
