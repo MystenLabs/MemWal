@@ -600,7 +600,7 @@ export default function Playground() {
 
     return (
         <>
-            <nav className="nav">
+            <nav className="nav playground-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
                         <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
@@ -622,7 +622,7 @@ export default function Playground() {
                 </div>
             </nav>
 
-            <div className="container dashboard">
+            <div className="container dashboard playground-dashboard">
                 {/* Header */}
                 <div className="dashboard-header">
                     <h2>interactive demo</h2>
@@ -631,7 +631,7 @@ export default function Playground() {
                         <strong>▶ run</strong> to execute against your server
                         using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
-                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
+                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--playground-blue-strong)', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
                     </p>
                 </div>

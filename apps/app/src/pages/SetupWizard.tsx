@@ -363,8 +363,8 @@ export default function SetupWizard() {
     }, [])
 
     return (
-        <>
-            <nav className="nav">
+        <div className="setup-classic">
+            <nav className="nav setup-classic-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
                         <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
@@ -386,58 +386,58 @@ export default function SetupWizard() {
                 </div>
             </nav>
 
-            <div className="container">
-                <div style={{ maxWidth: 520, margin: '60px auto' }}>
+            <main className="container setup-classic-container">
+                <div className="setup-classic-panel">
 
                     {/* ===== Step 1: Intro ===== */}
                     {step === 'intro' && (
-                        <div style={{ textAlign: 'center' }}>
+                        <div className="setup-classic-intro">
 
-                            <h2 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: 12, letterSpacing: '-0.02em' }}>
+                            <h2 className="setup-classic-title">
                                 create your delegate key
                             </h2>
-                            <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 32 }}>
+                            <p className="setup-classic-description">
                                 a delegate key lets your AI apps access Walrus Memory on your behalf.
                                 it's a lightweight Ed25519 keypair — separate from your wallet.
                             </p>
 
-                            <div className="card" style={{ textAlign: 'left', marginBottom: 24 }}>
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                            <div className="card setup-classic-feature-card">
+                                <div className="setup-classic-feature">
 
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>low risk</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
+                                        <strong>low risk</strong>
+                                        <p>
                                             cannot access funds or sign Sui transactions
                                         </p>
                                     </div>
                                 </div>
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                                <div className="setup-classic-feature">
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>revocable</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
+                                        <strong>revocable</strong>
+                                        <p>
                                             remove anytime from your Walrus Memory dashboard
                                         </p>
                                     </div>
                                 </div>
-                                <div style={{ display: 'flex', gap: 12 }}>
+                                <div className="setup-classic-feature">
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>onchain registration</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
+                                        <strong>onchain registration</strong>
+                                        <p>
                                             key is verified on Sui blockchain for maximum security
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
-                            <button className="lp-btn-yellow" onClick={handleGenerate}>
+                            <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
                                 generate delegate key
                             </button>
 
-                            <div style={{ margin: '28px 0 18px', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                            <div className="setup-classic-divider">
                                 or
                             </div>
 
-                            <div style={{ textAlign: 'left' }}>
+                            <div className="setup-classic-import">
                                 <div className="input-group">
                                     <textarea
                                         id="delegate-key-input"
@@ -448,7 +448,6 @@ export default function SetupWizard() {
                                         placeholder="paste your delegate private key"
                                         aria-label="existing delegate key"
                                         spellCheck={false}
-                                        style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }}
                                     />
                                 </div>
                                 {error && (
@@ -605,7 +604,7 @@ export default function SetupWizard() {
                     )}
 
                 </div>
-            </div>
-        </>
+            </main>
+        </div>
     )
 }
