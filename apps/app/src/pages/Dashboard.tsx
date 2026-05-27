@@ -212,7 +212,7 @@ export default function Dashboard() {
     // Generate + add a new delegate key (via SDK)
     // ============================================================
 
-    // LOW-31: sanitize a key label — strip HTML special chars and control characters
+    // sanitize a key label — strip HTML special chars and control characters
     const sanitizeLabel = (raw: string): string =>
         raw
             // Strip HTML special characters
@@ -234,7 +234,7 @@ export default function Dashboard() {
             return
         }
 
-        // LOW-31: validate label before submitting on-chain
+        // validate label before submitting on-chain
         const trimmedLabel = sanitizeLabel(newKeyLabel)
         if (!trimmedLabel) {
             setKeyError('key label cannot be empty')
@@ -322,7 +322,7 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
-    // LOW-30: Never render any portion (prefix/suffix) of the real private key
+    // Never render any portion (prefix/suffix) of the real private key
     // in DOM / copyable snippets. Use a static placeholder instead.
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
@@ -678,7 +678,7 @@ const result = await generateText({
                                     value={newKeyLabel}
                                     maxLength={64}
                                     onChange={(e) =>
-                                        // LOW-31: strip HTML special chars and control characters on every keystroke
+                                        // strip HTML special chars and control characters on every keystroke
                                         setNewKeyLabel(sanitizeLabel(e.target.value))
                                     }
                                     placeholder="e.g. MacBook Pro, Production Server"

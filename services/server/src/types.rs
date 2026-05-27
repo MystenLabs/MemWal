@@ -9,10 +9,10 @@ use crate::services::{Embedder, Extractor, Ranker};
 use crate::storage::db::VectorDb;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// ENG-1408: Max items in a single POST /api/remember/bulk request.
+/// Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
 
-/// ENG-1408: Bounded concurrency for concurrent embed+encrypt in bulk route handler.
+/// Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
 
 /// Redis key prefix for Walrus ciphertext cache entries.
@@ -101,18 +101,18 @@ pub struct AppState {
     /// equivocation, so one wallet + concurrent workers + retry handler is
     /// sufficient. See `plans/simplify-walrus-wallet-queues/reports/` for context.
     pub wallet_storage: WalletJobStorage,
-    /// ENG-1408: Apalis storage for BulkRememberJob.
+    /// Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
-    /// ENG-1405: Redis TTL for Walrus blob ciphertext cache entries.
+    /// Redis TTL for Walrus blob ciphertext cache entries.
     /// Expiry forces Walrus revalidation so BlobNotFound still triggers cleanup.
     /// (Also cloned into `WalrusSealEngine` at construction so the engine
     /// shares the same TTL when serving recall.)
     pub blob_cache_ttl: std::time::Duration,
-    /// MEM-37: Maximum SEAL ciphertext bytes to cache in Redis.
+    /// Maximum SEAL ciphertext bytes to cache in Redis.
     /// Zero disables blob ciphertext reads and writes in Redis.
     /// (Also cloned into `WalrusSealEngine` for size-capped cache writes.)
     pub blob_cache_max_bytes: usize,
-    /// ENG-1405: Redis TTL for recall query embedding cache entries.
+    /// Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
 }
 
@@ -174,7 +174,7 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
-    /// ENG-1697: network name (mainnet/testnet/devnet). Surfaced via
+    /// network name (mainnet/testnet/devnet). Surfaced via
     /// `GET /config` so the SDK can select the matching Sui fullnode
     /// without the user having to configure it.
     pub sui_network: String,
@@ -212,7 +212,7 @@ pub struct Config {
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
-    /// ENG-1747: when true, select `PlaintextEngine` instead of
+    /// when true, select `PlaintextEngine` instead of
     /// `WalrusSealEngine` — memories are stored as plaintext in Postgres,
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
@@ -375,7 +375,7 @@ pub struct RememberRequest {
 }
 
 // ============================================================
-// Bulk Remember types (ENG-1408)
+// Bulk Remember types
 // ============================================================
 
 /// One item in a POST /api/remember/bulk request.
@@ -426,7 +426,7 @@ pub struct RememberBulkStatusResponse {
     pub results: Vec<RememberBulkStatusItem>,
 }
 
-/// POST /api/remember (async, ENG-1406 v3)
+/// POST /api/remember (async, v3)
 /// Returns 202 Accepted immediately with a job_id for polling.
 #[derive(Debug, Serialize)]
 pub struct RememberAcceptedResponse {
@@ -487,7 +487,7 @@ pub struct RecallRequest {
 pub struct RecallResponse {
     pub results: Vec<RecallResult>,
     pub total: usize,
-    /// LOW-7: Count of matches whose blob download / SEAL decrypt / UTF-8 decode
+    /// Count of matches whose blob download / SEAL decrypt / UTF-8 decode
     /// failed and were silently omitted from `results`. Zero on the happy path.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub dropped_count: usize,
@@ -522,7 +522,7 @@ pub struct SearchHit {
     /// in the engine `fetch_*` calls. Always present (column is NOT NULL
     /// in migration 001).
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// MEM-54: per-fact importance score from `vector_entries.importance`
+    /// per-fact importance score from `vector_entries.importance`
     /// (column added by migration 009). Set at extraction time by the
     /// LLM-emitted vital/standard/trivial bucket (mapped to 0.9/0.5/0.2
     /// via `services::extractor::importance_for_bucket`). Consumed by
@@ -563,10 +563,10 @@ pub struct ScoringWeights {
     /// twice that, 0.25; etc.
     #[serde(default = "default_recency_half_life_days")]
     pub recency_half_life_days: f64,
-    /// MEM-54: weight applied to the per-fact importance score from
+    /// weight applied to the per-fact importance score from
     /// `vector_entries.importance` (set by the extractor's vital /
     /// standard / trivial bucket → 0.9 / 0.5 / 0.2). Default 0.0 so the
-    /// existing default-weights path is byte-identical to the pre-MEM-54
+    /// existing default-weights path is byte-identical to previous
     /// behaviour. Opt in by passing a positive value via
     /// `scoring_weights.importance` in the request body.
     #[serde(default)]
@@ -607,7 +607,7 @@ impl ScoringWeights {
     /// breadcrumbs) stays in lockstep with what the ranker actually does.
     /// Keep this in sync with [`crate::services::ranker::CompositeRanker::rank`].
     ///
-    /// MEM-54: a non-zero `importance` weight is enough on its own to
+    /// a non-zero `importance` weight is enough on its own to
     /// activate the ranker — the importance signal alone can reorder hits
     /// even when recency is off.
     pub fn is_ranker_active(&self) -> bool {
@@ -751,7 +751,7 @@ pub struct RecallManualRequest {
     /// raw pgvector cosine distance, byte-identical to the pre-ranker
     /// behaviour. When set, the manual path applies the **same**
     /// `CompositeRanker` as `/api/recall` and `/api/ask` so all three return
-    /// the same ordering for the same query + weights (ENG-1785). The ranker
+    /// the same ordering for the same query + weights. The ranker
     /// scores the `SearchHit` fields directly (`distance` / `created_at` /
     /// `importance`) — no Walrus fetch or SEAL decrypt — preserving manual
     /// recall's "server returns blob ids + distances, client hydrates" contract.
@@ -855,7 +855,7 @@ pub struct HealthResponse {
     /// at startup that they're hitting a benchmark-mode server before
     /// ingesting plaintext memories. Mirrors `Config::benchmark_mode`.
     pub mode: String,
-    /// MEM-56: the prompt version constants the running binary is using.
+    /// the prompt version constants the running binary is using.
     /// The benchmark harness reads this at run start and pins the
     /// versions into the result-artifact JSON so a future "score jumped"
     /// delta is attributable to the prompt change rather than guessed
@@ -864,7 +864,7 @@ pub struct HealthResponse {
     pub prompt_versions: PromptVersions,
 }
 
-/// MEM-56: prompt version constants surfaced on `/health`. See the
+/// prompt version constants surfaced on `/health`. See the
 /// `*_PROMPT_VERSION` consts in `services::extractor` and `routes::admin`.
 #[derive(Debug, Serialize)]
 pub struct PromptVersions {
@@ -877,7 +877,7 @@ pub struct PromptVersions {
     pub ask: String,
 }
 
-/// GET /config response (ENG-1697).
+/// GET /config response.
 ///
 /// Public deployment parameters the SDK needs to build a SEAL SessionKey
 /// client-side. All fields are non-secret (on-chain / public RPC URL).
@@ -942,7 +942,7 @@ pub struct AuthInfo {
     pub seal_session: Option<String>,
 }
 
-// LOW-5 / ENG-1697: Manual Debug redacts both credential fields so accidental
+// Manual Debug redacts both credential fields so accidental
 // `{:?}` formatting never leaks delegate private key material or session
 // tokens into logs.
 impl std::fmt::Debug for AuthInfo {
@@ -1058,7 +1058,7 @@ pub struct SidecarError {
 mod tests {
     use super::*;
 
-    // ── LOW-5: AuthInfo Debug redacts delegate_key ───────────────────────
+    // ── AuthInfo Debug redacts delegate_key ───────────────────────
 
     #[test]
     fn blob_cache_defaults_match_mem_37_policy() {
@@ -1136,7 +1136,7 @@ mod tests {
         assert!(!debug_str.contains("<redacted>"));
     }
 
-    // ENG-1697: seal_session must also be redacted in Debug output. While
+    // seal_session must also be redacted in Debug output. While
     // less catastrophic than the raw private key (bounded TTL, bounded
     // scope), it is still an authorization token and must not surface in
     // structured logs.
@@ -1439,7 +1439,7 @@ mod tests {
         assert!(!ScoringWeights::default().is_ranker_active());
     }
 
-    // ── MEM-56: HealthResponse.prompt_versions wire shape ────────────────
+    // ── HealthResponse.prompt_versions wire shape ────────────────
 
     #[test]
     fn health_response_serializes_prompt_versions_block() {

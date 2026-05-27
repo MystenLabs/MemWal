@@ -76,7 +76,7 @@ pub async fn verify_delegate_key_onchain(
         .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
         .to_string();
 
-    // MED-2 fix: Block deactivated accounts.
+    // Block deactivated accounts.
     // The onchain MemWalAccount has an `active: bool` field.
     // If false, reject immediately — even if the delegate key is valid.
     let active = fields
@@ -426,7 +426,7 @@ struct ObjectContent {
 pub enum OnchainVerifyError {
     RpcError(String),
     KeyNotFound(String),
-    /// MED-2: Returned when MemWalAccount.active == false.
+    /// Returned when MemWalAccount.active == false.
     /// Prevents deactivated accounts from authenticating.
     AccountDeactivated(String),
 }
@@ -453,7 +453,7 @@ impl std::error::Error for OnchainVerifyError {}
 mod tests {
     use super::*;
 
-    // ---- MED-2: AccountDeactivated error variant ----
+    // ---- AccountDeactivated error variant ----
 
     #[test]
     fn test_account_deactivated_display() {
@@ -488,7 +488,7 @@ mod tests {
         assert!(matches!(not_found, OnchainVerifyError::KeyNotFound(_)));
     }
 
-    // ── MED-2: Deactivated account field parsing ────────────────────────
+    // ── Deactivated account field parsing ────────────────────────
 
     #[test]
     fn test_active_field_parsed_correctly() {

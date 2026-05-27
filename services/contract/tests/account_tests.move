@@ -453,7 +453,7 @@ module memwal::account_tests {
         scenario.end();
     }
 
-    /// LOW-20 / SEC-281: owners must be able to purge delegate keys even after
+    /// owners must be able to purge delegate keys even after
     /// the account is frozen, so that compromised keys can be removed.
     #[test]
     fun test_deactivated_allows_remove_key() {
@@ -730,7 +730,7 @@ module memwal::account_tests {
     }
 
     // ============================================================
-    // LOW-19 — Idempotent deactivate/reactivate (SEC-279)
+    // Idempotent deactivate/reactivate
     // ============================================================
 
     #[test]
@@ -769,7 +769,7 @@ module memwal::account_tests {
     }
 
     // ============================================================
-    // LOW-21 — Label length validation (SEC-282)
+    // Label length validation
     // ============================================================
 
     #[test]
@@ -815,7 +815,7 @@ module memwal::account_tests {
     }
 
     // ============================================================
-    // HIGH-14 — Version gating (SEC-303)
+    // Version gating
     // ============================================================
 
     #[test]

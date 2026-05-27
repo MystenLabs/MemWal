@@ -59,8 +59,8 @@ class BenchmarkAdapter(ABC):
             extractor on long sessions — this is the pattern that caused
             LOCOMO's 53% "no info" rate.
 
-          - Sliding-window or message-pair chunking mirrors Mem0's approach
-            and captures more facts from dense conversations.
+          - Sliding-window or message-pair chunking captures more facts from
+            dense conversations.
 
         The adapter MUST choose explicitly. A helper for the naive default
         is provided below — adapters that use it should do so by delegation,
@@ -104,8 +104,8 @@ class BenchmarkAdapter(ABC):
 
         This matches how the Walrus Memory SDK wrapper (withMemWal) actually
         drives /api/analyze in production — one call per user message —
-        and how Mem0 runs its own LOCOMO evaluation (turn-by-turn replay
-        through their sliding-window context manager).
+        and the published LOCOMO evaluation style (turn-by-turn replay
+        through a sliding-window context manager).
 
         Each turn becomes its own /api/analyze call. The text includes
         the speaker name so the extractor can attribute facts correctly

@@ -38,7 +38,7 @@ impl PlaintextEngine {
     /// `HydratedMemory`. Shared by `fetch_one` and `fetch_batch`.
     /// Returns `Ok(None)` for a missing row or a NULL plaintext (a
     /// production row leaked into a benchmark DB — logged, handled).
-    /// LOW-S1 / MED-1: scoped to `owner` so cross-tenant lookups by
+    /// scoped to `owner` so cross-tenant lookups by
     /// blob_id return None even if the row exists for a different owner.
     async fn hydrate(
         &self,

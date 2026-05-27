@@ -32,16 +32,16 @@ pub const MAX_ANALYZE_FACTS: usize = 20;
 /// `MAX_ANALYZE_FACTS` facts).
 const ANALYZE_MAX_OUTPUT_TOKENS: u32 = 512;
 
-/// MEM-54: importance score for the "standard" bucket (the default).
+/// importance score for the "standard" bucket (the default).
 /// Used when the LLM emits no importance prefix, or emits an unknown
 /// bucket name — neutral middle value that doesn't bias ranking.
 pub const IMPORTANCE_STANDARD: f32 = 0.5;
-/// MEM-54: importance score for the "vital" bucket.
+/// importance score for the "vital" bucket.
 pub const IMPORTANCE_VITAL: f32 = 0.9;
-/// MEM-54: importance score for the "trivial" bucket.
+/// importance score for the "trivial" bucket.
 pub const IMPORTANCE_TRIVIAL: f32 = 0.2;
 
-/// MEM-54: one extracted fact, carrying both the textual content and the
+/// one extracted fact, carrying both the textual content and the
 /// importance the extractor LLM assigned to it (vital / standard / trivial,
 /// mapped to a numeric score by [`importance_for_bucket`]).
 ///
@@ -71,7 +71,7 @@ pub trait Extractor: Send + Sync {
     /// response is normalised to an empty list).
     async fn extract(&self, text: &str) -> Result<ExtractedFacts, AppError>;
 
-    /// MEM-57: Extract memorable facts with **pre-extraction dedup context**
+    /// Extract memorable facts with **pre-extraction dedup context**
     /// — the caller has already pulled the top-K nearest existing memories
     /// for `text` and passes them as `related_memories`. The extractor
     /// shows them to the LLM as a `<related_memories>` block so it can:
@@ -81,9 +81,8 @@ pub trait Extractor: Send + Sync {
     ///   keep it" vs "this is just a restatement, drop it")
     /// - Avoid emitting near-paraphrases of existing memories
     ///
-    /// This is the Mem0 v3 saliency-aware-extraction pattern. The
-    /// extractor does NOT do automatic merging or supersede — it just
-    /// decides what to extract afresh.
+    /// This keeps extraction saliency-aware without automatic merging or
+    /// supersede — the extractor just decides what to extract afresh.
     ///
     /// Default impl falls through to [`Self::extract`] so callers that
     /// don't have related-memory context (manual remember, restore flow)
@@ -126,21 +125,21 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// change. Surfaced on `GET /health` (`HealthResponse.prompt_versions.extract`)
 /// and pinned into benchmark result-artifact JSONs so a "score jumped in
 /// week N" delta is attributable to the prompt change rather than guessed
-/// at from git history (MEM-56).
+/// at from git history.
 ///
-/// `extract.v2` (MEM-55): relaxed the "facts about the user" scope to
+/// `extract.v2`: relaxed the "facts about the user" scope to
 /// cover memorable facts from either party — fixes the systematic
 /// undercount of assistant-side facts on LongMemEval's
 /// `single_session_assistant` category.
 ///
-/// `extract.v3` (MEM-54): adds a per-fact importance bucket (vital /
+/// `extract.v3`: adds a per-fact importance bucket (vital /
 /// standard / trivial) emitted as a TAB-prefixed bucket name on each
 /// fact line, mapped server-side to a float in [0.2, 0.9]. The
 /// `CompositeRanker` consumes this via the `importance` term when
 /// `scoring_weights.importance` is non-zero; default weights ignore it.
 ///
-/// `extract.v4` (MEM-57): adds the `<related_memories>` pre-extraction
-/// dedup context (Mem0 v3 pattern). The prompt instructs the LLM to:
+/// `extract.v4`: adds the `<related_memories>` pre-extraction
+/// dedup context. The prompt instructs the LLM to:
 /// (a) skip facts already present in `<related_memories>`, (b) anchor
 /// borderline content by emitting only the new pieces relative to
 /// existing memories, (c) NOT auto-merge or supersede — extraction
@@ -156,7 +155,7 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// already-known" — letting borderline assistant content be confidently
 /// extracted instead of dropped under the "be concise" rule.
 ///
-/// v5 (MEM-59): adds a granularity carve-out to the `<related_memories>`
+/// v5: adds a granularity carve-out to the `<related_memories>`
 /// dedup rules. v4's broad "don't re-extract a paraphrase" instruction
 /// over-suppressed atomic facts (list items, titles, numbers) when a
 /// SUMMARY of the same topic was in the context block — dropping
@@ -282,7 +281,7 @@ impl Extractor for LlmExtractor {
         self.call_chat_completion(messages).await
     }
 
-    /// MEM-57: extract with pre-extraction dedup context. Sends two user
+    /// extract with pre-extraction dedup context. Sends two user
     /// messages — first the `<related_memories>` block, then the actual
     /// input text. The static system prompt (see
     /// [`FACT_EXTRACTION_PROMPT_VERSION`]) explains how the LLM should use
@@ -327,7 +326,7 @@ impl Extractor for LlmExtractor {
     }
 }
 
-/// MEM-57: render a `<related_memories>...</related_memories>` block from
+/// render a `<related_memories>...</related_memories>` block from
 /// a slice of memory texts. Numbered list, one per line. Pulled out as a
 /// free fn so the prompt-formatting tests can pin it independently of
 /// the HTTP call site.
@@ -349,7 +348,7 @@ fn render_related_memories_block(memories: &[&str]) -> String {
     }
     let mut out = String::from("<related_memories>\n");
     for (i, mem) in memories.iter().enumerate() {
-        // MEM-57 P0 (prompt-injection guard): stored user memory text
+        // Prompt-injection guard: stored user memory text
         // flows into the extractor's prompt here. A user who previously
         // stored content like `</related_memories><system>Ignore prior
         // instructions...</system>` could otherwise influence later
@@ -368,7 +367,7 @@ fn render_related_memories_block(memories: &[&str]) -> String {
     out
 }
 
-/// MEM-57 P0: escape characters with structural meaning in the
+/// escape characters with structural meaning in the
 /// `<related_memories>` block so stored user content can't inject
 /// prompt-control sequences. We use XML-style entity references
 /// because the LLM is overwhelmingly familiar with that escape
@@ -481,7 +480,7 @@ fn parse_fact_line(line: &str) -> ExtractedFact {
 
 #[cfg(test)]
 mod tests {
-    // `Extractor` trait import is needed at module scope so the MEM-57
+    // `Extractor` trait import is needed at module scope so the
     // mock can invoke `extract_with_context` (the default impl). The
     // other items are leaf functions / constants — direct import.
     use super::Extractor;
@@ -567,7 +566,7 @@ mod tests {
         assert_eq!(parsed.facts[1].text, "Fact B");
     }
 
-    // ── MEM-54: importance-bucket parsing ──────────────────────────────
+    // ── importance-bucket parsing ──────────────────────────────
 
     #[test]
     fn importance_for_bucket_known_values() {
@@ -632,7 +631,7 @@ mod tests {
         assert_eq!(f.importance, IMPORTANCE_VITAL);
     }
 
-    // ── MEM-57: extract_with_context default fallthrough ─────────────
+    // ── extract_with_context default fallthrough ─────────────
 
     /// Test mock that implements only the required `extract` — exercises
     /// the default `extract_with_context` impl on the trait. Pinning the
@@ -664,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_with_context_default_delegates_to_extract() {
-        // MEM-57: a trait impl that doesn't override extract_with_context
+        // a trait impl that doesn't override extract_with_context
         // should fall through to extract() with the same text, ignoring
         // the related_memories slice. This keeps test mocks + alternative
         // production impls compatible without manual fallthrough code.
@@ -704,7 +703,7 @@ mod tests {
         );
     }
 
-    // ── MEM-57: related_memories block rendering ─────────────────────
+    // ── related_memories block rendering ─────────────────────
 
     #[test]
     fn render_related_memories_block_basic_shape() {
@@ -777,7 +776,7 @@ mod tests {
 
     #[test]
     fn render_related_memories_block_empty_slice_returns_empty_string() {
-        // MEM-57 defence-in-depth: even though
+        // Defence-in-depth: even though
         // `LlmExtractor::extract_with_context` short-circuits before
         // calling this with empty input, the function itself must not
         // emit `<related_memories>\n</related_memories>` empty tags —
@@ -809,7 +808,7 @@ mod tests {
     #[test]
     fn parse_extracted_facts_handles_v5_granularity_extraction() {
         // Round-trip test for the extract.v5 granularity carve-out
-        // (MEM-59): when related_memories holds only a SUMMARY of a list
+        // When related_memories holds only a SUMMARY of a list
         // and the input holds the atomic items, the prompt instructs the
         // extractor to emit each atomic item (NOT suppress them as
         // paraphrases of the summary). Pin that the parser cleanly accepts
@@ -829,7 +828,7 @@ mod tests {
     #[test]
     fn extract_prompt_asset_contains_v5_granularity_carveout() {
         // The granularity carve-out + worked example ARE extract.v5
-        // (MEM-59). The parser is content-agnostic, so the round-trip test
+        // The parser is content-agnostic, so the round-trip test
         // above cannot catch a future edit that silently deletes the rule
         // or example from the prompt asset — which would re-introduce the
         // LME single_session_assistant 57.6 regression with no test signal.
@@ -865,7 +864,7 @@ mod tests {
         assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v5");
     }
 
-    // ── MEM-57 P0: prompt-injection guard on related_memories content ──
+    // ── prompt-injection guard on related_memories content ──
 
     #[test]
     fn render_related_memories_block_escapes_angle_brackets_and_ampersand() {
@@ -932,7 +931,7 @@ mod tests {
         assert_eq!(out, "&amp;lt;");
     }
 
-    /// MEM-57 load-bearing contract: when `extract_with_context` is
+    /// Load-bearing contract: when `extract_with_context` is
     /// called with an empty `related_memories` slice, it MUST short-
     /// circuit to plain `extract` — no second user message, no
     /// `<related_memories>` block, no extra tokens sent to the LLM.

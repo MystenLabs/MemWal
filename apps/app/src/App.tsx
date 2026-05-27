@@ -60,7 +60,7 @@ interface DelegateKeyContextType extends DelegateKeyState {
 
 const DelegateKeyContext = createContext<DelegateKeyContextType | null>(null)
 
-// LOW-32: tunable idle-timeout. 15 minutes by default. Exported so callers/tests can read it.
+// tunable idle-timeout. 15 minutes by default. Exported so callers/tests can read it.
 export const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000
 
 // Debounce interval for activity events to avoid excessive timer resets.
@@ -104,7 +104,7 @@ function DelegateKeyProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   // ============================================================
-  // LOW-32: Idle-timeout — wipe in-memory key material and disconnect after inactivity.
+  // Idle-timeout — wipe in-memory key material and disconnect after inactivity.
   // ============================================================
   const { mutateAsync: disconnect } = useDisconnectWallet()
   const hasKey = state.delegateKey !== null

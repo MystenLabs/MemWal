@@ -132,7 +132,7 @@ pub async fn sponsor_proxy(
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
             Err(_) => {
-                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
+                // Redis and in-memory fallback both unavailable — deny to fail-closed.
                 tracing::error!(
                     "sponsor sender rate limit unavailable for sponsor_proxy, denying request"
                 );
@@ -255,7 +255,7 @@ pub async fn sponsor_execute_proxy(
             }
             Ok(rate_limit::SponsorRlResult::Allowed) => {}
             Err(_) => {
-                // HIGH-2: Redis and in-memory fallback both unavailable — deny to fail-closed.
+                // Redis and in-memory fallback both unavailable — deny to fail-closed.
                 tracing::error!("sponsor/execute sender rate limit unavailable, denying request");
                 return Ok(json_error_response(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,

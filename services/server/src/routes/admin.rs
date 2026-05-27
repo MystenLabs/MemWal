@@ -20,15 +20,15 @@ use crate::types::*;
 
 use super::cleanup_expired_blob;
 
-/// ENG-1747: the `/api/ask` system prompt — a versioned text asset with a
+/// the `/api/ask` system prompt — a versioned text asset with a
 /// `{MEMORY_CONTEXT}` placeholder (substituted with the `<memory>`-tag-
-/// wrapped recall context per request). Includes the LOW-8 prompt-injection
+/// wrapped recall context per request). Includes the prompt-injection
 /// guard. Bundled at compile time.
 const ASK_SYSTEM_PROMPT: &str = include_str!("../services/prompts/ask.txt");
 /// Version ID for the ask prompt. Bump on every meaningful prompt change.
 /// Exposed on `GET /health` via `HealthResponse.prompt_versions.ask` so
 /// the benchmark harness can pin it into the result-artifact metadata
-/// (MEM-56).
+/// for reproducible comparisons.
 const ASK_SYSTEM_PROMPT_VERSION: &str = "ask.v1";
 
 // ============================================================
@@ -123,7 +123,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         } else {
             "production".to_string()
         },
-        // MEM-56: surface the prompt-version constants so benchmark
+        // surface the prompt-version constants so benchmark
         // run-artifacts can pin them at run start. Read from the same
         // consts the running binary uses for extraction (`/api/analyze`)
         // and ask (`/api/ask`) — no separate config to drift.
@@ -141,7 +141,7 @@ pub async fn version() -> Json<crate::compatibility::VersionResponse> {
 
 /// GET /config
 ///
-/// ENG-1697: public, unauthenticated endpoint returning deployment
+/// public, unauthenticated endpoint returning deployment
 /// parameters the SDK needs to build a SEAL `SessionKey` client-side —
 /// specifically the Move `packageId` and the Sui network/RPC URL.
 ///
@@ -187,9 +187,9 @@ pub async fn ask(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    // LOW-S5: cap `limit` so a misbehaving client can't make us pull a
+    // cap `limit` so a misbehaving client can't make us pull a
     // huge number of memories through Walrus + SEAL. Matches the cap
-    // `recall` already enforces (MED-3) — see routes/recall.rs.
+    // `recall` already enforces — see routes/recall.rs.
     let limit = body.limit.unwrap_or(5).min(100);
     tracing::info!(
         question_len = body.question.len(),
@@ -239,9 +239,9 @@ pub async fn ask(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
 
-    // Zip created_at + importance on (engine returns None; recall path
-    // is responsible). MEM-54: importance joined the zip when the
-    // composite ranker grew an importance term.
+    // Zip created_at + importance onto hydrated memories. The engine returns
+    // None for both fields; the recall path is responsible for filling them
+    // before composite ranking.
     super::zip_search_hit_fields_onto_hydrated(&mut hydrated, &hits);
 
     if weights.is_ranker_active() {
@@ -250,7 +250,7 @@ pub async fn ask(
             semantic = weights.semantic,
             recency = weights.recency,
             half_life_days = weights.recency_half_life_days,
-            // MEM-54: include the importance weight in the breadcrumb so
+            // include the importance weight in the breadcrumb so
             // ordering bug reports can be triaged against the full vector
             // of weights the client sent.
             importance = weights.importance,
@@ -274,7 +274,7 @@ pub async fn ask(
     let memories_used = memories.len();
     tracing::info!("ask: {} memories found for context", memories_used);
 
-    // LOW-8: Defence-in-depth against indirect prompt injection via stored memories.
+    // Defence-in-depth against indirect prompt injection via stored memories.
     // Wrap each memory in an explicit <memory> tag with the blob_id and tell the
     // LLM in the system prompt that tag contents are user-provided data, not
     // instructions. This does not eliminate the attack vector (owner-scoped
@@ -297,9 +297,9 @@ pub async fn ask(
         format!("Known facts about this user:\n{}", lines.join("\n"))
     };
 
-    // ENG-1747: the ask system prompt is a versioned text asset
+    // the ask system prompt is a versioned text asset
     // (services/prompts/ask.txt) with a {MEMORY_CONTEXT} placeholder.
-    // Keeps the LOW-8 prompt-injection guard. ASK_SYSTEM_PROMPT_VERSION
+    // Keeps the prompt-injection guard. ASK_SYSTEM_PROMPT_VERSION
     // tracks the prompt version for attribution.
     let system_prompt = ASK_SYSTEM_PROMPT.replace("{MEMORY_CONTEXT}", &memory_context);
 
@@ -405,7 +405,7 @@ pub async fn restore(
     let limit = body.limit;
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
-    // ENG-1697: Prefer the client-built SessionKey; fall back to legacy
+    // Prefer the client-built SessionKey; fall back to legacy
     // delegate key, then to the server's own key for restore operations.
     let credential = seal::SealCredential::from_auth_or_fallback(
         &auth,
@@ -525,7 +525,7 @@ pub async fn restore(
         })
         .collect();
 
-    // MED-6 fix: Bounded concurrency (max 10 parallel downloads) to prevent
+    // Bounded concurrency (max 10 parallel downloads) to prevent
     // OOM when restoring large namespaces. join_all() with hundreds of blobs
     // would spawn all downloads simultaneously → memory spike.
     // We use buffer_unordered(10) to cap parallelism at 10 concurrent downloads.
@@ -653,7 +653,7 @@ pub async fn restore(
                 blob_id,
                 vector,
                 blob_size,
-                // MEM-54: restore flow re-indexes existing Walrus blobs after
+                // restore flow re-indexes existing Walrus blobs after
                 // they fell out of pgvector. The original importance value is
                 // not preserved in the blob (it's a row-level signal). Use the
                 // neutral "standard" bucket so restored memories rank as
@@ -685,7 +685,7 @@ pub async fn restore(
 mod tests {
     use crate::types::RecallResult;
 
-    // ── LOW-8: Memory context wraps in XML tags ─────────────────────────
+    // ── Memory context wraps in XML tags ─────────────────────────
 
     #[test]
     fn memory_context_uses_xml_tags() {
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(context, "No memories found for this user yet.");
     }
 
-    // ── LOW-S5: /api/ask body.limit cap ─────────────────────────────────
+    // ── /api/ask body.limit cap ─────────────────────────────────
     //
     // Verifies the structural-review F3 follow-up: `/api/ask` clamps
     // `body.limit` to `<= 100`, matching the cap `/api/recall` already
