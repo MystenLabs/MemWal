@@ -20,6 +20,14 @@ import { useDelegateKey } from '../App'
 import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy } from 'lucide-react'
 import { config } from '../config'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import {
+    getDelegateKeyFields,
+    getMoveFields,
+    type AccountObjectFields,
+    type DynamicFieldObjectFields,
+    type RegistryObjectFields,
+} from '../utils/suiFields'
 import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
@@ -58,17 +66,16 @@ async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ow
             id: config.memwalRegistryId,
             options: { showContent: true },
         })
-        if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-            const fields = registryObj.data.content.fields as any
+        const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
+        if (fields) {
             const tableId = fields?.accounts?.fields?.id?.id
             if (tableId) {
                 const dynField = await suiClient.getDynamicFieldObject({
                     parentId: tableId,
                     name: { type: 'address', value: ownerAddress },
                 })
-                if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                    return (dynField.data.content.fields as any).value as string
-                }
+                const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
+                if (dynFields?.value) return dynFields.value
             }
         }
     } catch {
@@ -83,10 +90,8 @@ async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, a
         id: accountId,
         options: { showContent: true },
     })
-    if (obj?.data?.content && 'fields' in obj.data.content) {
-        const fields = obj.data.content.fields as any
-        return (fields?.delegate_keys ?? []).length
-    }
+    const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
+    if (fields) return (fields.delegate_keys ?? []).length
 
     return 0
 }
@@ -96,11 +101,11 @@ async function getRegisteredDelegatePublicKeys(suiClient: ReturnType<typeof useS
         id: accountId,
         options: { showContent: true },
     })
-    if (obj?.data?.content && 'fields' in obj.data.content) {
-        const fields = obj.data.content.fields as any
-        const keys = fields?.delegate_keys ?? []
-        return keys.map((k: any) => {
-            const f = k.fields ?? k
+    const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
+    if (fields) {
+        const keys = fields.delegate_keys ?? []
+        return keys.map((k) => {
+            const f = getDelegateKeyFields(k)
             const pkBytes: number[] = f.public_key ?? []
             return bytesToHex(pkBytes)
         })
@@ -250,6 +255,7 @@ export default function SetupWizard() {
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
+        trackEvent('delegate_key_generate_start', { location: 'setup' })
         setStep('generating')
         setError('')
 
@@ -259,11 +265,13 @@ export default function SetupWizard() {
             setPublicKeyHex(pubHex)
             setSuiAddress(suiAddr)
             setStep('show-key')
+            trackEvent('delegate_key_generated', { location: 'setup' })
         } catch (err) {
             console.error('Setup failed:', err)
             const message = err instanceof Error ? err.message : 'setup failed. please try again.'
             setError(message)
             setStep('error')
+            trackEvent('delegate_key_generate_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setupRunningRef.current = false
         }
@@ -275,12 +283,14 @@ export default function SetupWizard() {
         const normalizedKey = normalizePrivateKeyHex(importKeyHex)
         if (!/^[0-9a-f]{64}$/.test(normalizedKey)) {
             setError('delegate key must be a 64-character hex private key.')
+            trackEvent('delegate_key_import_failed', { error_type: 'invalid_input' })
             return
         }
 
         setupRunningRef.current = true
         setImportingKey(true)
         setError('')
+        trackEvent('delegate_key_import_start', { location: 'setup' })
 
         try {
             const accountId = await getAccountObjectId(suiClient, address)
@@ -297,9 +307,11 @@ export default function SetupWizard() {
             setDelegateKeys(normalizedKey, pubHex, accountId)
             setImportKeyHex('')
             setStep('done')
+            trackEvent('delegate_key_import_complete', { location: 'setup' })
         } catch (err) {
             const message = err instanceof Error ? err.message : 'failed to import delegate key. please try again.'
             setError(message)
+            trackEvent('delegate_key_import_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setImportingKey(false)
             setupRunningRef.current = false
@@ -311,6 +323,10 @@ export default function SetupWizard() {
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
+        trackEvent('delegate_key_register_start', {
+            auth_method: isEnoki ? 'enoki' : 'wallet',
+            location: 'setup',
+        })
         setStep('onchain')
         setError('')
         setTxStatus('checking existing account...')
@@ -321,14 +337,19 @@ export default function SetupWizard() {
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
             setPrivateKeyHex('')
             setStep('done')
+            trackEvent('delegate_key_register_complete', {
+                auth_method: isEnoki ? 'enoki' : 'wallet',
+                location: 'setup',
+            })
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)
             setError((isMaxDelegateKeysError(err) || (err instanceof Error && err.message === MAX_DELEGATE_KEYS_ERROR)) ? MAX_DELEGATE_KEYS_ERROR : err instanceof Error ? err.message : 'transaction failed. please try again.')
             setStep('show-key')
+            trackEvent('delegate_key_register_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setupRunningRef.current = false
         }
-    }, [address, publicKeyHex, privateKeyHex, suiAddress, registerOnchain, setDelegateKeys])
+    }, [address, publicKeyHex, privateKeyHex, suiAddress, registerOnchain, setDelegateKeys, isEnoki])
 
     const copyKey = useCallback(async () => {
         await navigator.clipboard.writeText(privateKeyHex)
@@ -352,7 +373,13 @@ export default function SetupWizard() {
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="lp-nav-cta" onClick={() => disconnect()}>
+                        <button
+                            className="lp-nav-cta"
+                            onClick={() => {
+                                trackEvent('sign_out', { location: 'setup' })
+                                disconnect()
+                            }}
+                        >
                             <LogOut size={14} /> sign out
                         </button>
                     </div>

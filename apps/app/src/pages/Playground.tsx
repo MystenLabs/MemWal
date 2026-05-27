@@ -25,6 +25,7 @@ import type { RememberJobStatus } from '@mysten-incubation/memwal'
 import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import memwalLogo from '../assets/memwal-logo.svg'
 
 // ============================================================
@@ -43,6 +44,17 @@ interface DemoStepProps {
     loading: boolean
     highlight?: boolean
     children?: ReactNode
+}
+
+function trackPlaygroundOperation(
+    operation: string,
+    status: 'start' | 'complete' | 'failed',
+    params: Record<string, string | number | boolean> = {},
+) {
+    trackEvent(`playground_operation_${status}`, {
+        operation,
+        ...params,
+    })
 }
 
 
@@ -210,6 +222,7 @@ export default function Playground() {
 
 
     const handleLogout = useCallback(async () => {
+        trackEvent('sign_out', { location: 'playground' })
         clearDelegateKeys()
         await disconnect()
     }, [clearDelegateKeys, disconnect])
@@ -218,14 +231,17 @@ export default function Playground() {
 
     const runHealth = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('health', 'start')
         setHealthLoading(true)
         setHealthResult(null)
         setHealthError(null)
         try {
             const data = await memwal.health()
             setHealthResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('health', 'complete')
         } catch (err: unknown) {
             setHealthError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('health', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setHealthLoading(false)
         }
@@ -233,6 +249,7 @@ export default function Playground() {
 
     const runRemember = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('remember', 'start')
         setRememberLoading(true)
         setRememberResult(null)
         setRememberError(null)
@@ -347,6 +364,7 @@ export default function Playground() {
                     `// 3. terminal at T+${elapsed()}s\n` +
                     JSON.stringify(terminal, null, 2)
             )
+            trackPlaygroundOperation('remember', 'complete')
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err)
             const jobId = (err as { jobId?: string } | null)?.jobId
@@ -360,6 +378,7 @@ export default function Playground() {
             } else {
                 setRememberError(msg)
             }
+            trackPlaygroundOperation('remember', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRememberLoading(false)
         }
@@ -367,14 +386,17 @@ export default function Playground() {
 
     const runRecall = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('recall', 'start')
         setRecallLoading(true)
         setRecallResult(null)
         setRecallError(null)
         try {
             const data = await memwal.recall(recallQuery, 5)
             setRecallResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('recall', 'complete')
         } catch (err: unknown) {
             setRecallError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('recall', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRecallLoading(false)
         }
@@ -382,14 +404,17 @@ export default function Playground() {
 
     const runAnalyze = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('analyze', 'start')
         setAnalyzeLoading(true)
         setAnalyzeResult(null)
         setAnalyzeError(null)
         try {
             const data = await memwal.analyze(analyzeText)
             setAnalyzeResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('analyze', 'complete')
         } catch (err: unknown) {
             setAnalyzeError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('analyze', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setAnalyzeLoading(false)
         }
@@ -397,14 +422,17 @@ export default function Playground() {
 
     const runRestore = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('restore', 'start')
         setRestoreLoading(true)
         setRestoreResult(null)
         setRestoreError(null)
         try {
             const data = await memwal.restore(namespace || 'default')
             setRestoreResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('restore', 'complete')
         } catch (err: unknown) {
             setRestoreError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('restore', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRestoreLoading(false)
         }
@@ -414,8 +442,10 @@ export default function Playground() {
         if (!memwal) return
         if (!askLlmKey.trim()) {
             setAskError('Please enter your LLM API key (OpenAI or OpenRouter)')
+            trackPlaygroundOperation('ask_ai', 'failed', { error_type: 'missing_llm_key' })
             return
         }
+        trackPlaygroundOperation('ask_ai', 'start', { llm_provider: askLlmProvider })
         setAskLoading(true)
         setAskResult(null)
         setAskError(null)
@@ -469,9 +499,17 @@ export default function Playground() {
 
             setAskPhase('')
             setAskResult({ answer, memories, systemPrompt })
+            trackPlaygroundOperation('ask_ai', 'complete', {
+                llm_provider: askLlmProvider,
+                memories_count: memories.length,
+            })
         } catch (err: unknown) {
             setAskPhase('')
             setAskError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('ask_ai', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setAskLoading(false)
         }
@@ -504,10 +542,11 @@ export default function Playground() {
         } catch {
             return null
         }
-    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider])
+    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider, accountObjectId])
 
     const runFullRemember = useCallback(async () => {
         if (!memwalManual) return
+        trackPlaygroundOperation('manual_remember', 'start', { llm_provider: askLlmProvider })
         setFullRememberLoading(true)
         setFullRememberResult(null)
         setFullRememberError(null)
@@ -517,16 +556,22 @@ export default function Playground() {
             const data = await memwalManual.rememberManual(fullRememberText)
             setFullRememberPhase('')
             setFullRememberResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('manual_remember', 'complete', { llm_provider: askLlmProvider })
         } catch (err: unknown) {
             setFullRememberPhase('')
             setFullRememberError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('manual_remember', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setFullRememberLoading(false)
         }
-    }, [memwalManual, fullRememberText])
+    }, [memwalManual, fullRememberText, askLlmProvider])
 
     const runFullRecall = useCallback(async () => {
         if (!memwalManual) return
+        trackPlaygroundOperation('manual_recall', 'start', { llm_provider: askLlmProvider })
         setFullRecallLoading(true)
         setFullRecallResult(null)
         setFullRecallError(null)
@@ -536,13 +581,18 @@ export default function Playground() {
 
             setFullRecallPhase('')
             setFullRecallResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('manual_recall', 'complete', { llm_provider: askLlmProvider })
         } catch (err: unknown) {
             setFullRecallPhase('')
             setFullRecallError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('manual_recall', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setFullRecallLoading(false)
         }
-    }, [memwalManual, fullRecallQuery])
+    }, [memwalManual, fullRecallQuery, askLlmProvider])
 
 
 
@@ -581,7 +631,7 @@ export default function Playground() {
                         <strong>▶ run</strong> to execute against your server
                         using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
-                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }}>documentation</a> for full API reference.</>
+                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
                     </p>
                 </div>
