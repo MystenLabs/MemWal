@@ -1246,6 +1246,149 @@ pub async fn app_auth_clients_rate_limit_middleware(
     next.run(request).await
 }
 
+/// Rate limiting middleware for hosted app-auth admin login.
+///
+/// Production client management is gated by `APP_AUTH_ADMIN_TOKEN`; keep login
+/// attempts on their own tight IP bucket so a exposed dashboard cannot be used
+/// as an unlimited token guessing surface.
+pub async fn app_auth_admin_login_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    const ADMIN_LOGIN_ATTEMPTS_PER_MINUTE: i64 = 5;
+    const ADMIN_LOGIN_ATTEMPTS_PER_HOUR: i64 = 30;
+
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip: Option<String> = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        });
+
+    let ip = match ip {
+        Some(ip) => ip,
+        None => {
+            tracing::warn!(
+                "app_auth_admin_login_rate_limit_middleware: cannot determine client IP, denying"
+            );
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:app_auth:admin_login:ip:min:{}", ip);
+    let hr_key = format!("rate:app_auth:admin_login:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+    let mut redis_down = false;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        ADMIN_LOGIN_ATTEMPTS_PER_MINUTE,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "app-auth/admin-login rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                ADMIN_LOGIN_ATTEMPTS_PER_MINUTE
+            );
+            return rate_limit_response(
+                "app_auth_admin_login_ip_burst",
+                ADMIN_LOGIN_ATTEMPTS_PER_MINUTE,
+                "min",
+                60,
+            );
+        }
+        Err(e) => {
+            tracing::warn!("app_auth_admin_login_rate_limit_middleware: Redis error (minute bucket): {} — switching to in-memory fallback", e);
+            redis_down = true;
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    if !redis_down {
+        match check_and_record_window(
+            &mut redis,
+            &hr_key,
+            hr_window_start,
+            now + 0.1,
+            ADMIN_LOGIN_ATTEMPTS_PER_HOUR,
+            1,
+            3700,
+        )
+        .await
+        {
+            Ok(WindowCheckResult::Denied) => {
+                tracing::warn!(
+                    "app-auth/admin-login rate limit [IP/hr]: ip={} denied (limit={})",
+                    ip,
+                    ADMIN_LOGIN_ATTEMPTS_PER_HOUR
+                );
+                return rate_limit_response(
+                    "app_auth_admin_login_ip_sustained",
+                    ADMIN_LOGIN_ATTEMPTS_PER_HOUR,
+                    "hour",
+                    300,
+                );
+            }
+            Err(e) => {
+                tracing::warn!("app_auth_admin_login_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
+                redis_down = true;
+            }
+            Ok(WindowCheckResult::Allowed) => {}
+        }
+    }
+
+    if redis_down {
+        tracing::warn!("app_auth_admin_login_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
+        crate::observability::record_rate_limit_fallback("app_auth_admin_login_ip");
+        let mut fallback = state.fallback_rate_limit.lock().await;
+
+        if !fallback.can_consume(&min_key, 1.0, ADMIN_LOGIN_ATTEMPTS_PER_MINUTE as f64, 60.0) {
+            return rate_limit_response(
+                "app_auth_admin_login_ip_burst",
+                ADMIN_LOGIN_ATTEMPTS_PER_MINUTE,
+                "min",
+                60,
+            );
+        }
+        if !fallback.can_consume(&hr_key, 1.0, ADMIN_LOGIN_ATTEMPTS_PER_HOUR as f64, 3600.0) {
+            return rate_limit_response(
+                "app_auth_admin_login_ip_sustained",
+                ADMIN_LOGIN_ATTEMPTS_PER_HOUR,
+                "hour",
+                300,
+            );
+        }
+
+        fallback.consume(&min_key, 1.0, ADMIN_LOGIN_ATTEMPTS_PER_MINUTE as f64, 60.0);
+        fallback.consume(&hr_key, 1.0, ADMIN_LOGIN_ATTEMPTS_PER_HOUR as f64, 3600.0);
+        return next.run(request).await;
+    }
+
+    next.run(request).await
+}
+
 // ============================================================
 // Unit Tests
 // ============================================================

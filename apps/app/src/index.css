@@ -1164,6 +1164,225 @@ h1, h2, h3 {
   background: var(--bg-card-hover);
 }
 
+/* ========== Hosted App Client Manager ========== */
+
+.app-auth-manager {
+  background: #ffffff;
+}
+
+.app-auth-error {
+  background: rgba(239, 68, 68, 0.10);
+  border: 2px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 700;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.app-auth-login {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.app-auth-login-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: var(--border);
+  border-radius: var(--radius-md);
+  background: var(--color-violet);
+  box-shadow: var(--neo-shadow-xs);
+}
+
+.app-auth-login-title,
+.app-auth-form-title,
+.app-auth-client-title {
+  font-size: 1rem;
+  font-weight: 850;
+  color: var(--text-primary);
+}
+
+.app-auth-login-subtitle,
+.app-auth-client-id {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.app-auth-login-controls {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.app-auth-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 120px)) auto;
+  gap: 12px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+
+.app-auth-summary > div {
+  border: var(--border);
+  border-radius: var(--radius-md);
+  background: var(--color-yellow);
+  box-shadow: var(--neo-shadow-xs);
+  padding: 10px 12px;
+}
+
+.app-auth-summary span {
+  display: block;
+  font-size: 1.15rem;
+  font-weight: 900;
+}
+
+.app-auth-summary small {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.app-auth-secret {
+  margin-bottom: 16px;
+}
+
+.app-auth-form {
+  border: var(--border);
+  border-radius: var(--radius-md);
+  background: #FAF8F5;
+  box-shadow: var(--neo-shadow-sm);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.app-auth-form-title {
+  margin-bottom: 12px;
+}
+
+.app-auth-textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.app-auth-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-auth-client-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.app-auth-client {
+  border: var(--border);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  box-shadow: var(--neo-shadow-sm);
+  padding: 16px;
+}
+
+.app-auth-client-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.app-auth-client-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app-auth-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1.5px solid #000000;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.app-auth-status--active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.app-auth-status--blocked {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.app-auth-uri-block {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.app-auth-uri-block > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-auth-uri-block strong {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.app-auth-uri-block code {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: var(--radius-sm);
+  background: #FAF8F5;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .app-auth-login-controls,
+  .app-auth-summary,
+  .app-auth-uri-block {
+    grid-template-columns: 1fr;
+  }
+
+  .app-auth-client-main {
+    flex-direction: column;
+  }
+
+  .app-auth-client-actions {
+    justify-content: flex-start;
+  }
+}
+
 /* ========== Delegate Key List ========== */
 
 .key-list {

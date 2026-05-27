@@ -2,7 +2,7 @@ use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-use crate::types::{AppAuthClientConfig, AppError, SearchHit};
+use crate::types::{AppAuthClientConfig, AppAuthClientRecord, AppError, SearchHit};
 
 pub struct VectorDb {
     pool: PgPool,
@@ -228,6 +228,139 @@ impl VectorDb {
         .map_err(|e| AppError::Internal(format!("Failed to update app auth client status: {}", e)));
         crate::observability::observe_db(
             "app_auth_clients.update_status",
+            db_status(&result),
+            started.elapsed(),
+        );
+
+        result.map(|done| done.rows_affected() > 0)
+    }
+
+    pub async fn list_app_auth_clients(&self) -> Result<Vec<AppAuthClientRecord>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<
+            Vec<(
+                String,
+                String,
+                String,
+                Vec<String>,
+                Option<String>,
+                Vec<String>,
+                String,
+                chrono::DateTime<chrono::Utc>,
+                chrono::DateTime<chrono::Utc>,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT
+                    client_id,
+                    client_secret_sha256,
+                    display_name,
+                    allowed_redirect_uris,
+                    fallback_uri,
+                    allowed_fallback_uris,
+                    status,
+                    created_at,
+                    updated_at
+                 FROM app_auth_clients
+                 ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to list app auth clients: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.list",
+            db_status(&result),
+            started.elapsed(),
+        );
+
+        result.map(|rows| {
+            rows.into_iter()
+                .map(
+                    |(
+                        client_id,
+                        client_secret_sha256,
+                        display_name,
+                        allowed_redirect_uris,
+                        fallback_uri,
+                        allowed_fallback_uris,
+                        status,
+                        created_at,
+                        updated_at,
+                    )| AppAuthClientRecord {
+                        client: AppAuthClientConfig {
+                            client_id,
+                            client_secret_sha256,
+                            display_name,
+                            allowed_redirect_uris,
+                            fallback_uri,
+                            allowed_fallback_uris,
+                            status,
+                        },
+                        created_at,
+                        updated_at,
+                    },
+                )
+                .collect()
+        })
+    }
+
+    pub async fn update_app_auth_client(
+        &self,
+        client_id: &str,
+        display_name: &str,
+        allowed_redirect_uris: &[String],
+        fallback_uri: Option<&String>,
+        allowed_fallback_uris: &[String],
+        status: &str,
+    ) -> Result<bool, AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "UPDATE app_auth_clients
+             SET display_name = $2,
+                 allowed_redirect_uris = $3,
+                 fallback_uri = $4,
+                 allowed_fallback_uris = $5,
+                 status = $6,
+                 updated_at = NOW()
+             WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .bind(display_name)
+        .bind(allowed_redirect_uris)
+        .bind(fallback_uri)
+        .bind(allowed_fallback_uris)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to update app auth client: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.update",
+            db_status(&result),
+            started.elapsed(),
+        );
+
+        result.map(|done| done.rows_affected() > 0)
+    }
+
+    pub async fn update_app_auth_client_secret(
+        &self,
+        client_id: &str,
+        client_secret_sha256: &str,
+    ) -> Result<bool, AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "UPDATE app_auth_clients
+             SET client_secret_sha256 = $2,
+                 updated_at = NOW()
+             WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .bind(client_secret_sha256)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to rotate app auth client secret: {}", e)));
+        crate::observability::observe_db(
+            "app_auth_clients.rotate_secret",
             db_status(&result),
             started.elapsed(),
         );

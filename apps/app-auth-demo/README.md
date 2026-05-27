@@ -17,10 +17,11 @@ MEMWAL_API_URL=http://localhost:8000
 APP_LABEL=Demo App
 ```
 
-On first connect, the demo registers itself with `POST /api/app-auth/clients`
-using its exact HTTPS callback/fallback URLs. Public self-registration rejects
-localhost and `*.memwal.ai` URLs; for local demos, use the optional static
-`dev_localhost` client instead.
+By default the demo can auto-register on first connect against a dev relayer,
+but the production-like path is to create a hosted app client from the Walrus
+Memory dashboard and set `MEMWAL_CLIENT_ID` / `MEMWAL_CLIENT_SECRET` on this
+backend. Public self-registration rejects localhost and `*.memwal.ai` URLs; for
+local demos, use the optional static `dev_localhost` client instead.
 
 ## Deployed Demo App
 
@@ -38,8 +39,9 @@ APP_LABEL=Demo App
 
 The relayer must also be configured for the intended scale:
 
-- Staging/dev demo: set `APP_AUTH_PUBLIC_CLIENT_REGISTRATION_ENABLED=true` on the relayer so this app can auto-register.
-- Production: leave public registration disabled. An operator creates the client with `Authorization: Bearer $APP_AUTH_ADMIN_TOKEN` and gives the `client_id` / one-time `client_secret` to the dapp developer.
+- Staging/dev demo: prefer the dashboard's `hosted app clients` section so this app uses static backend credentials.
+- Temporary self-registering demo: set `APP_AUTH_PUBLIC_CLIENT_REGISTRATION_ENABLED=true` on the relayer so this app can auto-register.
+- Production: leave public registration disabled. An operator signs into the dashboard with `APP_AUTH_ADMIN_TOKEN`, creates the client, and gives the `client_id` / one-time `client_secret` to the dapp developer.
 
 Railway service config is included at `apps/app-auth-demo/railway.json` and uses `apps/app-auth-demo/Dockerfile`. Set Railway Root Directory to the repo root (`/`) so the Dockerfile path resolves correctly.
 
@@ -51,24 +53,17 @@ Third-party apps do not integrate Enoki directly. They register their backend
 app once, redirect the browser to Walrus Memory hosted connect, and exchange the
 returned code server-side.
 
-Register the app from your backend:
+Register the app from the Walrus Memory dashboard:
 
-```bash
-curl -X POST "$MEMWAL_API_URL/api/app-auth/clients" \
-  -H 'content-type: application/json' \
-  --data '{
-    "display_name": "My Dapp",
-    "redirect_uris": ["https://my-dapp.example.com/api/memwal/callback"],
-    "fallback_uris": ["https://my-dapp.example.com/memwal/error"]
-  }'
-```
+1. Open the dashboard.
+2. Under `install`, open `hosted app clients`.
+3. Sign in with `APP_AUTH_ADMIN_TOKEN`.
+4. Create the dapp with exact callback/fallback URLs.
+5. Copy the one-time `client_id` / `client_secret` into the dapp backend env.
 
-For staging/dev, that request works when public registration is enabled on the
-relayer. For production, the same request must be made by a Walrus Memory
-operator with `Authorization: Bearer $APP_AUTH_ADMIN_TOKEN`; end users never
-create app clients. Store the returned `client_id` and `client_secret` in your
-backend env. The client is active immediately unless an operator later blocks
-it. Then send users to:
+End users never create app clients. Store the returned `client_id` and
+`client_secret` in your backend env. The client is active immediately unless an
+operator later blocks it. Then send users to:
 
 ```txt
 https://dev.memwal.ai/connect/app?client_id=CLIENT_ID&redirect_uri=https%3A%2F%2Fmy-dapp.example.com%2Fapi%2Fmemwal%2Fcallback&state=RANDOM_STATE&label=My%20Dapp&intent=sdk_delegate&fallback_uri=https%3A%2F%2Fmy-dapp.example.com%2Fmemwal%2Ferror
@@ -98,4 +93,6 @@ APP_BASE_URL=https://your-app.railway.app
 MEMWAL_WEB_URL=https://dev.memwal.ai
 MEMWAL_API_URL=https://relayer.dev.memwal.ai
 APP_LABEL=Your App
+MEMWAL_CLIENT_ID=app_...
+MEMWAL_CLIENT_SECRET=mwas_...
 ```

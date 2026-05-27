@@ -26,8 +26,10 @@ mod sponsor;
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use app_auth::{
-    app_auth_block_client, app_auth_cancel, app_auth_complete, app_auth_create_client,
-    app_auth_register, app_auth_start, app_auth_token,
+    app_auth_admin_create_client, app_auth_admin_list_clients, app_auth_admin_login,
+    app_auth_admin_update_client, app_auth_block_client, app_auth_cancel, app_auth_complete,
+    app_auth_create_client, app_auth_register, app_auth_rotate_client_secret, app_auth_start,
+    app_auth_token, app_auth_unblock_client,
 };
 pub use recall::{recall, recall_manual};
 pub use remember::{

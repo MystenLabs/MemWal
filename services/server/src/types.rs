@@ -198,6 +198,13 @@ pub struct AppAuthClientConfig {
     pub status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppAuthClientRecord {
+    pub client: AppAuthClientConfig,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub const APP_AUTH_CLIENT_STATUS_ACTIVE: &str = "active";
 pub const APP_AUTH_CLIENT_STATUS_BLOCKED: &str = "blocked";
 

@@ -24,6 +24,7 @@ SyntaxHighlighter.registerLanguage('bash', bash)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import memwalLogo from '../assets/memwal-logo.svg'
+import AppAuthClientManager from './AppAuthClientManager'
 
 // ============================================================
 // Types
@@ -840,9 +841,11 @@ const result = await generateText({
                         {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
                          pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
                          pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
-                         'bun add @mysten-incubation/memwal'}
+                        'bun add @mysten-incubation/memwal'}
                     </SyntaxHighlighter>
                 </div>
+
+                <AppAuthClientManager />
             </div>
         </>
     )

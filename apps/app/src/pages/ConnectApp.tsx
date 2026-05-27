@@ -31,6 +31,9 @@ type Step = 'loading' | 'consent' | 'registering' | 'redirecting' | 'error'
 type Provider = 'wallet' | 'google'
 
 const MAX_DELEGATE_KEYS = 20
+const MAX_DELEGATE_KEYS_MESSAGE =
+    `This Walrus Memory account already has ${MAX_DELEGATE_KEYS} delegate keys. ` +
+    'Open the dashboard and remove an unused key, then retry Connect App.'
 
 interface AppAuthSession {
     session_id: string
@@ -93,6 +96,21 @@ async function resolveAccountId(
     return null
 }
 
+async function fetchDelegateKeyCount(
+    suiClient: ReturnType<typeof useSuiClient>,
+    accountId: string,
+): Promise<number> {
+    const accountObj = await suiClient.getObject({
+        id: accountId,
+        options: { showContent: true },
+    })
+    if (accountObj?.data?.content && 'fields' in accountObj.data.content) {
+        const fields = accountObj.data.content.fields as any
+        return Array.isArray(fields?.delegate_keys) ? fields.delegate_keys.length : 0
+    }
+    return 0
+}
+
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${config.memwalServerUrl}${path}`, {
         method: 'POST',
@@ -125,6 +143,8 @@ export default function ConnectApp() {
     const [errorMsg, setErrorMsg] = useState('')
     const [walletPickerOpen, setWalletPickerOpen] = useState(false)
     const [provider, setProvider] = useState<Provider>('wallet')
+    const [delegateKeyCount, setDelegateKeyCount] = useState<number | null>(null)
+    const [checkingDelegateKeys, setCheckingDelegateKeys] = useState(false)
 
     const request = useMemo(() => ({
         client_id: params.get('client_id') ?? '',
@@ -142,6 +162,7 @@ export default function ConnectApp() {
     )
     const googleWallet = walletsByProvider.get('google')
     const hasGoogle = !!(config.enokiApiKey && config.googleClientId && googleWallet)
+    const hasMaxDelegateKeys = delegateKeyCount !== null && delegateKeyCount >= MAX_DELEGATE_KEYS
 
     useEffect(() => {
         let cancelled = false
@@ -165,6 +186,41 @@ export default function ConnectApp() {
             setSession(null)
         }
     }, [request])
+
+    useEffect(() => {
+        let cancelled = false
+
+        if (!currentAccount) {
+            setDelegateKeyCount(null)
+            setCheckingDelegateKeys(false)
+            return () => {
+                cancelled = true
+            }
+        }
+
+        setCheckingDelegateKeys(true)
+        setDelegateKeyCount(null)
+
+        ;(async () => {
+            try {
+                const accountId = await resolveAccountId(suiClient, currentAccount.address)
+                if (!accountId) {
+                    if (!cancelled) setDelegateKeyCount(0)
+                    return
+                }
+                const count = await fetchDelegateKeyCount(suiClient, accountId)
+                if (!cancelled) setDelegateKeyCount(count)
+            } catch {
+                if (!cancelled) setDelegateKeyCount(null)
+            } finally {
+                if (!cancelled) setCheckingDelegateKeys(false)
+            }
+        })()
+
+        return () => {
+            cancelled = true
+        }
+    }, [currentAccount, suiClient])
 
     const registerDelegate = useCallback(async (): Promise<{ accountId: string, digest: string }> => {
         if (!session) throw new Error('missing app auth session')
@@ -219,10 +275,7 @@ export default function ConnectApp() {
             addResult = await signAndExecute({ transaction: addTx })
         } catch (txErr) {
             if (isAddDelegateAbort(txErr, 2)) {
-                throw new Error(
-                    `This Walrus Memory account already has the maximum number of delegate keys (${MAX_DELEGATE_KEYS}). ` +
-                    `Open the dashboard and revoke an unused key, then retry Connect App.`,
-                )
+                throw new Error(MAX_DELEGATE_KEYS_MESSAGE)
             }
             if (isAddDelegateAbort(txErr, 0)) {
                 throw new Error(
@@ -238,6 +291,11 @@ export default function ConnectApp() {
 
     const handleAuthorize = useCallback(async () => {
         if (!session) return
+        if (hasMaxDelegateKeys) {
+            setErrorMsg(MAX_DELEGATE_KEYS_MESSAGE)
+            setStep('error')
+            return
+        }
         if (!currentAccount) {
             setProvider('wallet')
             setWalletPickerOpen(true)
@@ -262,7 +320,7 @@ export default function ConnectApp() {
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('error')
         }
-    }, [currentAccount, provider, registerDelegate, session])
+    }, [currentAccount, hasMaxDelegateKeys, provider, registerDelegate, session])
 
     const handleGoogleConnect = useCallback(() => {
         if (!googleWallet) return
@@ -356,9 +414,24 @@ export default function ConnectApp() {
                                     <span style={connectedLabelStyle}>Wallet</span>
                                     <span>{currentAccount.address.slice(0, 8)}…{currentAccount.address.slice(-6)}</span>
                                 </div>
+                                {checkingDelegateKeys && (
+                                    <div style={capacityNoteStyle}>Checking delegate key capacity...</div>
+                                )}
+                                {hasMaxDelegateKeys && (
+                                    <div style={capacityErrorStyle}>
+                                        {MAX_DELEGATE_KEYS_MESSAGE}
+                                    </div>
+                                )}
                                 <div style={buttonRowStyle}>
-                                    <button style={primaryButtonStyle} onClick={handleAuthorize}>
-                                        Authorize app
+                                    <button
+                                        style={{
+                                            ...primaryButtonStyle,
+                                            ...(checkingDelegateKeys || hasMaxDelegateKeys ? disabledPrimaryButtonStyle : {}),
+                                        }}
+                                        onClick={handleAuthorize}
+                                        disabled={checkingDelegateKeys || hasMaxDelegateKeys}
+                                    >
+                                        {checkingDelegateKeys ? 'Checking account' : 'Authorize app'}
                                     </button>
                                     <button style={secondaryButtonStyle} onClick={() => redirectWithError('access_denied')}>
                                         Cancel
@@ -535,6 +608,29 @@ const connectedLabelStyle: CSSProperties = {
     textTransform: 'uppercase',
 }
 
+const capacityNoteStyle: CSSProperties = {
+    border: '1px solid #a3a3a3',
+    borderRadius: 8,
+    background: '#FAF8F5',
+    color: '#525252',
+    fontSize: 13,
+    lineHeight: 1.45,
+    margin: '0 0 16px',
+    padding: '10px 12px',
+}
+
+const capacityErrorStyle: CSSProperties = {
+    border: '2px solid #dc2626',
+    borderRadius: 8,
+    background: '#fef2f2',
+    color: '#991b1b',
+    fontSize: 13,
+    fontWeight: 700,
+    lineHeight: 1.45,
+    margin: '0 0 16px',
+    padding: '10px 12px',
+}
+
 const buttonRowStyle: CSSProperties = {
     display: 'flex',
     flexWrap: 'wrap',
@@ -553,6 +649,13 @@ const primaryButtonStyle: CSSProperties = {
     padding: '12px 16px',
     fontWeight: 900,
     cursor: 'pointer',
+}
+
+const disabledPrimaryButtonStyle: CSSProperties = {
+    background: '#d4d4d4',
+    color: '#737373',
+    cursor: 'not-allowed',
+    boxShadow: 'none',
 }
 
 const secondaryButtonStyle: CSSProperties = {

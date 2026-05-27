@@ -14,7 +14,7 @@ use axum::http::{header, HeaderValue, Method};
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::net::SocketAddr;
@@ -610,8 +610,35 @@ async fn main() {
                 )),
         )
         .route(
+            "/api/admin/app-auth/login",
+            post(routes::app_auth_admin_login)
+                .layer(DefaultBodyLimit::max(4 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_admin_login_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/app-auth/clients",
+            get(routes::app_auth_admin_list_clients)
+                .post(routes::app_auth_admin_create_client)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}",
+            patch(routes::app_auth_admin_update_client).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/rotate-secret",
+            post(routes::app_auth_rotate_client_secret).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
             "/api/admin/app-auth/clients/{client_id}/block",
             post(routes::app_auth_block_client).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/unblock",
+            post(routes::app_auth_unblock_client).layer(DefaultBodyLimit::max(4 * 1024)),
         )
         .route(
             "/api/app-auth/start",
@@ -686,7 +713,7 @@ async fn main() {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::AUTHORIZATION,

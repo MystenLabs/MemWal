@@ -35,6 +35,7 @@ use crate::types::{
 
 const APP_AUTH_SESSION_TTL_SECS: u64 = 15 * 60;
 const APP_AUTH_CODE_TTL_SECS: u64 = 5 * 60;
+const APP_AUTH_ADMIN_SESSION_TTL_SECS: u64 = 2 * 60 * 60;
 // ENG-1783 review B1 (2026-05-26): both delegate writes previously used
 // ttl_secs:None, leaking ~800B / completed flow into Redis indefinitely
 // (~560MB at 1M flows). 24h is long enough to cover the start→complete→
@@ -82,6 +83,50 @@ pub struct AppAuthRegisterResponse {
     pub fallback_uri: Option<String>,
     pub allowed_fallback_uris: Vec<String>,
     pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthAdminLoginResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppAuthAdminLoginRequest {
+    pub admin_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthAdminClientListResponse {
+    pub clients: Vec<AppAuthAdminClientDetail>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthAdminClientDetail {
+    pub client_id: String,
+    pub display_name: String,
+    pub allowed_redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    pub allowed_fallback_uris: Vec<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppAuthAdminUpdateClientRequest {
+    pub display_name: String,
+    pub redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    #[serde(default)]
+    pub fallback_uris: Vec<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppAuthAdminSecretResponse {
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,9 +280,16 @@ async fn create_app_auth_client(
     req: AppAuthRegisterRequest,
 ) -> Result<Json<AppAuthRegisterResponse>, AppError> {
     if !state.config.app_auth_public_client_registration_enabled {
-        require_app_auth_admin(&headers, state.as_ref())?;
+        require_app_auth_admin(&headers, state.as_ref()).await?;
     }
 
+    create_app_auth_client_record(state, req).await
+}
+
+async fn create_app_auth_client_record(
+    state: Arc<AppState>,
+    req: AppAuthRegisterRequest,
+) -> Result<Json<AppAuthRegisterResponse>, AppError> {
     let display_name = sanitize_client_display_name(&req.display_name)?;
     let allowed_redirect_uris = validate_registration_urls("redirect_uris", &req.redirect_uris)?;
 
@@ -277,15 +329,140 @@ async fn create_app_auth_client(
     }))
 }
 
+pub async fn app_auth_admin_login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AppAuthAdminLoginRequest>,
+) -> Result<Json<AppAuthAdminLoginResponse>, AppError> {
+    let presented = req.admin_token.trim();
+    if presented.is_empty() {
+        return Err(AppError::Unauthorized("missing admin token".into()));
+    }
+    ensure_configured_app_auth_admin_token(presented, state.as_ref())?;
+
+    let token = random_token("mwadm_");
+    let expires_at = Utc::now() + Duration::seconds(APP_AUTH_ADMIN_SESSION_TTL_SECS as i64);
+    set_redis_json(
+        state.as_ref(),
+        &app_auth_admin_session_key(&hash_secret(&token)),
+        &"active",
+        Some(APP_AUTH_ADMIN_SESSION_TTL_SECS),
+    )
+    .await?;
+
+    Ok(Json(AppAuthAdminLoginResponse { token, expires_at }))
+}
+
+pub async fn app_auth_admin_list_clients(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AppAuthAdminClientListResponse>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    let rows = state.db.list_app_auth_clients().await?;
+    Ok(Json(AppAuthAdminClientListResponse {
+        clients: rows
+            .into_iter()
+            .map(|row| AppAuthAdminClientDetail {
+                client_id: row.client.client_id,
+                display_name: row.client.display_name,
+                allowed_redirect_uris: row.client.allowed_redirect_uris,
+                fallback_uri: row.client.fallback_uri,
+                allowed_fallback_uris: row.client.allowed_fallback_uris,
+                status: row.client.status,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            })
+            .collect(),
+    }))
+}
+
+pub async fn app_auth_admin_create_client(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AppAuthRegisterRequest>,
+) -> Result<Json<AppAuthRegisterResponse>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    create_app_auth_client_record(state, req).await
+}
+
+pub async fn app_auth_admin_update_client(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+    Json(req): Json<AppAuthAdminUpdateClientRequest>,
+) -> Result<Json<AppAuthAdminClientDetail>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    let client_id = sanitize_client_id(&client_id)?;
+    let display_name = sanitize_client_display_name(&req.display_name)?;
+    let allowed_redirect_uris = validate_registration_urls("redirect_uris", &req.redirect_uris)?;
+
+    let mut requested_fallback_uris = req.fallback_uris;
+    if let Some(fallback_uri) = req.fallback_uri {
+        requested_fallback_uris.push(fallback_uri);
+    }
+    let allowed_fallback_uris = if requested_fallback_uris.is_empty() {
+        Vec::new()
+    } else {
+        validate_registration_urls("fallback_uris", &requested_fallback_uris)?
+    };
+    let fallback_uri = allowed_fallback_uris.first().cloned();
+    let status = sanitize_client_status(&req.status)?;
+
+    let updated = state
+        .db
+        .update_app_auth_client(
+            &client_id,
+            &display_name,
+            &allowed_redirect_uris,
+            fallback_uri.as_ref(),
+            &allowed_fallback_uris,
+            &status,
+        )
+        .await?;
+    if !updated {
+        return Err(AppError::BadRequest("unknown app client".into()));
+    }
+
+    Ok(Json(AppAuthAdminClientDetail {
+        client_id,
+        display_name,
+        allowed_redirect_uris,
+        fallback_uri,
+        allowed_fallback_uris,
+        status,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }))
+}
+
+pub async fn app_auth_rotate_client_secret(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> Result<Json<AppAuthAdminSecretResponse>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    let client_id = sanitize_client_id(&client_id)?;
+    let client_secret = random_token("mwas_");
+    let updated = state
+        .db
+        .update_app_auth_client_secret(&client_id, &hash_secret(&client_secret))
+        .await?;
+    if !updated {
+        return Err(AppError::BadRequest("unknown app client".into()));
+    }
+
+    Ok(Json(AppAuthAdminSecretResponse {
+        client_id,
+        client_secret,
+    }))
+}
+
 pub async fn app_auth_block_client(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
 ) -> Result<Json<AppAuthAdminClientResponse>, AppError> {
-    require_app_auth_admin(&headers, state.as_ref())?;
-    if client_id.trim().is_empty() || client_id.len() > 160 {
-        return Err(AppError::BadRequest("client_id is invalid".into()));
-    }
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    let client_id = sanitize_client_id(&client_id)?;
 
     let updated = state
         .db
@@ -298,6 +475,28 @@ pub async fn app_auth_block_client(
     Ok(Json(AppAuthAdminClientResponse {
         client_id,
         status: APP_AUTH_CLIENT_STATUS_BLOCKED.to_string(),
+    }))
+}
+
+pub async fn app_auth_unblock_client(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> Result<Json<AppAuthAdminClientResponse>, AppError> {
+    require_app_auth_admin(&headers, state.as_ref()).await?;
+    let client_id = sanitize_client_id(&client_id)?;
+
+    let updated = state
+        .db
+        .update_app_auth_client_status(&client_id, APP_AUTH_CLIENT_STATUS_ACTIVE)
+        .await?;
+    if !updated {
+        return Err(AppError::BadRequest("unknown app client".into()));
+    }
+
+    Ok(Json(AppAuthAdminClientResponse {
+        client_id,
+        status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
     }))
 }
 
@@ -576,12 +775,8 @@ async fn load_client(
     state.db.fetch_app_auth_client(client_id).await
 }
 
-fn require_app_auth_admin(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
-    let configured =
-        state.config.app_auth_admin_token.as_ref().ok_or_else(|| {
-            AppError::Unauthorized("app auth admin token is not configured".into())
-        })?;
-    let presented = headers
+fn app_auth_admin_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get("x-admin-token")
         .and_then(|value| value.to_str().ok())
         .or_else(|| {
@@ -590,7 +785,16 @@ fn require_app_auth_admin(headers: &HeaderMap, state: &AppState) -> Result<(), A
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
         })
-        .ok_or_else(|| AppError::Unauthorized("missing app auth admin token".into()))?;
+}
+
+fn ensure_configured_app_auth_admin_token(
+    presented: &str,
+    state: &AppState,
+) -> Result<(), AppError> {
+    let configured =
+        state.config.app_auth_admin_token.as_ref().ok_or_else(|| {
+            AppError::Unauthorized("app auth admin token is not configured".into())
+        })?;
     if presented.trim().is_empty() {
         return Err(AppError::Unauthorized(
             "missing app auth admin token".into(),
@@ -606,6 +810,41 @@ fn require_app_auth_admin(headers: &HeaderMap, state: &AppState) -> Result<(), A
     }
 
     Ok(())
+}
+
+async fn require_app_auth_admin(headers: &HeaderMap, state: &AppState) -> Result<(), AppError> {
+    let presented = app_auth_admin_token_from_headers(headers)
+        .ok_or_else(|| AppError::Unauthorized("missing app auth admin token".into()))?;
+    if ensure_configured_app_auth_admin_token(presented, state).is_ok() {
+        return Ok(());
+    }
+
+    if get_redis_json::<String>(state, &app_auth_admin_session_key(&hash_secret(presented)))
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    Err(AppError::Unauthorized(
+        "invalid app auth admin token".into(),
+    ))
+}
+
+fn sanitize_client_id(client_id: &str) -> Result<String, AppError> {
+    let client_id = client_id.trim();
+    if client_id.is_empty() || client_id.len() > 160 {
+        return Err(AppError::BadRequest("client_id is invalid".into()));
+    }
+    Ok(client_id.to_string())
+}
+
+fn sanitize_client_status(status: &str) -> Result<String, AppError> {
+    match status.trim() {
+        APP_AUTH_CLIENT_STATUS_ACTIVE => Ok(APP_AUTH_CLIENT_STATUS_ACTIVE.to_string()),
+        APP_AUTH_CLIENT_STATUS_BLOCKED => Ok(APP_AUTH_CLIENT_STATUS_BLOCKED.to_string()),
+        _ => Err(AppError::BadRequest("client status is invalid".into())),
+    }
 }
 
 fn select_fallback_uri(
@@ -940,6 +1179,10 @@ fn app_auth_code_key(client_id: &str, code_hash: &str) -> String {
 
 fn app_auth_delegate_key(delegate_ref: &str) -> String {
     format!("app_auth:delegate:{delegate_ref}")
+}
+
+fn app_auth_admin_session_key(token_hash: &str) -> String {
+    format!("app_auth:admin_session:{token_hash}")
 }
 
 async fn set_redis_json<T: Serialize>(
