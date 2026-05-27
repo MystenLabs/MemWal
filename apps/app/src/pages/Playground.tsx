@@ -57,6 +57,14 @@ function trackPlaygroundOperation(
     })
 }
 
+function normalizeHttpHeaderToken(raw: string) {
+    return raw.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+}
+
+function hasInvalidHttpHeaderChars(value: string) {
+    return /[^\x20-\x7E]/.test(value)
+}
+
 
 function DemoStep({
     number,
@@ -200,6 +208,10 @@ export default function Playground() {
     const [askError, setAskError] = useState<string | null>(null)
     const [askLoading, setAskLoading] = useState(false)
     const [askPhase, setAskPhase] = useState('')
+    const llmApiKey = useMemo(() => normalizeHttpHeaderToken(askLlmKey), [askLlmKey])
+    const hasLlmApiKey = llmApiKey.length > 0
+    const hasInvalidLlmApiKeyHeader = hasInvalidHttpHeaderChars(llmApiKey)
+    const canUseLlmApiKey = hasLlmApiKey && !hasInvalidLlmApiKeyHeader
 
     // Full client-side mode states
     const [fullRememberText, setFullRememberText] = useState(
@@ -440,9 +452,17 @@ export default function Playground() {
 
     const runAsk = useCallback(async () => {
         if (!memwal) return
-        if (!askLlmKey.trim()) {
+        if (!llmApiKey) {
             setAskError('Please enter your LLM API key (OpenAI or OpenRouter)')
             trackPlaygroundOperation('ask_ai', 'failed', { error_type: 'missing_llm_key' })
+            return
+        }
+        if (hasInvalidHttpHeaderChars(llmApiKey)) {
+            setAskError('Your LLM API key contains a hidden or non-ASCII character. Paste the raw key from OpenAI/OpenRouter; shortened text copied with "..." will not work.')
+            trackPlaygroundOperation('ask_ai', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: 'invalid_llm_key_header',
+            })
             return
         }
         trackPlaygroundOperation('ask_ai', 'start', { llm_provider: askLlmProvider })
@@ -477,7 +497,7 @@ export default function Playground() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${askLlmKey.trim()}`,
+                    'Authorization': `Bearer ${llmApiKey}`,
                 },
                 body: JSON.stringify({
                     model,
@@ -513,12 +533,12 @@ export default function Playground() {
         } finally {
             setAskLoading(false)
         }
-    }, [memwal, askQuestion, askLlmKey, askLlmProvider])
+    }, [memwal, askQuestion, llmApiKey, askLlmProvider])
 
     // ---- Full Client-Side Mode (MemWalManual) ----
 
     const memwalManual = useMemo(() => {
-        if (!delegateKey || !address || !askLlmKey.trim()) return null
+        if (!delegateKey || !address || !llmApiKey || hasInvalidHttpHeaderChars(llmApiKey)) return null
         try {
             const embeddingApiBase = askLlmProvider === 'openrouter'
                 ? 'https://openrouter.ai/api/v1'
@@ -532,7 +552,7 @@ export default function Playground() {
                     signPersonalMessage: (input) => signPersonalMessage({ message: input.message }),
                 },
                 suiClient,
-                embeddingApiKey: askLlmKey.trim(),
+                embeddingApiKey: llmApiKey,
                 embeddingApiBase,
                 packageId: config.memwalPackageId,
                 accountId: accountObjectId || '',
@@ -542,7 +562,7 @@ export default function Playground() {
         } catch {
             return null
         }
-    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider, accountObjectId])
+    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, llmApiKey, askLlmProvider, accountObjectId])
 
     const runFullRemember = useCallback(async () => {
         if (!memwalManual) return
@@ -795,7 +815,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                 <div className="card demo-step">
                     <div className="card-header">
                         <div className="demo-step-header-row">
-                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>
+                            <div className={`demo-step-badge${hasLlmApiKey ? ' demo-step-badge--highlight' : ''}`}>6</div>
                             <div>
                                 <div className="card-title">configure your LLM</div>
                                 <div className="card-subtitle">
@@ -803,9 +823,9 @@ const result = await memwal.restore("${namespace || 'default'}")
                                 </div>
                             </div>
                         </div>
-                        {askLlmKey.trim() && (
-                            <span style={{ fontSize: '0.78rem', color: 'var(--success)', fontWeight: 500 }}>
-                                ✓ ready
+                        {hasLlmApiKey && (
+                            <span style={{ fontSize: '0.78rem', color: canUseLlmApiKey ? 'var(--success)' : 'var(--error)', fontWeight: 500 }}>
+                                {canUseLlmApiKey ? 'ready' : 'fix key'}
                             </span>
                         )}
                     </div>
@@ -835,6 +855,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         </div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                             required for steps 7–9. your key stays in this browser tab — never sent to Walrus Memory.
+                            {hasInvalidLlmApiKeyHeader ? ' Paste the raw key, not a shortened or rich-text value.' : ''}
                         </div>
                     </div>
 
@@ -849,7 +870,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                 </div>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: hasLlmApiKey ? 1 : 0.72, pointerEvents: hasLlmApiKey ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">7</div>
@@ -863,7 +884,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={runAsk}
-                            disabled={askLoading || !askLlmKey.trim()}
+                            disabled={askLoading || !hasLlmApiKey}
                             style={{ minWidth: 80 }}
                         >
                             {askLoading ? (
@@ -980,7 +1001,7 @@ const { text } = await generateText({
                 </div>
 
                 {/* Step 7: Remember (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: hasLlmApiKey ? 1 : 0.72, pointerEvents: hasLlmApiKey ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">8</div>
@@ -1065,7 +1086,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                 </div>
 
                 {/* Step 8: Recall (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
+                <div className="card demo-step" style={{ opacity: hasLlmApiKey ? 1 : 0.72, pointerEvents: hasLlmApiKey ? 'auto' : 'none' }}>
                     <div className="card-header">
                         <div className="demo-step-header-row">
                             <div className="demo-step-badge demo-step-badge--highlight">9</div>
