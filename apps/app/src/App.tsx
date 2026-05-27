@@ -25,6 +25,7 @@ import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
+import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -219,6 +220,11 @@ function AppContent() {
   )
 }
 
+function AnalyticsTracker() {
+  useRouteAnalytics()
+  return null
+}
+
 // ============================================================
 // Root App
 // ============================================================
@@ -226,6 +232,7 @@ function AppContent() {
 export default function App() {
   return (
     <BrowserRouter>
+      <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
         <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
           <RegisterEnokiWallets />
