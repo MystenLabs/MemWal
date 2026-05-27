@@ -94,7 +94,7 @@ class RecallMemory:
 
 @dataclass
 class RecallParams:
-    """Object-style input for :meth:`MemWal.recall` (WALM-53).
+    """Object-style input for :meth:`MemWal.recall`.
 
     Preferred over positional args because positional ``recall(query, limit,
     namespace)`` is easy to mis-read as ``recall(query, namespace)`` at call

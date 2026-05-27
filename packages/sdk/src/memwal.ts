@@ -479,7 +479,7 @@ export class MemWal {
      * Recall memories similar to a query — server handles:
      * verify → embed query → search → Walrus download → decrypt → return plaintext.
      *
-     * **Preferred call style** (WALM-53): pass a single `RecallParams` object
+     * **Preferred call style**: pass a single `RecallParams` object
      * so call sites read self-describingly:
      * ```ts
      * memwal.recall({ query: "food allergies", limit: 5, namespace: "profile" })
@@ -714,7 +714,7 @@ export class MemWal {
      * SEAL-decrypts them with the delegate key, re-embeds the plaintext,
      * and inserts a fresh vector row per blob.
      *
-     * **Response semantics** (WALM-53):
+     * **Response semantics**:
      * - `restored` — blobs that completed the full
      *   download → decrypt → embed → DB insert pipeline this call.
      * - `skipped` — on-chain blobs already in the local index (no work needed).

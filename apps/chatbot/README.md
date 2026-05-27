@@ -77,7 +77,7 @@ Your app template should now be running on [localhost:3000](http://localhost:300
 
 ## Next.js `"use server"` files: async functions only
 
-WALM-53 — when adding server actions to this app, **a `"use server"` file may only `export` async functions**. Next.js rejects any other top-level export (constants, types, interfaces, even `const` arrow functions returning a Promise) with `Only async functions are allowed to be exported from a "use server" file`.
+When adding server actions to this app, **a `"use server"` file may only `export` async functions**. Next.js rejects any other top-level export (constants, types, interfaces, even `const` arrow functions returning a Promise) with `Only async functions are allowed to be exported from a "use server" file`.
 
 Put shared **constants** and **type aliases** in a sibling module (e.g. `actions.types.ts`, `actions.constants.ts`) and `import` them into the action file. Imports are unrestricted; only *exports* are constrained.
 

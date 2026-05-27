@@ -279,7 +279,7 @@ class TestRecall:
     async def test_accepts_recall_params_object(
         self, memwal_client: MemWal
     ) -> None:
-        """WALM-53: recall(RecallParams(...)) sends the same request body as
+        """recall(RecallParams(...)) sends the same request body as
         the positional form, with query/limit/namespace pulled from the
         dataclass instead of positional args."""
         mock_seal_session_prereqs()

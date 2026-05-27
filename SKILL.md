@@ -362,7 +362,7 @@ Cross-namespace and cross-owner reads are not just filtered out of results — t
 
 #### Default and limit
 
-* `limit` defaults to `10` in both TypeScript and Python SDKs and matches the server-side default. The Python SDK historically defaulted to `50`; WALM-53 brings it back in line.
+* `limit` defaults to `10` in both TypeScript and Python SDKs and matches the server-side default. The Python SDK historically defaulted to `50`; it is now realigned with the server.
 * `limit` caps the **inspected** blob set, newest-first. It does not cap `restored` independently — if all 10 inspected blobs are already indexed, `restored = 0` and `skipped = 10`.
 * There is no enforced server-side maximum, but very large limits will dominate latency (see below).
 
@@ -568,7 +568,7 @@ Lifecycle hooks run automatically:
 
 ## Brand Terminology
 
-Until product confirms a canonical naming pass (tracked separately from WALM-53), these are the **working** assumptions reflected across this doc, the SDKs, and the relayer. Treat them as descriptive, not authoritative.
+Until product confirms a canonical naming pass, these are the **working** assumptions reflected across this doc, the SDKs, and the relayer. Treat them as descriptive, not authoritative.
 
 | Surface | Canonical term | Notes |
 |---|---|---|

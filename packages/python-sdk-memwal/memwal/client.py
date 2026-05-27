@@ -483,7 +483,7 @@ class MemWal:
 
         Server handles: verify -> embed query -> search -> Walrus download -> decrypt.
 
-        WALM-53 — **preferred call style** is to pass a :class:`RecallParams`
+        **Preferred call style** is to pass a :class:`RecallParams`
         object so the call site reads self-describingly:
 
             await client.recall(RecallParams(
@@ -661,7 +661,7 @@ class MemWal:
         SEAL-decrypts them with the delegate key, re-embeds the plaintext, and
         inserts a fresh vector row per blob.
 
-        WALM-53 — Response semantics:
+        Response semantics:
 
         * ``restored`` — blobs that completed the full
           download → decrypt → embed → DB insert pipeline this call.
@@ -1268,7 +1268,7 @@ class MemWalSync:
 
     def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
         """Synchronous version of :meth:`MemWal.restore`. Default limit is 10
-        (matches server + TypeScript SDK as of WALM-53)."""
+        (matches server + TypeScript SDK)."""
         return self._run(self._inner.restore(namespace, limit))
 
     def health(self) -> HealthResult:
