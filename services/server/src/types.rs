@@ -256,6 +256,10 @@ pub struct Config {
     /// Legacy/static confidential clients for hosted web app auth. Real dapps
     /// should use `/api/app-auth/clients`, which stores clients in Postgres.
     pub app_auth_clients: Vec<AppAuthClientConfig>,
+    /// Staging/demo only: allow unauthenticated third-party app client
+    /// registration. Production leaves this off and requires APP_AUTH_ADMIN_TOKEN
+    /// on `POST /api/app-auth/clients`.
+    pub app_auth_public_client_registration_enabled: bool,
     /// Optional operator token for hosted app-auth admin actions, such as
     /// blocking a dynamically registered client.
     pub app_auth_admin_token: Option<SecretBytes>,
@@ -340,6 +344,9 @@ impl Config {
             app_auth_clients: parse_app_auth_clients(
                 &network,
                 app_auth_enable_dev_localhost_wildcards,
+            ),
+            app_auth_public_client_registration_enabled: env_bool(
+                "APP_AUTH_PUBLIC_CLIENT_REGISTRATION_ENABLED",
             ),
             app_auth_admin_token: std::env::var("APP_AUTH_ADMIN_TOKEN")
                 .ok()

@@ -30,6 +30,8 @@ import { config } from '../config'
 type Step = 'loading' | 'consent' | 'registering' | 'redirecting' | 'error'
 type Provider = 'wallet' | 'google'
 
+const MAX_DELEGATE_KEYS = 20
+
 interface AppAuthSession {
     session_id: string
     client: {
@@ -56,6 +58,11 @@ function hexToBytes(hex: string): number[] {
         out.push(parseInt(clean.slice(i, i + 2), 16))
     }
     return out
+}
+
+function isAddDelegateAbort(err: unknown, abortCode: number): boolean {
+    const message = err instanceof Error ? err.message : String(err)
+    return message.includes(`abort code: ${abortCode}`) && message.includes('add_delegate_key')
 }
 
 async function resolveAccountId(
@@ -207,7 +214,24 @@ export default function ConnectApp() {
                 addTx.object('0x6'),
             ],
         })
-        const addResult = await signAndExecute({ transaction: addTx })
+        let addResult
+        try {
+            addResult = await signAndExecute({ transaction: addTx })
+        } catch (txErr) {
+            if (isAddDelegateAbort(txErr, 2)) {
+                throw new Error(
+                    `This Walrus Memory account already has the maximum number of delegate keys (${MAX_DELEGATE_KEYS}). ` +
+                    `Open the dashboard and revoke an unused key, then retry Connect App.`,
+                )
+            }
+            if (isAddDelegateAbort(txErr, 0)) {
+                throw new Error(
+                    `This wallet (${currentAccount.address.slice(0, 10)}...${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}...${accountId.slice(-6)}. ` +
+                    `Switch to the wallet that created this Walrus Memory account, then retry Connect App.`,
+                )
+            }
+            throw txErr
+        }
         await suiClient.waitForTransaction({ digest: addResult.digest })
         return { accountId, digest: addResult.digest }
     }, [currentAccount, session, signAndExecute, suiClient])

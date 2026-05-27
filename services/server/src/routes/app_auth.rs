@@ -206,29 +206,38 @@ struct AppAuthDelegateStore {
 /// Dynamic client registration for third-party backend apps.
 ///
 /// This replaces the "ask Walrus Memory operators to edit
-/// APP_AUTH_CLIENTS_JSON" path for real dapps. The returned `client_secret` is
-/// shown once and must be stored by the third-party backend, never in browser
-/// JavaScript.
+/// APP_AUTH_CLIENTS_JSON" path for real dapps, without making production
+/// registration anonymously mutable. Staging/demo can opt into public
+/// registration; production leaves it off and requires APP_AUTH_ADMIN_TOKEN on
+/// this endpoint. The returned `client_secret` is shown once and must be stored
+/// by the third-party backend, never in browser JavaScript.
 pub async fn app_auth_create_client(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AppAuthRegisterRequest>,
 ) -> Result<Json<AppAuthRegisterResponse>, AppError> {
-    create_app_auth_client(state, req).await
+    create_app_auth_client(headers, state, req).await
 }
 
 /// Backward-compatible alias for early demo deployments. New dapps should use
 /// `POST /api/app-auth/clients`.
 pub async fn app_auth_register(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AppAuthRegisterRequest>,
 ) -> Result<Json<AppAuthRegisterResponse>, AppError> {
-    create_app_auth_client(state, req).await
+    create_app_auth_client(headers, state, req).await
 }
 
 async fn create_app_auth_client(
+    headers: HeaderMap,
     state: Arc<AppState>,
     req: AppAuthRegisterRequest,
 ) -> Result<Json<AppAuthRegisterResponse>, AppError> {
+    if !state.config.app_auth_public_client_registration_enabled {
+        require_app_auth_admin(&headers, state.as_ref())?;
+    }
+
     let display_name = sanitize_client_display_name(&req.display_name)?;
     let allowed_redirect_uris = validate_registration_urls("redirect_uris", &req.redirect_uris)?;
 

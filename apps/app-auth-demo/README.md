@@ -36,6 +36,11 @@ APP_LABEL=Demo App
 
 `APP_BASE_URL` is required on Railway and other deployed hosts. It makes the demo generate public HTTPS callback/fallback URLs behind the platform proxy and marks the state cookie `Secure`.
 
+The relayer must also be configured for the intended scale:
+
+- Staging/dev demo: set `APP_AUTH_PUBLIC_CLIENT_REGISTRATION_ENABLED=true` on the relayer so this app can auto-register.
+- Production: leave public registration disabled. An operator creates the client with `Authorization: Bearer $APP_AUTH_ADMIN_TOKEN` and gives the `client_id` / one-time `client_secret` to the dapp developer.
+
 Railway service config is included at `apps/app-auth-demo/railway.json` and uses `apps/app-auth-demo/Dockerfile`. Set Railway Root Directory to the repo root (`/`) so the Dockerfile path resolves correctly.
 
 Google Console does not need every dApp callback URL. Google/Enoki auth is handled by Walrus Memory, so Google Console only needs Walrus Memory origins/callbacks such as `https://dev.memwal.ai` and `https://memwal.ai`.
@@ -58,9 +63,12 @@ curl -X POST "$MEMWAL_API_URL/api/app-auth/clients" \
   }'
 ```
 
-Store the returned `client_id` and `client_secret` in your backend env. The
-client is active immediately unless an operator later blocks it. Then send
-users to:
+For staging/dev, that request works when public registration is enabled on the
+relayer. For production, the same request must be made by a Walrus Memory
+operator with `Authorization: Bearer $APP_AUTH_ADMIN_TOKEN`; end users never
+create app clients. Store the returned `client_id` and `client_secret` in your
+backend env. The client is active immediately unless an operator later blocks
+it. Then send users to:
 
 ```txt
 https://dev.memwal.ai/connect/app?client_id=CLIENT_ID&redirect_uri=https%3A%2F%2Fmy-dapp.example.com%2Fapi%2Fmemwal%2Fcallback&state=RANDOM_STATE&label=My%20Dapp&intent=sdk_delegate&fallback_uri=https%3A%2F%2Fmy-dapp.example.com%2Fmemwal%2Ferror
