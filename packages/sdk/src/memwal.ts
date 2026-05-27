@@ -512,6 +512,12 @@ export class MemWal {
      * ```
      */
     async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`. Prefer the object form
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
+     */
     async recall(
         query: string,
         limitOrOptions?: number | RecallOptions,
