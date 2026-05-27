@@ -1,7 +1,13 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
 
 const ALERT_TO_SLACK_ENV: &str = "ALERT_TO_SLACK";
 const MAX_SLACK_ERROR_LEN: usize = 1_500;
+const WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_PACKAGE_UPGRADE_ALERT_DEDUP_SECS";
+const WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 
 /// Mirrors the `@mysten/walrus` dep version in
 /// `services/server/scripts/package.json`. Bump this constant in lockstep
@@ -9,9 +15,18 @@ const MAX_SLACK_ERROR_LEN: usize = 1_500;
 /// runtime version, not a stale label.
 pub const SIDECAR_WALRUS_DEP_VERSION: &str = "1.1.7";
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AlertManager {
     slack: Option<SlackNotifier>,
+    /// Suppresses Walrus package-upgrade alert spam during an upgrade burst.
+    /// Keyed by `(sui_network, sidecar_walrus_dep_version)` because that's
+    /// what makes two alerts "the same event" — concurrent queued jobs all
+    /// hit EWrongVersion against the same on-chain package change, so a
+    /// single notification per (network, dep) is enough until either the
+    /// dep bumps or enough time passes that this is plausibly a separate
+    /// upgrade event.
+    walrus_upgrade_dedup: Mutex<HashMap<(String, String), Instant>>,
+    walrus_upgrade_dedup_window: Duration,
 }
 
 impl AlertManager {
@@ -19,8 +34,18 @@ impl AlertManager {
         let slack = std::env::var(ALERT_TO_SLACK_ENV)
             .ok()
             .and_then(|raw| SlackNotifier::from_env_value(http_client, &raw));
+        let window = std::env::var(WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT);
 
-        Self { slack }
+        Self {
+            slack,
+            walrus_upgrade_dedup: Mutex::new(HashMap::new()),
+            walrus_upgrade_dedup_window: window,
+        }
     }
 
     pub fn slack_enabled(&self) -> bool {
@@ -45,8 +70,39 @@ impl AlertManager {
         let Some(slack) = &self.slack else {
             return Ok(());
         };
+        if self.suppress_walrus_upgrade_alert(&alert.sui_network, &alert.sidecar_walrus_dep_version)
+        {
+            return Ok(());
+        }
         let payload = SlackPayload::for_walrus_package_upgrade_detected(&alert);
         slack.send_payload(&payload).await
+    }
+
+    /// Returns `true` if a Walrus-upgrade alert with the same
+    /// (network, dep version) fired within the dedup window — caller should
+    /// drop the alert. Updates the entry to `now` on the *firing* path (i.e.
+    /// returns `false`), so the window slides from the most-recent fire.
+    fn suppress_walrus_upgrade_alert(&self, sui_network: &str, dep_version: &str) -> bool {
+        let key = (sui_network.to_string(), dep_version.to_string());
+        let now = Instant::now();
+        let mut guard = self.walrus_upgrade_dedup.lock().expect("dedup mutex poisoned");
+        // Opportunistic cleanup so the map can't grow without bound on a
+        // long-running relayer: drop entries older than 2× the window.
+        let cleanup_horizon = self.walrus_upgrade_dedup_window.saturating_mul(2);
+        guard.retain(|_, fired_at| {
+            now.checked_duration_since(*fired_at)
+                .map(|elapsed| elapsed < cleanup_horizon)
+                .unwrap_or(true)
+        });
+        if let Some(fired_at) = guard.get(&key) {
+            if let Some(elapsed) = now.checked_duration_since(*fired_at) {
+                if elapsed < self.walrus_upgrade_dedup_window {
+                    return true;
+                }
+            }
+        }
+        guard.insert(key, now);
+        false
     }
 }
 
@@ -410,5 +466,54 @@ mod tests {
         assert!(json.contains("..."));
         // total payload comfortably under twice the cap (header + metadata + body)
         assert!(json.len() < MAX_SLACK_ERROR_LEN * 3);
+    }
+
+    fn test_alert_manager_with_window(window: Duration) -> AlertManager {
+        AlertManager {
+            // No Slack notifier so we test the dedup gate in isolation —
+            // suppress_walrus_upgrade_alert is the unit we care about; the
+            // outer notify_* short-circuits on `slack=None` anyway.
+            slack: None,
+            walrus_upgrade_dedup: Mutex::new(HashMap::new()),
+            walrus_upgrade_dedup_window: window,
+        }
+    }
+
+    #[test]
+    fn walrus_upgrade_dedup_lets_first_alert_through() {
+        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+    }
+
+    #[test]
+    fn walrus_upgrade_dedup_suppresses_burst_within_window() {
+        // Concurrent queued jobs all hit EWrongVersion on the same upgrade —
+        // only the first one fires; the rest are suppressed.
+        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        for _ in 0..50 {
+            assert!(mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        }
+    }
+
+    #[test]
+    fn walrus_upgrade_dedup_separates_networks_and_dep_versions() {
+        // Mainnet vs testnet are independent events. A dep bump between
+        // upgrades also resets — we want to know about the next event.
+        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        assert!(!mgr.suppress_walrus_upgrade_alert("testnet", "1.1.7"));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.2.0"));
+        // …but a repeat on the same key is still suppressed.
+        assert!(mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+    }
+
+    #[test]
+    fn walrus_upgrade_dedup_re_fires_after_window_expires() {
+        // Very short window → immediately past it on the second call.
+        let mgr = test_alert_manager_with_window(Duration::from_millis(1));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
     }
 }
