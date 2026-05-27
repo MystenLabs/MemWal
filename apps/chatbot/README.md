@@ -74,3 +74,32 @@ pnpm dev
 ```
 
 Your app template should now be running on [localhost:3000](http://localhost:3000).
+
+## Next.js `"use server"` files: async functions only
+
+WALM-53 — when adding server actions to this app, **a `"use server"` file may only `export` async functions**. Next.js rejects any other top-level export (constants, types, interfaces, even `const` arrow functions returning a Promise) with `Only async functions are allowed to be exported from a "use server" file`.
+
+Put shared **constants** and **type aliases** in a sibling module (e.g. `actions.types.ts`, `actions.constants.ts`) and `import` them into the action file. Imports are unrestricted; only *exports* are constrained.
+
+Wrong:
+```ts
+// app/(chat)/actions.ts — fails the build
+"use server";
+export const RATE_LIMIT_MS = 5000;            // ❌ const
+export type ChatActionResult = { ok: true };  // ❌ type
+export async function sendMessage(...) {}     // ✅ ok
+```
+
+Right:
+```ts
+// app/(chat)/actions.constants.ts
+export const RATE_LIMIT_MS = 5000;
+export type ChatActionResult = { ok: true };
+
+// app/(chat)/actions.ts
+"use server";
+import { RATE_LIMIT_MS, type ChatActionResult } from "./actions.constants";
+export async function sendMessage(...): Promise<ChatActionResult> { ... }
+```
+
+The constraint exists because Next.js wraps every `"use server"` export in an RPC envelope; only functions have a runtime representation that survives the boundary.
