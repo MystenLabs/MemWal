@@ -17,10 +17,12 @@ import { ArrowRight, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, FileTex
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import bash from 'react-syntax-highlighter/dist/esm/languages/hljs/bash'
+import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
 import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -45,6 +47,7 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
+type QuickstartLanguage = 'ts' | 'py'
 
 function bytesToHex(bytes: Uint8Array | number[]): string {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -83,6 +86,7 @@ export default function Dashboard({
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
     const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
+    const [quickstartLanguage, setQuickstartLanguage] = useState<QuickstartLanguage>('ts')
 
     // Delegate key management state
     const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
@@ -368,7 +372,7 @@ export default function Dashboard({
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
 
-    const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
+    const sdkTypeScriptSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
@@ -383,6 +387,30 @@ await memwal.waitForRememberJob(job.job_id)
 // Recall memories
 const result = await memwal.recall("food allergies")
 console.log(result.results[0].text)`
+
+    const sdkPythonSnippet = `import asyncio
+import os
+from memwal import MemWal
+
+async def main():
+    memwal = MemWal.create(
+        key=os.environ["MEMWAL_PRIVATE_KEY"],
+        account_id=os.environ["MEMWAL_ACCOUNT_ID"],
+        server_url=os.environ.get("MEMWAL_SERVER_URL", "${config.memwalServerUrl}"),
+    )
+
+    await memwal.remember_and_wait("I'm allergic to peanuts")
+
+    result = await memwal.recall("food allergies")
+    print(result.results[0].text)
+
+    await memwal.close()
+
+asyncio.run(main())`
+
+    const sdkSnippet = quickstartLanguage === 'py' ? sdkPythonSnippet : sdkTypeScriptSnippet
+    const sdkSnippetLanguage = quickstartLanguage === 'py' ? 'python' : 'javascript'
+    const sdkCopyLabel = `sdk-${quickstartLanguage}`
 
     return (
         <div className="dash-page">
@@ -819,21 +847,31 @@ console.log(result.results[0].text)`
                             <div className="card-title">Quickstart — SDK</div>
                             <div className="card-subtitle">Use the Walrus Memory SDK to remember and recall</div>
                         </div>
-                        <span className="dashboard-quickstart-toggle" aria-hidden="true">
-                            <span className="dashboard-quickstart-toggle-active">py</span>
-                            <span>ts</span>
-                        </span>
+                        <div className="dashboard-quickstart-toggle" role="tablist" aria-label="SDK language">
+                            {(['ts', 'py'] as const).map((language) => (
+                                <button
+                                    key={language}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={quickstartLanguage === language}
+                                    className={quickstartLanguage === language ? 'dashboard-quickstart-toggle-active' : ''}
+                                    onClick={() => setQuickstartLanguage(language)}
+                                >
+                                    {language}
+                                </button>
+                            ))}
+                        </div>
                     </div>
                     <div className="dashboard-quickstart-codewrap">
                         <button
                             className="btn btn-secondary btn-sm dashboard-quickstart-copy"
-                            onClick={() => copyToClipboard(sdkSnippet, 'sdk')}
+                            onClick={() => copyToClipboard(sdkSnippet, sdkCopyLabel)}
                             aria-label="Copy SDK snippet"
                         >
                             <Copy size={14} />
-                            <span className="dashboard-quickstart-copy-label">{copied === 'sdk' ? 'done' : 'copy'}</span>
+                            <span className="dashboard-quickstart-copy-label">{copied === sdkCopyLabel ? 'done' : 'copy'}</span>
                         </button>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
+                        <SyntaxHighlighter language={sdkSnippetLanguage} style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
                             {sdkSnippet}
                         </SyntaxHighlighter>
                     </div>

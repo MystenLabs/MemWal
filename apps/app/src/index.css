@@ -2535,15 +2535,32 @@ h1, h2, h3 {
   letter-spacing: 0.05em;
 }
 
+.dashboard-quickstart-toggle > button,
 .dashboard-quickstart-toggle > span {
   display: inline-grid;
   place-items: center;
   height: 100%;
   padding: 0 14px;
+  border: 0;
   border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: uppercase;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.dashboard-quickstart-toggle > button:hover {
+  color: var(--dash-text);
 }
 
 .dashboard-quickstart-toggle-active {
+  background: var(--dash-paper);
+  color: var(--dash-bg) !important;
+}
+
+.dashboard-quickstart-toggle > button.dashboard-quickstart-toggle-active {
   background: var(--dash-paper);
   color: var(--dash-bg) !important;
 }
