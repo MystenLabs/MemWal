@@ -2959,6 +2959,9 @@ h1, h2, h3 {
   width: 1908px;
   max-width: none;
   height: 1406px;
+  background:
+    url('/walrus-memory-aurora-r-layer.png') center / 100% 100% no-repeat,
+    url('/walrus-memory-aurora-snake.png') center / 100% 100% no-repeat;
   transform: translateX(-50%);
   pointer-events: none;
   user-select: none;
