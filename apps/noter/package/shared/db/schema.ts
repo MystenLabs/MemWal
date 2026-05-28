@@ -179,6 +179,27 @@ export const walletSessions = pgTable(
 );
 
 // ════════════════════════════════════════════════════════════════
+// WALLET CHALLENGES (one-time nonces for replay protection)
+// ════════════════════════════════════════════════════════════════
+
+export const walletChallenges = pgTable(
+  "wallet_challenges",
+  {
+    id: uuid()
+      .primaryKey()
+      .$defaultFn(() => uuidv7()),
+    createdAt: timestamp().defaultNow().notNull(),
+
+    // Server-generated random nonce
+    nonce: text().notNull(),
+
+    // Challenge expiration (5 minutes)
+    expiresAt: timestamp().notNull(),
+  },
+  (t) => [index().on(t.expiresAt)]
+);
+
+// ════════════════════════════════════════════════════════════════
 // NOTES (Apple Notes / Notion-like)
 // ════════════════════════════════════════════════════════════════
 

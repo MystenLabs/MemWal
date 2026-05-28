@@ -69,7 +69,7 @@ export const OAUTH_SCOPES = {
 export const STORAGE_KEYS = {
   ephemeralPrivateKey: "zklogin:ephemeral:private",
   ephemeralPublicKey: "zklogin:ephemeral:public",
-  sessionId: "zklogin:session:id",
+  sessionId: "auth:session:id",
   nonce: "zklogin:nonce",
   maxEpoch: "zklogin:maxEpoch",
   randomness: "zklogin:randomness",
