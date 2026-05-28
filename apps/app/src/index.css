@@ -2938,7 +2938,18 @@ h1, h2, h3 {
 }
 
 .wm-hero::before {
-  content: none;
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: -41px;
+  left: 50%;
+  width: 1908px;
+  height: 1406px;
+  background:
+    url('/walrus-memory-aurora-r-layer.png') center / 100% 100% no-repeat,
+    url('/walrus-memory-aurora-snake.png') center / 100% 100% no-repeat;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 .wm-hero::after {
