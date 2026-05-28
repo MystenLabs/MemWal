@@ -12,8 +12,7 @@ Access: github.com/snap-research/locomo/data/locomo10.json
     4 = open_domain
     5 = adversarial
 
-This is the benchmark Mem0 used in their paper — running it gives
-direct comparability against their published J-scores.
+This benchmark gives direct comparability against published J-scores.
 
 Format:
     [
@@ -69,8 +68,8 @@ class LocomoBenchmark(BenchmarkAdapter):
     def build_ingest_text(self, conversation):
         # EXPLICIT CHOICE: per-turn chunking.
         # Matches how the Walrus Memory SDK wrapper (withMemWal) drives /api/analyze
-        # in production — one call per user message — and how Mem0 runs its
-        # own LOCOMO evaluation (turn-by-turn replay). The prior session-
+        # in production — one call per user message — and the published
+        # LOCOMO evaluation style (turn-by-turn replay). The prior session-
         # concat approach produced a 53% "no info" rate because dumping
         # 17-23 turns into a single extract call overwhelmed the extractor.
         # LOCOMO text already includes the speaker name prefix

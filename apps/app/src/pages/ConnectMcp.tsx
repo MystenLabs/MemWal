@@ -26,7 +26,7 @@
  *   - localhost callback unreachable → keep success on-chain anyway, ask user
  *     to manually copy creds (rare — only if the MCP listener died).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     ConnectModal,
     useCurrentAccount,
@@ -36,6 +36,8 @@ import { Transaction } from '@mysten/sui/transactions'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { getMoveFields, type DynamicFieldObjectFields, type RegistryObjectFields } from '../utils/suiFields'
 import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step =
@@ -64,20 +66,16 @@ async function resolveAccountId(
             id: config.memwalRegistryId,
             options: { showContent: true },
         })
-        if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-            const fields = registryObj.data.content.fields as any
+        const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
+        if (fields) {
             const tableId = fields?.accounts?.fields?.id?.id
             if (tableId) {
                 const dynField = await suiClient.getDynamicFieldObject({
                     parentId: tableId,
                     name: { type: 'address', value: ownerAddress },
                 })
-                if (
-                    dynField?.data?.content &&
-                    'fields' in dynField.data.content
-                ) {
-                    return (dynField.data.content.fields as any).value as string
-                }
+                const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
+                if (dynFields?.value) return dynFields.value
             }
         }
     } catch {
@@ -120,6 +118,7 @@ export default function ConnectMcp() {
     const [walletPickerOpen, setWalletPickerOpen] = useState(false)
     const [callbackPayload, setCallbackPayload] = useState<McpCallbackPayload | null>(null)
     const [callbackDelivered, setCallbackDelivered] = useState<boolean | null>(null)
+    const invalidRequestTrackedRef = useRef(false)
 
     // Validate query string up-front.
     const paramsValid = useMemo(() => {
@@ -138,7 +137,7 @@ export default function ConnectMcp() {
     }, [port, publicKey, delegateAddress, state])
 
     const postCallback = useCallback(
-        async (payload: McpCallbackPayload) => {
+        async (payload: McpCallbackPayload): Promise<boolean> => {
             try {
                 const res = await fetch(`http://127.0.0.1:${port}/callback`, {
                     method: 'POST',
@@ -146,8 +145,10 @@ export default function ConnectMcp() {
                     body: JSON.stringify(payload),
                 })
                 setCallbackDelivered(res.ok)
+                return res.ok
             } catch {
                 setCallbackDelivered(false)
+                return false
             }
         },
         [port],
@@ -155,20 +156,24 @@ export default function ConnectMcp() {
 
     const handleConnect = useCallback(async () => {
         if (!paramsValid) {
+            trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
             setErrorMsg('Invalid query parameters from MCP client.')
             setStep('error')
             return
         }
         if (!currentAccount) {
+            trackEvent('mcp_connect_start', { wallet_connected: false })
             setWalletPickerOpen(true)
             return
         }
 
+        trackEvent('mcp_connect_start', { wallet_connected: true })
         setStep('signing')
         try {
             // Resolve the user's Walrus Memory account object.
             const accountId = await resolveAccountId(suiClient, currentAccount.address)
             if (!accountId) {
+                trackEvent('mcp_connect_failed', { error_type: 'no_account' })
                 setStep('no-account')
                 return
             }
@@ -196,6 +201,7 @@ export default function ConnectMcp() {
                         `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
                         `Switch your wallet to the account that originally created this Walrus Memory account, OR run /setup to create a new Walrus Memory account for the current wallet.`
                     )
+                    trackEvent('mcp_connect_failed', { error_type: 'owner_mismatch' })
                     setStep('error')
                     return
                 }
@@ -203,6 +209,7 @@ export default function ConnectMcp() {
                     setErrorMsg(
                         `This Walrus Memory account already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
                     )
+                    trackEvent('mcp_connect_failed', { error_type: 'max_delegate_keys' })
                     setStep('error')
                     return
                 }
@@ -220,11 +227,13 @@ export default function ConnectMcp() {
             }
             setCallbackPayload(payload)
             setStep('callback')
-            await postCallback(payload)
+            const delivered = await postCallback(payload)
             setStep('success')
+            trackEvent('mcp_connect_complete', { callback_delivered: delivered })
         } catch (err) {
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('error')
+            trackEvent('mcp_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
     }, [
         paramsValid,
@@ -237,6 +246,12 @@ export default function ConnectMcp() {
         state,
         postCallback,
     ])
+
+    useEffect(() => {
+        if (paramsValid || invalidRequestTrackedRef.current) return
+        invalidRequestTrackedRef.current = true
+        trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
+    }, [paramsValid])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
     useEffect(() => {
@@ -318,7 +333,11 @@ export default function ConnectMcp() {
                             through the one-time setup, then come back here.
                         </p>
                         <p>
-                            <Link to="/setup" style={primaryButton}>
+                            <Link
+                                to="/setup"
+                                style={primaryButton}
+                                onClick={() => trackEvent('cta_click', { cta: 'mcp_create_account', location: 'connect_mcp' })}
+                            >
                                 Create account
                             </Link>
                         </p>
@@ -333,6 +352,7 @@ export default function ConnectMcp() {
                             <button
                                 style={primaryButton}
                                 onClick={() => {
+                                    trackEvent('cta_click', { cta: 'mcp_retry', location: 'connect_mcp' })
                                     setErrorMsg('')
                                     setStep('consent')
                                 }}
@@ -445,7 +465,11 @@ function SuccessCard({
                 </dd>
             </dl>
             <p>
-                <Link to="/dashboard" style={primaryButton}>
+                <Link
+                    to="/dashboard"
+                    style={primaryButton}
+                    onClick={() => trackEvent('cta_click', { cta: 'mcp_success_dashboard', location: 'connect_mcp' })}
+                >
                     Go to dashboard
                 </Link>
             </p>

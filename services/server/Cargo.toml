@@ -22,7 +22,7 @@ hex = "0.4"
 # SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
 # (no Rust crypto deps needed)
 
-# Background job queue — persistent metadata+transfer tasks (ENG-1406)
+# Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }
 apalis-sql = { version = "0.7", features = ["postgres", "migrate"] }
 

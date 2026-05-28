@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * bench-recall-latency.ts — ENG-1405
+ * bench-recall-latency.ts
  *
  * End-to-end latency benchmark for public memory APIs.
  * Measures POST /api/remember write latency and POST /api/recall cold/warm read latency.
@@ -70,7 +70,7 @@ interface Args {
 
 function printHelp(): void {
   console.log(`
-bench-recall-latency.ts — ENG-1405: remember + recall latency benchmark
+bench-recall-latency.ts — remember + recall latency benchmark
 
 Usage:
   npx tsx bench-recall-latency.ts [options]
@@ -414,7 +414,7 @@ function printBatchTable(batches: BatchResult[], col: boolean): void {
 
 function buildMarkdown(batches: BatchResult[]): string {
   const lines = [
-    "## Walrus Memory Live Benchmark — ENG-1405",
+    "## Walrus Memory Live Benchmark",
     "",
     "| phase | endpoint | runs | p50 | p95 | p99 | mean | min | max | fail% |",
     "|-------|----------|------|-----|-----|-----|------|-----|-----|-------|",
@@ -438,7 +438,7 @@ async function main(): Promise<void> {
   const args = parseArgs();
   const col = args.color && process.stdout.isTTY;
 
-  console.log(color(col, C.bold, "\n⚡ memwal-live-benchmark — ENG-1405\n"));
+  console.log(color(col, C.bold, "\n⚡ memwal-live-benchmark\n"));
   console.log(`  server:        ${args.serverUrl}`);
   console.log(`  namespace:     ${args.namespace}`);
   console.log(`  limit:         ${args.limit}`);

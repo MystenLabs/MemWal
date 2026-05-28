@@ -29,7 +29,7 @@ const memwal = MemWal.create({
 
 const job = await memwal.remember(rememberText);
 await memwal.waitForRememberJob(job.job_id);
-await memwal.recall(recallQuery, 5);
+await memwal.recall({ query: recallQuery, limit: 5 });
 await memwal.analyze(analyzeText);
 ```
 
@@ -80,7 +80,7 @@ const fullText =
 
 const job = await memwal.remember(fullText);
 await memwal.waitForRememberJob(job.job_id);
-const { results } = await memwal.recall(query, 5);
+const { results } = await memwal.recall({ query, limit: 5 });
 ```
 
 This app shows long-form research memory and session rehydration. Researcher saves each sprint as a structured report in MemWal, then generates recall queries from sprint metadata, pulls back the most relevant findings, and rebuilds context for a fresh session.

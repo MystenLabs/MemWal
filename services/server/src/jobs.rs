@@ -19,6 +19,9 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
+use crate::alerts::{
+    SIDECAR_WALRUS_DEP_VERSION, WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+};
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
@@ -40,10 +43,10 @@ pub enum WalletOperation {
         encrypted_b64: String,
         /// Pre-computed embedding vector (1536-dim).
         vector: Vec<f32>,
-        /// MEM-54: per-fact importance set at extraction time. Persisted
+        /// per-fact importance set at extraction time. Persisted
         /// on `vector_entries.importance` after Walrus upload completes.
         /// `#[serde(default = "default_importance")]` so legacy job rows
-        /// enqueued before MEM-54 land at the neutral "standard" bucket
+        /// land at the neutral "standard" bucket
         /// rather than failing deserialisation.
         #[serde(default = "default_importance")]
         importance: f32,
@@ -87,9 +90,9 @@ pub enum WalletOperation {
         /// Encrypted blob size to record with the vector row.
         #[serde(default)]
         blob_size_bytes: Option<i64>,
-        /// MEM-54: per-fact importance score, indexed alongside the vector
+        /// per-fact importance score, indexed alongside the vector
         /// when this recovery job finalises the upload. Defaulted to
-        /// `IMPORTANCE_STANDARD` so legacy / pre-MEM-54 rows degrade to the
+        /// `IMPORTANCE_STANDARD` so legacy rows degrade to the
         /// neutral bucket rather than failing deserialisation.
         #[serde(default = "default_importance")]
         importance: f32,
@@ -105,7 +108,7 @@ pub enum WalletOperation {
         blob_id: String,
         vector: Vec<f32>,
         blob_size_bytes: i64,
-        /// MEM-54: same as on `UploadAndTransfer` — persisted on the
+        /// same as on `UploadAndTransfer` — persisted on the
         /// `vector_entries.importance` column. Defaulted to
         /// `IMPORTANCE_STANDARD` for backwards compatibility with in-flight
         /// recovery jobs enqueued before this field existed.
@@ -119,7 +122,7 @@ fn default_epochs() -> u32 {
     configured_walrus_storage_epochs(&network)
 }
 
-/// MEM-54: serde default for `WalletOperation::UploadAndTransfer.importance`
+/// serde default for `WalletOperation::UploadAndTransfer.importance`
 /// so legacy job rows enqueued before this field existed degrade to the
 /// neutral "standard" bucket on dequeue.
 fn default_importance() -> f32 {
@@ -332,17 +335,53 @@ pub async fn execute_meta_transfer(
 }
 
 // ============================================================
-// Retry policy (Tower middleware)
+// Retry constants
 // ============================================================
 
 /// Maximum number of attempts (1 initial + N-1 retries).
 #[allow(dead_code)]
-pub const MAX_ATTEMPTS: u32 = 3;
+pub const MAX_ATTEMPTS: u32 = 5;
 
-/// Exponential back-off: attempt 1→2s, 2→4s, 3→8s.
+/// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
 #[allow(dead_code)]
 pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
+}
+
+pub(crate) fn wallet_job_request(
+    job: WalletJob,
+) -> Request<WalletJob, apalis_sql::context::SqlContext> {
+    let mut context = apalis_sql::context::SqlContext::new();
+    context.set_max_attempts(MAX_ATTEMPTS as i32);
+    Request::new_with_ctx(job, context)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WalletJobAttemptInfo {
+    current: usize,
+    max: usize,
+}
+
+impl WalletJobAttemptInfo {
+    fn exhausted_by(&self, error: &WalletJobError) -> bool {
+        !error.is_permanent() && self.current >= self.max
+    }
+}
+
+impl FromRequest<Request<WalletJob, apalis_sql::context::SqlContext>> for WalletJobAttemptInfo {
+    fn from_request(
+        req: &Request<WalletJob, apalis_sql::context::SqlContext>,
+    ) -> Result<Self, Error> {
+        let mut max =
+            usize::try_from(req.parts.context.max_attempts()).unwrap_or(MAX_ATTEMPTS as usize);
+        if max == 0 {
+            max = MAX_ATTEMPTS as usize;
+        }
+        Ok(Self {
+            current: req.parts.attempt.current(),
+            max,
+        })
+    }
 }
 
 // ============================================================
@@ -355,7 +394,11 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
 /// queue. Upload jobs select a fresh wallet index at execution time; legacy
 /// metadata-transfer jobs keep their pinned wallet because the blob object is
 /// owned by the wallet that registered/certified it.
-pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Result<(), Error> {
+pub(crate) async fn execute_wallet_job(
+    job: WalletJob,
+    ctx: Data<Arc<AppState>>,
+    attempt_info: WalletJobAttemptInfo,
+) -> Result<(), Error> {
     let state: &AppState = &ctx;
     let enqueued_wallet_index = job.wallet_index;
 
@@ -400,6 +443,7 @@ pub async fn execute_wallet_job(job: WalletJob, ctx: Data<Arc<AppState>>) -> Res
                 agent_public_key,
                 remember_job_id,
                 epochs,
+                attempt_info,
             )
             .await
         }
@@ -654,7 +698,7 @@ async fn enqueue_finalize_uploaded_blob(
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
-        .push(WalletJob {
+        .push_request(wallet_job_request(WalletJob {
             wallet_index,
             operation: WalletOperation::FinalizeUploadedBlob {
                 owner,
@@ -665,7 +709,7 @@ async fn enqueue_finalize_uploaded_blob(
                 blob_size_bytes,
                 importance,
             },
-        })
+        }))
         .await
         .map_err(|e| {
             WalletJobError::Transient(format!(
@@ -693,6 +737,7 @@ async fn execute_upload_and_transfer(
     agent_public_key: Option<String>,
     remember_job_id: Option<String>,
     epochs: u32,
+    attempt_info: WalletJobAttemptInfo,
 ) -> Result<(), WalletJobError> {
     // ── Mark running ───────────────────────────────────────────
     if let Some(ref jid) = remember_job_id {
@@ -779,7 +824,7 @@ async fn execute_upload_and_transfer(
             let recovery_remember_job_id = remember_job_id.clone();
             let mut storage = state.wallet_storage.clone();
             if let Err(e) = storage
-                .push(WalletJob {
+                .push_request(wallet_job_request(WalletJob {
                     wallet_index,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
@@ -793,7 +838,7 @@ async fn execute_upload_and_transfer(
                         blob_size_bytes: Some(encrypted.len() as i64),
                         importance,
                     },
-                })
+                }))
                 .await
             {
                 let classified = classify_wallet_remember_handoff_failure(
@@ -821,6 +866,25 @@ async fn execute_upload_and_transfer(
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
             let classified = WalletJobError::classify_sidecar_error(&msg);
+            maybe_alert_walrus_package_upgrade_detected(
+                state,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
+            maybe_alert_walrus_upload_exhausted(
+                state,
+                &classified,
+                attempt_info,
+                remember_job_id.as_deref(),
+                &owner,
+                &namespace,
+                wallet_index,
+                &msg,
+            )
+            .await;
             update_remember_job_after_wallet_error(
                 state,
                 remember_job_id.as_deref(),
@@ -866,6 +930,93 @@ async fn execute_upload_and_transfer(
         wallet_index,
     )
     .await
+}
+
+/// Mirrors the TS sidecar's `isWalrusPackageVersionMismatch` detector. We
+/// recheck the pattern on the Rust side so we can fire a one-shot informational
+/// Slack alert when the sidecar surfaces an EWrongVersion MoveAbort, without
+/// having to plumb a structured signal back from the subprocess.
+///
+/// Anchor: requires the literal `MoveAbort` token alongside either the
+/// `::system::inner_mut` function-path fragment (cross-transport stable, since
+/// the package component is always a numeric address) OR the symbolic
+/// `EWrongVersion` (only present on gRPC/GraphQL clients). See
+/// `services/server/scripts/walrus-error-detection.ts` for the same pattern.
+fn is_walrus_package_version_mismatch(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    if !lower.contains("moveabort") && !lower.contains("move abort") {
+        return false;
+    }
+    lower.contains("::system::inner_mut") || lower.contains("ewrongversion")
+}
+
+async fn maybe_alert_walrus_package_upgrade_detected(
+    state: &AppState,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    msg: &str,
+) {
+    if !is_walrus_package_version_mismatch(msg) {
+        return;
+    }
+
+    let alert = WalrusPackageUpgradeDetectedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        sidecar_walrus_dep_version: SIDECAR_WALRUS_DEP_VERSION.to_string(),
+        on_chain_version_before: None,
+        on_chain_version_after: None,
+        action_taken: "Sidecar refreshed cached @mysten/walrus client; Apalis will retry against the new package metadata.".to_string(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state
+        .alerts
+        .notify_walrus_package_upgrade_detected(alert)
+        .await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for Walrus package upgrade detected: {}",
+            err
+        );
+    }
+}
+
+async fn maybe_alert_walrus_upload_exhausted(
+    state: &AppState,
+    error: &WalletJobError,
+    attempt_info: WalletJobAttemptInfo,
+    remember_job_id: Option<&str>,
+    owner: &str,
+    namespace: &str,
+    wallet_index: usize,
+    msg: &str,
+) {
+    if !attempt_info.exhausted_by(error) {
+        return;
+    }
+
+    let alert = WalrusUploadExhaustedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.to_string(),
+        namespace: namespace.to_string(),
+        attempt: attempt_info.current,
+        max_attempts: attempt_info.max,
+        wallet_index,
+        configured_wallets: state.key_pool.len(),
+        sui_network: state.config.sui_network.clone(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state.alerts.notify_walrus_upload_exhausted(alert).await {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for exhausted Walrus upload retries: {}",
+            err
+        );
+    }
 }
 
 // ============================================================
@@ -919,6 +1070,16 @@ impl WalletJobError {
         {
             return WalletJobError::Transient(msg.to_string());
         }
+        // Walrus on-chain package upgrade — the cached @mysten/walrus client
+        // carries stale package metadata until refreshed. The sidecar already
+        // recreates the client on this error; classifying Transient lets
+        // Apalis retry against the refreshed client instead of Dead-marking
+        // a job that the next attempt will succeed on.
+        if (lower.contains("moveabort") || lower.contains("move abort"))
+            && (lower.contains("::system::inner_mut") || lower.contains("ewrongversion"))
+        {
+            return WalletJobError::Transient(msg.to_string());
+        }
         if lower.contains("moveabort") || lower.contains("move abort") {
             return WalletJobError::Permanent(msg.to_string());
         }
@@ -956,7 +1117,7 @@ impl std::fmt::Display for WalletJobError {
 impl std::error::Error for WalletJobError {}
 
 // ============================================================
-// RememberJob — full async pipeline (ENG-1406 v3)
+// RememberJob — full async pipeline
 // ============================================================
 
 /// Payload for the full async remember pipeline stored in `apalis_jobs`.
@@ -1093,7 +1254,7 @@ pub async fn execute_remember(
 
             let mut storage = state.wallet_storage.clone();
             if let Err(e) = storage
-                .push(WalletJob {
+                .push_request(wallet_job_request(WalletJob {
                     wallet_index: key_index,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
@@ -1105,14 +1266,14 @@ pub async fn execute_remember(
                         blob_id: Some(blob_id.clone()),
                         vector: Some(job.vector.clone()),
                         blob_size_bytes: Some(encrypted.len() as i64),
-                        // MEM-54: legacy RememberJob payload predates the
+                        // legacy RememberJob payload predates the
                         // importance field. Drain the queue at the neutral
                         // "standard" bucket; new requests go through
                         // WalletOperation::UploadAndTransfer which carries
                         // importance through end-to-end.
                         importance: crate::services::extractor::IMPORTANCE_STANDARD,
                     },
-                })
+                }))
                 .await
             {
                 let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
@@ -1129,7 +1290,31 @@ pub async fn execute_remember(
             );
             return Ok(());
         }
-        Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
+        Err(UploadBlobError::App(e)) => {
+            let msg = format!("walrus upload failed: {}", e);
+            // EWrongVersion is transient: the sidecar's catch path refreshes
+            // the cached @mysten/walrus client before bubbling this error up,
+            // so the next Apalis attempt sees fresh package metadata. We must
+            // not write `status='failed'` here — that would make the row read
+            // as terminal even though the upload is about to succeed on retry.
+            if is_walrus_package_version_mismatch(&msg) {
+                maybe_alert_walrus_package_upgrade_detected(
+                    state,
+                    Some(&job.job_id),
+                    Some(&job.owner),
+                    Some(&job.namespace),
+                    &msg,
+                )
+                .await;
+                tracing::warn!(
+                    "[remember-job] walrus package upgrade detected, returning Err for Apalis retry job_id={} msg={}",
+                    job.job_id,
+                    msg
+                );
+                return Err(RememberJobError::Internal(msg));
+            }
+            fail!(msg);
+        }
     };
     let blob_id = upload.blob_id.clone();
 
@@ -1147,7 +1332,7 @@ pub async fn execute_remember(
             &blob_id,
             &job.vector,
             blob_size,
-            // MEM-54: legacy RememberJob payload predates the importance
+            // legacy RememberJob payload predates the importance
             // field. Drains the queue at the neutral "standard" bucket;
             // new requests go through WalletOperation::UploadAndTransfer
             // which carries importance through end-to-end.
@@ -1178,7 +1363,7 @@ pub async fn execute_remember(
 }
 
 // ============================================================
-// BulkRememberJob — ENG-1408
+// BulkRememberJob
 //
 // Fans a preprocessed bulk request out into per-item wallet jobs.
 // ============================================================
@@ -1195,7 +1380,7 @@ pub struct BulkRememberItem {
     pub namespace: String,
     /// Wallet index assigned at enqueue time.
     pub wallet_index: usize,
-    /// MEM-54: per-item importance score (defaults to "standard" 0.5 when
+    /// per-item importance score (defaults to "standard" 0.5 when
     /// the bulk-remember route doesn't run extraction — e.g. SDK passes
     /// pre-formed memories). `#[serde(default)]` so legacy bulk job rows
     /// drain cleanly at the neutral default.
@@ -1241,7 +1426,7 @@ impl std::error::Error for BulkRememberError {}
 // execute_bulk_remember — Apalis handler
 // ─────────────────────────────────────────────────────────────
 
-/// Apalis worker handler for BulkRememberJob (ENG-1408).
+/// Apalis worker handler for BulkRememberJob.
 ///
 /// The bulk worker intentionally does not perform wallet work itself. It fans
 /// out already-prepared items into the shared WalletJob queue so single-item
@@ -1272,7 +1457,7 @@ pub async fn execute_bulk_remember(
         let namespace = item.namespace.clone();
         let wallet_index = item.wallet_index;
         storage
-            .push(WalletJob {
+            .push_request(wallet_job_request(WalletJob {
                 wallet_index,
                 operation: WalletOperation::UploadAndTransfer {
                     encrypted_b64: item.encrypted_b64,
@@ -1285,7 +1470,7 @@ pub async fn execute_bulk_remember(
                     remember_job_id: Some(job_id.clone()),
                     epochs: job.epochs,
                 },
-            })
+            }))
             .await
             .map_err(|e| {
                 BulkRememberError::Internal(format!(
@@ -1314,7 +1499,9 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, mark_remember_job_failed, WalletJobError,
+        classify_wallet_remember_handoff_failure, is_walrus_package_version_mismatch,
+        mark_remember_job_failed, wallet_job_request, WalletJob, WalletJobAttemptInfo,
+        WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -1389,6 +1576,68 @@ mod tests {
     }
 
     #[test]
+    fn classify_walrus_version_mismatch_as_transient() {
+        // The sidecar refreshes the cached @mysten/walrus client on EWrongVersion;
+        // Apalis must retry against the refreshed client instead of marking Dead.
+        for msg in [
+            // JSON-RPC production format (common): only "abort code: 1", no symbolic name
+            "walrus upload failed: MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut' (instruction 0)",
+            // gRPC/GraphQL: symbolic EWrongVersion
+            "walrus upload failed: MoveAbort in 1st command, 'EWrongVersion': 1, in '0xc1b6::system::inner_mut' (line 42)",
+            // Defensive: lowercase + only symbolic name
+            "moveabort ewrongversion",
+        ] {
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected transient for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_non_walrus_moveabort_stays_permanent() {
+        // The walrus-specific carve-out must NOT widen — other modules' MoveAborts
+        // still classify Permanent (the existing contract for non-retryable errors).
+        for msg in [
+            // generic move abort with no walrus-specific anchors
+            "MoveAbort in 1st command, abort code: 5, in '0x2::coin::join' (instruction 0)",
+            "MoveAbort(MoveLocation { module: 0x3::foo }, 1)",
+        ] {
+            assert!(
+                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected permanent for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn walrus_version_mismatch_detector_pattern() {
+        // Mirrors the sidecar's isWalrusPackageVersionMismatch; keep both in sync.
+        assert!(is_walrus_package_version_mismatch(
+            "MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut'"
+        ));
+        assert!(is_walrus_package_version_mismatch(
+            "MoveAbort 'EWrongVersion': 1"
+        ));
+        // Lowercase / case-insensitive matching
+        assert!(is_walrus_package_version_mismatch(
+            "moveabort ewrongversion"
+        ));
+        // Anchors required — bare tokens alone don't match
+        assert!(!is_walrus_package_version_mismatch("EWrongVersion"));
+        assert!(!is_walrus_package_version_mismatch(
+            "::system::inner_mut without context"
+        ));
+        // Balance-split MoveAbort (the existing handler's domain) does not match
+        assert!(!is_walrus_package_version_mismatch(
+            "MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\"split\") }, 2)"
+        ));
+        assert!(!is_walrus_package_version_mismatch(""));
+    }
+
+    #[test]
     fn classify_network_errors_as_transient() {
         for msg in [
             "sidecar timeout",
@@ -1423,6 +1672,37 @@ mod tests {
     fn transient_errors_remain_retryable() {
         let error = WalletJobError::Transient("timeout".to_string()).into_apalis_error();
         assert!(matches!(error, apalis::prelude::Error::Failed(_)));
+    }
+
+    #[test]
+    fn alert_gate_only_opens_on_final_transient_attempt() {
+        let transient = WalletJobError::Transient("timeout".to_string());
+        assert!(!WalletJobAttemptInfo { current: 4, max: 5 }.exhausted_by(&transient));
+        assert!(WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&transient));
+    }
+
+    #[test]
+    fn alert_gate_stays_closed_for_permanent_errors() {
+        let permanent = WalletJobError::Permanent("move abort".to_string());
+        assert!(!WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&permanent));
+    }
+
+    #[test]
+    fn wallet_job_request_sets_explicit_max_attempts() {
+        let req = wallet_job_request(WalletJob {
+            wallet_index: 0,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner: "0xowner".to_string(),
+                namespace: "default".to_string(),
+                remember_job_id: None,
+                blob_id: "blob".to_string(),
+                vector: vec![],
+                blob_size_bytes: 0,
+                importance: crate::services::extractor::IMPORTANCE_STANDARD,
+            },
+        });
+
+        assert_eq!(req.parts.context.max_attempts(), MAX_ATTEMPTS as i32);
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 //! `/api/recall` + `/api/recall/manual` handlers, plus the recall
-//! query-embedding cache (Redis, ENG-1405).
+//! query-embedding cache (Redis).
 //!
 //! `recall`: embed the query (cached) → vector search → hydrate the hits
 //! through the storage engine (cache → Walrus → batched SEAL decrypt),
@@ -30,7 +30,7 @@ fn recall_embedding_cache_key(config: &Config, query: &str) -> String {
     format!("memwal:embedding:v1:{:x}", hasher.finalize())
 }
 
-/// Embed a recall query, with a Redis cache (ENG-1405) keyed on
+/// Embed a recall query, with a Redis cache keyed on
 /// api_base + model + query. Cache miss / disabled (ttl 0) falls through
 /// to `state.embedder.embed`. Cache errors are best-effort (logged, ignored).
 async fn generate_recall_embedding_cached(
@@ -68,13 +68,13 @@ async fn generate_recall_embedding_cached(
 }
 
 // ============================================================
-// Shared ranking for manual recall (ENG-1785)
+// Shared ranking for manual recall
 // ============================================================
 
 /// Rank `SearchHit`s with the composite ranker and return them reordered,
 /// without hydrating (no Walrus fetch / SEAL decrypt).
 ///
-/// ENG-1785: manual recall must produce the same ordering as `/api/recall`
+/// manual recall must produce the same ordering as `/api/recall`
 /// and `/api/ask` for the same query + weights. Those paths rank
 /// `HydratedMemory` values; to guarantee identical ordering we reuse the
 /// **same** `Ranker::rank` rather than re-implementing the scoring on
@@ -179,7 +179,7 @@ pub async fn recall(
     let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
-    // MED-3 fix: Cap limit to prevent unbounded DB scans / memory use.
+    // Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
     let t1 = std::time::Instant::now();
@@ -216,7 +216,7 @@ pub async fn recall(
         state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 
-    // Zip `created_at` (recency signal) + `importance` (MEM-54) from the
+    // Zip `created_at` (recency signal) + `importance` from the
     // SearchHits onto the HydratedMemory records so the ranker has both
     // signals it needs. Engines leave both fields as `None`; the recall
     // path populates them from the SearchHit it already has. See
@@ -233,7 +233,7 @@ pub async fn recall(
             semantic = weights.semantic,
             recency = weights.recency,
             half_life_days = weights.recency_half_life_days,
-            // MEM-54: include the importance weight in the breadcrumb so
+            // include the importance weight in the breadcrumb so
             // ordering bug reports can be triaged against the full vector
             // of weights the client sent.
             importance = weights.importance,
@@ -261,7 +261,7 @@ pub async fn recall(
         .collect();
     let total = results.len();
 
-    // LOW-7: Surface the count of silently-dropped entries (download /
+    // Surface the count of silently-dropped entries (download /
     // decrypt / UTF-8 failures) so clients can distinguish "no matches"
     // from "matches we couldn't return". Per-item errors are logged with
     // the blob_id inside the engine.
@@ -302,7 +302,7 @@ pub async fn recall(
 /// Server searches Vector DB and returns {blob_id, distance}[].
 /// User downloads from Walrus + SEAL decrypts on their own.
 ///
-/// ENG-1785: manual recall applies the **same** `CompositeRanker` as
+/// manual recall applies the **same** `CompositeRanker` as
 /// `/api/recall` and `/api/ask`, so all three return the same ordering for
 /// the same query + `scoring_weights`. Before this fix, manual recall
 /// returned raw cosine order while the others reordered when weights were
@@ -340,7 +340,7 @@ pub async fn recall_manual(
     );
 
     // Search Vector DB — blob IDs + distances (+ created_at + importance).
-    // MED-3 fix: Cap limit on recall_manual as well.
+    // Cap limit on recall_manual as well.
     let limit = body.limit.min(100);
     let hits = state
         .db
@@ -348,7 +348,7 @@ pub async fn recall_manual(
         .await?;
 
     // Apply the shared CompositeRanker so manual ordering matches
-    // `/api/recall` and `/api/ask` (ENG-1785). `rank_search_hits` reuses the
+    // `/api/recall` and `/api/ask`. `rank_search_hits` reuses the
     // exact same `rank()` the hydrating paths use — see its doc for why we
     // map through `HydratedMemory`. At default weights it short-circuits and
     // preserves the pgvector cosine order. Index-based reorder => no hit is
@@ -379,7 +379,7 @@ pub async fn recall_manual(
 
 #[cfg(test)]
 mod tests {
-    // ── MED-3: Recall limit capped at 100 ───────────────────────────────
+    // ── Recall limit capped at 100 ───────────────────────────────
 
     #[test]
     fn recall_limit_capped_at_100() {
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(cap_limit(0), 0);
     }
 
-    // ── LOW-7: RecallResponse dropped_count serialization ───────────────
+    // ── RecallResponse dropped_count serialization ───────────────
 
     #[test]
     fn recall_response_includes_dropped_count_when_nonzero() {
@@ -419,7 +419,7 @@ mod tests {
         assert!(json.get("dropped_count").is_none());
     }
 
-    // ── ENG-1785: manual recall applies the same ranker as non-manual ───
+    // ── manual recall applies the same ranker as non-manual ───
 
     use crate::services::ranker::{CompositeRanker, Ranker};
     use crate::types::{ScoringWeights, SearchHit};
@@ -441,7 +441,7 @@ mod tests {
     /// Ranking the equivalent hydrated memories directly (the non-manual
     /// path) and ranking the SearchHits via `rank_search_hits` (the manual
     /// path) MUST produce the same blob_id ordering — that's the whole point
-    /// of ENG-1785. Use importance-heavy weights so the ranker actually
+    /// of this shared-ranker check. Use importance-heavy weights so the ranker actually
     /// reorders (a no-op would pass trivially).
     #[test]
     fn manual_ranking_matches_non_manual_ranking() {
@@ -494,7 +494,7 @@ mod tests {
 
     /// At default weights the ranker short-circuits — manual recall must
     /// return the SearchHits in their original (pgvector cosine) order,
-    /// byte-identical to the pre-ENG-1785 behaviour.
+    /// byte-identical to the previous behaviour.
     #[test]
     fn manual_ranking_default_weights_preserves_cosine_order() {
         use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(ranked[0].created_at, t_now() - chrono::Duration::days(7));
     }
 
-    /// ENG-1785 regression guard (deep-review blocker): `blob_id` is NOT
+    /// Regression guard (deep-review blocker): `blob_id` is NOT
     /// unique — `search_similar` can return multiple hits with the same
     /// blob_id. A blob_id-keyed round-trip would collapse them, silently
     /// dropping hits and reordering — re-introducing the manual-vs-non-manual

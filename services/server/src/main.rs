@@ -1,3 +1,4 @@
+mod alerts;
 mod auth;
 mod compatibility;
 mod engine;
@@ -24,6 +25,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 
+use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
@@ -99,7 +101,7 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -190,7 +192,7 @@ async fn main() {
     let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
     let remember_job_storage: PostgresStorage<RememberJob> =
         PostgresStorage::new(apalis_pool.clone());
-    // ENG-1408: BulkRememberJob storage
+    // BulkRememberJob storage
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
@@ -249,7 +251,7 @@ async fn main() {
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
 
-    // ENG-1405: Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
+    // Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
     let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -328,12 +330,15 @@ async fn main() {
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
+    let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
         config: Arc::clone(&config),
         http_client,
         key_pool,
+        alerts,
         engine,
         embedder,
         extractor,
@@ -347,6 +352,15 @@ async fn main() {
         blob_cache_max_bytes,
         embedding_cache_ttl,
     });
+
+    tracing::info!(
+        "  alerts: Slack {} via ALERT_TO_SLACK",
+        if state.alerts.slack_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
     {
@@ -390,7 +404,7 @@ async fn main() {
         tracing::info!("  Apalis: worker 'remember' spawned (concurrency=3)");
     }
 
-    // Worker 3: BulkRememberJob (ENG-1408)
+    // Worker 3: BulkRememberJob
     {
         let worker_state = state.clone();
         let storage = bulk_job_storage.clone();
@@ -478,7 +492,7 @@ async fn main() {
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
-    // HIGH-13 / ENG-1407 / ENG-1408: 2 MiB covers the largest realistic JSON
+    // 2 MiB covers the largest realistic JSON
     // body — single remember at 1 MiB plaintext + framing, and bulk remember
     // batches up to ~1.5 MB. Blocks abusive uploads before auth + rate-limit
     // middleware see them. Must equal auth::PROTECTED_BODY_LIMIT_BYTES — these
@@ -497,7 +511,7 @@ async fn main() {
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
-        // ENG-1408: Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
+        // Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
         .route(
             "/api/remember/bulk",
             post(routes::remember_bulk).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
@@ -505,7 +519,7 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
-        // ENG-1747: admin/harness endpoints — namespace delete + stats.
+        // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
         .route("/api/stats", post(routes::stats))
@@ -562,9 +576,9 @@ async fn main() {
         );
 
     // Public routes
-    // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
+    // /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
-    // ENG-1697: /config exposes non-secret deployment parameters (packageId,
+    // /config exposes non-secret deployment parameters (packageId,
     // network, sui_rpc_url) so the SDK can build SEAL SessionKey without
     // the user adding packageId to MemWalConfig.
     let public_routes = Router::new()
@@ -624,7 +638,7 @@ async fn main() {
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
                     "x-request-id".parse::<header::HeaderName>().unwrap(),
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
-                    // ENG-1697: SessionKey envelope replacing x-delegate-key
+                    // SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),

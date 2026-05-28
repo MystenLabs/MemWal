@@ -11,7 +11,7 @@
 //! SEAL, no Walrus, no Sui tx, no job row). The response carries the real
 //! stored ids and `status: "done"`, so the benchmark harness can treat
 //! `/api/analyze` as synchronous the way the SDK's analyze contract did
-//! before ENG-1406.
+//! before.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -28,25 +28,25 @@ use super::{collect_bounded_results, enqueue_wallet_job};
 
 const ANALYZE_CONCURRENCY: usize = 5;
 
-// LOW-6: /api/analyze does not benefit from larger inputs — it sends the
+// /api/analyze does not benefit from larger inputs — it sends the
 // full text to gpt-4o-mini for fact extraction in a single LLM call (no
 // chunking like remember). Cap it at the previous /api/remember ceiling
 // so a hostile client cannot burn ~1 MiB of LLM tokens for the same
 // rate-limit weight as a tiny request.
 const MAX_ANALYZE_TEXT_BYTES: usize = 64 * 1024;
 
-/// MEM-57: How many existing memories to pull as pre-extraction dedup
-/// context for the extractor. Matches Mem0 v3's published pattern and the
-/// default `recall_limit` the benchmark harness uses, so the dedup
-/// context reflects what the user is most likely to ask about next.
+/// How many existing memories to pull as pre-extraction dedup
+/// context for the extractor. This matches the default `recall_limit` the
+/// benchmark harness uses, so the dedup context reflects what the user is
+/// most likely to ask about next.
 ///
 /// Sized for the cost trade-off: each retrieved memory adds ~50-150ms
 /// of latency (one extra `search_similar` + `fetch_batch` round-trip),
 /// and roughly 50-100 tokens to the LLM input. K=10 keeps p95 latency
-/// within the +50-150ms budget called out in the MEM-57 ticket.
+/// within the expected +50-150ms budget.
 const PRE_EXTRACTION_CONTEXT_LIMIT: usize = 10;
 
-/// MEM-57 P0: per-leg timeouts on the pre-extraction context retrieval.
+/// Per-leg timeouts on the pre-extraction context retrieval.
 /// Set generously above measured p95 (embed ~150ms, search ~30ms warm /
 /// 500ms cold, fetch ~50ms warm) so a healthy server is unaffected, but
 /// tight enough to cap a stalled external dependency (OpenAI hiccup,
@@ -72,7 +72,7 @@ pub async fn analyze(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
-    // LOW-6: Reject oversize plaintext before spending an LLM call.
+    // Reject oversize plaintext before spending an LLM call.
     if body.text.len() > MAX_ANALYZE_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
             "Text exceeds maximum length of {} bytes",
@@ -89,13 +89,13 @@ pub async fn analyze(
         "analyze request"
     );
 
-    // ── MEM-57: Pre-extraction dedup context (Mem0 v3 pattern) ────────
+    // ── Pre-extraction dedup context ──────────────────────────
     //
     // Before the extractor LLM call, fetch the top-K nearest existing
     // memories for this input. The extractor sees them as
     // `<related_memories>` and uses the context to skip duplicates and
     // anchor borderline facts. This is the architectural fix for the
-    // MEM-54 v3 LME `single_session_assistant` regression — gives the
+    // benchmark LME `single_session_assistant` regression — gives the
     // LLM stronger signal for what is new vs already-known, so
     // borderline assistant content gets confidently extracted rather
     // than dropped under "be concise".
@@ -154,7 +154,7 @@ pub async fn analyze(
         // The distinction: per-fact embeds produce vectors that get
         // stored (data loss on failure); this one only feeds dedup
         // context (best-effort optimisation).
-        // MEM-57 P0: each leg of the pre-extraction recall is wrapped in
+        // each leg of the pre-extraction recall is wrapped in
         // a `tokio::time::timeout`. On expiry the corresponding status
         // (`embed_timeout`, `search_timeout`, `fetch_timeout`) is set
         // and the context falls back to empty — analyze continues with
@@ -315,7 +315,7 @@ pub async fn analyze(
     );
 
     // Step 1: Extract facts using the Extractor service (sync — fast, ~1-2s).
-    // MEM-57: pass `related_memories` as dedup context. The LlmExtractor
+    // pass `related_memories` as dedup context. The LlmExtractor
     // short-circuits to plain `extract` on empty slice — no wasted tokens
     // when the namespace had no nearest hits.
     let extracted = state
@@ -354,7 +354,7 @@ pub async fn analyze(
     // worker uploads to Walrus → insert_vector → SDK polls job_id). The
     // benchmark harness expects `POST /api/analyze` to return when the
     // memories are stored and searchable, the way the SDK's synchronous
-    // analyze contract worked before ENG-1406. In benchmark mode we honour
+    // analyze contract worked before. In benchmark mode we honour
     // that: per fact, embed → engine.store_blob(plaintext bytes) (the
     // PlaintextEngine writes the `plaintext` column — no SEAL, no Walrus,
     // no Sui transaction, no job row), in parallel across facts. The
@@ -378,7 +378,7 @@ pub async fn analyze(
                 let fact = fact.clone();
                 async move {
                     let vector = state.embedder.embed(&fact.text).await?;
-                    // MEM-54: importance is threaded through the engine
+                    // importance is threaded through the engine
                     // (see store_blob signature in engine::MemoryEngine).
                     // The PlaintextEngine persists it on the new
                     // `vector_entries.importance` column; the ranker
@@ -457,7 +457,7 @@ pub async fn analyze(
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
-                // MEM-54: carry `importance` through the prep tuple so
+                // carry `importance` through the prep tuple so
                 // the job payload below can persist it alongside the
                 // ciphertext + vector.
                 Ok::<_, AppError>((
@@ -566,7 +566,7 @@ mod tests {
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
 
-    // ── LOW-6: Text size limit ──────────────────────────────────────────
+    // ── Text size limit ──────────────────────────────────────────
 
     #[test]
     fn max_analyze_text_bytes_is_64kb() {
@@ -580,7 +580,7 @@ mod tests {
         assert!(MAX_ANALYZE_TEXT_BYTES < MAX_REMEMBER_TEXT_BYTES);
     }
 
-    // ── HIGH-3 / MED-5: Analyze concurrency + weight ────────────────────
+    // ── Analyze concurrency + weight ────────────────────
 
     #[test]
     fn analyze_concurrency_constant_is_5() {

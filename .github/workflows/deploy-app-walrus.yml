@@ -67,6 +67,7 @@ jobs:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
           VITE_DOCS_URL: ${{ vars.VITE_DOCS_URL }}
           VITE_DEMO_URLS: ${{ vars.VITE_DEMO_URLS }}
+          VITE_GA_MEASUREMENT_ID: ${{ vars.VITE_GA_MEASUREMENT_ID }}
 
       - name: Deploy to Walrus Site (Mainnet)
         id: deploy-mainnet

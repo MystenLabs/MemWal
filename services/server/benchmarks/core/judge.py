@@ -5,7 +5,7 @@ Uses a FIXED prompt to score generated answers against ground truth.
 The prompt must never change between runs or preset comparisons —
 modifying it invalidates cross-run comparability.
 
-Scoring follows the Mem0 paper methodology:
+Scoring follows the published benchmark methodology:
   4 dimensions (1-5 each) → mean → normalized to 0-100 (J-score).
 """
 

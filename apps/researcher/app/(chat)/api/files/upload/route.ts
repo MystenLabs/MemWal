@@ -7,7 +7,7 @@ import { getSession } from "@/lib/auth/session";
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 const MAX_SIZE = 10 * 1024 * 1024; // 10MB
 
-// HIGH-9: Sanitize uploaded filename — strip path separators, restrict characters,
+// Sanitize uploaded filename — strip path separators, restrict characters,
 // and cap length to prevent path traversal via crafted filenames.
 function sanitizeFilename(raw: string): string {
   return raw
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 
     // Get filename from formData since Blob doesn't have name property
     const rawFilename = (formData.get("file") as File).name;
-    // HIGH-9: Prefix with user-scoped namespace + random suffix to prevent
+    // Prefix with user-scoped namespace + random suffix to prevent
     // path traversal and cross-user key collisions in shared blob storage.
     const userId = session.user.id;
     const sanitized = sanitizeFilename(rawFilename);

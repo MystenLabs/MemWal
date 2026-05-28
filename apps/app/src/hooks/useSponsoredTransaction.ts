@@ -30,7 +30,7 @@ export function useSponsoredTransaction() {
         try {
             // 1. Build TransactionKind bytes (without gas data)
             const kindBytes = await transaction.build({
-                client: suiClient as any,
+                client: suiClient,
                 onlyTransactionKind: true,
             })
             const kindBase64 = uint8ArrayToBase64(kindBytes)

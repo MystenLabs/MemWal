@@ -34,7 +34,7 @@ server:
 # LLM judge — evaluates generated answers vs ground truth
 # ─────────────────────────────────────────────────────────────────────
 judge:
-  # Model used for judging. Published benchmarks (Mem0, LongMemEval)
+  # Model used for judging. Published memory benchmarks
   # all use GPT-4o — keep this consistent for comparable numbers.
   # Other models will produce different scores.
   model: openai/gpt-4o

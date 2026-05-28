@@ -75,7 +75,7 @@ pub struct HydratedMemory {
     pub text: String,
     pub distance: f64,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// MEM-54: per-fact importance set at extraction time (vital / standard
+    /// per-fact importance set at extraction time (vital / standard
     /// / trivial mapped to a float in [0.2, 0.9]). Threaded through from
     /// `SearchHit.importance` by the recall handler's zip helper, then
     /// consumed by `CompositeRanker` when `scoring_weights.importance` is
@@ -118,7 +118,7 @@ pub trait MemoryEngine: Send + Sync {
     /// ignores it. Used by `remember_manual` and the `jobs.rs` workers
     /// — the three current copies of the upload-then-index code.
     ///
-    /// MEM-54: `importance` is the per-fact score (0.0–1.0) assigned at
+    /// `importance` is the per-fact score (0.0–1.0) assigned at
     /// extraction time. Persisted on `vector_entries.importance` and
     /// consumed at recall-time composite scoring. Pass `0.5` (the
     /// "standard" bucket default) when no LLM-assigned score is
