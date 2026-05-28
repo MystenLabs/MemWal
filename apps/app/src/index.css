@@ -29,7 +29,6 @@
   --color-violet-soft: rgba(202, 177, 255, 0.30);
   --color-yellow-soft: rgba(232, 255, 117, 0.45);
   --gradient-brand: linear-gradient(135deg, #CAB1FF, #E8FF75);
-  --wordmark-memory-gradient: linear-gradient(90deg, #575cff 0%, #8771ff 50%, #cd91ff 100%);
 
   --success: #166534;
   --success-border: #22c55e;
@@ -87,7 +86,7 @@ body,
 
 body {
   background-image: none;
-  overflow-x: clip;
+  overflow-x: hidden;
 }
 
 h1, h2, h3 {
@@ -181,7 +180,7 @@ h1, h2, h3 {
   gap: 10px;
   font-weight: 700;
   font-size: 1.15rem;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   color: inherit;
   text-decoration: none;
 }
@@ -206,10 +205,7 @@ h1, h2, h3 {
 }
 
 .walrus-memory-wordmark span:last-child {
-  color: transparent;
-  background: var(--wordmark-memory-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
+  color: #5b35ff;
 }
 
 .nav-user {
@@ -403,7 +399,7 @@ h1, h2, h3 {
 .hero h1 {
   font-size: 3.2rem;
   font-weight: 700;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 1.15;
   max-width: 600px;
   margin-bottom: 16px;
@@ -663,10 +659,10 @@ h1, h2, h3 {
 
 .lp-hero-copy h1 {
   color: #000000;
-  font-size: clamp(2.8rem, 6vw, 5rem);
+  font-size: 4.8rem;
   font-weight: 600;
   line-height: 1.04;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   margin-bottom: 20px;
 }
 
@@ -685,33 +681,6 @@ h1, h2, h3 {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
-}
-
-.lp-legal-copy {
-  margin: 16px 0 28px !important;
-  color: rgba(0, 0, 0, 0.62) !important;
-  font-size: 0.82rem !important;
-  line-height: 1.5 !important;
-}
-
-.lp-trusted-copy {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-  max-width: 560px;
-  color: rgba(0, 0, 0, 0.58);
-  font-size: 0.8rem;
-  line-height: 1.4;
-}
-
-.lp-trusted-copy span {
-  flex: 1 0 100%;
-}
-
-.lp-trusted-copy strong {
-  color: #000000;
-  font-weight: 700;
 }
 
 .lp-btn-yellow {
@@ -1391,10 +1360,7 @@ h1, h2, h3 {
 
 .setup-classic-nav .walrus-memory-wordmark span:last-child,
 .playground-nav .walrus-memory-wordmark span:last-child {
-  color: transparent;
-  background: var(--wordmark-memory-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
+  color: #e8ff75;
 }
 
 .setup-classic-nav .nav-address {
@@ -1544,54 +1510,6 @@ h1, h2, h3 {
 .setup-classic .setup-import-button:active:not(:disabled) {
   transform: translateY(0);
   box-shadow: none;
-}
-
-/* Key-generated step: match the dashboard's dark credential cards
-   (the base .key-display is light #fff; setup is dark-themed so override).
-   Values mirror `.dash-page .key-display--white` so /setup and /dashboard
-   read as the same component. */
-.setup-classic .key-display {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid var(--dash-card-border, #2a2d2f);
-  border-radius: 16px;
-  box-shadow: none;
-}
-
-.setup-classic .key-display .key-label {
-  color: #e8ff75;
-}
-
-.setup-classic .key-display .key-value {
-  color: #faf8f5;
-}
-
-.setup-classic .key-display .btn-secondary {
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  color: #faf8f5;
-  box-shadow: none;
-  transition: background 0.12s ease, border-color 0.12s ease;
-}
-
-.setup-classic .key-display .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.24);
-  border-color: rgba(255, 255, 255, 0.34);
-  transform: none;
-  box-shadow: none;
-}
-
-/* Warning box: match the dashboard's lime-filled treatment (the light-theme
-   base was cream + orange border, which looked off on the dark setup page). */
-.setup-classic .warning-box {
-  background: #e8ff75;
-  border: 0;
-  border-radius: 12px;
-  box-shadow: none;
-}
-
-.setup-classic .warning-box p,
-.setup-classic .warning-box strong {
-  color: #000000;
 }
 
 @media (max-width: 640px) {
@@ -2104,7 +2022,7 @@ h1, h2, h3 {
   --border: 1px solid #54575a;
   --border-light: 1px solid rgba(250, 248, 245, 0.12);
   min-height: 100vh;
-  overflow-x: clip;
+  overflow-x: hidden;
   background: #000000;
   color: #faf8f5;
 }
@@ -2144,7 +2062,7 @@ h1, h2, h3 {
 .dash-logo span:last-child {
   color: transparent;
   font-weight: 500;
-  background: var(--wordmark-memory-gradient);
+  background: linear-gradient(100deg, #2368ff 0%, #7248ff 48%, #ee79ff 100%);
   -webkit-background-clip: text;
   background-clip: text;
 }
@@ -2364,11 +2282,11 @@ h1, h2, h3 {
 .dash-page .dashboard-keys-card {
   order: 4;
   min-height: 277px;
-  margin-bottom: 36px !important;
+  margin-bottom: 54px !important;
 }
 
 .dash-page .dashboard-keys-card .card-title {
-  font-size: 2.25rem;
+  font-size: 2.12rem;
   font-weight: 500;
   line-height: 0.88;
   color: #faf8f5;
@@ -2377,7 +2295,7 @@ h1, h2, h3 {
 .dash-page .dashboard-quickstart-card {
   order: 5;
   min-height: 572px;
-  margin-bottom: 36px !important;
+  margin-bottom: 54px !important;
 }
 
 .dash-page .dashboard-quickstart-card .card-header {
@@ -2572,7 +2490,6 @@ h1, h2, h3 {
 
 .dash-page .install-tab:hover {
   background: #262b30;
-  color: #faf8f5;
 }
 
 .dash-page .install-tab--active {
@@ -5607,7 +5524,7 @@ h1, h2, h3 {
   background: var(--dash-bg);
   color: var(--dash-text);
   font-family: var(--font-sans);
-  overflow-x: clip;
+  overflow-x: hidden;
 }
 
 .dash-page a {
@@ -5644,10 +5561,7 @@ h1, h2, h3 {
 }
 
 .dash-logo span:nth-child(2) {
-  color: transparent;
-  background: var(--wordmark-memory-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
+  color: var(--dash-violet);
 }
 
 .dash-nav-actions {
@@ -6042,16 +5956,12 @@ h1, h2, h3 {
 }
 
 .dash-page .key-display .btn-secondary {
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--dash-text);
-  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .dash-page .key-display .btn-secondary:hover:not(:disabled) {
-  background: #faf8f5;
-  border-color: #faf8f5;
-  color: #000000;
+  background: rgba(255, 255, 255, 0.14);
   transform: none;
   box-shadow: none;
 }
@@ -7025,11 +6935,9 @@ h1, h2, h3 {
   box-shadow: none;
 }
 
-/* NOTE: removed `.playground-dashboard .demo-code-block span { color: inherit !important }`.
-   That rule forced every syntax token to the base off-white via !important,
-   overriding react-syntax-highlighter's inline token colors and making the
-   playground snippets fully monochrome. Without it, walrusCodeTheme's token
-   colors (purple keywords, lime strings/keys, gray comments) render. */
+.playground-dashboard .demo-code-block span {
+  color: inherit !important;
+}
 
 .playground-dashboard .demo-info-panel,
 .playground-dashboard .demo-phase-indicator {
@@ -7072,1067 +6980,275 @@ h1, h2, h3 {
   }
 }
 
-/* ========== Dashboard density alignment ========== */
-
-.dashboard-nav {
-  position: sticky;
-  top: 0;
-  z-index: 80;
-  border-bottom: 1px solid rgba(250, 248, 245, 0.1);
-}
-
-.dashboard-nav .nav-inner {
-  max-width: 1280px;
-}
-
-.dashboard-nav .lp-nav-cta {
-  min-height: 0;
-  padding: 10px 22px;
-  border: 1px solid #faf8f5;
-  border-radius: 999px;
-  background: #faf8f5;
-  color: #000000;
-  box-shadow: none;
-  font-size: 0.92rem;
-  font-weight: 700;
-  text-transform: lowercase;
-}
-
-.dashboard-nav .lp-nav-cta:hover:not(:disabled) {
-  background: var(--playground-accent, #e8ff75);
-  border-color: var(--playground-accent, #e8ff75);
-  transform: translateY(-1px);
-  box-shadow: none;
-}
-
-.dash-page .dash-shell {
-  width: min(900px, calc(100% - 48px));
-  padding: 34px 0 68px;
-}
-
-.dash-page .dashboard-header {
-  margin-bottom: 20px;
-}
-
-.dash-page .dashboard-header--compact {
-  margin-bottom: 18px;
-}
-
-.dash-page .dashboard-header h2 {
-  margin: 0 0 8px;
-  font-size: 1.54rem;
-  font-weight: 800;
-  line-height: 1.05;
-}
-
-.dash-page .dashboard-header p {
-  max-width: 680px;
-  margin-top: 0;
-  font-size: 0.92rem;
-  line-height: 1.45;
-}
-
-.dash-page .dash-alert {
-  min-height: 48px;
-  margin-bottom: 18px !important;
-  padding: 11px 16px 11px 48px;
-}
-
-.dash-alert-icon {
-  left: 18px;
-  width: 22px;
-  height: 20px;
-}
-
-.dash-alert-icon::before {
-  left: 10px;
-  top: 5px;
-  width: 2px;
-  height: 8px;
-}
-
-.dash-alert-icon::after {
-  left: 10px;
-  top: 15px;
-  width: 2px;
-  height: 2px;
-}
-
-.dash-page .dash-alert p {
-  font-size: 0.88rem;
-  line-height: 1.28;
-}
-
-.dash-page .dashboard-cta-row {
-  gap: 14px;
-  margin-bottom: 20px;
-}
-
-.dash-page .dashboard-cta {
-  min-height: 76px;
-  height: auto;
-  gap: 14px;
-  padding: 15px 18px;
-  border-radius: 12px;
-}
-
-.dash-page .dashboard-cta-icon-wrap {
-  width: 24px;
-  height: 28px;
-  margin-top: 1px;
-}
-
-.dash-page .dashboard-cta-icon {
-  width: 24px;
-  height: 28px;
-}
-
-.dash-page .dashboard-cta-title {
-  font-size: 1.02rem;
-  font-weight: 800;
-  line-height: 1.18;
-}
-
-.dash-page .dashboard-cta-subtitle {
-  margin-top: 4px;
-  font-size: 0.82rem;
-  line-height: 1.35;
-}
-
-.dash-page .dashboard-cta-arrow {
-  width: 16px;
-  height: 16px;
-}
-
-.dash-page .card {
-  margin-bottom: 20px !important;
-  padding: 20px;
-  border-radius: 12px;
-}
-
-.dash-page .dashboard-keys-card,
-.dash-page .dashboard-quickstart-card,
-.dash-page .dashboard-install-card {
-  min-height: 0;
-  margin-bottom: 20px !important;
-}
-
-.dash-page .card-header {
-  margin-bottom: 14px;
-  gap: 16px;
-}
-
-.dash-page .card-title,
-.dash-page .dashboard-keys-card .card-title {
-  font-size: 1.08rem;
-  font-weight: 800;
-  line-height: 1.15;
-}
-
-.dash-page .card-subtitle {
-  margin-top: 4px;
-  font-size: 0.82rem;
-  line-height: 1.35;
-}
-
-.dash-page .card-header-actions {
-  gap: 10px;
-}
-
-.dash-page .card-header-actions .btn-secondary,
-.dash-page .dashboard-keys-refresh,
-.dash-page .dashboard-keys-add {
-  /* Figma node 2325-6980: 52px pills, radius 26, px-30, 18px label,
-     tracking 0.72px. Both buttons equal. */
-  min-height: 52px;
-  height: 52px;
-  padding: 10px 30px;
-  border-radius: 26px;
-  font-size: 1.125rem;
-  letter-spacing: 0.72px;
-}
-
-.dash-page .key-display,
-.dash-page .key-display--white {
-  padding: 13px 15px;
-  border-radius: 10px;
-}
-
-.dash-page .key-display .key-label {
-  font-size: 0.68rem;
-}
-
-.dash-page .key-display .key-value {
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
-
-.dash-page .warning-box {
-  padding: 13px 16px;
-}
-
-.dash-page .dashboard-quickstart-card .card-header {
-  margin-bottom: 16px;
-}
-
-.dash-page .dashboard-quickstart-card pre,
-.dash-page .dashboard-quickstart-card .demo-code-block {
-  min-height: 0;
-  padding: 18px 20px !important;
-  border-radius: 12px;
-  font-size: 12.5px;
-  line-height: 1.42;
-}
-
-.dash-page .dashboard-quickstart-copy {
-  top: 12px;
-  right: 12px;
-  width: 34px;
-  height: 34px;
-}
-
-.dash-page .install-tabs {
-  gap: 8px;
-  margin-bottom: 14px;
-}
-
-.dash-page .install-tab,
-.dash-page .install-tab:last-child {
-  width: 64px;
-  height: 28px;
-  font-size: 0.78rem;
-}
-
-.dash-page .install-command,
-.dash-page .install-tabs + .demo-code-block {
-  padding: 10px 0 !important;
-  font-size: 0.82rem;
-}
-
-.dash-page .dashboard-install-codewrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 24px;
-  width: 100%;
-  max-width: 100%;
-}
-
-.dash-page .dashboard-install-codewrap .install-command {
-  display: inline-block;
-  width: auto;
-  max-width: calc(100% - 40px);
-  padding: 10px 0 !important;
-  white-space: pre;
-  overflow-x: auto;
-}
-
-.dash-page .dashboard-install-copy {
-  position: static;
-  z-index: 2;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #54575a;
+/* ── Sign-in screen (Figma 2556:112) ───────────────────────── */
+.wm-signin {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #050608;
+  overflow: hidden;
   display: grid;
   place-items: center;
-  box-shadow: none;
-  cursor: pointer;
-  transform: none;
-  flex: 0 0 24px;
+  font-family: var(--font-sans);
 }
 
-.dash-page .dashboard-install-copy:hover:not(:disabled) {
-  background: transparent;
-  color: #8f9294;
-  box-shadow: none;
+.wm-signin-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
 }
 
-.dash-page .dashboard-install-copy svg {
-  width: 18px;
-  height: 18px;
-  display: block;
-}
-
-.dash-page .install-command-text {
-  font-family: var(--font-mono);
-  color: #faf8f5;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-  font-weight: 700;
-}
-
-.dash-page .dashboard-keys-add {
-  height: 52px;
-  min-height: 52px;
-  padding: 10px 30px;
-  gap: 10px;
-  justify-content: center;
-  border: 1px solid #faf8f5;
-  border-radius: 26px;
-  background: #faf8f5;
-  color: #000000;
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 0.84;
-  letter-spacing: 0.72px;
-  white-space: nowrap;
-  box-shadow: none;
-}
-
-.dash-page .dashboard-keys-add svg {
-  width: 12.15px;
-  height: 12.15px;
-  stroke-width: 1.8;
-}
-
-/* ── Refresh: transparent + white outline; hover LIGHTENS the fill ── */
-.dash-page .dashboard-keys-refresh,
-.dash-page .dashboard-keys-refresh:focus,
-.dash-page .dashboard-keys-refresh:focus-visible,
-.dash-page .dashboard-keys-refresh:disabled {
-  background: transparent;
-  border-color: #faf8f5;
-  color: #faf8f5 !important;
-  -webkit-text-fill-color: #faf8f5;
-  opacity: 1;
-  transform: none;
-  box-shadow: none;
-  transition: background 0.14s ease;
-}
-
-.dash-page .dashboard-keys-refresh:hover:not(:disabled),
-.dash-page .dashboard-keys-refresh:active:not(:disabled) {
-  background: rgba(250, 248, 245, 0.16);
-  border-color: #faf8f5;
-  color: #faf8f5 !important;
-  -webkit-text-fill-color: #faf8f5;
-  transform: none;
-  box-shadow: none;
-}
-
-/* ── Add key: white fill; hover BRIGHTENS to the lime accent ── */
-.dash-page .dashboard-keys-add,
-.dash-page .dashboard-keys-add:focus,
-.dash-page .dashboard-keys-add:focus-visible,
-.dash-page .dashboard-keys-add:disabled {
-  background: #faf8f5;
-  border-color: #faf8f5;
-  color: #000000 !important;
-  -webkit-text-fill-color: #000000;
-  opacity: 1;
-  transform: none;
-  box-shadow: none;
-  transition: background 0.14s ease, border-color 0.14s ease;
-}
-
-.dash-page .dashboard-keys-add:hover:not(:disabled),
-.dash-page .dashboard-keys-add:active:not(:disabled) {
-  background: #e8ff75;
-  border-color: #e8ff75;
-  color: #000000 !important;
-  -webkit-text-fill-color: #000000;
-  transform: none;
-  box-shadow: none;
-}
-
-.dash-page .dashboard-keys-add svg {
-  width: 12.15px;
-  height: 12.15px;
-  stroke-width: 1.8;
-}
-
-.dash-page .install-tabs {
-  gap: 10px;
-  margin-bottom: 22px;
-}
-
-.dash-page .install-tab,
-.dash-page .install-tab:last-child {
-  width: 72px;
-  height: 28px;
-  min-height: 28px;
-  padding: 8px 12px;
-  border: 0;
-  outline: 0;
-  border-radius: 4px;
-  background: #1d2227;
-  color: #8f9294;
-  box-shadow: none;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 0.84;
-  letter-spacing: 0.14px;
-  text-transform: lowercase;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-
-/* Inactive tab: hover BRIGHTENS the text (matches the TS/PY toggle behavior) */
-.dash-page .install-tab:hover:not(.install-tab--active),
-.dash-page .install-tab:focus-visible:not(.install-tab--active) {
-  outline: 0;
-  background: #262b30;
-  color: #faf8f5;
-  box-shadow: none;
-}
-
-.dash-page .install-tab--active,
-.dash-page .install-tab--active:hover,
-.dash-page .install-tab--active:focus,
-.dash-page .install-tab--active:focus-visible,
-.dash-page .install-tab--active:active {
-  outline: 0;
-  background: #faf8f5;
-  color: #000000 !important;
-  box-shadow: none;
-}
-
-.dash-page .dashboard-empty-message--account {
+.wm-signin-aurora {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  min-height: 86px;
-  padding: 29px 0 !important;
-  color: #54575a !important;
-  font-size: 21px !important;
-  font-weight: 400;
-  line-height: 1.3;
-  text-align: center;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  opacity: 1;
+  z-index: 0;
+  pointer-events: none;
 }
 
-.dash-page .dashboard-empty-message--account .dashboard-empty-message-link {
-  display: inline;
-  padding: 0;
-  border: none;
-  background: none;
-  font: inherit;
+.wm-signin::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(5, 6, 8, 0) 0%,
+    rgba(5, 6, 8, 0) 42%,
+    rgba(5, 6, 8, 0.5) 62%,
+    rgba(5, 6, 8, 0.74) 82%,
+    rgba(5, 6, 8, 0.74) 100%
+  );
+}
+
+.wm-signin-close {
+  position: absolute;
+  top: 28px;
+  right: 28px;
+  z-index: 3;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(250, 248, 245, 0.18);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
   color: #faf8f5;
   cursor: pointer;
-  text-decoration-line: underline;
-  text-decoration-thickness: from-font;
-  text-underline-position: from-font;
 }
 
-.dash-page .dashboard-empty-message--account .dashboard-empty-message-link:hover {
-  opacity: 0.8;
+.wm-signin-close svg {
+  transform: rotate(45deg);
 }
 
-@media (max-width: 860px) {
-  .dashboard-nav .nav-inner {
-    max-width: none;
-  }
-
-  .dash-page .dash-shell {
-    width: calc(100% - 32px);
-    padding: 32px 0 56px;
-  }
-
-  .dash-page .dashboard-header h2 {
-    font-size: 1.55rem;
-  }
-
-  .dash-page .dashboard-cta {
-    min-height: 82px;
-    padding: 16px 18px;
-  }
-
-  .dash-page .card {
-    padding: 20px;
-  }
-}
-
-/* ========== Walrus Memory app flow system pass ========== */
-
-.setup-classic-nav,
-.playground-nav,
-.dashboard-nav {
-  height: 128px;
-  padding: 0 50px 0 49px;
-  background: #000000;
-  border-bottom: 0;
-  align-items: flex-start;
-}
-
-.setup-classic-nav .nav-inner,
-.playground-nav .nav-inner,
-.dashboard-nav .nav-inner {
+.wm-signin-inner {
   position: relative;
-  max-width: none;
-  height: 128px;
-}
-
-.setup-classic-nav .nav-brand,
-.playground-nav .nav-brand,
-.dashboard-nav .nav-brand {
-  position: absolute;
-  left: 0;
-  top: 34px;
-}
-
-.setup-classic-nav .walrus-memory-wordmark,
-.playground-nav .walrus-memory-wordmark,
-.dashboard-nav .walrus-memory-wordmark {
-  color: #faf8f5;
-  font-size: 2.23rem;
-  line-height: 0.85;
-  font-weight: 900;
-}
-
-.setup-classic-nav .nav-user,
-.playground-nav .nav-user,
-.dashboard-nav .nav-user {
-  position: absolute;
-  right: 0;
-  top: 27px;
-  height: 52px;
-  gap: 24px;
-}
-
-.setup-classic-nav .nav-address,
-.playground-nav .nav-address,
-.dashboard-nav .nav-address {
-  width: 125px;
-  height: 28px;
-  display: inline-flex;
+  z-index: 2;
+  width: min(1480px, calc(100% - 112px));
+  display: grid;
+  grid-template-columns: minmax(520px, 640px) minmax(560px, 1fr);
   align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 4px;
-  background: #262b30;
-  color: #faf8f5;
-  padding: 0 12px;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.6px;
-  line-height: 0.84;
-  box-shadow: none;
+  gap: clamp(64px, 5.2vw, 96px);
 }
 
-.setup-classic-nav .lp-nav-cta,
-.playground-nav .lp-nav-cta,
-.dashboard-nav .lp-nav-cta {
-  box-sizing: border-box;
-  width: 153.04px;
-  height: 52px;
-  min-height: 52px;
-  padding: 10px 30px;
-  border: 1px solid #faf8f5;
-  border-radius: 26px;
-  background: #000000;
-  color: #faf8f5;
-  box-shadow: none;
-  gap: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: 0.72px;
-  line-height: 0.84;
-  text-transform: none;
-  white-space: nowrap;
+.wm-signin-card {
+  width: clamp(520px, 33vw, 640px);
+  max-width: 100%;
+  aspect-ratio: 900 / 1010;
+  padding: clamp(52px, 5.3vh, 76px) 0 clamp(42px, 4.8vh, 62px);
+  border-radius: 18px;
+  border: 1px solid rgba(250, 248, 245, 0.08);
+  background:
+    radial-gradient(82% 48% at 87% 2%, rgba(0, 91, 153, 0.78) 0%, rgba(0, 60, 112, 0.5) 35%, rgba(0, 17, 31, 0) 72%),
+    radial-gradient(78% 45% at 1% 16%, rgba(129, 120, 178, 0.44) 0%, rgba(43, 55, 90, 0.28) 44%, rgba(0, 12, 22, 0) 78%),
+    linear-gradient(180deg, rgba(12, 34, 61, 0.96) 0%, rgba(0, 64, 96, 0.8) 46%, rgba(0, 14, 22, 0.95) 74%, #01060a 100%);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  text-align: center;
+  box-shadow: 0 48px 132px rgba(0, 0, 0, 0.5);
 }
 
-.setup-classic-nav .lp-nav-cta svg,
-.playground-nav .lp-nav-cta svg,
-.dashboard-nav .lp-nav-cta svg {
-  width: 13.04px;
-  height: 12.14px;
-  flex: 0 0 auto;
-  stroke-width: 1.7;
-}
-
-.setup-classic-nav .lp-nav-cta:hover:not(:disabled),
-.playground-nav .lp-nav-cta:hover:not(:disabled),
-.dashboard-nav .lp-nav-cta:hover:not(:disabled) {
-  background: #000000;
-  border-color: #faf8f5;
-  color: #faf8f5;
-  transform: none;
-  box-shadow: none;
-}
-
-.setup-classic-nav .demo-nav-back,
-.playground-nav .demo-nav-back,
-.dashboard-nav .demo-nav-back {
-  color: #8f9294;
-  font-size: 0.82rem;
-}
-
-.setup-classic-nav .demo-nav-back:hover,
-.playground-nav .demo-nav-back:hover,
-.dashboard-nav .demo-nav-back:hover {
-  color: #faf8f5;
-}
-
-.dash-page .dash-shell,
-.playground-dashboard {
-  width: min(900px, calc(100% - 48px));
-  max-width: 900px;
-  padding: 34px 0 68px;
-}
-
-.dash-page .dash-shell {
-  width: min(1240px, calc(100% - 96px));
-  max-width: 1240px;
-}
-
-.setup-classic-container {
-  width: min(900px, calc(100% - 48px));
-  max-width: 900px;
-  min-height: calc(100vh - 128px);
-  padding: 34px 0 68px;
-}
-
-.setup-classic-panel {
-  width: min(520px, 100%);
-}
-
-.playground-dashboard .dashboard-header,
-.dash-page .dashboard-header,
-.setup-classic-intro {
-  margin-bottom: 20px;
-}
-
-.playground-dashboard .dashboard-header h2,
-.dash-page .dashboard-header h2,
-.setup-classic-title {
-  margin: 0 0 8px;
-  font-size: 1.54rem;
-  font-weight: 800;
-  line-height: 1.05;
-  letter-spacing: 0;
-  color: #faf8f5;
-}
-
-.playground-dashboard .dashboard-header p,
-.dash-page .dashboard-header p,
-.setup-classic-description {
-  max-width: 680px;
-  margin-top: 0;
-  color: #c7c5c1;
-  font-size: 0.92rem;
-  line-height: 1.45;
-}
-
-.setup-classic-description {
-  margin: 0 auto 22px;
-}
-
-.playground-dashboard .card,
-.playground-dashboard .demo-step,
-.dash-page .card,
-.setup-classic-feature-card {
-  padding: 20px;
-  border: 1px solid #54575a;
-  border-radius: 12px;
-  background: #0a0a0a;
-  color: #faf8f5;
-  box-shadow: none;
-}
-
-.playground-dashboard .card,
-.playground-dashboard .demo-step,
-.dash-page .card {
-  margin-bottom: 56px !important;
-}
-
-.playground-dashboard .card-header,
-.dash-page .card-header {
-  margin-bottom: 14px;
-  gap: 16px;
-}
-
-.playground-dashboard .card-title,
-.playground-dashboard .demo-step-title,
-.dash-page .card-title,
-.setup-classic-feature strong {
-  color: #faf8f5;
-  font-size: 1.08rem;
-  font-weight: 800;
-  line-height: 1.15;
-}
-
-.playground-dashboard .card-subtitle,
-.dash-page .card-subtitle,
-.setup-classic-feature p {
-  color: #8f9294;
-  font-size: 0.82rem;
-  line-height: 1.35;
-}
-
-.setup-classic-feature {
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.setup-classic-generate,
-.setup-classic .setup-import-button,
-.playground-dashboard .btn,
-.dash-page .btn,
-.dash-page .dash-shell .lp-nav-cta {
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: 10px;
-  font-size: 0.82rem;
-}
-
-.setup-classic-generate,
-.setup-classic .setup-import-button {
-  min-height: 42px;
-  padding: 0 18px;
-  border-radius: 999px;
-}
-
-.playground-dashboard .demo-server-info {
-  gap: 10px;
-  margin-bottom: 20px;
-}
-
-.playground-dashboard .demo-server-tag {
-  border: 1px solid #54575a;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.08);
-  padding: 8px 12px;
-  color: #faf8f5;
-  box-shadow: none;
-  font-size: 0.78rem;
-}
-
-.playground-dashboard .demo-step-badge {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  font-size: 0.92rem;
-}
-
-.playground-dashboard .demo-code-block,
-.dash-page .dashboard-quickstart-card .demo-code-block,
-.dash-page .install-command {
-  border-radius: 12px;
-  font-size: 12.5px;
-  line-height: 1.42;
-  box-shadow: none;
-}
-
-.dash-page .dashboard-quickstart-card {
-  min-height: 572px;
-  padding: 39px;
-  border-color: #54575a;
-  border-radius: 24px;
-  background: #000000;
-  overflow: clip;
-}
-
-.dash-page .dashboard-quickstart-card .card-header {
-  margin-bottom: 34px;
-}
-
-.dash-page .dashboard-quickstart-card .card-title {
-  color: #faf8f5;
-  font-size: 36px;
-  font-weight: 500;
-  line-height: 0.88;
-  letter-spacing: 0;
-}
-
-.dash-page .dashboard-quickstart-card .card-subtitle {
-  margin-top: 14px;
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1.3;
-}
-
-.dash-page .dashboard-header h2 {
-  color: #faf8f5;
-  font-family: var(--font-sans);
-  font-size: 56px;
-  font-weight: 500;
-  line-height: 0.88;
-  letter-spacing: 0;
-}
-
-.dash-page .dashboard-cta-title {
-  color: #faf8f5;
-  font-family: var(--font-sans);
-  font-size: 24px;
-  font-weight: 650;
-  line-height: 1.3;
-  letter-spacing: 0;
-}
-
-.dash-page .dashboard-cta-subtitle {
-  margin-top: 0;
-  color: #c7c5c1;
-  font-family: var(--font-sans);
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1.3;
-  letter-spacing: 0;
-}
-
-.dash-page .dashboard-keys-card {
-  min-height: 277px;
-  padding: 39px 40px;
-  border-color: #54575a;
-  border-radius: 24px;
-  background: #000000;
-  overflow: clip;
-}
-
-.dash-page .dashboard-keys-card .card-header {
-  align-items: flex-start;
-  gap: 24px;
-  margin-bottom: 52px;
-}
-
-.dash-page .dashboard-keys-card .card-title {
-  color: #faf8f5;
-  font-family: var(--font-sans);
-  font-size: 36px;
-  font-weight: 500;
-  line-height: 0.88;
-  letter-spacing: 0;
-}
-
-.dash-page .dashboard-keys-card .card-subtitle {
-  margin-top: 14px;
-  color: #8f9294;
-  font-family: var(--font-sans);
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1.3;
-}
-
-.dash-page .dashboard-keys-card .card-header-actions {
-  align-self: flex-start;
-  gap: 20px;
-}
-
-.dash-page .dashboard-keys-card .dashboard-keys-refresh,
-.dash-page .dashboard-keys-card .dashboard-keys-add {
-  height: 52px;
-  min-height: 52px;
-  border-radius: 26px;
-  padding: 10px 30px;
-  font-family: var(--font-sans);
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 0.84;
-  letter-spacing: 0.72px;
-}
-
-.dash-page .dashboard-keys-card .dashboard-keys-refresh {
-  width: 128px;
-  justify-content: center;
-}
-
-.dash-page .dashboard-keys-card .dashboard-keys-refresh svg {
-  display: none;
-}
-
-.dash-page .dashboard-keys-card .dashboard-keys-add {
-  width: 152px;
-  gap: 14px;
-  justify-content: center;
-}
-
-.dash-page .dashboard-keys-card .dashboard-keys-add svg {
-  width: 12.15px;
-  height: 12.15px;
-  stroke-width: 1.8;
-}
-
-.dash-page .dashboard-keys-card .dashboard-empty-message--account {
+.wm-signin-logo {
   display: block;
-  min-height: 90px;
-  padding: 24px 0 0 !important;
-  color: #54575a !important;
-  font-family: var(--font-sans);
-  font-size: 21px !important;
+  width: min(330px, 46%);
+  max-width: none;
+  height: auto;
+  margin: 0 auto;
+}
+
+.wm-signin-sub {
+  width: min(610px, 78%);
+  margin: clamp(28px, 3.7vh, 42px) auto clamp(42px, 5.4vh, 58px);
+  color: #faf8f5;
+  font-size: clamp(23px, 1.55vw, 34px);
   font-weight: 400;
-  line-height: 1.3;
+  line-height: 1.34;
+}
+
+.wm-page .wm-signin-google,
+.wm-page .wm-signin-wallet button {
+  width: 100%;
+  min-height: clamp(62px, 6vh, 86px);
+  padding: 0 clamp(30px, 3.2vw, 48px);
+  border-radius: 999px;
+  border: 2px solid rgba(250, 248, 245, 0.94);
+  background: transparent;
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: clamp(20px, 1.18vw, 26px);
+  font-weight: 500;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.wm-signin-google {
+  position: relative;
+  width: min(552px, 62%);
+  margin: 0 auto clamp(22px, 2.3vh, 28px);
+  border-color: #faf8f5;
+}
+
+.wm-page .wm-signin-google {
+  width: min(552px, 62%);
+}
+
+.wm-signin-google svg {
+  position: absolute;
+  left: clamp(30px, 10%, 48px);
+  width: clamp(27px, 1.65vw, 34px);
+  height: clamp(27px, 1.65vw, 34px);
+}
+
+.wm-signin-google:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.wm-signin-wallet {
+  display: block;
+  width: min(552px, 62%);
+  margin: 0 auto;
+}
+
+.wm-signin-wallet button {
+  background: transparent !important;
+  border: 2px solid rgba(250, 248, 245, 0.94) !important;
+  border-radius: 999px !important;
+  box-shadow: none !important;
+}
+
+.wm-signin-wallet button,
+.wm-signin-wallet button * {
+  color: #faf8f5 !important;
+}
+
+.wm-signin-wallet button:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.wm-signin-tos {
+  width: min(360px, 64%);
+  margin: clamp(38px, 5vh, 54px) auto 0;
+  color: #8f9294;
+  font-size: clamp(13px, 0.9vw, 18px);
+  font-weight: 400;
+  line-height: 1.34;
+}
+
+.wm-signin-tos a {
+  color: #faf8f5;
+  text-decoration: none;
+}
+
+.wm-signin-trusted {
   text-align: center;
 }
 
-.dash-page .dashboard-install-card .card-title {
+.wm-signin-trusted h2 {
+  margin: 0 0 44px;
   color: #faf8f5;
-  font-family: var(--font-sans);
-  font-size: 36px;
+  font-size: 72px;
+  line-height: 0.9;
   font-weight: 500;
-  line-height: 0.88;
   letter-spacing: 0;
+  text-align: center;
 }
 
-.dash-page .dashboard-install-card .install-command-text {
-  font-family: var(--font-mono);
-  color: #faf8f5;
-  font-size: 15px;
-  font-weight: 300;
-  line-height: 1.4;
-  letter-spacing: 0.15px;
+.wm-signin-trusted h2 span {
+  color: transparent;
+  background: linear-gradient(93deg, #383bff 0%, #9a57ff 48%, #eda0ff 98%);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
-.dash-page .dashboard-quickstart-card pre,
-.dash-page .dashboard-quickstart-card .demo-code-block {
-  min-height: 395px;
-  padding: 31px 39px !important;
-  border: 1px solid #54575a;
-  border-radius: 24px;
-  background: #000000 !important;
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.playground-dashboard .demo-code-block {
-  padding: 16px 18px !important;
-}
-
-.setup-classic-divider {
-  margin: 22px 0 16px;
-}
-
-.setup-classic .setup-import-textarea {
-  min-height: 78px;
-  border-radius: 10px;
-  font-size: 0.82rem;
-}
-
-@media (max-width: 860px) {
-  .setup-classic-nav,
-  .playground-nav,
-  .dashboard-nav {
-    height: 92px;
-    padding: 0 16px;
-  }
-
-  .setup-classic-nav .nav-inner,
-  .playground-nav .nav-inner,
-  .dashboard-nav .nav-inner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 92px;
-    min-height: 92px;
-    padding: 0;
-  }
-
-  .setup-classic-nav .nav-brand,
-  .playground-nav .nav-brand,
-  .dashboard-nav .nav-brand {
-    top: 22px;
-  }
-
-  .setup-classic-nav .walrus-memory-wordmark,
-  .playground-nav .walrus-memory-wordmark,
-  .dashboard-nav .walrus-memory-wordmark {
-    font-size: 1.45rem;
-  }
-
-  .setup-classic-nav .nav-user,
-  .playground-nav .nav-user,
-  .dashboard-nav .nav-user {
-    display: flex;
-    align-items: center;
-    top: 18px;
-    gap: 10px;
-  }
-
-  .setup-classic-nav .nav-address,
-  .playground-nav .nav-address,
-  .dashboard-nav .nav-address {
-    width: auto;
-    min-width: 112px;
-  }
-
-  .setup-classic-nav .lp-nav-cta,
-  .playground-nav .lp-nav-cta,
-  .dashboard-nav .lp-nav-cta {
-    width: auto;
-    min-height: 44px;
-    height: 44px;
-    padding: 0 18px;
-    font-size: 0.95rem;
-  }
-
-  .dash-page .dash-shell,
-  .playground-dashboard,
-  .setup-classic-container {
-    width: calc(100% - 32px);
-    padding: 32px 0 56px;
-  }
-
-  .playground-dashboard .dashboard-header h2,
-  .dash-page .dashboard-header h2,
-  .setup-classic-title {
-    font-size: 1.38rem;
-  }
-}
-
-/* ── Figma 2325-6980: authoritative Delegate-keys header buttons + "+" icon.
-   Appended last (equal-or-higher specificity than the earlier duplicated
-   .dash-page rules) so these values win regardless of source-order conflicts. ── */
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh,
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add {
-  min-height: 52px;
-  height: 52px;
-  padding: 10px 30px;
-  border-radius: 26px;
-  font-family: var(--font-sans);
-  font-size: 18px;
-  font-weight: 500;
-  line-height: 0.84;
-  letter-spacing: 0.72px;
-  display: inline-flex;
-  align-items: center;
+.wm-signin-logos {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
   justify-content: center;
+  justify-items: center;
+  align-items: center;
+  gap: 36px 52px;
 }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh {
-  width: 127px;
-  gap: 0;
-  border: 1px solid #faf8f5;
-  background: transparent;
-  color: #faf8f5;
+.wm-signin-logos img {
+  height: auto;
+  max-width: 100%;
+  object-fit: contain;
+  opacity: 0.92;
 }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh svg {
-  display: none;
-}
+@media (max-width: 900px) {
+  .wm-signin-inner {
+    grid-template-columns: 1fr;
+    gap: 40px;
+    justify-items: center;
+    width: calc(100% - 40px);
+  }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add {
-  width: auto;
-  gap: 10px;
-  border: 1px solid #faf8f5;
-  background: #faf8f5;
-  color: #000000;
-}
+  .wm-signin-card {
+    width: min(100%, 640px);
+    aspect-ratio: auto;
+    min-height: min(760px, calc(100vh - 72px));
+    padding: 64px 0 50px;
+  }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 2.5;
-  flex-shrink: 0;
-}
+  .wm-signin-logo {
+    width: min(330px, 58%);
+  }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh:hover {
-  background: rgba(250, 248, 245, 0.16);
-  border-color: #faf8f5;
-  color: #faf8f5;
-}
+  .wm-signin-sub {
+    width: min(520px, 82%);
+    font-size: clamp(25px, 6.2vw, 34px);
+    margin: 36px auto 58px;
+  }
 
-.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add:hover {
-  background: #e8ff75;
-  border-color: #e8ff75;
-  color: #000000;
-}
+  .wm-signin-google,
+  .wm-signin-wallet {
+    width: min(440px, 82%);
+  }
 
-/* ── Figma 2325-6980: even, generous block spacing. The CTA row was only ~20px
-   below; align it with the 56px card gaps so the whole stack breathes like the
-   design (Figma's literal 36px sits between much taller cards). ── */
-.dash-page .dashboard-cta-row {
-  gap: 30px;
-  margin-bottom: 56px;
+  .wm-signin-google,
+  .wm-signin-wallet button {
+    min-height: 72px;
+    font-size: clamp(22px, 5.4vw, 30px);
+  }
+
+  .wm-signin-tos {
+    width: min(360px, 72%);
+    margin-top: 54px;
+    font-size: clamp(14px, 3.4vw, 20px);
+  }
+
+  .wm-signin-trusted {
+    display: none;
+  }
 }
