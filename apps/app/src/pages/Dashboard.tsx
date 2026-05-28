@@ -2,7 +2,7 @@
  * Dashboard — Account info, delegate keys management, SDK integration guide
  */
 
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, type SVGProps } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
@@ -13,7 +13,7 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link } from 'react-router-dom'
-import { ArrowRight, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, FileText, ShieldCheck } from 'lucide-react'
+import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import bash from 'react-syntax-highlighter/dist/esm/languages/hljs/bash'
@@ -33,6 +33,82 @@ import {
     type DynamicFieldObjectFields,
     type RegistryObjectFields,
 } from '../utils/suiFields'
+
+function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 34.9865 40.1201" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M34.9835 6.48047V21.043C34.9837 21.0489 34.9843 21.0554 34.9845 21.0625C34.9854 21.0937 34.9861 21.1366 34.9864 21.1904C34.987 21.2981 34.9855 21.4501 34.9767 21.6416C34.9591 22.0249 34.9129 22.568 34.8019 23.2324C34.5798 24.5608 34.0953 26.3809 33.048 28.3838C30.9395 32.4156 26.6048 37.0829 17.8097 40.0146L17.4933 40.1201L17.1769 40.0146C8.38176 37.0829 4.04706 32.4157 1.93859 28.3838C0.891206 26.3809 0.406732 24.5608 0.184682 23.2324C0.0736325 22.568 0.0274786 22.0249 0.00987737 21.6416C0.00108818 21.4501 -0.000482765 21.2981 0.000111746 21.1904C0.000409352 21.1366 0.00114976 21.0937 0.00206487 21.0625C0.002274 21.0554 0.002837 21.0489 0.00304143 21.043V6.48047L17.4933 0L34.9835 6.48047ZM2.00304 7.87207V21.082L2.00206 21.1084C2.00196 21.1111 2.00126 21.1153 2.00109 21.1211C2.00063 21.1368 2.00032 21.1637 2.00011 21.2012C1.9997 21.2763 2.00079 21.3942 2.00792 21.5498C2.02224 21.8614 2.06076 22.3245 2.15734 22.9023C2.35061 24.0586 2.7772 25.6712 3.71105 27.457C5.54154 30.9573 9.37644 35.2273 17.4933 38.0088C25.6101 35.2273 29.445 30.9573 31.2755 27.457C32.2093 25.6712 32.6359 24.0586 32.8292 22.9023C32.9258 22.3245 32.9643 21.8614 32.9786 21.5498C32.9858 21.3942 32.9869 21.2763 32.9864 21.2012C32.9862 21.1637 32.9849 21.1368 32.9845 21.1211C32.9843 21.1153 32.9846 21.1111 32.9845 21.1084L32.9835 21.082V7.87207L17.4933 2.13184L2.00304 7.87207ZM20.1232 13.6367C20.1232 12.2009 18.9593 11.0363 17.5236 11.0361C16.0876 11.0361 14.923 12.2008 14.923 13.6367C14.9231 15.0725 16.0877 16.2363 17.5236 16.2363C18.9592 16.2361 20.123 15.0724 20.1232 13.6367ZM22.1232 13.6367C22.123 15.8334 20.5827 17.6681 18.5236 18.125V31.1162H16.5236V28.7061H13.5831V26.7061H16.5236V24.5566H13.5831V22.5566H16.5236V18.126C14.464 17.6694 12.9231 15.8337 12.923 13.6367C12.923 11.0962 14.983 9.03613 17.5236 9.03613C20.0639 9.03632 22.1232 11.0963 22.1232 13.6367Z"
+                fill="currentColor"
+            />
+        </svg>
+    )
+}
+
+function DocumentationCtaIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 34.81 40" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M31.12 6.81H26.59V3.69C26.59 1.65 24.94 0 22.9 0H3.69C1.65 0 0 1.65 0 3.69V29.51C0 31.55 1.65 33.2 3.69 33.2H8.22V36.32C8.22 38.36 9.87 40.01 11.91 40.01H31.13C33.17 40.01 34.82 38.36 34.82 36.32V10.5C34.82 8.46 33.17 6.81 31.13 6.81H31.12ZM8.22 10.5V31.19H3.69C2.76 31.19 2 30.43 2 29.5V3.69C2 2.76 2.76 2 3.69 2H22.91C23.84 2 24.6 2.76 24.6 3.69V6.81H11.91C9.87 6.81 8.22 8.46 8.22 10.5ZM32.81 36.31C32.81 37.24 32.05 38 31.12 38H11.9C10.97 38 10.21 37.24 10.21 36.31V10.5C10.21 9.57 10.97 8.81 11.9 8.81H31.12C32.05 8.81 32.81 9.57 32.81 10.5V36.32V36.31Z"
+                fill="currentColor"
+            />
+            <path d="M28.48 22.5H14.55V24.5H28.48V22.5Z" fill="currentColor" />
+            <path d="M28.48 16.5H14.55V18.5H28.48V16.5Z" fill="currentColor" />
+            <path d="M28.48 28.5H14.55V30.5H28.48V28.5Z" fill="currentColor" />
+        </svg>
+    )
+}
+
+function CtaArrowIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 20.36 20.36" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M10.18 0L9.47 0.71L18.45 9.68H0V10.68H18.45L9.47 19.66L10.18 20.36L20.36 10.18L10.18 0Z"
+                fill="currentColor"
+            />
+        </svg>
+    )
+}
+
+const walrusCodeTheme = {
+    hljs: {
+        color: '#faf8f5',
+        background: '#050505',
+    },
+    'hljs-keyword': {
+        color: '#cab1ff',
+    },
+    'hljs-built_in': {
+        color: '#faf8f5',
+    },
+    'hljs-title': {
+        color: '#faf8f5',
+    },
+    'hljs-attr': {
+        color: '#e8ff75',
+    },
+    'hljs-property': {
+        color: '#e8ff75',
+    },
+    'hljs-variable': {
+        color: '#faf8f5',
+    },
+    'hljs-string': {
+        color: '#faf8f5',
+    },
+    'hljs-comment': {
+        color: '#8f9294',
+    },
+    'hljs-number': {
+        color: '#e8ff75',
+    },
+    'hljs-literal': {
+        color: '#e8ff75',
+    },
+    'hljs-params': {
+        color: '#faf8f5',
+    },
+}
 
 // ============================================================
 // Types
@@ -440,6 +516,7 @@ asyncio.run(main())`
 
                 {isRecoveringExistingAccount && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
                             your wallet already has a Walrus Memory account, but this browser does not have a saved delegate key.
                             remove an old on-chain key below or create a new delegate key.
@@ -449,6 +526,7 @@ asyncio.run(main())`
 
                 {isNewAccount && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
                             No Walrus Memory account found for this wallet,
                             create a delegate key to get started.
@@ -458,6 +536,7 @@ asyncio.run(main())`
 
                 {hasMaxDelegateKeys && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>{MAX_DELEGATE_KEYS_MESSAGE}</p>
                     </div>
                 )}
@@ -471,18 +550,18 @@ asyncio.run(main())`
                             onClick={() => trackEvent('cta_click', { cta: 'interactive_demo', location: 'dashboard' })}
                         >
                             <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-                                <ShieldCheck size={26} className="dashboard-cta-icon" />
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
                                 <div className="dashboard-cta-title">Try the interactive demo</div>
                                 <div className="dashboard-cta-subtitle">Test remember, recall &amp; analyze with your live server</div>
                             </div>
-                            <ArrowRight size={22} className="dashboard-cta-arrow" />
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     ) : hasMaxDelegateKeys ? (
                         <div className="dashboard-cta dashboard-cta--disabled">
                             <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-                                <ShieldCheck size={26} className="dashboard-cta-icon" />
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
                                 <div className="dashboard-cta-title">Remove a key first</div>
@@ -497,13 +576,13 @@ asyncio.run(main())`
                             onClick={() => trackEvent('cta_click', { cta: 'create_delegate_key', location: 'dashboard' })}
                         >
                             <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-                                <ShieldCheck size={26} className="dashboard-cta-icon" />
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
                                 <div className="dashboard-cta-title">Create a delegate key</div>
                                 <div className="dashboard-cta-subtitle">Generate and register a new SDK key</div>
                             </div>
-                            <ArrowRight size={22} className="dashboard-cta-arrow" />
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     )}
                     {config.docsUrl && (
@@ -515,13 +594,13 @@ asyncio.run(main())`
                             onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'dashboard' })}
                         >
                             <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-                                <FileText size={26} className="dashboard-cta-icon" />
+                                <DocumentationCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
                                 <div className="dashboard-cta-title">Documentation</div>
                                 <div className="dashboard-cta-subtitle">Guides, examples &amp; API references</div>
                             </div>
-                            <ArrowRight size={22} className="dashboard-cta-arrow" />
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </a>
                     )}
                 </div>
@@ -871,7 +950,7 @@ asyncio.run(main())`
                             <Copy size={14} />
                             <span className="dashboard-quickstart-copy-label">{copied === sdkCopyLabel ? 'done' : 'copy'}</span>
                         </button>
-                        <SyntaxHighlighter language={sdkSnippetLanguage} style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
+                        <SyntaxHighlighter language={sdkSnippetLanguage} style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
                             {sdkSnippet}
                         </SyntaxHighlighter>
                     </div>

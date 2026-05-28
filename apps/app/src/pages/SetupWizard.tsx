@@ -388,11 +388,9 @@ export default function SetupWizard() {
 
             <main className="container setup-classic-container">
                 <div className="setup-classic-panel">
-
                     {/* ===== Step 1: Intro ===== */}
                     {step === 'intro' && (
                         <div className="setup-classic-intro">
-
                             <h2 className="setup-classic-title">
                                 create your delegate key
                             </h2>
@@ -403,7 +401,6 @@ export default function SetupWizard() {
 
                             <div className="card setup-classic-feature-card">
                                 <div className="setup-classic-feature">
-
                                     <div>
                                         <strong>low risk</strong>
                                         <p>
@@ -486,7 +483,6 @@ export default function SetupWizard() {
                     {step === 'show-key' && (
                         <div>
                             <div style={{ textAlign: 'center', marginBottom: 24 }}>
-
                                 <h2 style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
                                     key generated!
                                 </h2>
@@ -602,7 +598,6 @@ export default function SetupWizard() {
                             </p>
                         </div>
                     )}
-
                 </div>
             </main>
         </div>
