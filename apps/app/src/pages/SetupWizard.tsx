@@ -28,7 +28,6 @@ import {
     type DynamicFieldObjectFields,
     type RegistryObjectFields,
 } from '../utils/suiFields'
-import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -367,7 +366,10 @@ export default function SetupWizard() {
             <nav className="nav setup-classic-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
+                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
+                            <span>walrus</span>
+                            <span>memory</span>
+                        </span>
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">

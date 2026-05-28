@@ -181,10 +181,31 @@ h1, h2, h3 {
   font-weight: 700;
   font-size: 1.15rem;
   letter-spacing: -0.02em;
+  color: inherit;
+  text-decoration: none;
 }
 
 .nav-brand span {
   color: var(--text-primary);
+}
+
+.walrus-memory-wordmark {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 0.86;
+  font-size: 1.35rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: lowercase;
+  color: #000000;
+}
+
+.walrus-memory-wordmark span:first-child {
+  color: currentColor;
+}
+
+.walrus-memory-wordmark span:last-child {
+  color: #5b35ff;
 }
 
 .nav-user {
@@ -1332,8 +1353,14 @@ h1, h2, h3 {
   border-bottom: 1px solid rgba(250, 248, 245, 0.1);
 }
 
-.setup-classic-nav .nav-brand img {
-  filter: invert(1) grayscale(1) brightness(1.8);
+.setup-classic-nav .walrus-memory-wordmark,
+.playground-nav .walrus-memory-wordmark {
+  color: #faf8f5;
+}
+
+.setup-classic-nav .walrus-memory-wordmark span:last-child,
+.playground-nav .walrus-memory-wordmark span:last-child {
+  color: #e8ff75;
 }
 
 .setup-classic-nav .nav-address {
@@ -3900,10 +3927,6 @@ h1, h2, h3 {
   border-bottom: 1px solid rgba(250, 248, 245, 0.1);
 }
 
-.playground-nav .nav-brand img {
-  filter: invert(1) grayscale(1) brightness(1.8);
-}
-
 .playground-nav .demo-nav-back {
   color: #8f9294;
 }
@@ -4081,7 +4104,7 @@ h1, h2, h3 {
 }
 
 @media (max-width: 640px) {
-  .playground-nav .nav-brand img {
-    max-width: min(220px, 58vw);
+  .playground-nav .walrus-memory-wordmark {
+    font-size: 1.2rem;
   }
 }

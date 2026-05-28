@@ -123,6 +123,10 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
+const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
+const PRIVATE_KEY_ENV = 'WALRUS_MEMORY_PRIVATE_KEY'
+const ACCOUNT_ID_ENV = 'WALRUS_MEMORY_ACCOUNT_ID'
+const SERVER_URL_ENV = 'WALRUS_MEMORY_SERVER_URL'
 type QuickstartLanguage = 'ts' | 'py'
 
 function bytesToHex(bytes: Uint8Array | number[]): string {
@@ -251,7 +255,7 @@ export default function Dashboard({
         : 'staging / testnet'
     const expectedRelayerUrl = config.suiNetwork === 'mainnet'
         ? 'https://relayer.memwal.ai'
-        : 'https://relayer.dev.memwal.ai'
+        : 'https://relayer.memwal.ai'
     const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
     const relayerEnvironmentLabel = normalizedRelayerUrl.startsWith('/')
         ? 'local dev proxy / testnet'
@@ -448,39 +452,37 @@ export default function Dashboard({
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
 
-    const sdkTypeScriptSnippet = `import { MemWal } from "@mysten-incubation/memwal"
-
-const memwal = MemWal.create({
-  key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: process.env.MEMWAL_ACCOUNT_ID ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.MEMWAL_SERVER_URL ?? "${config.memwalServerUrl}",
+    const sdkTypeScriptSnippet = `const memory = WalrusMemory.create({
+  key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
+  accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
 })
 
 // Remember something
-const job = await memwal.remember("I'm allergic to peanuts")
-await memwal.waitForRememberJob(job.job_id)
+const job = await memory.remember("I'm allergic to peanuts")
+await memory.waitForRememberJob(job.job_id)
 
 // Recall memories
-const result = await memwal.recall("food allergies")
+const result = await memory.recall("food allergies")
 console.log(result.results[0].text)`
 
     const sdkPythonSnippet = `import asyncio
 import os
-from memwal import MemWal
+	from walrus_memory import WalrusMemory
 
 async def main():
-    memwal = MemWal.create(
-        key=os.environ["MEMWAL_PRIVATE_KEY"],
-        account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-        server_url=os.environ.get("MEMWAL_SERVER_URL", "${config.memwalServerUrl}"),
+    memory = WalrusMemory.create(
+        key=os.environ["${PRIVATE_KEY_ENV}"],
+        account_id=os.environ["${ACCOUNT_ID_ENV}"],
+        server_url=os.environ.get("${SERVER_URL_ENV}", "${SDK_DEFAULT_SERVER_URL}"),
     )
 
-    await memwal.remember_and_wait("I'm allergic to peanuts")
+    await memory.remember_and_wait("I'm allergic to peanuts")
 
-    result = await memwal.recall("food allergies")
+    result = await memory.recall("food allergies")
     print(result.results[0].text)
 
-    await memwal.close()
+    await memory.close()
 
 asyncio.run(main())`
 
@@ -612,13 +614,13 @@ asyncio.run(main())`
                     <div className="card-header">
                         <div>
                             <div className="card-title">SDK credentials</div>
-                            <div className="card-subtitle">copy the delegate private key into server env as MEMWAL_PRIVATE_KEY</div>
+                            <div className="card-subtitle">copy the delegate private key into server env as {PRIVATE_KEY_ENV}</div>
                         </div>
                     </div>
 
                     {/* Private Key */}
                     <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                        <div className="key-label">delegate private key — server-side MEMWAL_PRIVATE_KEY</div>
+                        <div className="key-label">delegate private key — server-side {PRIVATE_KEY_ENV}</div>
                         {showKey ? (
                             <>
                                 <div className="key-value">{delegateKey}</div>
@@ -631,7 +633,7 @@ asyncio.run(main())`
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        onClick={() => copyToClipboard(`MEMWAL_PRIVATE_KEY=${delegateKey}`, 'priv-env')}
+                                        onClick={() => copyToClipboard(`${PRIVATE_KEY_ENV}=${delegateKey}`, 'priv-env')}
                                     >
                                         <Copy size={12} /> {copied === 'priv-env' ? 'copied!' : 'copy env line'}
                                     </button>
@@ -671,7 +673,7 @@ asyncio.run(main())`
                     {/* Account ID */}
                     {effectiveAccountObjectId && (
                         <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                            <div className="key-label">account ID — MEMWAL_ACCOUNT_ID</div>
+                            <div className="key-label">account ID — {ACCOUNT_ID_ENV}</div>
                             <div className="key-value" style={{ fontSize: '0.78rem' }}>
                                 {effectiveAccountObjectId}
                             </div>
@@ -684,7 +686,7 @@ asyncio.run(main())`
                                 </button>
                                 <button
                                     className="btn btn-secondary btn-sm"
-                                    onClick={() => copyToClipboard(`MEMWAL_ACCOUNT_ID=${effectiveAccountObjectId}`, 'acct-env')}
+                                    onClick={() => copyToClipboard(`${ACCOUNT_ID_ENV}=${effectiveAccountObjectId}`, 'acct-env')}
                                 >
                                     <Copy size={12} /> {copied === 'acct-env' ? 'copied!' : 'copy env line'}
                                 </button>
@@ -693,14 +695,14 @@ asyncio.run(main())`
                     )}
 
                     <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                        <div className="key-label">relayer URL — MEMWAL_SERVER_URL</div>
+                        <div className="key-label">relayer URL — {SERVER_URL_ENV}</div>
                         <div className="key-value" style={{ fontSize: '0.78rem' }}>
                             {config.memwalServerUrl}
                         </div>
                         <div className="key-actions">
                             <button
                                 className="btn btn-secondary btn-sm"
-                                onClick={() => copyToClipboard(`MEMWAL_SERVER_URL=${config.memwalServerUrl}`, 'server-env')}
+                                onClick={() => copyToClipboard(`${SERVER_URL_ENV}=${config.memwalServerUrl}`, 'server-env')}
                             >
                                 <Copy size={12} /> {copied === 'server-env' ? 'copied!' : 'copy env line'}
                             </button>
@@ -976,10 +978,10 @@ asyncio.run(main())`
                         ))}
                     </div>
                     <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
-                        {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
-                         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
-                         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
-                         'bun add @mysten-incubation/memwal'}
+                        {pkgManager === 'npm' ? 'npm install walrus-memory' :
+                         pkgManager === 'pnpm' ? 'pnpm add walrus-memory' :
+                         pkgManager === 'yarn' ? 'yarn add walrus-memory' :
+                         'bun add walrus-memory'}
                     </SyntaxHighlighter>
                 </div>
             </main>

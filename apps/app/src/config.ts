@@ -2,9 +2,7 @@
  * App-wide configuration from environment variables
  */
 const DEFAULT_DOCS_URL = 'https://docs.memwal.ai'
-const DEFAULT_MEMWAL_SERVER_URL = import.meta.env.DEV
-    ? '/api/memwal'
-    : 'https://relayer.dev.memwal.ai'
+const DEFAULT_MEMWAL_SERVER_URL = 'https://relayer.memwal.ai'
 
 export const config = {
     enokiApiKey: import.meta.env.VITE_ENOKI_API_KEY as string || '',

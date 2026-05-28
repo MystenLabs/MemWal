@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import wasm from 'vite-plugin-wasm'
 import topLevelAwait from 'vite-plugin-top-level-await'
 
-const memwalRelayerTarget = process.env.VITE_MEMWAL_RELAYER_PROXY_TARGET || 'https://relayer.dev.memwal.ai'
+const memwalRelayerTarget = process.env.VITE_MEMWAL_RELAYER_PROXY_TARGET || 'https://relayer.memwal.ai'
 
 // https://vite.dev/config/
 export default defineConfig({
