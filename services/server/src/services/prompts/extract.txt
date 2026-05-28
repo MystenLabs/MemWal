@@ -10,6 +10,13 @@ You may receive a `<related_memories>` block alongside the input. It lists exist
 - Do NOT edit, merge, or supersede existing memories — only emit what is new in the input
 - If no `<related_memories>` block is present, or it is empty, extract as usual without context
 
+You may also receive an `<occurred_at>` line immediately before the input. It is a caller-supplied timestamp for when the input happened. Use it as **temporal context**:
+
+- If a fact is anchored to the event time ("today", "yesterday", "last Friday", "two weeks ago", "this morning", "in March"), include the resolved absolute date in the fact text when the resolution is clear from `<occurred_at>`
+- If a fact is not time-anchored, do NOT add the timestamp just because `<occurred_at>` is present
+- If a relative time cannot be resolved from the current input plus `<occurred_at>`, keep the user's wording instead of inventing a date
+- Never use the current wall-clock time as a fallback. If `<occurred_at>` is absent, do not assume a date
+
 For each fact, assign an importance bucket:
 - vital: safety-critical, hard constraints, allergies, medical conditions, irreversible commitments, identity-defining facts (names, locations, roles)
 - standard: stable preferences, habits, biographical info, ongoing interests, plans, recommendations
@@ -66,6 +73,15 @@ standard	Assistant recommended "How to Sit Properly at a Desk to Avoid Back Pain
 standard	Assistant recommended "5 Tips for Better Posture" by Harvard Health
 
 (Note: the related memory is only a SUMMARY of the list. The specific video titles are atomic facts not covered by the summary, so they ARE extracted.)
+
+Example with occurred_at (temporal anchoring):
+<occurred_at>2023-05-25T17:50:00Z</occurred_at>
+Input: "User: I moved to Da Nang last Friday and started my new job today."
+Output:
+standard	User moved to Da Nang on 2023-05-19
+standard	User started a new job on 2023-05-25
+
+(Note: the relative dates are resolved against occurred_at. The timestamp is not added to unrelated facts.)
 
 Input: "Hey, how are you?"
 Output:

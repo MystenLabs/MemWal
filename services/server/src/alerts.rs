@@ -85,7 +85,10 @@ impl AlertManager {
     fn suppress_walrus_upgrade_alert(&self, sui_network: &str, dep_version: &str) -> bool {
         let key = (sui_network.to_string(), dep_version.to_string());
         let now = Instant::now();
-        let mut guard = self.walrus_upgrade_dedup.lock().expect("dedup mutex poisoned");
+        let mut guard = self
+            .walrus_upgrade_dedup
+            .lock()
+            .expect("dedup mutex poisoned");
         // Opportunistic cleanup so the map can't grow without bound on a
         // long-running relayer: drop entries older than 2× the window.
         let cleanup_horizon = self.walrus_upgrade_dedup_window.saturating_mul(2);
@@ -245,8 +248,12 @@ impl SlackPayload {
             (Some(before), Some(after)) => {
                 format!("*On-chain system version:* `{}` → `{}`\n", before, after)
             }
-            (None, Some(after)) => format!("*On-chain system version (after refresh):* `{}`\n", after),
-            (Some(before), None) => format!("*On-chain system version (before refresh):* `{}`\n", before),
+            (None, Some(after)) => {
+                format!("*On-chain system version (after refresh):* `{}`\n", after)
+            }
+            (Some(before), None) => {
+                format!("*On-chain system version (before refresh):* `{}`\n", before)
+            }
             (None, None) => String::new(),
         };
         let details = format!(

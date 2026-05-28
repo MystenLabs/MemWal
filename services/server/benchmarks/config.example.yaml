@@ -77,6 +77,26 @@ benchmarks:
   # Bumping to 20-30 can help recall at cost of more LLM context size.
   recall_limit: 10
 
+  # How conversations are chunked before calling /api/analyze.
+  # adapter = use each benchmark adapter's documented default.
+  # per_turn = one analyze call per turn; closest to SDK replay.
+  # session = concatenate each session into one analyze call; useful for
+  # apples-to-apples comparison with the 2026-04-20 LongMemEval run.
+  ingest_strategy: adapter
+  # Optional per-benchmark override:
+  # ingest_strategy_by_benchmark:
+  #   locomo: per_turn
+  #   longmemeval: session
+
+  # Phase-2 experiment toggles. All default false to preserve the
+  # 2026-05-21 extract.v5 baseline unless a run opts in explicitly.
+  extract_with_critique: false
+  contextual_embedding: false
+  adaptive_k: false
+  # Optional fixed hint for adaptive-k runs: lookup | standard | composition | survey.
+  # Leave unset to let the server classify when adaptive_k=true.
+  # limit_hint: composition
+
   # How many times to run the judge per query.
   # 1 = fastest, 1 data point per query. Judge has some variance
   #     (~±2-3 points) but retrieval is deterministic given fixed

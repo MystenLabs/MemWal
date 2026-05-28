@@ -20,7 +20,7 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
-    SIDECAR_WALRUS_DEP_VERSION, WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+    WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert, SIDECAR_WALRUS_DEP_VERSION,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};

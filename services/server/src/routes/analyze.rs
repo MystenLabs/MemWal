@@ -17,6 +17,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use base64::Engine as _;
+use chrono::{DateTime, SecondsFormat, Utc};
 use std::sync::Arc;
 
 use crate::jobs::WalletOperation;
@@ -58,6 +59,65 @@ const EMBED_TIMEOUT_MS: u64 = 800;
 const SEARCH_TIMEOUT_MS: u64 = 300;
 const FETCH_TIMEOUT_MS: u64 = 500;
 
+fn render_extraction_text(text: &str, occurred_at: Option<&DateTime<Utc>>) -> String {
+    match occurred_at {
+        None => text.to_string(),
+        Some(ts) => format!(
+            "<occurred_at>{}</occurred_at>\n{}",
+            ts.to_rfc3339_opts(SecondsFormat::Secs, true),
+            text
+        ),
+    }
+}
+
+fn render_contextual_embedding_prefix(
+    occurred_at: Option<&DateTime<Utc>>,
+    related_memories: &[&str],
+) -> Option<String> {
+    if occurred_at.is_none() && related_memories.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(ts) = occurred_at {
+        lines.push(format!(
+            "Occurred at: {}",
+            ts.to_rfc3339_opts(SecondsFormat::Secs, true)
+        ));
+    }
+    if !related_memories.is_empty() {
+        lines.push("Nearby existing memories:".to_string());
+        for (idx, memory) in related_memories.iter().take(3).enumerate() {
+            lines.push(format!(
+                "{}. {}",
+                idx + 1,
+                truncate_contextual_embedding_memory(memory)
+            ));
+        }
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn render_embedding_input(fact_text: &str, context_prefix: Option<&str>) -> String {
+    match context_prefix {
+        None => fact_text.to_string(),
+        Some(prefix) => format!("{}\nFact: {}", prefix, fact_text),
+    }
+}
+
+fn truncate_contextual_embedding_memory(memory: &str) -> &str {
+    const MAX_BYTES: usize = 240;
+    if memory.len() <= MAX_BYTES {
+        return memory;
+    }
+    let mut end = MAX_BYTES;
+    while !memory.is_char_boundary(end) {
+        end -= 1;
+    }
+    &memory[..end]
+}
+
 /// POST /api/analyze
 ///
 /// AI fact extraction flow:
@@ -86,8 +146,13 @@ pub async fn analyze(
         text_len = body.text.len(),
         owner = %owner,
         namespace = %namespace,
+        has_occurred_at = body.occurred_at.is_some(),
+        extract_with_critique = body.extract_with_critique,
+        contextual_embedding = body.contextual_embedding,
         "analyze request"
     );
+
+    let extraction_text = render_extraction_text(&body.text, body.occurred_at.as_ref());
 
     // ── Pre-extraction dedup context ──────────────────────────
     //
@@ -318,10 +383,17 @@ pub async fn analyze(
     // pass `related_memories` as dedup context. The LlmExtractor
     // short-circuits to plain `extract` on empty slice — no wasted tokens
     // when the namespace had no nearest hits.
-    let extracted = state
-        .extractor
-        .extract_with_context(&body.text, &related_texts)
-        .await?;
+    let extracted = if body.extract_with_critique {
+        state
+            .extractor
+            .extract_with_critique(&extraction_text, &related_texts)
+            .await?
+    } else {
+        state
+            .extractor
+            .extract_with_context(&extraction_text, &related_texts)
+            .await?
+    };
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
     let reserved_additional_weight = rate_limit::analyze_additional_weight(facts.len());
@@ -363,6 +435,10 @@ pub async fn analyze(
     // Production behaviour is untouched — this branch only runs when
     // BENCHMARK_MODE is on (which is off by default and not for production).
     if state.config.benchmark_mode {
+        let embedding_context_prefix = body
+            .contextual_embedding
+            .then(|| render_contextual_embedding_prefix(body.occurred_at.as_ref(), &related_texts))
+            .flatten();
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
         let total_plaintext_bytes: i64 = facts.iter().map(|f| f.text.len() as i64).sum();
@@ -376,8 +452,11 @@ pub async fn analyze(
                 let namespace = namespace.clone();
                 let agent_pk = auth.public_key.clone();
                 let fact = fact.clone();
+                let embedding_context_prefix = embedding_context_prefix.clone();
                 async move {
-                    let vector = state.embedder.embed(&fact.text).await?;
+                    let embedding_input =
+                        render_embedding_input(&fact.text, embedding_context_prefix.as_deref());
+                    let vector = state.embedder.embed(&embedding_input).await?;
                     // importance is threaded through the engine
                     // (see store_blob signature in engine::MemoryEngine).
                     // The PlaintextEngine persists it on the new
@@ -440,14 +519,21 @@ pub async fn analyze(
     //   - No plaintext stored in job payload
     //   - Exact ciphertext size known for quota check
     let auth_pubkey_base = auth.public_key.clone();
+    let embedding_context_prefix = body
+        .contextual_embedding
+        .then(|| render_contextual_embedding_prefix(body.occurred_at.as_ref(), &related_texts))
+        .flatten();
     let prep_tasks: Vec<_> = facts
         .iter()
         .map(|fact| {
             let state = Arc::clone(&state);
             let owner = owner.clone();
             let fact = fact.clone();
+            let embedding_context_prefix = embedding_context_prefix.clone();
             async move {
-                let embed_fut = state.embedder.embed(&fact.text);
+                let embedding_input =
+                    render_embedding_input(&fact.text, embedding_context_prefix.as_deref());
+                let embed_fut = state.embedder.embed(&embedding_input);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
                     &state.config.sidecar_url,
@@ -562,9 +648,13 @@ pub async fn analyze(
 
 #[cfg(test)]
 mod tests {
-    use super::{ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES};
+    use super::{
+        render_contextual_embedding_prefix, render_embedding_input, render_extraction_text,
+        ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES,
+    };
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
+    use chrono::TimeZone;
 
     // ── Text size limit ──────────────────────────────────────────
 
@@ -602,5 +692,35 @@ mod tests {
         // Additional weight is exactly fact_count
         assert_eq!(analyze_additional_weight(0), 0);
         assert_eq!(analyze_additional_weight(20), 20);
+    }
+
+    #[test]
+    fn extraction_text_includes_occurred_at_only_when_present() {
+        assert_eq!(render_extraction_text("User: hello", None), "User: hello");
+
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2023, 5, 25, 17, 50, 0)
+            .unwrap();
+        assert_eq!(
+            render_extraction_text("User: hello", Some(&ts)),
+            "<occurred_at>2023-05-25T17:50:00Z</occurred_at>\nUser: hello"
+        );
+    }
+
+    #[test]
+    fn contextual_embedding_prefix_is_opt_in_context() {
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2023, 5, 25, 17, 50, 0)
+            .unwrap();
+        let prefix = render_contextual_embedding_prefix(
+            Some(&ts),
+            &["User lives in Hanoi", "User works in TypeScript"],
+        )
+        .unwrap();
+        assert!(prefix.contains("Occurred at: 2023-05-25T17:50:00Z"));
+        assert!(prefix.contains("1. User lives in Hanoi"));
+
+        let embedded = render_embedding_input("User moved to Da Nang", Some(&prefix));
+        assert!(embedded.contains("Fact: User moved to Da Nang"));
     }
 }

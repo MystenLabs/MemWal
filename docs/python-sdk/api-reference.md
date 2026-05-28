@@ -87,6 +87,8 @@ RememberBulkResult(
 
 Search memories matching a natural-language query, scoped to `owner + namespace`.
 When `max_distance` is set, the client drops weak matches where `distance >= max_distance`.
+`adaptive_k` and `limit_hint` opt into adaptive recall-k. `limit_hint` can be
+`"lookup"`, `"standard"`, `"composition"`, or `"survey"`.
 
 Preferred form:
 
@@ -98,7 +100,9 @@ result = await memwal.recall(
 )
 ```
 
-The legacy positional form `recall(query, limit=10, namespace=None, max_distance=None)` remains supported for backwards compatibility.
+`RecallParams` also accepts `max_distance`, `adaptive_k`, and `limit_hint`.
+
+The legacy positional form `recall(query, limit=10, namespace=None, max_distance=None, adaptive_k=False, limit_hint=None)` remains supported for backwards compatibility.
 
 ```python
 RecallResult(
@@ -109,9 +113,11 @@ RecallResult(
 
 `distance` is cosine distance — lower is more similar.
 
-### `analyze(text, namespace=None) -> AnalyzeResult`
+### `analyze(text, namespace=None, occurred_at=None, extract_with_critique=False, contextual_embedding=False) -> AnalyzeResult`
 
 Extract memorable facts via an LLM and enqueue one background remember job per fact.
+`occurred_at` may be an RFC3339 string or timezone-aware `datetime`; no timestamp
+is sent by default.
 
 ```python
 AnalyzeResult(

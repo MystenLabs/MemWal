@@ -50,6 +50,6 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 
 # Utils
 uuid = { version = "1", features = ["v4"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 percent-encoding = "2"

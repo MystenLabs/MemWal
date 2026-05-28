@@ -24,6 +24,7 @@ import pytest
 from benchmarks.locomo import LocomoBenchmark
 from benchmarks.longmemeval import LongMemEvalBenchmark
 from core.types import Evidence
+from run import build_ingest_pairs, resolve_ingest_strategy
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -93,8 +94,9 @@ class TestLocomoAdapter:
         # Per-turn chunking: 2 sessions × 3 turns each (fixture) = 6 chunks
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        for label, text in chunks:
+        for label, text, occurred_at in chunks:
             assert "/" in label, "label format is conv_id/session_id"
+            assert occurred_at and occurred_at.endswith("Z")
             # LOCOMO text already has the speaker name baked in
             # ("Caroline: " / "Melanie: ") — the helper detects this
             # and skips double-prefixing.
@@ -110,7 +112,7 @@ class TestLocomoAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         from collections import defaultdict
         by_label = defaultdict(int)
-        for label, _ in chunks:
+        for label, _, _ in chunks:
             by_label[label] += 1
         # Every session should have produced at least one chunk
         assert len(by_label) == len(convs[0].sessions)
@@ -188,10 +190,25 @@ class TestLongMemEvalAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        for label, text in chunks:
+        for label, text, occurred_at in chunks:
             assert text.strip(), "ingest text should be non-empty"
+            assert occurred_at and occurred_at.endswith("Z")
             # LongMemEval turns are raw content (no embedded speaker name)
             # so the helper prefixes them with "User: " / "Assistant: ".
             assert text.startswith(("User:", "Assistant:")), (
                 f"LongMemEval turn should have role prefix; got {text[:40]!r}"
             )
+
+    def test_session_strategy_yields_one_chunk_per_session(self, adapter_and_data):
+        adapter, convs, _ = adapter_and_data
+        strategy = resolve_ingest_strategy(
+            "longmemeval",
+            {"benchmarks": {"ingest_strategy_by_benchmark": {"longmemeval": "session"}}},
+        )
+        chunks = build_ingest_pairs(adapter, convs[0], strategy)
+        assert strategy == "session"
+        assert len(chunks) == len(convs[0].sessions)
+        for label, text, occurred_at in chunks:
+            assert "/" in label, "label format is conv_id/session_id"
+            assert "User:" in text or "Assistant:" in text
+            assert occurred_at and occurred_at.endswith("Z")

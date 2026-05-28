@@ -95,13 +95,9 @@ class MemWalClient:
 
     # Status codes considered transient and worth retrying.
     # 429: rate-limited — wait and retry.
-    # 502/503/504: gateway/upstream issues (sidecar restart, transient
-    #              network blip) — wait and retry.
-    # 401 is intentionally NOT retried: it almost always means
-    #     misconfigured auth (wrong account_id, expired delegate key).
-    #     Retrying on 401 multiplies request load by N before failure
-    #     without ever succeeding, so we fail fast instead.
-    _RETRY_STATUS = (429, 502, 503, 504)
+    # 500/502/503/504: upstream issues (provider transient, sidecar restart,
+    #                  network blip) — wait and retry.
+    _RETRY_STATUS = (429, 500, 502, 503, 504)
 
     def _post(self, path: str, body: dict, max_retries: int = 5) -> dict:
         """Signed POST request. Raises on non-2xx. Retries transient
@@ -124,6 +120,14 @@ class MemWalClient:
                     time.sleep(delay)
                     continue
                 raise
+
+            # Rarely, under high concurrency, the server can reject an otherwise
+            # valid signed request as 401. Retry once with a fresh timestamp and
+            # nonce, but still fail fast for genuinely bad credentials.
+            if resp.status_code == 401 and attempt == 0:
+                delay = 0.25 + random.uniform(0, 0.25)
+                time.sleep(delay)
+                continue
 
             if resp.status_code in self._RETRY_STATUS and attempt < max_retries - 1:
                 # exponential backoff with real jitter: ~0.5, 1, 2, 4 seconds
@@ -150,7 +154,14 @@ class MemWalClient:
         resp.raise_for_status()
         return resp.json()
 
-    def analyze(self, text: str, namespace: str) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: str,
+        occurred_at: str | None = None,
+        extract_with_critique: bool = False,
+        contextual_embedding: bool = False,
+    ) -> AnalyzeResult:
         """
         POST /api/analyze — feed conversation text, extract and store memories.
 
@@ -162,10 +173,18 @@ class MemWalClient:
            status "done"; production: SEAL-encrypt + Walrus upload, via an
            async job, status "pending").
         """
-        data = self._post("/api/analyze", {
+        body = {
             "text": text,
             "namespace": namespace,
-        })
+        }
+        if occurred_at:
+            body["occurred_at"] = occurred_at
+        if extract_with_critique:
+            body["extract_with_critique"] = True
+        if contextual_embedding:
+            body["contextual_embedding"] = True
+
+        data = self._post("/api/analyze", body)
         # Response shape varies between server versions:
         # - Synchronous (reference branch): {facts, total, owner}
         # Async / benchmark-mode (dev): {facts, fact_count,
@@ -182,6 +201,8 @@ class MemWalClient:
         namespace: str,
         limit: int = 10,
         scoring_weights: ScoringWeights | None = None,
+        adaptive_k: bool = False,
+        limit_hint: str | None = None,
         memory_types: list[str] | None = None,
         min_importance: float | None = None,
     ) -> RecallResult:
@@ -207,6 +228,10 @@ class MemWalClient:
             "namespace": namespace,
             "limit": limit,
         }
+        if adaptive_k:
+            body["adaptive_k"] = True
+        if limit_hint:
+            body["limit_hint"] = limit_hint
         if scoring_weights:
             body["scoring_weights"] = scoring_weights.to_dict()
         if memory_types:

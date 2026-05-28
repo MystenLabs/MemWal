@@ -181,9 +181,105 @@ pub(super) fn zip_search_hit_fields_onto_hydrated(
     }
 }
 
+// ============================================================
+// Adaptive recall-k
+// ============================================================
+
+pub(super) struct ResolvedRecallLimit {
+    pub limit: usize,
+    pub hint: Option<RecallLimitHint>,
+}
+
+/// Resolve the effective recall limit for a query.
+///
+/// Default behavior is intentionally unchanged: when neither `adaptive_k` nor
+/// `limit_hint` is present, the caller's requested limit is only capped at 100.
+/// Adaptive behavior is opt-in and bounded, so a bad classification cannot
+/// scan an unbounded namespace.
+pub(super) fn resolve_recall_limit(
+    query: &str,
+    requested_limit: usize,
+    adaptive_k: bool,
+    limit_hint: Option<RecallLimitHint>,
+) -> ResolvedRecallLimit {
+    const MAX_LIMIT: usize = 100;
+    const LOOKUP_LIMIT: usize = 5;
+    const COMPOSITION_LIMIT: usize = 20;
+    const SURVEY_LIMIT: usize = 25;
+
+    let requested = requested_limit.min(MAX_LIMIT);
+    let hint = limit_hint.or_else(|| adaptive_k.then(|| classify_recall_intent(query)));
+
+    let limit = match hint {
+        None | Some(RecallLimitHint::Standard) => requested,
+        Some(RecallLimitHint::Lookup) => LOOKUP_LIMIT.min(MAX_LIMIT),
+        Some(RecallLimitHint::Composition) => requested.max(COMPOSITION_LIMIT).min(MAX_LIMIT),
+        Some(RecallLimitHint::Survey) => requested.max(SURVEY_LIMIT).min(MAX_LIMIT),
+    };
+
+    ResolvedRecallLimit { limit, hint }
+}
+
+fn classify_recall_intent(query: &str) -> RecallLimitHint {
+    let q = query.to_ascii_lowercase();
+    let words = q.split_whitespace().count();
+
+    let has_any = |needles: &[&str]| needles.iter().any(|needle| q.contains(needle));
+
+    if has_any(&[
+        "everything",
+        "all ",
+        "list ",
+        "overview",
+        "summarize",
+        "summary",
+        "what do you know",
+        "tell me about",
+    ]) {
+        return RecallLimitHint::Survey;
+    }
+
+    if has_any(&[
+        "compare",
+        "relationship",
+        "after ",
+        "before ",
+        "between",
+        "given ",
+        "based on",
+        "how did",
+        "why did",
+        "what changed",
+        "timeline",
+    ]) || q.matches(" and ").count() >= 2
+    {
+        return RecallLimitHint::Composition;
+    }
+
+    if words <= 10
+        && has_any(&[
+            "what is",
+            "what's",
+            "where is",
+            "where did",
+            "who is",
+            "when is",
+            "when did",
+            "name",
+            "favorite",
+            "favourite",
+        ])
+    {
+        return RecallLimitHint::Lookup;
+    }
+
+    RecallLimitHint::Standard
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_bounded_results, truncate_str};
+    use super::{collect_bounded_results, resolve_recall_limit, truncate_str};
+    use crate::types::RecallLimitHint;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -244,5 +340,41 @@ mod tests {
         let s = "🦀hello";
         let t = truncate_str(s, 2);
         assert_eq!(t, ""); // can't include partial emoji
+    }
+
+    #[test]
+    fn recall_limit_static_default_preserved() {
+        let resolved = resolve_recall_limit("What is my name?", 10, false, None);
+        assert_eq!(resolved.limit, 10);
+        assert_eq!(resolved.hint, None);
+    }
+
+    #[test]
+    fn recall_limit_hint_maps_to_bounded_k() {
+        let lookup =
+            resolve_recall_limit("What is my name?", 10, false, Some(RecallLimitHint::Lookup));
+        assert_eq!(lookup.limit, 5);
+        assert_eq!(lookup.hint, Some(RecallLimitHint::Lookup));
+
+        let composition = resolve_recall_limit(
+            "What changed after the move?",
+            10,
+            false,
+            Some(RecallLimitHint::Composition),
+        );
+        assert_eq!(composition.limit, 20);
+        assert_eq!(composition.hint, Some(RecallLimitHint::Composition));
+    }
+
+    #[test]
+    fn recall_limit_adaptive_classifies_survey() {
+        let resolved = resolve_recall_limit(
+            "Tell me about everything you know about my work",
+            10,
+            true,
+            None,
+        );
+        assert_eq!(resolved.limit, 25);
+        assert_eq!(resolved.hint, Some(RecallLimitHint::Survey));
     }
 }

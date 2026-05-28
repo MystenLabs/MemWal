@@ -52,6 +52,8 @@ DATASETS_DIR = ROOT / "datasets"
 RESULTS_DIR = ROOT / "results"
 PRESETS_DIR = ROOT / "presets"
 
+VALID_INGEST_STRATEGIES = {"adapter", "per_turn", "session"}
+
 
 # ============================================================
 # Config loading
@@ -81,6 +83,44 @@ def load_preset(name: str) -> ScoringWeights:
     )
 
 
+def apply_benchmark_overrides(config: dict, args) -> None:
+    """Apply per-run CLI overrides without mutating config.yaml."""
+    benchmark_cfg = config.setdefault("benchmarks", {})
+
+    if getattr(args, "extract_with_critique", False):
+        benchmark_cfg["extract_with_critique"] = True
+    if getattr(args, "contextual_embedding", False):
+        benchmark_cfg["contextual_embedding"] = True
+    if getattr(args, "adaptive_k", False):
+        benchmark_cfg["adaptive_k"] = True
+
+    limit_hint = getattr(args, "limit_hint", None)
+    if limit_hint:
+        benchmark_cfg["limit_hint"] = limit_hint
+
+    recall_limit = getattr(args, "recall_limit", None)
+    if recall_limit is not None:
+        benchmark_cfg["recall_limit"] = recall_limit
+
+    eval_concurrency = getattr(args, "eval_concurrency", None)
+    if eval_concurrency is not None:
+        benchmark_cfg["eval_concurrency"] = eval_concurrency
+
+    answer_judge_retries = getattr(args, "answer_judge_retries", None)
+    if answer_judge_retries is not None:
+        benchmark_cfg["answer_judge_retries"] = answer_judge_retries
+
+    ingest_strategy = getattr(args, "ingest_strategy", None)
+    benchmark_name = getattr(args, "benchmark", None)
+    if ingest_strategy and benchmark_name:
+        by_benchmark = benchmark_cfg.setdefault("ingest_strategy_by_benchmark", {})
+        by_benchmark[benchmark_name] = ingest_strategy
+
+    namespace_run_id = getattr(args, "namespace_run_id", None)
+    if namespace_run_id:
+        benchmark_cfg["namespace_run_id"] = namespace_run_id
+
+
 def get_git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -93,6 +133,44 @@ def get_git_commit() -> str:
 
 def generate_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+
+
+def resolve_ingest_strategy(benchmark_name: str, config: dict) -> str:
+    """
+    Resolve how benchmark conversations should be chunked for /api/analyze.
+
+    `adapter` preserves each adapter's explicit default. Per-benchmark
+    overrides let us keep LOCOMO production-aligned while running
+    LongMemEval session-level for apples-to-apples comparison with the
+    2026-04-20 assessment artifacts.
+    """
+    benchmark_cfg = config.get("benchmarks", {})
+    by_benchmark = benchmark_cfg.get("ingest_strategy_by_benchmark") or {}
+    strategy = by_benchmark.get(benchmark_name, benchmark_cfg.get("ingest_strategy", "adapter"))
+
+    aliases = {
+        "default": "adapter",
+        "naive_concat": "session",
+        "session_concat": "session",
+    }
+    strategy = aliases.get(str(strategy).strip(), str(strategy).strip())
+    if strategy not in VALID_INGEST_STRATEGIES:
+        raise ValueError(
+            f"Unsupported ingest strategy {strategy!r}. "
+            f"Expected one of {sorted(VALID_INGEST_STRATEGIES)}."
+        )
+    return strategy
+
+
+def build_ingest_pairs(adapter, conversation, strategy: str):
+    """Return adapter ingest triples using the resolved chunking strategy."""
+    if strategy == "adapter":
+        return adapter.build_ingest_text(conversation)
+    if strategy == "per_turn":
+        return adapter.build_ingest_text_per_turn(conversation)
+    if strategy == "session":
+        return adapter.build_ingest_text_naive_concat(conversation)
+    raise ValueError(f"Unsupported ingest strategy {strategy!r}")
 
 
 # ============================================================
@@ -156,6 +234,10 @@ def stage_ingest(
     start = time.time()
 
     concurrency = config.get("benchmarks", {}).get("concurrency", 10)
+    extract_with_critique = config.get("benchmarks", {}).get("extract_with_critique", False)
+    contextual_embedding = config.get("benchmarks", {}).get("contextual_embedding", False)
+    ingest_strategy = resolve_ingest_strategy(benchmark_name, config)
+    print(f"Ingest strategy: {ingest_strategy}")
 
     # Build tasks grouped by conversation. Each conversation's chunks are
     # processed SERIALLY (to mirror real-time message ordering and avoid
@@ -181,18 +263,18 @@ def stage_ingest(
         # aggregatable in the session map.
         return label
 
-    # Group (label, text) chunks by conversation so we can process each
+    # Group (label, text, occurred_at) chunks by conversation so we can process each
     # conversation's chunks serially in one worker.
-    conv_tasks: list[tuple[str, str, list[tuple[str, str, str]]]] = []
-    # each entry: (conv_id, namespace, [(session_id, label, text), ...])
+    conv_tasks: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] = []
+    # each entry: (conv_id, namespace, [(session_id, label, text, occurred_at), ...])
     total_chunk_count = 0
     for conv in conversations:
         namespace = f"bench-{benchmark_name}-{conv.conversation_id}-{run_id}"
-        pairs = adapter.build_ingest_text(conv)
-        chunks: list[tuple[str, str, str]] = []
-        for label, text in pairs:
+        pairs = build_ingest_pairs(adapter, conv, ingest_strategy)
+        chunks: list[tuple[str, str, str, str | None]] = []
+        for label, text, occurred_at in pairs:
             session_id = _parse_label(label, conv.conversation_id)
-            chunks.append((session_id, label, text))
+            chunks.append((session_id, label, text, occurred_at))
         conv_tasks.append((conv.conversation_id, namespace, chunks))
         total_chunk_count += len(chunks)
 
@@ -203,18 +285,26 @@ def stage_ingest(
 
     # Thread-safe stats accumulator.
     stats_lock = threading.Lock()
+    failed_labels: list[str] = []
 
     # Shared progress bar over CHUNKS (not conversations) so users see
     # fine-grained progress even though parallelism is at conv granularity.
-    pbar = tqdm(total=total_chunk_count, desc="Ingesting turns")
+    pbar = tqdm(total=total_chunk_count, desc="Ingesting chunks")
 
     def ingest_one_conversation(task):
         conv_id, namespace, chunks = task
         local_memories: dict[str, list[str]] = {}
         local_stored = 0
-        for session_id, label, text in chunks:
+        local_failures: list[str] = []
+        for session_id, label, text, occurred_at in chunks:
             try:
-                result = client.analyze(text, namespace)
+                result = client.analyze(
+                    text,
+                    namespace,
+                    occurred_at=occurred_at,
+                    extract_with_critique=extract_with_critique,
+                    contextual_embedding=contextual_embedding,
+                )
                 memory_ids = [fact.get("id", "") for fact in result.facts if fact.get("id")]
                 if memory_ids:
                     key = session_map_key(conv_id, session_id)
@@ -222,9 +312,10 @@ def stage_ingest(
                 local_stored += result.total
             except Exception as e:
                 logger.error("Ingestion failed for %s: %s", label, e)
+                local_failures.append(label)
             finally:
                 pbar.update(1)
-        return local_memories, local_stored
+        return local_memories, local_stored, local_failures
 
     # Parallelism is BY CONVERSATION, not by chunk. Within a conversation,
     # turns/chunks are processed serially. This (a) mirrors real-time
@@ -235,12 +326,13 @@ def stage_ingest(
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = [pool.submit(ingest_one_conversation, t) for t in conv_tasks]
             for fut in as_completed(futures):
-                local_memories, local_stored = fut.result()
+                local_memories, local_stored, local_failures = fut.result()
                 with session_map_lock:
                     for k, v in local_memories.items():
                         session_to_memories.setdefault(k, []).extend(v)
                 with stats_lock:
                     stats.memories_stored += local_stored
+                    failed_labels.extend(local_failures)
     finally:
         pbar.close()
 
@@ -249,6 +341,13 @@ def stage_ingest(
     map_path.write_text(json.dumps(session_to_memories, indent=2))
 
     stats.duration_seconds = time.time() - start
+    if failed_labels:
+        sample = ", ".join(failed_labels[:5])
+        raise RuntimeError(
+            f"Ingestion failed for {len(failed_labels)} chunks; "
+            f"not running eval with incomplete data. First failures: {sample}"
+        )
+
     print(
         f"Ingestion complete: {stats.memories_stored} memories from "
         f"{stats.conversations_processed} conversations ({stats.duration_seconds:.0f}s). "
@@ -266,6 +365,7 @@ def stage_eval(
     weights: ScoringWeights,
     config: dict,
     mode: str = "e2e",
+    ingestion_stats: IngestionStats | None = None,
 ) -> RunArtifact:
     """Run evaluation: recall with preset weights, then judge answers."""
     adapter_cls = BENCHMARKS[benchmark_name]
@@ -273,14 +373,19 @@ def stage_eval(
     _, queries = adapter.load(DATASETS_DIR)
 
     recall_limit = config.get("benchmarks", {}).get("recall_limit", 10)
+    adaptive_k = config.get("benchmarks", {}).get("adaptive_k", False)
+    limit_hint = config.get("benchmarks", {}).get("limit_hint")
     eval_runs = config.get("benchmarks", {}).get("eval_runs", 1) if mode == "e2e" else 1
     eval_concurrency = config.get("benchmarks", {}).get("eval_concurrency", 20)
+    answer_judge_retries = config.get("benchmarks", {}).get("answer_judge_retries", 3)
+    ingest_strategy = resolve_ingest_strategy(benchmark_name, config)
+    namespace_run_id = config.get("benchmarks", {}).get("namespace_run_id", run_id)
 
     # Load the session→memory-ids map written by stage_ingest (if present).
     # Needed to compute Recall@K for session-kind evidence. Turn-kind evidence
     # (e.g., LOCOMO's "D1:3" dialog IDs) cannot be resolved from this map
     # because ingestion concatenates turns into session blobs.
-    session_map_path = _session_map_path(run_id, benchmark_name)
+    session_map_path = _session_map_path(namespace_run_id, benchmark_name)
     if session_map_path.exists():
         session_to_memories: dict[str, list[str]] = json.loads(session_map_path.read_text())
         logger.info("Loaded session map from %s (%d sessions)", session_map_path, len(session_to_memories))
@@ -308,7 +413,7 @@ def stage_eval(
 
     def process_query(query):
         """Full per-query pipeline: recall → answer → judge. Thread-safe."""
-        namespace = f"bench-{benchmark_name}-{query.conversation_id}-{run_id}"
+        namespace = f"bench-{benchmark_name}-{query.conversation_id}-{namespace_run_id}"
 
         try:
             recall_result = client.recall(
@@ -316,10 +421,11 @@ def stage_eval(
                 namespace=namespace,
                 limit=recall_limit,
                 scoring_weights=weights,
+                adaptive_k=adaptive_k,
+                limit_hint=limit_hint,
             )
         except Exception as e:
-            logger.error("Recall failed for %s: %s", query.query_id, e)
-            return None
+            raise RuntimeError(f"Recall failed for {query.query_id}: {e}") from e
 
         memories = recall_result.memories
         memory_texts = [m.text for m in memories]
@@ -363,18 +469,34 @@ def stage_eval(
         judgment = None
         generated_answer = ""
         if mode == "e2e":
-            try:
-                generated_answer = judge.generate_answer(query.question, memory_texts)
-                j_scores = []
-                last_j = None
-                for _ in range(eval_runs):
-                    last_j = judge.judge(query.question, query.ground_truth_answer, generated_answer)
-                    j_scores.append(last_j.j_score)
-                judgment = last_j
-                query_metric["j_score"] = sum(j_scores) / len(j_scores)
-            except Exception as e:
-                logger.error("Answer/judge failed for %s: %s", query.query_id, e)
-                return None
+            for attempt in range(answer_judge_retries):
+                try:
+                    generated_answer = judge.generate_answer(query.question, memory_texts)
+                    j_scores = []
+                    last_j = None
+                    for _ in range(eval_runs):
+                        last_j = judge.judge(query.question, query.ground_truth_answer, generated_answer)
+                        j_scores.append(last_j.j_score)
+                    judgment = last_j
+                    query_metric["j_score"] = sum(j_scores) / len(j_scores)
+                    break
+                except Exception as e:
+                    if attempt < answer_judge_retries - 1:
+                        delay = 0.5 * (2 ** attempt)
+                        logger.warning(
+                            "Answer/judge failed for %s (attempt %d/%d): %s; retrying in %.1fs",
+                            query.query_id,
+                            attempt + 1,
+                            answer_judge_retries,
+                            e,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise RuntimeError(
+                        f"Answer/judge failed for {query.query_id} after "
+                        f"{answer_judge_retries} attempts: {e}"
+                    ) from e
 
         return QueryResult(
             query=query,
@@ -386,17 +508,31 @@ def stage_eval(
 
     all_query_results: list[QueryResult] = []
     per_query_metrics: list[dict] = []
+    failed_queries: list[str] = []
 
     # Parallel execution — each query is fully independent.
     # HTTP client (httpx) and OpenAI client are thread-safe for concurrent calls.
     with ThreadPoolExecutor(max_workers=eval_concurrency) as pool:
         futures = [pool.submit(process_query, q) for q in queries]
         for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Eval ({preset_name})"):
-            result = fut.result()
+            try:
+                result = fut.result()
+            except Exception as e:
+                logger.error("Eval query failed: %s", e)
+                failed_queries.append(str(e))
+                continue
             if result is None:
+                failed_queries.append("query returned no result")
                 continue
             all_query_results.append(result)
             per_query_metrics.append(result.retrieval_metrics)
+
+    if failed_queries:
+        sample = "; ".join(failed_queries[:5])
+        raise RuntimeError(
+            f"Eval failed for {len(failed_queries)} queries; no artifact written. "
+            f"First failures: {sample}"
+        )
 
     # Aggregate metrics (defensive: never let aggregation failure lose the raw data)
     try:
@@ -426,6 +562,12 @@ def stage_eval(
             "server_url": config.get("server", {}).get("url", ""),
             "scoring_weights": weights.to_dict(),
             "recall_limit": recall_limit,
+            "adaptive_k": adaptive_k,
+            "limit_hint": limit_hint,
+            "extract_with_critique": config.get("benchmarks", {}).get("extract_with_critique", False),
+            "contextual_embedding": config.get("benchmarks", {}).get("contextual_embedding", False),
+            "ingest_strategy": ingest_strategy,
+            "namespace_run_id": namespace_run_id,
             "eval_runs": eval_runs,
             "mode": mode,
             "judge_model": config.get("judge", {}).get("model", ""),
@@ -434,6 +576,7 @@ def stage_eval(
         metrics_overall=_dict_to_category_metrics(overall),
         metrics_by_category={cat: _dict_to_category_metrics(m) for cat, m in by_category.items()},
         query_results=all_query_results,
+        ingestion=ingestion_stats or IngestionStats(),
     )
 
     # Save artifact
@@ -461,6 +604,7 @@ def stage_compare(
     preset_names: list[str],
     config: dict,
     mode: str = "e2e",
+    ingestion_stats: IngestionStats | None = None,
 ):
     """Run evaluation for multiple presets, then print comparison table."""
     results = []
@@ -471,7 +615,7 @@ def stage_compare(
         weights = load_preset(preset_name)
         stage_eval(
             benchmark_name, client, judge, run_id,
-            preset_name, weights, config, mode,
+            preset_name, weights, config, mode, ingestion_stats,
         )
         # Reload the saved JSON for the comparison table
         artifact_path = RESULTS_DIR / f"{run_id}-{benchmark_name}-{preset_name}.json"
@@ -558,6 +702,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_benchmark_override_args(p):
+        p.add_argument("--extract-with-critique", action="store_true", help="Enable two-pass extraction critique for this run")
+        p.add_argument("--contextual-embedding", action="store_true", help="Enable contextual embedding text for this run")
+        p.add_argument("--adaptive-k", action="store_true", help="Enable adaptive recall limit for this run")
+        p.add_argument("--limit-hint", default=None, help="Optional adaptive-k limit hint")
+        p.add_argument("--recall-limit", type=int, default=None, help="Override recall limit")
+        p.add_argument("--eval-concurrency", type=int, default=None, help="Override evaluation concurrency")
+        p.add_argument("--answer-judge-retries", type=int, default=None, help="Override answer/judge retry count")
+        p.add_argument("--ingest-strategy", choices=sorted(VALID_INGEST_STRATEGIES), default=None, help="Override ingest chunking for this benchmark")
+
     # download
     dl = sub.add_parser("download", help="Download benchmark dataset")
     dl.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
@@ -566,20 +720,33 @@ def build_parser() -> argparse.ArgumentParser:
     ing = sub.add_parser("ingest", help="Ingest benchmark conversations into Walrus Memory")
     ing.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
     ing.add_argument("--run-id", default=None)
+    add_benchmark_override_args(ing)
 
     # eval
     ev = sub.add_parser("eval", help="Evaluate retrieval with a single preset")
     ev.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
     ev.add_argument("--preset", required=True)
     ev.add_argument("--run-id", default=None)
+    ev.add_argument(
+        "--namespace-run-id",
+        default=None,
+        help="Read memories/session map from this ingested run while writing artifacts under --run-id",
+    )
     ev.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
+    add_benchmark_override_args(ev)
 
     # compare
     cmp = sub.add_parser("compare", help="Compare multiple presets")
     cmp.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
     cmp.add_argument("--presets", required=True, help="Comma-separated preset names")
     cmp.add_argument("--run-id", default=None)
+    cmp.add_argument(
+        "--namespace-run-id",
+        default=None,
+        help="Read memories/session map from this ingested run while writing artifacts under --run-id",
+    )
     cmp.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
+    add_benchmark_override_args(cmp)
 
     # full
     full = sub.add_parser("full", help="Ingest + compare in one go")
@@ -587,7 +754,13 @@ def build_parser() -> argparse.ArgumentParser:
     full.add_argument("--presets", required=True, help="Comma-separated preset names")
     full.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
     full.add_argument("--run-id", default=None, help="Reuse an existing ingestion")
+    full.add_argument(
+        "--namespace-run-id",
+        default=None,
+        help="Read memories/session map from this ingested run while writing artifacts under --run-id",
+    )
     full.add_argument("--skip-ingest", action="store_true", help="Skip ingestion stage (assumes run-id already ingested)")
+    add_benchmark_override_args(full)
 
     # report
     rpt = sub.add_parser("report", help="View results")
@@ -611,6 +784,8 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # Commands that don't need config/client
     if args.command == "download":
@@ -631,6 +806,7 @@ def main():
 
     # Commands that need config + client
     config = load_config()
+    apply_benchmark_overrides(config, args)
     server_cfg = config["server"]
 
     client = MemWalClient(
@@ -718,6 +894,15 @@ def main():
         elif args.command == "full":
             preset_names = [p.strip() for p in args.presets.split(",")]
             skip_ingest = getattr(args, "skip_ingest", False)
+            ingestion_stats = None
+            namespace_run_id = config.get("benchmarks", {}).get("namespace_run_id", run_id)
+            if not skip_ingest and namespace_run_id != run_id:
+                print(
+                    "ERROR: --namespace-run-id is only valid with --skip-ingest "
+                    "for `full` runs. Otherwise ingestion and eval would use "
+                    "different namespaces."
+                )
+                sys.exit(1)
 
             # Guard against accidental re-runs that would accumulate memories
             # in the same namespace. If the session map for this run_id
@@ -742,10 +927,19 @@ def main():
                     sys.exit(1)
 
             if not skip_ingest:
-                stage_ingest(args.benchmark, client, run_id, config)
+                ingestion_stats = stage_ingest(args.benchmark, client, run_id, config)
             else:
-                print(f"Skipping ingestion — reusing run {run_id}")
-            stage_compare(args.benchmark, client, judge, run_id, preset_names, config, args.mode)
+                print(f"Skipping ingestion — reusing namespace run {namespace_run_id}")
+            stage_compare(
+                args.benchmark,
+                client,
+                judge,
+                run_id,
+                preset_names,
+                config,
+                args.mode,
+                ingestion_stats,
+            )
 
         elif args.command == "cleanup":
             stage_cleanup(client, args.run_id, getattr(args, "benchmark", None))

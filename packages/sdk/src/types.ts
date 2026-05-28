@@ -62,6 +62,9 @@ export interface RecallMemory {
 export interface RecallResult {
     results: RecallMemory[];
     total: number;
+    dropped_count?: number;
+    recall_limit_used?: number;
+    recall_limit_hint?: RecallLimitHint;
 }
 
 /** Options for recall(). */
@@ -74,7 +77,15 @@ export interface RecallOptions {
     namespace?: string;
     /** Drop memories whose distance is greater than or equal to this value. */
     maxDistance?: number;
+    /** Optional composite-scoring weights applied by the relayer before return. */
+    scoringWeights?: ScoringWeights;
+    /** Opt into server-side adaptive-k question-shape heuristics. */
+    adaptiveK?: boolean;
+    /** Caller-supplied question-shape hint for adaptive-k. */
+    limitHint?: RecallLimitHint;
 }
+
+export type RecallLimitHint = "lookup" | "standard" | "composition" | "survey";
 
 /** Recommended object-style recall input — preferred over positional args. */
 export interface RecallParams extends RecallOptions {
@@ -179,6 +190,18 @@ export interface AnalyzeResult {
     fact_count: number;
     status: string;
     owner: string;
+}
+
+/** Options for analyze(). */
+export interface AnalyzeOptions {
+    /** Namespace override (default: config namespace or "default"). */
+    namespace?: string;
+    /** Caller-supplied valid-time timestamp for the analyzed input. */
+    occurredAt?: string | Date;
+    /** Opt into two-pass extraction with self-critique. */
+    extractWithCritique?: boolean;
+    /** Opt into contextual embeddings while storing plain fact text. */
+    contextualEmbedding?: boolean;
 }
 
 /** Result from analyzeAndWait() */

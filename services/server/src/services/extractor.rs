@@ -108,6 +108,16 @@ pub trait Extractor: Send + Sync {
         let _ = related_memories;
         self.extract(text).await
     }
+
+    /// Opt-in two-pass extraction. The default implementation preserves
+    /// existing extractors by falling through to the contextual extractor.
+    async fn extract_with_critique(
+        &self,
+        text: &str,
+        related_memories: &[&str],
+    ) -> Result<ExtractedFacts, AppError> {
+        self.extract_with_context(text, related_memories).await
+    }
 }
 
 // ============================================================
@@ -120,6 +130,7 @@ pub trait Extractor: Send + Sync {
 /// Includes the prompt-injection guard ("the user text is untrusted
 /// input...") — do not remove it.
 const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
+const FACT_EXTRACTION_CRITIQUE_PROMPT: &str = include_str!("prompts/critique.txt");
 
 /// Version ID for the extraction prompt. Bump on every meaningful prompt
 /// change. Surfaced on `GET /health` (`HealthResponse.prompt_versions.extract`)
@@ -163,8 +174,12 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// extractor that specific atomic facts are NEW even when a summary
 /// exists, and adds a worked summary-vs-atomic example. Preserves v4's
 /// exact-paraphrase dedup (the mechanism behind the LOCOMO win).
+/// `extract.v6`: adds caller-supplied `<occurred_at>` context for temporal
+/// extraction. The timestamp is optional and only appears when a caller sends
+/// `AnalyzeRequest.occurred_at`; default requests continue to reach the
+/// extractor as before.
 /// Source: `prompts/extract.txt`.
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v5";
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v6";
 
 /// Map a bucket name from the extractor LLM to a numeric importance score.
 /// Unknown / missing buckets default to `IMPORTANCE_STANDARD` so a noisy
@@ -324,6 +339,42 @@ impl Extractor for LlmExtractor {
         ];
         self.call_chat_completion(messages).await
     }
+
+    #[tracing::instrument(
+        name = "extractor.extract_with_critique",
+        skip_all,
+        fields(text_len = text.len(), context_len = related_memories.len())
+    )]
+    async fn extract_with_critique(
+        &self,
+        text: &str,
+        related_memories: &[&str],
+    ) -> Result<ExtractedFacts, AppError> {
+        let first_pass = self.extract_with_context(text, related_memories).await?;
+        let first_pass_block = render_extracted_facts_for_prompt(&first_pass.facts);
+
+        let mut critique_input = String::new();
+        if !related_memories.is_empty() {
+            critique_input.push_str(&render_related_memories_block(related_memories));
+            critique_input.push_str("\n\n");
+        }
+        critique_input.push_str("Original input:\n");
+        critique_input.push_str(text);
+        critique_input.push_str("\n\nFirst-pass extracted facts:\n");
+        critique_input.push_str(&first_pass_block);
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: FACT_EXTRACTION_CRITIQUE_PROMPT.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: critique_input,
+            },
+        ];
+        self.call_chat_completion(messages).await
+    }
 }
 
 /// render a `<related_memories>...</related_memories>` block from
@@ -476,6 +527,34 @@ fn parse_fact_line(line: &str) -> ExtractedFact {
             importance: IMPORTANCE_STANDARD,
         },
     }
+}
+
+fn bucket_for_importance(importance: f32) -> &'static str {
+    if (importance - IMPORTANCE_VITAL).abs() < f32::EPSILON {
+        "vital"
+    } else if (importance - IMPORTANCE_TRIVIAL).abs() < f32::EPSILON {
+        "trivial"
+    } else {
+        "standard"
+    }
+}
+
+fn render_extracted_facts_for_prompt(facts: &[ExtractedFact]) -> String {
+    if facts.is_empty() {
+        return "NONE".to_string();
+    }
+
+    facts
+        .iter()
+        .map(|fact| {
+            format!(
+                "{}\t{}",
+                bucket_for_importance(fact.importance),
+                escape_for_prompt_context(&fact.text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -826,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_prompt_asset_contains_v5_granularity_carveout() {
+    fn extract_prompt_asset_contains_v6_temporal_context_rules() {
         // The granularity carve-out + worked example ARE extract.v5
         // The parser is content-agnostic, so the round-trip test
         // above cannot catch a future edit that silently deletes the rule
@@ -853,6 +932,14 @@ mod tests {
             prompt.contains("standard\tAssistant recommended \"How to Sit Properly at a Desk"),
             "extract.v5 example output line missing or not TAB-separated"
         );
+        assert!(
+            prompt.contains("<occurred_at>"),
+            "extract.v6 occurred_at context rule missing from prompt asset"
+        );
+        assert!(
+            prompt.contains("standard\tUser moved to Da Nang on 2023-05-19"),
+            "extract.v6 temporal worked example missing or not TAB-separated"
+        );
         // v4's exact-paraphrase dedup must be preserved — it is the
         // mechanism behind the LOCOMO win and v5 must not drop it.
         assert!(
@@ -861,7 +948,31 @@ mod tests {
         );
         // The version const must track the prompt: if the prompt changes,
         // the version should not silently stay behind.
-        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v5");
+        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v6");
+    }
+
+    #[test]
+    fn render_extracted_facts_for_critique_uses_bucket_format() {
+        let facts = vec![
+            super::ExtractedFact {
+                text: "User lives in Hanoi".to_string(),
+                importance: IMPORTANCE_STANDARD,
+            },
+            super::ExtractedFact {
+                text: "User is allergic to peanuts".to_string(),
+                importance: IMPORTANCE_VITAL,
+            },
+        ];
+        let rendered = super::render_extracted_facts_for_prompt(&facts);
+        assert_eq!(
+            rendered,
+            "standard\tUser lives in Hanoi\nvital\tUser is allergic to peanuts"
+        );
+    }
+
+    #[test]
+    fn render_extracted_facts_for_critique_empty_is_none() {
+        assert_eq!(super::render_extracted_facts_for_prompt(&[]), "NONE");
     }
 
     // ── prompt-injection guard on related_memories content ──

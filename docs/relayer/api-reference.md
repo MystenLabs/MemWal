@@ -191,11 +191,16 @@ Search for memories matching a natural language query. Returns decrypted plainte
 {
   "query": "What do we know about this user?",
   "limit": 10,
-  "namespace": "demo"
+  "namespace": "demo",
+  "adaptive_k": false,
+  "limit_hint": "standard"
 }
 ```
 
 `limit` defaults to `10`. `namespace` defaults to `"default"`.
+`adaptive_k` and `limit_hint` are optional phase-2 quality controls. `limit_hint`
+may be `"lookup"`, `"standard"`, `"composition"`, or `"survey"`; when omitted
+and `adaptive_k` is false, recall uses the static `limit`.
 
 **Response:**
 
@@ -208,9 +213,14 @@ Search for memories matching a natural language query. Returns decrypted plainte
       "distance": 0.15
     }
   ],
-  "total": 1
+  "total": 1,
+  "recall_limit_used": 10,
+  "recall_limit_hint": "standard"
 }
 ```
+
+`recall_limit_used` and `recall_limit_hint` are omitted unless adaptive-k or a
+limit hint was used.
 
 ### `POST /api/remember/manual`
 
@@ -274,9 +284,15 @@ Extract facts from text using an LLM, then enqueue each fact as a separate memor
 ```json
 {
   "text": "I live in Hanoi and prefer dark mode.",
-  "namespace": "demo"
+  "namespace": "demo",
+  "occurred_at": "2023-05-25T17:50:00Z",
+  "extract_with_critique": false,
+  "contextual_embedding": false
 }
 ```
+
+`occurred_at`, `extract_with_critique`, and `contextual_embedding` are optional.
+Defaults preserve the current single-pass, bare-fact embedding behavior.
 
 **Response:** `202 Accepted`
 
@@ -303,7 +319,9 @@ Recall memories, inject them into an LLM prompt, and return an AI-generated answ
 {
   "question": "What do you know about my preferences?",
   "limit": 5,
-  "namespace": "demo"
+  "namespace": "demo",
+  "adaptive_k": false,
+  "limit_hint": "standard"
 }
 ```
 

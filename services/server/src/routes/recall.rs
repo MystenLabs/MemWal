@@ -167,11 +167,16 @@ pub async fn recall(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
+    let resolved_limit =
+        super::resolve_recall_limit(&body.query, body.limit, body.adaptive_k, body.limit_hint);
+    let adaptive_hint_label = resolved_limit.hint.map(|h| h.as_str());
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
         namespace = %namespace,
         ranker_active = weights.is_ranker_active(),
+        recall_limit = resolved_limit.limit,
+        adaptive_hint = adaptive_hint_label,
         "recall request"
     );
 
@@ -181,7 +186,7 @@ pub async fn recall(
 
     // Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
-    let limit = body.limit.min(100);
+    let limit = resolved_limit.limit;
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -199,6 +204,8 @@ pub async fn recall(
             results: vec![],
             total: 0,
             dropped_count: 0,
+            recall_limit_used: adaptive_hint_label.map(|_| limit),
+            recall_limit_hint: adaptive_hint_label.map(str::to_string),
         }));
     }
 
@@ -293,6 +300,8 @@ pub async fn recall(
         results,
         total,
         dropped_count,
+        recall_limit_used: adaptive_hint_label.map(|_| limit),
+        recall_limit_hint: adaptive_hint_label.map(str::to_string),
     }))
 }
 
@@ -402,6 +411,8 @@ mod tests {
             results: vec![],
             total: 0,
             dropped_count: 3,
+            recall_limit_used: None,
+            recall_limit_hint: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["dropped_count"], 3);
@@ -413,6 +424,8 @@ mod tests {
             results: vec![],
             total: 0,
             dropped_count: 0,
+            recall_limit_used: None,
+            recall_limit_hint: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent

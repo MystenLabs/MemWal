@@ -30,7 +30,8 @@ import base64
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import httpx
 import nacl.signing
@@ -121,6 +122,17 @@ def _is_transient_polling_status(status: int) -> bool:
     """
 
     return status == 0 or status == 429 or status >= 500
+
+
+def _occurred_at_to_wire(occurred_at: Optional[Union[str, datetime]]) -> Optional[str]:
+    if occurred_at is None:
+        return None
+    if isinstance(occurred_at, datetime):
+        dt = occurred_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return occurred_at
 
 
 class MemWal:
@@ -478,6 +490,8 @@ class MemWal:
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
+        adaptive_k: bool = False,
+        limit_hint: Optional[str] = None,
     ) -> RecallResult:
         """Recall memories similar to a query.
 
@@ -495,7 +509,8 @@ class MemWal:
 
         Args:
             query: Search query, or a :class:`RecallParams` carrying query +
-                limit + namespace + max_distance in one object.
+                limit + namespace + max_distance + adaptive_k + limit_hint in
+                one object.
             limit: Max number of results (default: 10). Ignored when ``query``
                 is a :class:`RecallParams`.
             namespace: Override the default namespace. Ignored when ``query``
@@ -503,6 +518,10 @@ class MemWal:
             max_distance: Optional client-side relevance threshold. Memories
                 with ``distance >= max_distance`` are dropped. Ignored when
                 ``query`` is a :class:`RecallParams`.
+            adaptive_k: Opt into server-side adaptive-k question-shape heuristics.
+                Ignored when ``query`` is a :class:`RecallParams`.
+            limit_hint: Optional hint: ``lookup``, ``standard``, ``composition``, or ``survey``.
+                Ignored when ``query`` is a :class:`RecallParams`.
 
         Returns:
             :class:`RecallResult` with decrypted text results.
@@ -513,13 +532,22 @@ class MemWal:
             limit = params.limit
             namespace = params.namespace
             max_distance = params.max_distance
+            adaptive_k = params.adaptive_k
+            limit_hint = params.limit_hint
         else:
             query_text = query
-        data = await self._signed_request("POST", "/api/recall", {
+
+        body: Dict[str, Any] = {
             "query": query_text,
             "limit": limit,
             "namespace": namespace or self._namespace,
-        })
+        }
+        if adaptive_k:
+            body["adaptive_k"] = True
+        if limit_hint:
+            body["limit_hint"] = limit_hint
+
+        data = await self._signed_request("POST", "/api/recall", body)
         memories = [
             RecallMemory(
                 blob_id=m["blob_id"],
@@ -530,10 +558,29 @@ class MemWal:
         ]
         if max_distance is not None:
             memories = [m for m in memories if m.distance < max_distance]
-            return RecallResult(results=memories, total=len(memories))
-        return RecallResult(results=memories, total=data.get("total", len(memories)))
+            return RecallResult(
+                results=memories,
+                total=len(memories),
+                dropped_count=int(data.get("dropped_count", 0)),
+                recall_limit_used=data.get("recall_limit_used"),
+                recall_limit_hint=data.get("recall_limit_hint"),
+            )
+        return RecallResult(
+            results=memories,
+            total=data.get("total", len(memories)),
+            dropped_count=int(data.get("dropped_count", 0)),
+            recall_limit_used=data.get("recall_limit_used"),
+            recall_limit_hint=data.get("recall_limit_hint"),
+        )
 
-    async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    async def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
+        contextual_embedding: bool = False,
+    ) -> AnalyzeResult:
         """Analyze conversation text and return as soon as facts are accepted.
 
         Per PR #121: server extracts atomic facts synchronously via LLM, then
@@ -546,15 +593,27 @@ class MemWal:
         Args:
             text: Conversation text to analyze.
             namespace: Override the default namespace.
+            occurred_at: Optional valid-time timestamp for the analyzed input.
+            extract_with_critique: Opt into two-pass extraction with self-critique.
+            contextual_embedding: Opt into contextual embeddings while storing plain fact text.
 
         Returns:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        body: Dict[str, Any] = {"text": text, "namespace": namespace or self._namespace}
+        wire_occurred_at = _occurred_at_to_wire(occurred_at)
+        if wire_occurred_at:
+            body["occurred_at"] = wire_occurred_at
+        if extract_with_critique:
+            body["extract_with_critique"] = True
+        if contextual_embedding:
+            body["contextual_embedding"] = True
+
         data = await self._signed_request(
             "POST",
             "/api/analyze",
-            {"text": text, "namespace": namespace or self._namespace},
+            body,
             accepted_statuses=(200, 202),
         )
         # Backward-compat: older server shape returned `facts[].id` and
@@ -583,6 +642,9 @@ class MemWal:
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
+        contextual_embedding: bool = False,
     ) -> AnalyzeWaitResult:
         """Analyze + wait for every extracted fact to finish persisting.
 
@@ -592,7 +654,13 @@ class MemWal:
         per-job results.
         """
 
-        accepted = await self.analyze(text, namespace)
+        accepted = await self.analyze(
+            text,
+            namespace,
+            occurred_at=occurred_at,
+            extract_with_critique=extract_with_critique,
+            contextual_embedding=contextual_embedding,
+        )
         completed = await self.wait_for_remember_jobs(accepted.job_ids, opts)
         return AnalyzeWaitResult(
             results=completed.results,
@@ -1240,23 +1308,61 @@ class MemWalSync:
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
+        adaptive_k: bool = False,
+        limit_hint: Optional[str] = None,
     ) -> RecallResult:
         """Synchronous version of :meth:`MemWal.recall` (accepts
         :class:`RecallParams` for the recommended object-style call)."""
-        return self._run(self._inner.recall(query, limit, namespace, max_distance))
+        return self._run(
+            self._inner.recall(
+                query,
+                limit,
+                namespace,
+                max_distance,
+                adaptive_k=adaptive_k,
+                limit_hint=limit_hint,
+            )
+        )
 
-    def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
+        contextual_embedding: bool = False,
+    ) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
-        return self._run(self._inner.analyze(text, namespace))
+        return self._run(
+            self._inner.analyze(
+                text,
+                namespace,
+                occurred_at=occurred_at,
+                extract_with_critique=extract_with_critique,
+                contextual_embedding=contextual_embedding,
+            )
+        )
 
     def analyze_and_wait(
         self,
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
+        contextual_embedding: bool = False,
     ) -> AnalyzeWaitResult:
         """Synchronous version of :meth:`MemWal.analyze_and_wait`."""
-        return self._run(self._inner.analyze_and_wait(text, namespace, opts))
+        return self._run(
+            self._inner.analyze_and_wait(
+                text,
+                namespace,
+                opts,
+                occurred_at=occurred_at,
+                extract_with_critique=extract_with_critique,
+                contextual_embedding=contextual_embedding,
+            )
+        )
 
     def embed(self, text: str) -> EmbedResult:
         """Synchronous version of :meth:`MemWal.embed`."""

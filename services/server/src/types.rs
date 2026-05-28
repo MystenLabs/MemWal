@@ -481,6 +481,34 @@ pub struct RecallRequest {
     /// [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    /// Opt into server-side adaptive-k heuristics when no explicit
+    /// `limit_hint` is supplied. Default false preserves static-k recall.
+    #[serde(default)]
+    pub adaptive_k: bool,
+    /// Optional caller-supplied question-shape hint. When present, the server
+    /// maps the hint to a bounded recall limit instead of using static k.
+    #[serde(default)]
+    pub limit_hint: Option<RecallLimitHint>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallLimitHint {
+    Lookup,
+    Standard,
+    Composition,
+    Survey,
+}
+
+impl RecallLimitHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lookup => "lookup",
+            Self::Standard => "standard",
+            Self::Composition => "composition",
+            Self::Survey => "survey",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -491,6 +519,12 @@ pub struct RecallResponse {
     /// failed and were silently omitted from `results`. Zero on the happy path.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub dropped_count: usize,
+    /// Present only when adaptive-k or `limit_hint` was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_limit_used: Option<usize>,
+    /// Present only when adaptive-k or `limit_hint` was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_limit_hint: Option<String>,
 }
 
 fn is_zero_usize(n: &usize) -> bool {
@@ -678,6 +712,21 @@ pub struct AnalyzeRequest {
     pub text: String,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional valid-time timestamp supplied by the caller. When present, the
+    /// extractor sees it as context and can resolve in-turn temporal references
+    /// before the resulting fact text is embedded/encrypted.
+    #[serde(default)]
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Opt-in second extraction pass that critiques and corrects the first
+    /// pass before any facts are embedded or stored. Default false preserves
+    /// the current single-pass write path.
+    #[serde(default)]
+    pub extract_with_critique: bool,
+    /// Opt-in contextual embedding: embed a situated string while storing the
+    /// plain extracted fact text unchanged. Default false preserves today's
+    /// bare-fact embedding.
+    #[serde(default)]
+    pub contextual_embedding: bool,
 }
 
 /// POST /api/analyze (async, returns 202 immediately)
@@ -780,6 +829,14 @@ pub struct AskRequest {
     /// pgvector cosine order. See [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    /// Opt into server-side adaptive-k heuristics for the memory recall that
+    /// feeds the answer prompt.
+    #[serde(default)]
+    pub adaptive_k: bool,
+    /// Optional caller-supplied question-shape hint for the memory recall that
+    /// feeds the answer prompt.
+    #[serde(default)]
+    pub limit_hint: Option<RecallLimitHint>,
 }
 
 #[derive(Debug, Serialize)]

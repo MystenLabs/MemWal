@@ -14,6 +14,7 @@ by the shared framework and never duplicated per benchmark.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.types import Conversation, Query
@@ -46,9 +47,10 @@ class BenchmarkAdapter(ABC):
         """
 
     @abstractmethod
-    def build_ingest_text(self, conversation: Conversation) -> list[tuple[str, str]]:
+    def build_ingest_text(self, conversation: Conversation) -> list[tuple[str, str, str | None]]:
         """
-        Convert a conversation into (session_label, text) pairs for /api/analyze.
+        Convert a conversation into (session_label, text, occurred_at) triples
+        for /api/analyze.
 
         Each returned pair is fed as ONE /api/analyze call. The choice of
         chunking strategy is benchmark-specific and directly affects
@@ -67,13 +69,14 @@ class BenchmarkAdapter(ABC):
         so the choice is visible in the adapter's source.
 
         Returns:
-            List of (label, text) pairs.
+            List of (label, text, occurred_at) triples. `occurred_at` is RFC3339
+            UTC when the benchmark supplies a turn/session timestamp.
         """
 
     @staticmethod
     def build_ingest_text_naive_concat(
         conversation: Conversation,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str | None]]:
         """
         Helper: concatenate all turns in each session into one text blob.
 
@@ -82,9 +85,9 @@ class BenchmarkAdapter(ABC):
         facts under large input contexts.
 
         Returns:
-            List of (label, text) pairs, one per session.
+            List of (label, text, occurred_at) triples, one per session.
         """
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, str | None]] = []
         for session in conversation.sessions:
             lines: list[str] = []
             for turn in session.turns:
@@ -92,13 +95,16 @@ class BenchmarkAdapter(ABC):
                 lines.append(f"{prefix}: {turn.text}")
             text = "\n".join(lines)
             label = f"{conversation.conversation_id}/{session.session_id}"
-            result.append((label, text))
+            occurred_at = BenchmarkAdapter.normalize_occurred_at(
+                next((turn.timestamp for turn in session.turns if turn.timestamp), None)
+            )
+            result.append((label, text, occurred_at))
         return result
 
     @staticmethod
     def build_ingest_text_per_turn(
         conversation: Conversation,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str | None]]:
         """
         Helper: emit one ingest chunk per turn.
 
@@ -128,9 +134,9 @@ class BenchmarkAdapter(ABC):
         aggregates multiple turn-level chunks under the same session key.
 
         Returns:
-            List of (label, text) pairs, one per turn.
+            List of (label, text, occurred_at) triples, one per turn.
         """
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, str | None]] = []
         for session in conversation.sessions:
             label = f"{conversation.conversation_id}/{session.session_id}"
             for turn in session.turns:
@@ -155,5 +161,40 @@ class BenchmarkAdapter(ABC):
                     role = role[:1].upper() + role[1:]
                     text = f"{role}: {raw}"
 
-                result.append((label, text))
+                result.append((
+                    label,
+                    text,
+                    BenchmarkAdapter.normalize_occurred_at(turn.timestamp),
+                ))
         return result
+
+    @staticmethod
+    def normalize_occurred_at(timestamp: str | None) -> str | None:
+        """Normalize benchmark timestamp strings to RFC3339 UTC."""
+        if not timestamp:
+            return None
+
+        raw = timestamp.strip()
+        formats = [
+            "%Y/%m/%d (%a) %H:%M",       # LongMemEval: 2023/04/10 (Mon) 17:50
+            "%I:%M %p on %d %B, %Y",     # LOCOMO: 1:56 pm on 8 May, 2023
+        ]
+
+        # Handle already-ISO/RFC3339 strings first.
+        try:
+            iso_raw = raw.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso_raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+                return dt.isoformat().replace("+00:00", "Z")
+            except ValueError:
+                continue
+
+        return None

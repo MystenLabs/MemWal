@@ -102,8 +102,14 @@ docs/build/
 # x-wallet
 x-wallet/
 
-# Local system documents
-whole-system-documents/
+# Local system documents. Keep the phase-2 methodology trail trackable
+# without committing arbitrary local archives.
+whole-system-documents/*
+!whole-system-documents/
+!whole-system-documents/sprint-plans/
+!whole-system-documents/sprint-plans/*.md
+!whole-system-documents/benchmark-archive/
+!whole-system-documents/benchmark-archive/README.md
 .gitnexus
 AGENTS.md
 CLAUDE.md

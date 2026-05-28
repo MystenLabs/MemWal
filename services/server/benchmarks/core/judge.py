@@ -97,7 +97,10 @@ class LLMJudge:
         )
 
         self.tokens_used += resp.usage.total_tokens if resp.usage else 0
-        return resp.choices[0].message.content.strip()
+        content = resp.choices[0].message.content
+        if not content:
+            raise RuntimeError("answer model returned empty content")
+        return content.strip()
 
     def judge(self, question: str, ground_truth: str, generated_answer: str) -> Judgment:
         """
@@ -121,13 +124,16 @@ class LLMJudge:
         )
 
         self.tokens_used += resp.usage.total_tokens if resp.usage else 0
-        raw = resp.choices[0].message.content.strip()
+        content = resp.choices[0].message.content
+        if not content:
+            raise RuntimeError("judge model returned empty content")
+        raw = content.strip()
 
         # Earlier behaviour: silently fall back to (1,1,1,1) = 5 J on parse
         # failure. That's a systematic downward bias on the aggregate score —
         # we'd rather miss the query entirely than score it 5/100.
-        # `stage_eval` catches exceptions from this method and excludes the
-        # affected query from the aggregate (returns None for that query).
+        # `stage_eval` retries transient failures and then fails fast rather
+        # than writing an incomplete aggregate.
         try:
             scores = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as e:

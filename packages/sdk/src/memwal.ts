@@ -35,6 +35,7 @@ import type {
     RecallMemory,
     RecallOptions,
     RecallParams,
+    AnalyzeOptions,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -107,6 +108,19 @@ const SEAL_SESSION_TTL_MIN = 5;
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
+
+function normalizeAnalyzeOptions(
+    namespaceOrOptions?: string | AnalyzeOptions,
+): AnalyzeOptions {
+    if (namespaceOrOptions == null) return {};
+    if (typeof namespaceOrOptions === "string") return { namespace: namespaceOrOptions };
+    return namespaceOrOptions;
+}
+
+function occurredAtToWire(occurredAt?: string | Date): string | undefined {
+    if (occurredAt == null) return undefined;
+    return occurredAt instanceof Date ? occurredAt.toISOString() : occurredAt;
+}
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -554,6 +568,9 @@ export class MemWal {
                 query,
                 limit,
                 namespace: resolvedNamespace,
+                scoring_weights: scoringWeightsToWire(options.scoringWeights),
+                adaptive_k: options.adaptiveK || undefined,
+                limit_hint: options.limitHint,
             }, { signal: ac.signal });
 
             if (typeof options.maxDistance === "number") {
@@ -681,10 +698,17 @@ export class MemWal {
      * console.log(result.job_ids)
      * ```
      */
-    async analyze(text: string, namespace?: string): Promise<AnalyzeResult> {
+    async analyze(
+        text: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
+    ): Promise<AnalyzeResult> {
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
         return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", {
             text,
-            namespace: namespace ?? this.namespace,
+            namespace: options.namespace ?? this.namespace,
+            occurred_at: occurredAtToWire(options.occurredAt),
+            extract_with_critique: options.extractWithCritique || undefined,
+            contextual_embedding: options.contextualEmbedding || undefined,
         }, [200, 202]);
     }
 
@@ -693,11 +717,12 @@ export class MemWal {
      */
     async analyzeAndWait(
         text: string,
-        namespace?: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
         opts: RememberBulkOptions = {},
     ): Promise<AnalyzeWaitResult> {
-        const accepted = await this.analyze(text, namespace);
-        const namespaces = accepted.job_ids.map(() => namespace ?? this.namespace);
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
+        const accepted = await this.analyze(text, options);
+        const namespaces = accepted.job_ids.map(() => options.namespace ?? this.namespace);
         const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
         return {
             ...completed,

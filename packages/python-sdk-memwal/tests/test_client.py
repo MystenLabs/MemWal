@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -373,6 +374,21 @@ class TestRecall:
         assert result.results[0].blob_id == "b1"
 
     @respx.mock
+    async def test_adaptive_k_fields_are_sent(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(200, json={"results": [], "total": 0})
+        )
+
+        await memwal_client.recall("what changed after the move?", adaptive_k=True)
+        body = json.loads(route.calls[0].request.content)
+        assert body["adaptive_k"] is True
+
+        await memwal_client.recall("profile overview", limit_hint="survey")
+        body = json.loads(route.calls[1].request.content)
+        assert body["limit_hint"] == "survey"
+
+    @respx.mock
     async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(
         self, memwal_client: MemWal
     ) -> None:
@@ -497,6 +513,34 @@ class TestAnalyze:
         assert len(result.facts) == 1
         assert result.facts[0].text == "User loves coffee"
         assert result.owner == "0xowner"
+
+    @respx.mock
+    async def test_analyze_sends_phase2_options(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(
+                202,
+                json={
+                    "facts": [],
+                    "fact_count": 0,
+                    "job_ids": [],
+                    "status": "done",
+                    "owner": "0xowner",
+                },
+            )
+        )
+
+        await memwal_client.analyze(
+            "I moved last Friday",
+            occurred_at=datetime(2023, 5, 25, 17, 50, tzinfo=timezone.utc),
+            extract_with_critique=True,
+            contextual_embedding=True,
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["occurred_at"] == "2023-05-25T17:50:00Z"
+        assert body["extract_with_critique"] is True
+        assert body["contextual_embedding"] is True
 
 
 class TestRestore:

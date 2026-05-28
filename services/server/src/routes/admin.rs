@@ -190,12 +190,22 @@ pub async fn ask(
     // cap `limit` so a misbehaving client can't make us pull a
     // huge number of memories through Walrus + SEAL. Matches the cap
     // `recall` already enforces — see routes/recall.rs.
-    let limit = body.limit.unwrap_or(5).min(100);
+    let requested_limit = body.limit.unwrap_or(5);
+    let resolved_limit = super::resolve_recall_limit(
+        &body.question,
+        requested_limit,
+        body.adaptive_k,
+        body.limit_hint,
+    );
+    let adaptive_hint_label = resolved_limit.hint.map(|h| h.as_str());
+    let limit = resolved_limit.limit;
     tracing::info!(
         question_len = body.question.len(),
         owner = %owner,
         namespace = %namespace,
         ranker_active = weights.is_ranker_active(),
+        recall_limit = limit,
+        adaptive_hint = adaptive_hint_label,
         "ask request"
     );
 

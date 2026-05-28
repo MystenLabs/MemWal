@@ -104,10 +104,11 @@ Use `rememberAndWait(text, namespace?, opts?)` or `waitForRememberJob(job_id, op
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, adaptiveK?, limitHint? })`
 - `limit` defaults to `10`; `topK` is an alias and wins when both are set
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
+- `adaptiveK` and `limitHint` opt into adaptive recall-k. `limitHint` can be `lookup`, `standard`, `composition`, or `survey`.
 
 Returns:
 ```ts
@@ -121,9 +122,11 @@ Returns:
 }
 ```
 
-### `analyze(text, namespace?): Promise<AnalyzeResult>`
+### `analyze(text, namespaceOrOptions?): Promise<AnalyzeResult>`
 
 Extract memorable facts from text using an LLM, then return accepted background jobs for storing each fact.
+
+Pass a namespace string for the legacy form, or `{ namespace, occurredAt, extractWithCritique, contextualEmbedding }` for phase-2 extraction/embedding experiments. Do not default `occurredAt` to now for old events.
 
 Returns:
 ```ts

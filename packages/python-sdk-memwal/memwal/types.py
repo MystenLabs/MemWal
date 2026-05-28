@@ -108,6 +108,8 @@ class RecallParams:
     limit: int = 10
     namespace: Optional[str] = None
     max_distance: Optional[float] = None
+    adaptive_k: bool = False
+    limit_hint: Optional[str] = None
 
 
 @dataclass
@@ -116,6 +118,9 @@ class RecallResult:
 
     results: List[RecallMemory]
     total: int
+    dropped_count: int = 0
+    recall_limit_used: Optional[int] = None
+    recall_limit_hint: Optional[str] = None
 
 
 @dataclass
