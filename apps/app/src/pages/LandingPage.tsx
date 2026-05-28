@@ -20,11 +20,8 @@ import {
     ArrowUpRight,
     ChevronDown,
     Copy,
-    Github,
     Minus,
     Plus,
-    Sparkles,
-    Workflow,
 } from 'lucide-react'
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -62,21 +59,21 @@ const builderLogos = [
 const portableCards = [
     {
         nodeId: '2302:2635',
-        icon: 'portable',
+        iconSrc: '/walrus-card-portable.svg',
         title: 'Portable by design',
         copy: 'Context doesn’t die when the session ends. Your agent picks up where it left off — in a different app, in a different runtime, weeks later.',
         codeLines: ['Your agents keep context', 'wherever they run'],
     },
     {
         nodeId: '2302:2648',
-        icon: 'control',
+        iconSrc: '/walrus-card-control.svg',
         title: 'Yours to control',
         copy: 'You decide how every memory is shared, accessed, and updated. Programmable permissions, explicit ownership, privacy on your terms.',
         codeLines: ['Explicit privacy and access', 'permissions'],
     },
     {
         nodeId: '2302:2661',
-        icon: 'coordination',
+        iconSrc: '/walrus-card-coordination.svg',
         title: 'Built for coordination',
         copy: 'In multi-step workflows, your agents share memory and stay coordinated on the same state. Memory integrity is independently verifiable.',
         codeLines: ['Multiple agents, one source', 'of truth'],
@@ -208,6 +205,23 @@ const footerColumns = [
             { label: 'Release Schedule', href: '#production' },
         ],
     },
+]
+
+const socialLinks = [
+    { label: 'Discord', href: '#', src: '/walrus-social-discord.svg' },
+    { label: 'Telegram', href: '#', src: '/walrus-social-telegram.svg' },
+    { label: 'X', href: '#', src: '/walrus-social-x.svg' },
+    { label: 'LinkedIn', href: '#', src: '/walrus-social-linkedin.svg' },
+    { label: 'YouTube', href: '#', src: '/walrus-social-youtube.svg' },
+]
+
+const signinLogos = [
+    { label: 'Allium', src: '/walrus-trust-allium.png', w: 143 },
+    { label: 'inflectiv', src: '/walrus-trust-inflectiv.svg', w: 162 },
+    { label: 'OpenGradient', src: '/walrus-trust-opengradient.svg', w: 191 },
+    { label: 'TALUS', src: '/walrus-trust-talus.svg', w: 117 },
+    { label: 'TATUM', src: '/walrus-trust-tatum.svg', w: 128 },
+    { label: 'CONSO', src: '/walrus-logo-conso.png', w: 146 },
 ]
 
 const HERO_QUICKSTART_CODE = [
@@ -404,20 +418,42 @@ export default function LandingPage() {
                         </button>
                     )}
                     {loginOpen && (
-                        <div className="lp-demo-menu lp-login-menu wm-menu">
-                            {hasEnokiConfig && googleWallet && (
-                                <button className="lp-login-provider-btn" onClick={handleEnokiConnect}>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
-                                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
-                                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-                                    </svg>
-                                    Sign in with Google
-                                </button>
-                            )}
-                            <div onClick={handleWalletClick} className="lp-login-wallet-btn">
-                                <ConnectButton connectText="Connect Wallet" />
+                        <div className="wm-signin" role="dialog" aria-modal="true" aria-label="Sign in">
+                            <div className="wm-signin-backdrop" onClick={() => setLoginOpen(false)} aria-hidden="true" />
+                            <img className="wm-signin-aurora" src="/walrus-signin-bg.png" alt="" aria-hidden="true" />
+                            <button className="wm-signin-close" onClick={() => setLoginOpen(false)} aria-label="Close sign in">
+                                <Plus size={22} />
+                            </button>
+                            <div className="wm-signin-inner">
+                                <div className="wm-signin-card">
+                                    <img className="wm-signin-logo" src="/walrus-signin-logo.svg" alt="Walrus Memory" />
+                                    <p className="wm-signin-sub">Sign in to start building with portable memory across apps and workflows.</p>
+                                    {hasEnokiConfig && googleWallet && (
+                                        <button className="wm-signin-google" onClick={handleEnokiConnect}>
+                                            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                                                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                                                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                                                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                                            </svg>
+                                            Continue with Google
+                                        </button>
+                                    )}
+                                    <div onClick={handleWalletClick} className="wm-signin-wallet">
+                                        <ConnectButton connectText="Connect wallet" />
+                                    </div>
+                                    <p className="wm-signin-tos">
+                                        By continuing, you agree to our <a href={config.docsUrl || '#'} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.docsUrl || '#'} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+                                    </p>
+                                </div>
+                                <div className="wm-signin-trusted" aria-hidden="true">
+                                    <h2>Trusted by teams<br />building <span>reliable</span><br />AI systems</h2>
+                                    <div className="wm-signin-logos">
+                                        {signinLogos.map((logo) => (
+                                            <img key={logo.label} src={logo.src} alt={logo.label} style={{ width: `${logo.w}px` }} />
+                                        ))}
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     )}
@@ -533,7 +569,7 @@ export default function LandingPage() {
                     </div>
                 </section>
 
-                <div className="wm-spine" aria-hidden="true">
+                <div className="wm-spine wm-spine--lead" aria-hidden="true">
                     <i className="wm-spine-gem" />
                 </div>
 
@@ -567,21 +603,7 @@ export default function LandingPage() {
                     <div className="wm-card-grid">
                         {portableCards.map((card) => (
                             <article className="wm-dark-card" key={card.title} data-node-id={card.nodeId}>
-                                <span className={`wm-card-icon wm-card-icon--${card.icon}`} aria-hidden="true">
-                                    {card.icon === 'control' ? (
-                                        <>
-                                            <i data-kind="check" />
-                                            <i data-kind="x" />
-                                            <i data-kind="diamond" />
-                                            <i data-kind="x" />
-                                            <i data-kind="check" />
-                                        </>
-                                    ) : (
-                                        Array.from({ length: card.icon === 'portable' ? 4 : 7 }).map((_, index) => (
-                                            <i key={index} data-kind="diamond" />
-                                        ))
-                                    )}
-                                </span>
+                                <img className="wm-card-icon" src={card.iconSrc} alt="" aria-hidden="true" />
                                 <h3>{card.title}</h3>
                                 <p>{card.copy}</p>
                                 <code>
@@ -650,6 +672,7 @@ export default function LandingPage() {
                         ))}
                     </div>
                     <button className="wm-small-cta" data-node-id="2425:2744" onClick={() => openPlayground('builders_section')}>Start building <ArrowRight size={14} /></button>
+                    <span className="wm-light-band-line" data-node-id="2425:3045" aria-hidden="true" />
                 </section>
 
                 <section className="wm-production" id="production">
@@ -712,6 +735,14 @@ export default function LandingPage() {
                             onClick={() => trackEvent('outbound_link_click', { link: config.docsUrl ? 'docs' : 'github', location: 'bottom_cta' })}
                         >
                             Explore Docs
+                        </a>
+                        <a
+                            href="https://github.com/MystenLabs/memwal"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={() => trackEvent('outbound_link_click', { link: 'github', location: 'bottom_cta' })}
+                        >
+                            Go to GitHub
                         </a>
                         <a
                             href="#ecosystem"
@@ -779,21 +810,17 @@ export default function LandingPage() {
                             Get Started <ArrowRight size={14} />
                         </button>
                         <div className="wm-socials">
-                            <a href="#" aria-label="Discord">
-                                <Workflow size={16} />
-                            </a>
-                            <a href="#" aria-label="Telegram">
-                                <Plus size={16} />
-                            </a>
-                            <a href="#" aria-label="X">
-                                <ArrowUpRight size={16} />
-                            </a>
-                            <a href="https://github.com/MystenLabs/memwal" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
-                                <Github size={16} />
-                            </a>
-                            <a href="#" aria-label="YouTube">
-                                <Sparkles size={16} />
-                            </a>
+                            {socialLinks.map((s) => (
+                                <a
+                                    key={s.label}
+                                    href={s.href}
+                                    aria-label={s.label}
+                                    target={s.href.startsWith('http') ? '_blank' : undefined}
+                                    rel={s.href.startsWith('http') ? 'noopener noreferrer' : undefined}
+                                >
+                                    <img src={s.src} alt="" aria-hidden="true" />
+                                </a>
+                            ))}
                         </div>
                     </div>
                 </div>

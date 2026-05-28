@@ -28,7 +28,6 @@ import {
     type DynamicFieldObjectFields,
     type RegistryObjectFields,
 } from '../utils/suiFields'
-import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -199,7 +198,10 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const result = await signAndExecute({ transaction: tx })
+            const result = await signAndExecute({
+                transaction: tx,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: result.digest })
         } else {
             setTxStatus('creating account...')
@@ -211,7 +213,10 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const createResult = await signAndExecute({ transaction: tx })
+            const createResult = await signAndExecute({
+                transaction: tx,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: createResult.digest })
 
             const txDetails = await suiClient.getTransactionBlock({
@@ -243,12 +248,15 @@ export default function SetupWizard() {
                     tx2.object('0x6'),
                 ],
             })
-            const addResult = await signAndExecute({ transaction: tx2 })
+            const addResult = await signAndExecute({
+                transaction: tx2,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
         return knownAccountId!
-    }, [suiClient, signAndExecute])
+    }, [suiClient, signAndExecute, isEnoki])
 
     // ── "Generate delegate key" button handler ──
     const handleGenerate = useCallback(async () => {
@@ -367,7 +375,10 @@ export default function SetupWizard() {
             <nav className="nav setup-classic-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
+                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
+                            <span>walrus</span>
+                            <span>memory</span>
+                        </span>
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">

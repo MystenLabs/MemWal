@@ -1,0 +1,10 @@
+<svg preserveAspectRatio="xMidYMid meet" width="30" height="21" overflow="visible" style="display: block;" viewBox="0 0 30 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="youtube" clip-path="url(#clip0_0_4)">
+<path id="Vector" d="M14.9904 0C14.9904 0 5.61527 0 3.26148 0.611233C2.00079 0.964324 0.964058 2.00134 0.611064 3.28018C0 5.63462 0 10.5096 0 10.5096C0 10.5096 0 15.4025 0.611064 17.7198C0.962575 18.9987 1.98151 20.0179 3.26148 20.371C5.63306 21.0015 14.9918 21.0015 14.9918 21.0015C14.9918 21.0015 24.3862 21.0015 26.74 20.3903C28.0185 20.0386 29.0374 19.0372 29.3711 17.7391C30.0015 15.404 30.0015 10.5289 30.0015 10.5289C30.0015 10.5289 30.0193 5.6361 29.3711 3.28167C29.0374 2.00283 28.0185 0.98361 26.74 0.649806C24.3862 0 14.9904 0 14.9904 0ZM12.0077 6.00551L19.8092 10.5096L12.0077 14.9945V6.00551Z" fill="var(--fill-0, #FAF8F5)" style="fill:#FAF8F5;fill:color(display-p3 0.9804 0.9725 0.9608);fill-opacity:1;"/>
+</g>
+<defs>
+<clipPath id="clip0_0_4">
+<rect width="30" height="21" fill="white" style="fill:white;fill-opacity:1;"/>
+</clipPath>
+</defs>
+</svg>
