@@ -4631,10 +4631,20 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-empty-message--account .dashboard-empty-message-link {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
   color: #faf8f5;
+  cursor: pointer;
   text-decoration-line: underline;
   text-decoration-thickness: from-font;
   text-underline-position: from-font;
+}
+
+.dash-page .dashboard-empty-message--account .dashboard-empty-message-link:hover {
+  opacity: 0.8;
 }
 
 @media (max-width: 860px) {
@@ -4854,7 +4864,7 @@ h1, h2, h3 {
 .playground-dashboard .card,
 .playground-dashboard .demo-step,
 .dash-page .card {
-  margin-bottom: 20px !important;
+  margin-bottom: 56px !important;
 }
 
 .playground-dashboard .card-header,
@@ -5221,7 +5231,7 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add {
-  width: 150px;
+  width: auto;
   gap: 10px;
   border: 1px solid #faf8f5;
   background: #faf8f5;
@@ -5245,4 +5255,12 @@ h1, h2, h3 {
   background: #e8ff75;
   border-color: #e8ff75;
   color: #000000;
+}
+
+/* ── Figma 2325-6980: even, generous block spacing. The CTA row was only ~20px
+   below; align it with the 56px card gaps so the whole stack breathes like the
+   design (Figma's literal 36px sits between much taller cards). ── */
+.dash-page .dashboard-cta-row {
+  gap: 30px;
+  margin-bottom: 56px;
 }

@@ -659,7 +659,7 @@ asyncio.run(main())`
 
                 {/* Current Delegate Key */}
                 {delegateKey && (
-                    <div className="card dashboard-credentials-card" style={{ marginBottom: 24 }}>
+                    <div className="card dashboard-credentials-card" style={{ marginBottom: 56 }}>
                     <div className="card-header">
                         <div>
                             <div className="card-title">SDK credentials</div>
@@ -777,7 +777,7 @@ asyncio.run(main())`
                 )}
 
                 {/* On-Chain Delegate Keys Management */}
-                <div className="card dashboard-keys-card" style={{ marginBottom: 24 }}>
+                <div className="card dashboard-keys-card" style={{ marginBottom: 56 }}>
                     <div className="card-header">
                         <div>
                             <div className="card-title">Delegate keys (on-chain)</div>
@@ -923,13 +923,13 @@ asyncio.run(main())`
                     ) : !effectiveAccountObjectId ? (
                         <div className="dashboard-empty-message dashboard-empty-message--account">
                             <span>No Walrus Memory account found for this wallet. </span>
-                            <span className="dashboard-empty-message-link">create a delegate key</span>
+                            <button type="button" className="dashboard-empty-message-link" onClick={() => navigate('/setup')}>create a delegate key</button>
                             <span> to get started.</span>
                         </div>
                     ) : onChainKeys.length === 0 ? (
                         <div className="dashboard-empty-message dashboard-empty-message--account">
                             <span>No Walrus Memory account found for this wallet. </span>
-                            <span className="dashboard-empty-message-link">create a delegate key</span>
+                            <button type="button" className="dashboard-empty-message-link" onClick={() => navigate('/setup')}>create a delegate key</button>
                             <span> to get started.</span>
                         </div>
                     ) : (
@@ -975,7 +975,7 @@ asyncio.run(main())`
                 </div>
 
                 {/* Quick Start: SDK */}
-                <div className="card dashboard-quickstart-card" style={{ marginBottom: 24 }}>
+                <div className="card dashboard-quickstart-card" style={{ marginBottom: 56 }}>
                     <div className="card-header">
                         <div>
                             <div className="card-title">Quickstart — SDK</div>
