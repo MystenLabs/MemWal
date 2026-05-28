@@ -31,6 +31,7 @@ export type {
     RecallResult,
     RecallMemory,
     RecallOptions,
+    RecallParams,
     ScoringWeights,
     EmbedResult,
     AnalyzeResult,

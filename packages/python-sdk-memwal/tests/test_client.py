@@ -17,7 +17,12 @@ import pytest
 import respx
 
 from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
-from memwal.types import RecallManualOptions, RememberManualOptions, ScoringWeights
+from memwal.types import (
+    RecallManualOptions,
+    RecallParams,
+    RememberManualOptions,
+    ScoringWeights,
+)
 from memwal.utils import build_signature_message, bytes_to_hex, sha256_hex
 
 # ============================================================
@@ -269,6 +274,58 @@ class TestRecall:
         assert result.results[0].text == "I love coffee"
         assert result.results[0].distance == 0.1
         assert result.results[1].blob_id == "b2"
+
+    @respx.mock
+    async def test_accepts_recall_params_object(
+        self, memwal_client: MemWal
+    ) -> None:
+        """recall(RecallParams(...)) sends the same request body as
+        the positional form, with query/limit/namespace pulled from the
+        dataclass instead of positional args."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={"results": [], "total": 0},
+            )
+        )
+
+        await memwal_client.recall(
+            RecallParams(query="coffee", limit=7, namespace="profile"),
+        )
+
+        assert route.called
+        body = json.loads(route.calls[0].request.content)
+        assert body["query"] == "coffee"
+        assert body["limit"] == 7
+        assert body["namespace"] == "profile"
+
+    @respx.mock
+    async def test_recall_params_object_applies_max_distance_filter(
+        self, memwal_client: MemWal
+    ) -> None:
+        """max_distance on the RecallParams dataclass drops weak matches
+        client-side, matching the positional max_distance kwarg behavior."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"blob_id": "b1", "text": "tight", "distance": 0.1},
+                        {"blob_id": "b2", "text": "noisy", "distance": 0.9},
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        result = await memwal_client.recall(
+            RecallParams(query="x", limit=10, max_distance=0.5),
+        )
+
+        assert len(result.results) == 1
+        assert result.results[0].blob_id == "b1"
 
     @respx.mock
     async def test_sends_correct_headers(self, memwal_client: MemWal) -> None:

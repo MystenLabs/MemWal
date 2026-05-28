@@ -23,10 +23,10 @@ const accepted = await memwal.remember(
 );
 const stored = await memwal.waitForRememberJob(accepted.job_id);
 
-const recalled = await memwal.recall(
-  "What do we know about this user?",
-  5
-);
+const recalled = await memwal.recall({
+  query: "What do we know about this user?",
+  limit: 5,
+});
 
 console.log(stored.blob_id);
 console.log(recalled.results);

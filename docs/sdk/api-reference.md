@@ -77,12 +77,13 @@ Submit up to 20 memories in one request and return the accepted job IDs immediat
 
 Submit a bulk remember request and wait until every job reaches a terminal state.
 
-### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
+### `recall(params): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limitOrOptions` defaults to `10`
-- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
+- `limit` defaults to `10`; `topK` is an alias and wins when both are set
+- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 **Returns:**

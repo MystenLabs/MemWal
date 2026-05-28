@@ -1,4 +1,4 @@
-//! HTTP route handlers, split by endpoint family (ENG-1747 phase 4.2).
+//! HTTP route handlers, split by endpoint family (phase 4.2).
 //!
 //! Each submodule owns a related group of handlers:
 //! - `remember` — `/api/remember`, `/api/remember/manual`, `/api/remember/bulk`
@@ -32,7 +32,7 @@ pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
 
 use futures::stream::{self, StreamExt};
 
-use crate::jobs::{WalletJob, WalletOperation};
+use crate::jobs::{wallet_job_request, WalletJob, WalletOperation};
 use crate::storage::db::VectorDb;
 use crate::types::*;
 
@@ -54,10 +54,10 @@ pub async fn enqueue_wallet_job(
 ) -> Result<usize, AppError> {
     let mut storage = state.wallet_storage.clone();
     storage
-        .push(WalletJob {
+        .push_request(wallet_job_request(WalletJob {
             wallet_index,
             operation,
-        })
+        }))
         .await
         .map_err(|e| AppError::Internal(format!("Failed to enqueue WalletJob: {}", e)))?;
     Ok(wallet_index)
@@ -116,7 +116,7 @@ where
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
 ///
-/// LOW-10: `owner` is required so the DELETE is scoped to the caller's rows.
+/// `owner` is required so the DELETE is scoped to the caller's rows.
 /// The DB layer enforces `WHERE blob_id = $1 AND owner = $2`, so an expired
 /// blob discovered via one user's recall cannot delete another user's entry
 /// even if blob_ids collided.
@@ -146,7 +146,7 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
 // HydratedMemory
 // ============================================================
 
-/// Zip the `created_at` timestamp **and** (MEM-54) the `importance` score
+/// Zip the `created_at` timestamp **and** the `importance` score
 /// from a slice of `SearchHit`s onto a mutable slice of `HydratedMemory`s
 /// by `blob_id`. The storage engines deliberately leave both fields as
 /// `None` (they don't fetch them as part of the cache → Walrus → SEAL
@@ -158,7 +158,7 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
 /// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
 /// it here keeps the two call sites in sync.
 ///
-/// Renamed from `zip_created_at_onto_hydrated` in MEM-54 once importance
+/// Renamed from `zip_created_at_onto_hydrated` in once importance
 /// joined the zip. Single function (rather than two separate ones) because
 /// both fields come from the same `SearchHit` and we don't want to walk
 /// the hits vector twice for what's a hot path.

@@ -37,7 +37,7 @@ const memwal = MemWal.create({
 
 const job = await memwal.remember("User prefers dark mode and uses TypeScript.");
 await memwal.waitForRememberJob(job.job_id);
-const memories = await memwal.recall("What are the user's preferences?");
+const memories = await memwal.recall({ query: "What are the user's preferences?" });
 await memwal.restore("demo");
 ```
 

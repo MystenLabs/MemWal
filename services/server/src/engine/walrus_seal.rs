@@ -32,7 +32,7 @@ use crate::types::{AppError, AuthInfo, Config, KeyPool};
 
 use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 
-/// Redis key prefix for the Walrus blob ciphertext cache (ENG-1405).
+/// Redis key prefix for the Walrus blob ciphertext cache.
 const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 /// SEAL decrypt-batch chunk size (matches the inlined `recall` value).
 const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
@@ -48,9 +48,9 @@ pub struct WalrusSealEngine {
     key_pool: Arc<KeyPool>,
     config: Arc<Config>,
     redis: redis::aio::MultiplexedConnection,
-    /// ENG-1405 blob ciphertext cache TTL. Zero disables write-back.
+    /// Blob ciphertext cache TTL. Zero disables write-back.
     blob_cache_ttl: Duration,
-    /// MEM-37 max ciphertext size kept in the Redis cache. Reads ignore
+    /// Max ciphertext size kept in the Redis cache. Reads ignore
     /// entries larger than this (they get evicted via TTL eventually);
     /// writes skip blobs larger than this. Zero disables the cache
     /// entirely (read and write).
@@ -91,7 +91,7 @@ impl WalrusSealEngine {
     }
 
     /// Reactively delete an expired blob's index row. Best-effort —
-    /// errors logged, not propagated. Scoped to `owner` (LOW-10) so a
+    /// errors logged, not propagated. Scoped to `owner` so a
     /// blob discovered via one user's recall can't delete another's row.
     async fn cleanup_expired_blob(&self, blob_id: &str, owner: &str) {
         match self.db.delete_by_blob_id(blob_id, owner).await {
@@ -115,7 +115,7 @@ impl WalrusSealEngine {
     }
 
     /// Try the Redis blob cache. Returns `Some(ciphertext)` on hit;
-    /// `None` on miss, oversized entry (MEM-37 cap), or any cache error
+    /// `None` on miss, oversized entry (cap), or any cache error
     /// (cache is best-effort). Disabled entirely when
     /// `blob_cache_max_bytes` is zero.
     async fn cache_get(&self, blob_id: &str) -> Option<Vec<u8>> {
@@ -129,7 +129,7 @@ impl WalrusSealEngine {
                 match read_decision(ciphertext.len(), self.blob_cache_max_bytes) {
                     CacheReadDecision::Serve => Some(ciphertext),
                     CacheReadDecision::IgnoreOversize => {
-                        // MEM-37: ignore entries larger than the configured cap.
+                        // ignore entries larger than the configured cap.
                         // The entry will be evicted by TTL eventually; we don't
                         // delete it here to keep `cache_get` read-only.
                         tracing::info!(
@@ -152,13 +152,13 @@ impl WalrusSealEngine {
 
     /// Write a freshly-downloaded ciphertext into the Redis cache.
     /// No-op when `blob_cache_ttl` is zero, `blob_cache_max_bytes` is
-    /// zero, or the ciphertext exceeds the size cap (MEM-37). Best-effort.
+    /// zero, or the ciphertext exceeds the size cap. Best-effort.
     async fn cache_put(&self, blob_id: &str, ciphertext: &[u8]) {
         let ttl_secs = self.blob_cache_ttl.as_secs();
         match write_decision(ciphertext.len(), self.blob_cache_max_bytes, ttl_secs) {
             CacheWriteDecision::Skip => return,
             CacheWriteDecision::SkipOversize => {
-                // MEM-37: skip blobs above the size cap to bound Redis memory.
+                // skip blobs above the size cap to bound Redis memory.
                 tracing::info!(
                     "blob cache skip for {}: {} bytes exceeds max {}",
                     blob_id,
@@ -259,7 +259,7 @@ impl MemoryEngine for WalrusSealEngine {
         let blob_id = upload.blob_id;
         tracing::info!("engine.store_blob: walrus upload ok blob_id={}", blob_id);
 
-        // MEM-37: warm the Redis blob cache with the just-uploaded ciphertext
+        // warm the Redis blob cache with the just-uploaded ciphertext
         // so the first recall of this blob hits the cache instead of round-
         // tripping Walrus. Best-effort — skipped when the cache is disabled
         // or the blob exceeds `blob_cache_max_bytes`.
@@ -511,7 +511,7 @@ impl MemoryEngine for WalrusSealEngine {
 }
 
 // ============================================================
-// Pure cache-policy helpers (MEM-37 size cap, ENG-1405 TTL)
+// Pure cache-policy helpers (size cap, TTL)
 // ============================================================
 
 /// What `cache_get` should do with a Redis hit, given the configured
@@ -522,7 +522,7 @@ impl MemoryEngine for WalrusSealEngine {
 enum CacheReadDecision {
     /// Entry is within the cap — serve it.
     Serve,
-    /// Entry exceeds the cap — ignore (MEM-37 policy: don't delete,
+    /// Entry exceeds the cap — ignore (policy: don't delete,
     /// let TTL evict).
     IgnoreOversize,
 }
@@ -541,7 +541,7 @@ fn read_decision(ciphertext_len: usize, max_bytes: usize) -> CacheReadDecision {
 enum CacheWriteDecision {
     /// Either TTL or max-bytes is zero — cache is disabled, no write.
     Skip,
-    /// Ciphertext exceeds the size cap — skip the write (MEM-37).
+    /// Ciphertext exceeds the size cap — skip the write.
     SkipOversize,
     /// Within policy — go ahead and write with the configured TTL.
     Write,
@@ -561,7 +561,7 @@ fn write_decision(ciphertext_len: usize, max_bytes: usize, ttl_secs: u64) -> Cac
 mod tests {
     use super::{read_decision, write_decision, CacheReadDecision, CacheWriteDecision};
 
-    // ── MEM-37 read-side cap ──────────────────────────────────────────────
+    // ── read-side cap ──────────────────────────────────────────────
 
     #[test]
     fn read_decision_serves_entries_at_or_below_cap() {
@@ -596,11 +596,11 @@ mod tests {
         );
     }
 
-    // ── MEM-37 write-side cap + ENG-1405 TTL ──────────────────────────────
+    // ── write-side cap + TTL ──────────────────────────────
 
     #[test]
     fn write_decision_skips_when_ttl_zero() {
-        // ENG-1405: TTL=0 disables write-back entirely.
+        // TTL=0 disables write-back entirely.
         assert_eq!(
             write_decision(100, 512, 0),
             CacheWriteDecision::Skip,
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn write_decision_skips_when_max_bytes_zero() {
-        // MEM-37: max=0 disables cache writes.
+        // max=0 disables cache writes.
         assert_eq!(
             write_decision(100, 0, 600),
             CacheWriteDecision::Skip,

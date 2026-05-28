@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 /// Credential used to authorize a SEAL decrypt request against the sidecar.
 ///
-/// ENG-1697: `Session` (an exported `SessionKey`, built on the client) is
+/// `Session` (an exported `SessionKey`, built on the client) is
 /// preferred. `DelegateKey` is the legacy path where the SDK transmits the
 /// raw Ed25519 private key — retained temporarily so existing clients keep
 /// working. At EOL the `DelegateKey` variant will be removed.
@@ -163,7 +163,7 @@ pub async fn seal_encrypt(
 /// Decrypt SEAL-encrypted data via the sidecar.
 ///
 /// Calls `POST /seal/decrypt` on the long-lived sidecar server. The
-/// credential (ENG-1697) is either an exported SessionKey token or a
+/// credential is either an exported SessionKey token or a
 /// legacy delegate private key. The client must have authority for
 /// `seal_approve` against the given `account_id`.
 ///

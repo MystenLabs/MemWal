@@ -20,6 +20,7 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import { trackEvent } from '../utils/analytics'
 import memwalLogo from '../assets/memwal-logo.svg'
 
 type AuthMethod = 'enoki' | 'wallet' | null
@@ -65,6 +66,7 @@ export default function LandingPage() {
 
     // ── Track wallet click for ConnectButton flow ──
     const walletClickedRef = useRef(false)
+    const signInTrackedRef = useRef(false)
 
     // ── Close dropdowns on outside click ──
     useEffect(() => {
@@ -87,11 +89,17 @@ export default function LandingPage() {
 
     useEffect(() => {
         if (currentAccount && !delegateKey) {
-            const persisted = getPersistedAuthMethod()
-            if (!persisted && walletClickedRef.current) {
+            let authMethod = getPersistedAuthMethod()
+            if (!authMethod && walletClickedRef.current) {
+                authMethod = 'wallet'
                 walletClickedRef.current = false
-                setLoginOpen(false)
                 updateAuthMethod('wallet')
+            }
+            if (authMethod && !signInTrackedRef.current) {
+                trackEvent('sign_in_complete', {
+                    auth_method: authMethod,
+                })
+                signInTrackedRef.current = true
             }
             // Navigate to dashboard/setup after connection
             navigate('/dashboard')
@@ -102,6 +110,7 @@ export default function LandingPage() {
     const handleEnokiConnect = () => {
         if (!googleWallet) return
         updateAuthMethod('enoki')
+        trackEvent('sign_in_start', { auth_method: 'enoki', location: 'landing_nav' })
         setLoginOpen(false)
         connect({ wallet: googleWallet })
     }
@@ -109,6 +118,7 @@ export default function LandingPage() {
     const handleWalletClick = () => {
         walletClickedRef.current = true
         updateAuthMethod('wallet')
+        trackEvent('sign_in_start', { auth_method: 'wallet', location: 'landing_nav' })
     }
 
     return (
@@ -126,7 +136,10 @@ export default function LandingPage() {
                             <div className="lp-demo-dropdown" ref={demoRef}>
                                 <button
                                     className="lp-demo-trigger"
-                                    onClick={() => setDemoOpen(o => !o)}
+                                    onClick={() => {
+                                        trackEvent('cta_click', { cta: 'demo_menu', location: 'landing_nav' })
+                                        setDemoOpen(o => !o)
+                                    }}
                                 >
                                     Demo <ChevronDown size={14} className={`lp-demo-chevron${demoOpen ? ' open' : ''}`} />
                                 </button>
@@ -139,7 +152,10 @@ export default function LandingPage() {
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="lp-demo-item"
-                                                onClick={() => setDemoOpen(false)}
+                                                onClick={() => {
+                                                    trackEvent('demo_link_click', { label, location: 'landing_nav' })
+                                                    setDemoOpen(false)
+                                                }}
                                             >
                                                 {label} <span className="lp-arrow">↗</span>
                                             </a>
@@ -151,14 +167,23 @@ export default function LandingPage() {
 
                         {/* SDK Playground — direct link if logged in, popover with login options if not */}
                         {currentAccount && delegateKey ? (
-                            <button className="lp-nav-cta" onClick={() => navigate('/dashboard')}>
+                            <button
+                                className="lp-nav-cta"
+                                onClick={() => {
+                                    trackEvent('cta_click', { cta: 'sdk_playground', location: 'landing_nav', state: 'authenticated' })
+                                    navigate('/dashboard')
+                                }}
+                            >
                                 SDK Playground <span className="lp-arrow">↗</span>
                             </button>
                         ) : (
                             <div className="lp-demo-dropdown lp-login-dropdown" ref={loginRef}>
                                 <button
                                     className="lp-nav-cta"
-                                    onClick={() => setLoginOpen(o => !o)}
+                                    onClick={() => {
+                                        trackEvent('cta_click', { cta: 'sdk_playground', location: 'landing_nav', state: 'signed_out' })
+                                        setLoginOpen(o => !o)
+                                    }}
                                 >
                                     SDK Playground <span className="lp-arrow">↗</span>
                                 </button>
@@ -222,6 +247,7 @@ export default function LandingPage() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="lp-btn-yellow"
+                                    onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'landing_hero' })}
                                 >
                                     Documentation <span className="lp-arrow">↗</span>
                                 </a>
@@ -231,6 +257,7 @@ export default function LandingPage() {
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="lp-btn-outline"
+                                onClick={() => trackEvent('outbound_link_click', { link: 'github', location: 'landing_hero' })}
                             >
                                 <Github size={18} /> GitHub <span className="lp-arrow">↗</span>
                             </a>

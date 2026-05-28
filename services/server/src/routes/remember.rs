@@ -1,15 +1,15 @@
 //! `/api/remember`, `/api/remember/manual`, `/api/remember/bulk` handlers.
 //!
-//! `remember` (ENG-1406 v3): validate → insert a `remember_jobs` row →
+//! `remember`: validate → insert a `remember_jobs` row →
 //! return HTTP 202; preparation (summarize-if-large → embed ∥ SEAL-encrypt →
 //! enqueue `UploadAndTransfer` WalletJob) runs in-process via
-//! `spawn_prepare_remember_job`. `remember/bulk` (ENG-1408): the same for up
+//! `spawn_prepare_remember_job`. `remember/bulk`: the same for up
 //! to `MAX_BULK_ITEMS` memories at once, batching metadata+transfer by wallet.
 //! `remember/manual`: client already embedded + SEAL-encrypted; server just
 //! uploads to Walrus and indexes (via `engine.store_blob`). `*/status`
 //! endpoints poll the `remember_jobs` table.
 //!
-//! Also home to the summarize-for-embedding helpers (ENG-1407): texts beyond
+//! Also home to the summarize-for-embedding helpers: texts beyond
 //! the embedder's context window are summarized (chunk → reduce) by
 //! gpt-4o-mini before embedding, while the original bytes are still what gets
 //! encrypted and stored.
@@ -29,7 +29,7 @@ use crate::types::*;
 
 use super::{collect_bounded_results, enqueue_wallet_job};
 
-// LOW-6 / ENG-1407: Upper bound on plaintext accepted by /api/remember.
+// Upper bound on plaintext accepted by /api/remember.
 // 1 MiB supports large markdown documents while staying within the auth
 // middleware's PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) once JSON framing is
 // factored in. Text above SUMMARIZE_THRESHOLD_BYTES is summarized via
@@ -106,7 +106,7 @@ fn spawn_prepare_remember_job(
     tokio::spawn(async move {
         let work = async move {
             let result: Result<(), AppError> = async {
-                // ENG-1407: texts beyond the embedder's context window must be
+                // texts beyond the embedder's context window must be
                 // summarized first. Summarization runs sequentially before the
                 // embed/encrypt fan-out because the summary is the embedder's
                 // input — encrypt still uses the original `text`.
@@ -155,7 +155,7 @@ fn spawn_prepare_remember_job(
                     WalletOperation::UploadAndTransfer {
                         encrypted_b64,
                         vector,
-                        // MEM-54: manual /remember has no extractor → no
+                        // manual /remember has no extractor → no
                         // bucket signal. Use neutral "standard" so user-
                         // supplied text isn't artificially boosted or
                         // suppressed by the ranker's importance term.
@@ -217,7 +217,7 @@ fn spawn_prepare_bulk_remember_job(
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
                         async move {
-                            // ENG-1407: bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
+                            // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
                             let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
                                 && state.config.openai_api_key.is_some();
@@ -286,7 +286,7 @@ fn spawn_prepare_bulk_remember_job(
                         job_id,
                         encrypted_b64,
                         vector,
-                        // MEM-54: bulk /remember mirrors single /remember —
+                        // bulk /remember mirrors single /remember —
                         // no extractor in this path, so we use the neutral
                         // standard bucket.
                         importance: crate::services::extractor::IMPORTANCE_STANDARD,
@@ -396,7 +396,7 @@ fn batch_summary_inputs(summaries: &[String], max_bytes: usize) -> Vec<String> {
 }
 
 // ============================================================
-// Summarize-for-embedding (ENG-1407)
+// Summarize-for-embedding
 // ============================================================
 
 async fn summarize_with_prompt(
@@ -602,7 +602,7 @@ async fn summarize_for_embedding(
 // Handlers
 // ============================================================
 
-/// POST /api/remember  (ENG-1406 v3 — fully async)
+/// POST /api/remember (v3 — fully async)
 ///
 /// Validates the request, inserts a job row, and returns HTTP 202 before
 /// embed/encrypt/upload work starts. Preparation runs in-process (see
@@ -617,7 +617,7 @@ pub async fn remember(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
-    // LOW-6: Reject oversize plaintext before spending embed + encrypt compute.
+    // Reject oversize plaintext before spending embed + encrypt compute.
     if body.text.len() > MAX_REMEMBER_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
             "Text exceeds maximum length of {} bytes",
@@ -712,7 +712,7 @@ pub async fn remember_status(
     }))
 }
 
-/// POST /api/remember/bulk  (ENG-1408)
+/// POST /api/remember/bulk
 ///
 /// Accepts up to MAX_BULK_ITEMS memories and returns HTTP 202 after creating
 /// status rows. Embed/encrypt runs in the background; the bulk worker batches
@@ -919,7 +919,7 @@ pub async fn remember_manual(
             namespace,
             &encrypted_bytes,
             &body.vector,
-            // MEM-54: remember_manual is the user-supplied SDK path —
+            // remember_manual is the user-supplied SDK path —
             // the SDK doesn't run the extractor, so we have no bucket
             // signal. Use neutral standard so manual writes rank with
             // average importance.
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(results[3].status, "failed");
     }
 
-    // ── LOW-6: Text size limit ──────────────────────────────────────────
+    // ── Text size limit ──────────────────────────────────────────
 
     #[test]
     fn max_remember_text_bytes_is_1mb() {

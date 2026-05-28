@@ -23,6 +23,14 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('bash', bash)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import {
+    getDelegateKeyFields,
+    getMoveFields,
+    type AccountObjectFields,
+    type DynamicFieldObjectFields,
+    type RegistryObjectFields,
+} from '../utils/suiFields'
 import memwalLogo from '../assets/memwal-logo.svg'
 
 // ============================================================
@@ -84,10 +92,15 @@ export default function Dashboard() {
     const copyToClipboard = useCallback(async (text: string, label: string) => {
         await navigator.clipboard.writeText(text)
         setCopied(label)
+        trackEvent('copy_action', {
+            item: label.startsWith('pk-') ? 'public_key' : label,
+            location: 'dashboard',
+        })
         setTimeout(() => setCopied(null), 2000)
     }, [])
 
     const handleLogout = useCallback(async () => {
+        trackEvent('sign_out', { location: 'dashboard' })
         clearDelegateKeys()
         await disconnect()
     }, [clearDelegateKeys, disconnect])
@@ -105,17 +118,16 @@ export default function Dashboard() {
                 id: config.memwalRegistryId,
                 options: { showContent: true },
             })
-            if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-                const fields = registryObj.data.content.fields as any
+            const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
+            if (fields) {
                 const tableId = fields?.accounts?.fields?.id?.id
                 if (tableId) {
                     const dynField = await suiClient.getDynamicFieldObject({
                         parentId: tableId,
                         name: { type: 'address', value: address },
                     })
-                    if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                        setResolvedAccountObjectId((dynField.data.content.fields as any).value as string)
-                    }
+                    const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
+                    if (dynFields?.value) setResolvedAccountObjectId(dynFields.value)
                 }
             }
         } catch (err) {
@@ -178,11 +190,11 @@ export default function Dashboard() {
                 id: effectiveAccountObjectId,
                 options: { showContent: true },
             })
-            if (obj?.data?.content && 'fields' in obj.data.content) {
-                const fields = obj.data.content.fields as any
-                const keys = fields?.delegate_keys ?? []
-                const parsed: OnChainDelegateKey[] = keys.map((k: any) => {
-                    const f = k.fields ?? k
+            const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
+            if (fields) {
+                const keys = fields.delegate_keys ?? []
+                const parsed: OnChainDelegateKey[] = keys.map((k) => {
+                    const f = getDelegateKeyFields(k)
                     const pkBytes: number[] = f.public_key ?? []
                     const pkHex = pkBytes.map((b: number) => b.toString(16).padStart(2, '0')).join('')
                     return {
@@ -212,13 +224,13 @@ export default function Dashboard() {
     // Generate + add a new delegate key (via SDK)
     // ============================================================
 
-    // LOW-31: sanitize a key label — strip HTML special chars and control characters
+    // sanitize a key label — strip HTML special chars and control characters
     const sanitizeLabel = (raw: string): string =>
         raw
             // Strip HTML special characters
             .replace(/[<>&"'/]/g, '')
-            // Strip C0/C1 control characters (U+0000–U+001F, U+007F–U+009F)
-            .replace(/[\x00-\x1F\x7F-\x9F]/g, '')
+            // Strip Unicode control characters.
+            .replace(/\p{Cc}/gu, '')
             .trim()
 
     const handleAddKey = useCallback(async () => {
@@ -226,28 +238,33 @@ export default function Dashboard() {
 
         if (!effectiveAccountObjectId) {
             setKeyError('account is still loading. please try again in a moment.')
+            trackEvent('delegate_key_add_failed', { error_type: 'account_loading' })
             return
         }
 
         if (hasMaxDelegateKeys) {
             setKeyError(MAX_DELEGATE_KEYS_MESSAGE)
+            trackEvent('delegate_key_add_failed', { error_type: 'max_delegate_keys' })
             return
         }
 
-        // LOW-31: validate label before submitting on-chain
+        // validate label before submitting on-chain
         const trimmedLabel = sanitizeLabel(newKeyLabel)
         if (!trimmedLabel) {
             setKeyError('key label cannot be empty')
+            trackEvent('delegate_key_add_failed', { error_type: 'invalid_input' })
             return
         }
         if (trimmedLabel.length > 64) {
             setKeyError('key label must be 64 characters or fewer')
+            trackEvent('delegate_key_add_failed', { error_type: 'invalid_input' })
             return
         }
 
         setAddingKey(true)
         setKeyError('')
         setNewPrivateKey(null)
+        trackEvent('delegate_key_add_start', { location: 'dashboard' })
         try {
             // Generate keypair via SDK
             const delegate = await generateDelegateKey()
@@ -272,9 +289,11 @@ export default function Dashboard() {
 
             // Refresh key list
             await fetchOnChainKeys()
+            trackEvent('delegate_key_add_complete', { location: 'dashboard' })
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'failed to add key'
             setKeyError(msg)
+            trackEvent('delegate_key_add_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setAddingKey(false)
         }
@@ -290,6 +309,7 @@ export default function Dashboard() {
         setRemovingKey(publicKeyHex)
         setKeyError('')
         setNewPrivateKey(null)
+        trackEvent('delegate_key_remove_start', { location: 'dashboard' })
         try {
             await removeDelegateKey({
                 packageId: config.memwalPackageId,
@@ -309,9 +329,11 @@ export default function Dashboard() {
 
             // Refresh key list
             await fetchOnChainKeys()
+            trackEvent('delegate_key_remove_complete', { location: 'dashboard' })
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'failed to remove key'
             setKeyError(msg)
+            trackEvent('delegate_key_remove_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
 
             setRemovingKey(null)
@@ -322,7 +344,7 @@ export default function Dashboard() {
     // SDK code snippets
     // ============================================================
 
-    // LOW-30: Never render any portion (prefix/suffix) of the real private key
+    // Never render any portion (prefix/suffix) of the real private key
     // in DOM / copyable snippets. Use a static placeholder instead.
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
@@ -413,7 +435,11 @@ const result = await generateText({
                 {/* Action CTAs */}
                 <div className="dashboard-cta-row">
                     {delegateKey ? (
-                        <Link to="/playground" className="dashboard-cta">
+                        <Link
+                            to="/playground"
+                            className="dashboard-cta"
+                            onClick={() => trackEvent('cta_click', { cta: 'interactive_demo', location: 'dashboard' })}
+                        >
                             <div>
                                 <div className="dashboard-cta-title">
                                     try interactive demo
@@ -437,7 +463,11 @@ const result = await generateText({
                             <div className="dashboard-cta-arrow">↓</div>
                         </div>
                     ) : (
-                        <Link to="/setup" className="dashboard-cta">
+                        <Link
+                            to="/setup"
+                            className="dashboard-cta"
+                            onClick={() => trackEvent('cta_click', { cta: 'create_delegate_key', location: 'dashboard' })}
+                        >
                             <div>
                                 <div className="dashboard-cta-title">
                                     create delegate key
@@ -450,7 +480,13 @@ const result = await generateText({
                         </Link>
                     )}
                     {config.docsUrl && (
-                        <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" className="dashboard-cta">
+                        <a
+                            href={config.docsUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="dashboard-cta"
+                            onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'dashboard' })}
+                        >
                             <div>
                                 <div className="dashboard-cta-title">
                                     documentation
@@ -606,8 +642,10 @@ const result = await generateText({
                                 onClick={() => {
                                     if (hasMaxDelegateKeys) {
                                         setKeyError(MAX_DELEGATE_KEYS_MESSAGE)
+                                        trackEvent('delegate_key_add_failed', { error_type: 'max_delegate_keys' })
                                         return
                                     }
+                                    trackEvent('cta_click', { cta: 'show_add_delegate_key_form', location: 'dashboard' })
                                     setShowAddForm(true)
                                 }}
                                 disabled={showAddForm || addingKey || !effectiveAccountObjectId || hasMaxDelegateKeys}
@@ -678,7 +716,7 @@ const result = await generateText({
                                     value={newKeyLabel}
                                     maxLength={64}
                                     onChange={(e) =>
-                                        // LOW-31: strip HTML special chars and control characters on every keystroke
+                                        // strip HTML special chars and control characters on every keystroke
                                         setNewKeyLabel(sanitizeLabel(e.target.value))
                                     }
                                     placeholder="e.g. MacBook Pro, Production Server"
@@ -830,7 +868,10 @@ const result = await generateText({
                             <button
                                 key={pm}
                                 className={`install-tab${pkgManager === pm ? ' install-tab--active' : ''}`}
-                                onClick={() => setPkgManager(pm)}
+                                onClick={() => {
+                                    trackEvent('sdk_install_tab_selected', { package_manager: pm, location: 'dashboard' })
+                                    setPkgManager(pm)
+                                }}
                             >
                                 {pm}
                             </button>

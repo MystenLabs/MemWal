@@ -23,7 +23,7 @@
  * await memwal.waitForRememberJob(accepted.job_id)
  *
  * // Recall — server: verify → embed query → search → download → decrypt
- * const result = await memwal.recall("food allergies")
+ * const result = await memwal.recall({ query: "food allergies" })
  * console.log(result.results[0].text) // "I'm allergic to peanuts"
  * ```
  */
@@ -34,6 +34,7 @@ import type {
     RecallResult,
     RecallMemory,
     RecallOptions,
+    RecallParams,
     EmbedResult,
     AnalyzeResult,
     AnalyzeWaitResult,
@@ -476,32 +477,72 @@ export class MemWal {
 
     /**
      * Recall memories similar to a query — server handles:
-     * verify → embed query → search → Walrus download → decrypt → return plaintext
+     * verify → embed query → search → Walrus download → decrypt → return plaintext.
      *
-     * @param query - Search query
-     * @param limitOrOptions - Max number of results (default: 10), or recall options
+     * **Preferred call style**: pass a single `RecallParams` object
+     * so call sites read self-describingly:
+     * ```ts
+     * memwal.recall({ query: "food allergies", limit: 5, namespace: "profile" })
+     * ```
+     *
+     * The legacy positional forms remain supported for backwards compatibility:
+     * - `recall(query)`
+     * - `recall(query, limit)`
+     * - `recall(query, limit, namespace)`
+     * - `recall(query, { limit, namespace, maxDistance, topK })`
+     *
+     * `topK` and `limit` are aliases; if both are set, `topK` wins.
+     *
      * @returns RecallResult with decrypted text results
      *
      * @example
      * ```typescript
-     * const result = await memwal.recall("food allergies")
+     * // Object style — recommended
+     * const result = await memwal.recall({
+     *     query: "food allergies",
+     *     limit: 5,
+     *     namespace: "profile",
+     * });
      * for (const memory of result.results) {
-     *     console.log(memory.text, memory.distance)
+     *     console.log(memory.text, memory.distance);
      * }
+     *
+     * // Positional style — still works
+     * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
+     */
+    async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`. Prefer the object form
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
      */
     async recall(
         query: string,
+        limitOrOptions?: number | RecallOptions,
+        namespace?: string,
+    ): Promise<RecallResult>;
+    async recall(
+        queryOrParams: string | RecallParams,
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string,
     ): Promise<RecallResult> {
+        let query: string;
         let options: RecallOptions;
-        if (limitOrOptions == null) {
-            options = { limit: 10, namespace };
-        } else if (typeof limitOrOptions === "number") {
-            options = { limit: limitOrOptions, namespace };
+        if (typeof queryOrParams === "object") {
+            const { query: q, ...rest } = queryOrParams;
+            query = q;
+            options = rest;
         } else {
-            options = limitOrOptions;
+            query = queryOrParams;
+            if (limitOrOptions == null) {
+                options = { limit: 10, namespace };
+            } else if (typeof limitOrOptions === "number") {
+                options = { limit: limitOrOptions, namespace };
+            } else {
+                options = limitOrOptions;
+            }
         }
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
@@ -666,16 +707,41 @@ export class MemWal {
     }
 
     /**
-     * Restore a namespace — server downloads all blobs from Walrus,
-     * decrypts with delegate key, re-embeds, and re-indexes.
+     * Rebuild missing local index entries for `namespace` from Walrus.
      *
-     * @param namespace - Namespace to restore
-     * @returns RestoreResult with count of restored entries
+     * The relayer queries Walrus for blobs the caller owns in `namespace`,
+     * ignores blobs already indexed locally, downloads the missing ones,
+     * SEAL-decrypts them with the delegate key, re-embeds the plaintext,
+     * and inserts a fresh vector row per blob.
+     *
+     * **Response semantics**:
+     * - `restored` — blobs that completed the full
+     *   download → decrypt → embed → DB insert pipeline this call.
+     * - `skipped` — on-chain blobs already in the local index (no work needed).
+     *   Decrypt / embed failures are dropped silently and count as neither.
+     * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
+     *   before the limit was applied.
+     *
+     * **`limit`** caps the *number of blobs the relayer inspects*, newest
+     * first. It is not a cap on `restored` directly. The server default is
+     * `10` (matches the SDK default).
+     *
+     * **No pagination cursor** — restore is single-shot. To rebuild a large
+     * namespace, call repeatedly with a growing `limit` or prune the local
+     * index first.
+     *
+     * **Performance** scales linearly in `limit`: up to 10 Walrus downloads
+     * in parallel, then 3 SEAL decrypts in parallel, then embeddings.
+     * Expect seconds-per-blob on cold caches.
+     *
+     * @param namespace - Namespace to restore (exact match; no prefix/hierarchy)
+     * @param limit - Max blobs to inspect this call (default: 10)
+     * @returns RestoreResult with restored / skipped / total counts
      *
      * @example
      * ```typescript
-     * const result = await memwal.restore("my-app")
-     * console.log(`Restored ${result.restored} memories`)
+     * const result = await memwal.restore("my-app");
+     * console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
