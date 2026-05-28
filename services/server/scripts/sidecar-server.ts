@@ -21,6 +21,7 @@ import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
+import { isWalrusPackageVersionMismatch } from "./walrus-error-detection.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -175,6 +176,10 @@ const WALRUS_CLIENT_MAX_AGE_MS = (() => {
     const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
 })();
+// Mirror of services/server/src/alerts.rs SIDECAR_WALRUS_DEP_VERSION.
+// Bump this in lockstep with package.json's @mysten/walrus dep so the
+// version-mismatch warn log reports the actual runtime dep.
+const WALRUS_DEP_VERSION = "1.1.7";
 const UPLOAD_RELAY_TIP_CACHE_TTL_MS = (() => {
     const parsed = Number.parseInt(process.env.UPLOAD_RELAY_TIP_CACHE_TTL_MS || "", 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
@@ -294,6 +299,28 @@ function summarizeEnokiError(text: string): Record<string, unknown> {
 
 function isMoveAbortBalanceSplit(message: string): boolean {
     return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
+}
+
+/**
+ * Fetch the Walrus on-chain System object's version (u64 -> decimal string).
+ * Reads go through the version-unchecked `inner` accessor so even the
+ * stale cached client returns the value it last cached. After
+ * refreshWalrusClient(), the recreated client refetches fresh metadata so
+ * the returned value reflects the new on-chain version.
+ *
+ * Safe in the error path: any failure (RPC down, API drift) returns null
+ * rather than throwing — we never want diagnostic logging to mask the
+ * original error.
+ */
+async function fetchWalrusSystemVersion(): Promise<string | null> {
+    try {
+        const sys = await walrusClient.systemObject();
+        const version = (sys as any)?.version;
+        if (version === undefined || version === null) return null;
+        return String(version);
+    } catch {
+        return null;
+    }
 }
 
 function clearUploadRelayTipCache(): void {
@@ -1229,6 +1256,22 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const message = err?.message || String(err);
         if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
             refreshWalrusClient("register_sponsor_balance_split");
+        }
+        if (isWalrusPackageVersionMismatch(message)) {
+            // EWrongVersion is phase-independent: can fire from register / upload / certify
+            // any time the Walrus system package gets upgraded on-chain after this sidecar
+            // booted. Refresh the cached client so the next Apalis retry picks up the new
+            // package metadata; no in-handler retry needed.
+            const versionBefore = await fetchWalrusSystemVersion();
+            refreshWalrusClient("walrus_package_version_mismatch");
+            const versionAfter = await fetchWalrusSystemVersion();
+            console.warn(
+                `[walrus/client] EWrongVersion detected — Walrus on-chain package upgraded. ` +
+                `Action: client refreshed, Apalis will retry against new package metadata. ` +
+                `Walrus system version: before=${versionBefore ?? "unknown"} after=${versionAfter ?? "unknown"}. ` +
+                `Sidecar @mysten/walrus dep=${WALRUS_DEP_VERSION}. ` +
+                `traceId=${traceId}`
+            );
         }
         const postFailureSignerSuiBalanceMist = signerAddressForLog
             ? await getSuiBalanceMist(signerAddressForLog)
