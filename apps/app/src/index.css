@@ -29,6 +29,7 @@
   --color-violet-soft: rgba(202, 177, 255, 0.30);
   --color-yellow-soft: rgba(232, 255, 117, 0.45);
   --gradient-brand: linear-gradient(135deg, #CAB1FF, #E8FF75);
+  --wordmark-memory-gradient: linear-gradient(90deg, #575cff 0%, #8771ff 50%, #cd91ff 100%);
 
   --success: #166534;
   --success-border: #22c55e;
@@ -205,7 +206,10 @@ h1, h2, h3 {
 }
 
 .walrus-memory-wordmark span:last-child {
-  color: #5b35ff;
+  color: transparent;
+  background: var(--wordmark-memory-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 .nav-user {
@@ -1360,7 +1364,10 @@ h1, h2, h3 {
 
 .setup-classic-nav .walrus-memory-wordmark span:last-child,
 .playground-nav .walrus-memory-wordmark span:last-child {
-  color: #e8ff75;
+  color: transparent;
+  background: var(--wordmark-memory-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 .setup-classic-nav .nav-address {
@@ -2062,7 +2069,7 @@ h1, h2, h3 {
 .dash-logo span:last-child {
   color: transparent;
   font-weight: 500;
-  background: linear-gradient(100deg, #2368ff 0%, #7248ff 48%, #ee79ff 100%);
+  background: var(--wordmark-memory-gradient);
   -webkit-background-clip: text;
   background-clip: text;
 }
@@ -2690,7 +2697,10 @@ h1, h2, h3 {
 }
 
 .dash-logo span:nth-child(2) {
-  color: var(--dash-violet);
+  color: transparent;
+  background: var(--wordmark-memory-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
 }
 
 .dash-nav-actions {
