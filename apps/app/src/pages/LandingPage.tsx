@@ -464,13 +464,13 @@ export default function LandingPage() {
                 <section className="wm-hero" id="discover">
                     <div className="wm-hero-bg" aria-hidden="true">
                         <img
-                            src="/walrus-memory-aurora-snake.png"
+                            src="/walrus-memory-aurora-snake.png?v=walm61"
                             alt=""
                             className="wm-hero-bg-layer wm-hero-bg-layer--snake"
                             data-node-id="2425:2274"
                         />
                         <img
-                            src="/walrus-memory-aurora-r-layer.png"
+                            src="/walrus-memory-aurora-r-layer.png?v=walm61"
                             alt=""
                             className="wm-hero-bg-layer wm-hero-bg-layer--r"
                             data-node-id="2425:2275"

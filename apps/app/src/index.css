@@ -2935,27 +2935,10 @@ h1, h2, h3 {
   position: relative;
   text-align: center;
   isolation: isolate;
-  background:
-    radial-gradient(ellipse 1050px 260px at 52% 53%, rgba(25, 131, 255, 0.72) 0%, rgba(25, 131, 255, 0.28) 34%, rgba(25, 131, 255, 0) 70%),
-    radial-gradient(ellipse 760px 190px at 34% 49%, rgba(237, 160, 255, 0.56) 0%, rgba(146, 73, 255, 0.24) 42%, rgba(146, 73, 255, 0) 72%),
-    radial-gradient(ellipse 620px 210px at 25% 82%, rgba(0, 221, 190, 0.58) 0%, rgba(0, 161, 255, 0.22) 44%, rgba(0, 161, 255, 0) 74%),
-    #000000;
-  background-blend-mode: screen;
 }
 
 .wm-hero::before {
-  content: "";
-  position: absolute;
-  z-index: 1;
-  top: -41px;
-  left: 50%;
-  width: 1908px;
-  height: 1406px;
-  background:
-    url('/walrus-memory-aurora-r-layer.png') center / 100% 100% no-repeat,
-    url('/walrus-memory-aurora-snake.png') center / 100% 100% no-repeat;
-  transform: translateX(-50%);
-  pointer-events: none;
+  content: none;
 }
 
 .wm-hero::after {
@@ -2976,9 +2959,6 @@ h1, h2, h3 {
   width: 1908px;
   max-width: none;
   height: 1406px;
-  background:
-    url('/walrus-memory-aurora-r-layer.png') center / 100% 100% no-repeat,
-    url('/walrus-memory-aurora-snake.png') center / 100% 100% no-repeat;
   transform: translateX(-50%);
   pointer-events: none;
   user-select: none;

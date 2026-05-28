@@ -53,14 +53,13 @@ RUN pnpm --filter @memwal/app build
 # ── Stage 2: Serve static files ─────────────────────────────
 FROM node:22-alpine AS runtime
 
-RUN npm install -g serve
-
 WORKDIR /app
 
 COPY --from=builder /app/apps/app/dist ./dist
+COPY --from=builder /app/apps/app/server.mjs ./server.mjs
 
-ENV PORT=${PORT}
-EXPOSE ${PORT}
+ENV PORT=3000
+EXPOSE 3000
 
-# SPA mode — all routes fallback to index.html
-CMD sh -c "serve -s -l ${PORT} dist"
+# SPA mode for app routes only. File-like paths never fall back to index.html.
+CMD ["node", "server.mjs"]
