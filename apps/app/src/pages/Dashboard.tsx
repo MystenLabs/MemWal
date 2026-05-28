@@ -494,18 +494,20 @@ asyncio.run(main())`
 
     return (
         <div className="dash-page">
-            <nav className="dash-nav">
-                <div className="dash-nav-inner">
-                    <Link to="/" className="dash-logo" aria-label="Walrus Memory home">
-                        <span>walrus</span>
-                        <span>memory</span>
+            <nav className="nav playground-nav dashboard-nav">
+                <div className="nav-inner">
+                    <Link to="/" className="nav-brand">
+                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
+                            <span>walrus</span>
+                            <span>memory</span>
+                        </span>
                     </Link>
-                    <div className="dash-nav-actions">
-                        <span className="dash-address">
+                    <div className="nav-user">
+                        <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="dash-outline-button" onClick={handleLogout}>
-                            Sign out <LogOut size={13} />
+                        <button className="lp-nav-cta" onClick={handleLogout}>
+                            <LogOut size={14} /> sign out
                         </button>
                     </div>
                 </div>
