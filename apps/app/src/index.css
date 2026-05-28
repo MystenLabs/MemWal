@@ -3178,8 +3178,9 @@ h1, h2, h3 {
 }
 
 .dash-page .key-display .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.24);
-  border-color: rgba(255, 255, 255, 0.34);
+  background: #faf8f5;
+  border-color: #faf8f5;
+  color: #000000;
   transform: none;
   box-shadow: none;
 }
