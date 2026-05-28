@@ -1519,6 +1519,54 @@ h1, h2, h3 {
   box-shadow: none;
 }
 
+/* Key-generated step: match the dashboard's dark credential cards
+   (the base .key-display is light #fff; setup is dark-themed so override).
+   Values mirror `.dash-page .key-display--white` so /setup and /dashboard
+   read as the same component. */
+.setup-classic .key-display {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--dash-card-border, #2a2d2f);
+  border-radius: 16px;
+  box-shadow: none;
+}
+
+.setup-classic .key-display .key-label {
+  color: #e8ff75;
+}
+
+.setup-classic .key-display .key-value {
+  color: #faf8f5;
+}
+
+.setup-classic .key-display .btn-secondary {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #faf8f5;
+  box-shadow: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.setup-classic .key-display .btn-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.24);
+  border-color: rgba(255, 255, 255, 0.34);
+  transform: none;
+  box-shadow: none;
+}
+
+/* Warning box: match the dashboard's lime-filled treatment (the light-theme
+   base was cream + orange border, which looked off on the dark setup page). */
+.setup-classic .warning-box {
+  background: #e8ff75;
+  border: 0;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.setup-classic .warning-box p,
+.setup-classic .warning-box strong {
+  color: #000000;
+}
+
 @media (max-width: 640px) {
   .setup-classic-nav {
     padding: 0 20px;
@@ -2497,6 +2545,7 @@ h1, h2, h3 {
 
 .dash-page .install-tab:hover {
   background: #262b30;
+  color: #faf8f5;
 }
 
 .dash-page .install-tab--active {
@@ -3095,12 +3144,15 @@ h1, h2, h3 {
 }
 
 .dash-page .key-display .btn-secondary {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.16);
   color: var(--dash-text);
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .dash-page .key-display .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.24);
+  border-color: rgba(255, 255, 255, 0.34);
   transform: none;
   box-shadow: none;
 }
@@ -4074,9 +4126,11 @@ h1, h2, h3 {
   box-shadow: none;
 }
 
-.playground-dashboard .demo-code-block span {
-  color: inherit !important;
-}
+/* NOTE: removed `.playground-dashboard .demo-code-block span { color: inherit !important }`.
+   That rule forced every syntax token to the base off-white via !important,
+   overriding react-syntax-highlighter's inline token colors and making the
+   playground snippets fully monochrome. Without it, walrusCodeTheme's token
+   colors (purple keywords, lime strings/keys, gray comments) render. */
 
 .playground-dashboard .demo-info-panel,
 .playground-dashboard .demo-phase-indicator {
@@ -4397,6 +4451,102 @@ h1, h2, h3 {
   display: block;
 }
 
+.dash-page .dashboard-keys-add {
+  width: 150px;
+  height: 52px;
+  min-height: 52px;
+  padding: 10px 30px;
+  gap: 10px;
+  justify-content: center;
+  border: 1px solid #faf8f5;
+  border-radius: 26px;
+  background: #faf8f5;
+  color: #000000;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 0.84;
+  letter-spacing: 0.72px;
+  white-space: nowrap;
+  box-shadow: none;
+}
+
+.dash-page .dashboard-keys-add svg {
+  width: 12.15px;
+  height: 12.15px;
+  stroke-width: 1.8;
+}
+
+.dash-page .dashboard-keys-add:hover:not(:disabled) {
+  background: #faf8f5;
+  border-color: #faf8f5;
+  color: #000000;
+  transform: none;
+  box-shadow: none;
+}
+
+.dash-page .install-tabs {
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.dash-page .install-tab,
+.dash-page .install-tab:last-child {
+  width: 72px;
+  height: 28px;
+  min-height: 28px;
+  padding: 8px 12px;
+  border: 0;
+  outline: 0;
+  border-radius: 4px;
+  background: #1d2227;
+  color: #8f9294;
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 0.84;
+  letter-spacing: 0.14px;
+  text-transform: lowercase;
+}
+
+.dash-page .install-tab:hover,
+.dash-page .install-tab:focus,
+.dash-page .install-tab:focus-visible,
+.dash-page .install-tab:active {
+  outline: 0;
+  background: #1d2227;
+  color: #8f9294;
+  box-shadow: none;
+}
+
+.dash-page .install-tab--active,
+.dash-page .install-tab--active:hover,
+.dash-page .install-tab--active:focus,
+.dash-page .install-tab--active:focus-visible,
+.dash-page .install-tab--active:active {
+  outline: 0;
+  background: #faf8f5;
+  color: #000000 !important;
+  box-shadow: none;
+}
+
+.dash-page .dashboard-empty-message--account {
+  width: 100%;
+  min-height: 86px;
+  padding: 29px 0 !important;
+  color: #54575a !important;
+  font-size: 21px !important;
+  font-weight: 400;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.dash-page .dashboard-empty-message--account .dashboard-empty-message-link {
+  color: #faf8f5;
+  text-decoration-line: underline;
+  text-decoration-thickness: from-font;
+  text-underline-position: from-font;
+}
+
 @media (max-width: 860px) {
   .dashboard-nav .nav-inner {
     max-width: none;
@@ -4491,21 +4641,26 @@ h1, h2, h3 {
 .setup-classic-nav .lp-nav-cta,
 .playground-nav .lp-nav-cta,
 .dashboard-nav .lp-nav-cta {
-  width: 153px;
+  box-sizing: border-box;
+  width: 153.04px;
   height: 52px;
   min-height: 52px;
-  padding: 0 30px;
+  padding: 10px 30px;
   border: 1px solid #faf8f5;
   border-radius: 26px;
-  background: transparent;
+  background: #000000;
   color: #faf8f5;
   box-shadow: none;
   gap: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 18px;
   font-weight: 500;
   letter-spacing: 0.72px;
   line-height: 0.84;
   text-transform: none;
+  white-space: nowrap;
 }
 
 .setup-classic-nav .lp-nav-cta svg,
@@ -4514,14 +4669,16 @@ h1, h2, h3 {
   width: 13.04px;
   height: 12.14px;
   flex: 0 0 auto;
+  stroke-width: 1.7;
 }
 
 .setup-classic-nav .lp-nav-cta:hover:not(:disabled),
 .playground-nav .lp-nav-cta:hover:not(:disabled),
 .dashboard-nav .lp-nav-cta:hover:not(:disabled) {
-  background: rgba(250, 248, 245, 0.08);
+  background: #000000;
   border-color: #faf8f5;
-  transform: translateY(-1px);
+  color: #faf8f5;
+  transform: none;
   box-shadow: none;
 }
 

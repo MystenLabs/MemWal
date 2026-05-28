@@ -10,7 +10,6 @@ import { Link } from 'react-router-dom'
 import { LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
-import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
 import {
@@ -26,6 +25,46 @@ import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+
+const walrusCodeTheme = {
+    hljs: {
+        color: '#faf8f5',
+        background: '#050505',
+    },
+    'hljs-keyword': {
+        color: '#cab1ff',
+    },
+    'hljs-built_in': {
+        color: '#faf8f5',
+    },
+    'hljs-title': {
+        color: '#faf8f5',
+    },
+    'hljs-attr': {
+        color: '#e8ff75',
+    },
+    'hljs-property': {
+        color: '#e8ff75',
+    },
+    'hljs-variable': {
+        color: '#faf8f5',
+    },
+    'hljs-string': {
+        color: '#e8ff75',
+    },
+    'hljs-comment': {
+        color: '#8f9294',
+    },
+    'hljs-number': {
+        color: '#e8ff75',
+    },
+    'hljs-literal': {
+        color: '#e8ff75',
+    },
+    'hljs-params': {
+        color: '#faf8f5',
+    },
+}
 
 // ============================================================
 // Demo Step — reusable step card
@@ -103,7 +142,7 @@ function DemoStep({
             <div className={hasOutput ? 'demo-code-block--spaced' : ''}>
                 <SyntaxHighlighter
                     language="javascript"
-                    style={githubGist}
+                    style={walrusCodeTheme}
                     className="demo-code-block"
                     customStyle={{ margin: 0 }}
                 >
@@ -626,11 +665,10 @@ export default function Playground() {
             <div className="container dashboard playground-dashboard">
                 {/* Header */}
                 <div className="dashboard-header">
-                    <h2>interactive demo</h2>
+                    <h2>Developer Playground</h2>
                     <p>
-                        try each Walrus Memory SDK operation live. click{' '}
-                        <strong>▶ run</strong> to execute against your server
-                        using <code>@mysten-incubation/memwal</code>.
+                        Test Walrus Memory SDK operations with your current server and credentials.
+                        Run steps against your server using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
                             <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--playground-blue-strong)', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
@@ -839,7 +877,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         </div>
                     </div>
 
-                    <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                    <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// Walrus Memory doesn't include an LLM — you choose your own.
 // steps 7–9 use this key for:
 //   • ask AI: recalls memories → injects into your LLM prompt
@@ -886,7 +924,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     </div>
 
                     <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
@@ -1018,7 +1056,7 @@ const { text } = await generateText({
                     </div>
 
                     <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { MemWalManual } from "@mysten-incubation/memwal/manual"
 
 const memwal = MemWalManual.create({
@@ -1101,7 +1139,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     </div>
 
                     <div className={fullRecallResult || fullRecallError || fullRecallPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// client does:
 //   1. embed query via OpenAI
 //   2. SEAL decrypt each result (wallet popup)

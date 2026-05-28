@@ -377,9 +377,10 @@ export default function SetupWizard() {
                         </span>
                         <button
                             className="lp-nav-cta"
-                            onClick={() => {
+                            onClick={async () => {
                                 trackEvent('sign_out', { location: 'setup' })
-                                disconnect()
+                                await disconnect()
+                                navigate('/')
                             }}
                         >
                             Sign out <LogOut size={14} />
@@ -394,46 +395,48 @@ export default function SetupWizard() {
                     {step === 'intro' && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">
-                                create your delegate key
+                                Create your delegate key
                             </h2>
                             <p className="setup-classic-description">
-                                a delegate key lets your AI apps access Walrus Memory on your behalf.
-                                it's a lightweight Ed25519 keypair — separate from your wallet.
+                                A delegate key lets your AI apps and agents access Walrus Memory on
+                                your behalf. It's a lightweight Ed25519 keypair that stays separate
+                                from your primary account credentials.
                             </p>
 
                             <div className="card setup-classic-feature-card">
                                 <div className="setup-classic-feature">
                                     <div>
-                                        <strong>low risk</strong>
+                                        <strong>Low risk</strong>
                                         <p>
-                                            cannot access funds or sign Sui transactions
+                                            Cannot access funds or approve transactions
                                         </p>
                                     </div>
                                 </div>
                                 <div className="setup-classic-feature">
                                     <div>
-                                        <strong>revocable</strong>
+                                        <strong>Revocable</strong>
                                         <p>
-                                            remove anytime from your Walrus Memory dashboard
+                                            Remove access anytime from your Walrus Memory Dashboard
                                         </p>
                                     </div>
                                 </div>
                                 <div className="setup-classic-feature">
                                     <div>
-                                        <strong>onchain registration</strong>
+                                        <strong>Verified access</strong>
                                         <p>
-                                            key is verified on Sui blockchain for maximum security
+                                            Delegate permissions are independently verified for
+                                            secure, tamper-resistant access control
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
                             <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
-                                generate delegate key
+                                Create delegate key
                             </button>
 
                             <div className="setup-classic-divider">
-                                or
+                                Already have a delegate key?
                             </div>
 
                             <div className="setup-classic-import">
@@ -444,7 +447,7 @@ export default function SetupWizard() {
                                         rows={3}
                                         value={importKeyHex}
                                         onChange={(e) => setImportKeyHex(e.target.value)}
-                                        placeholder="paste your delegate private key"
+                                        placeholder="Paste an existing delegate key"
                                         aria-label="existing delegate key"
                                         spellCheck={false}
                                     />
@@ -467,7 +470,7 @@ export default function SetupWizard() {
                                     onClick={handleImportKey}
                                     disabled={importingKey || !importKeyHex.trim()}
                                 >
-                                    {importingKey ? 'checking key...' : 'use delegate key'}
+                                    {importingKey ? 'Checking key…' : 'Continue'}
                                 </button>
                             </div>
                         </div>
@@ -477,7 +480,7 @@ export default function SetupWizard() {
                     {step === 'generating' && (
                         <div style={{ textAlign: 'center', padding: '60px 0' }}>
                             <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
-                            <p style={{ color: 'var(--text-secondary)' }}>generating keypair...</p>
+                            <p style={{ color: 'var(--text-secondary)' }}>Generating keypair…</p>
                         </div>
                     )}
 
@@ -486,32 +489,32 @@ export default function SetupWizard() {
                         <div>
                             <div style={{ textAlign: 'center', marginBottom: 24 }}>
                                 <h2 style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
-                                    key generated!
+                                    Your delegate key is ready
                                 </h2>
                             </div>
 
                             <div className="warning-box">
                                 <p>
-                                    <strong>save this private key now!</strong> it will not be shown again.
-                                    store it securely — you'll need it to configure the Walrus Memory SDK.
+                                    Save this key now. For your security, we won't show it again.
+                                    You'll need the key to configure the Walrus Memory SDK.
                                 </p>
                             </div>
 
                             <div className="key-display" style={{ marginBottom: 16 }}>
-                                <div className="key-label">private key (keep secret)</div>
+                                <div className="key-label">Private key (keep secret)</div>
                                 <div className="key-value">{privateKeyHex}</div>
                                 <div className="key-actions">
                                     <button className="btn btn-secondary btn-sm" onClick={copyKey}>
-                                        <Copy size={12} /> {copied ? 'copied!' : 'copy'}
+                                        <Copy size={12} /> {copied ? 'Copied' : 'Copy private key'}
                                     </button>
                                 </div>
                             </div>
 
-                            <div className="key-display" style={{ marginBottom: 24, borderColor: 'var(--border)' }}>
-                                <div className="key-label" style={{ color: 'var(--text-muted)' }}>
-                                    public key (shareable)
+                            <div className="key-display" style={{ marginBottom: 24 }}>
+                                <div className="key-label">
+                                    Public key (shareable)
                                 </div>
-                                <div className="key-value" style={{ color: 'var(--text-secondary)' }}>
+                                <div className="key-value">
                                     {publicKeyHex}
                                 </div>
                             </div>
@@ -529,7 +532,7 @@ export default function SetupWizard() {
                                     <div>{error}</div>
                                     {error === MAX_DELEGATE_KEYS_ERROR && (
                                         <Link to="/dashboard" className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
-                                            manage keys in dashboard
+                                            Manage keys in Dashboard
                                         </Link>
                                     )}
                                 </div>
@@ -546,7 +549,7 @@ export default function SetupWizard() {
                                         onChange={(e) => setConfirmed(e.target.checked)}
                                         style={{ marginTop: 3 }}
                                     />
-                                    i have saved my private key securely. i understand it cannot be recovered.
+                                    I've saved my private key. I understand Walrus Memory can't show it again.
                                 </label>
                             </div>
 
@@ -556,7 +559,7 @@ export default function SetupWizard() {
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
-                                {isEnoki ? 'continue →' : 'register key onchain & continue →'}
+                                {isEnoki ? 'Continue →' : 'Register key onchain & continue →'}
                             </button>
                         </div>
                     )}
@@ -568,8 +571,8 @@ export default function SetupWizard() {
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>{txStatus}</p>
                             <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
                                 {isEnoki
-                                    ? 'this may take a few seconds...'
-                                    : 'please approve the transaction in your wallet'}
+                                    ? 'This may take a few seconds…'
+                                    : 'Please approve the transaction in your wallet'}
                             </p>
                         </div>
                     )}
@@ -578,13 +581,13 @@ export default function SetupWizard() {
                     {step === 'error' && (
                         <div style={{ textAlign: 'center', padding: '60px 0' }}>
                             <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8, color: 'var(--danger)' }}>
-                                setup failed
+                                Setup failed
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: '0.85rem' }}>
                                 {error}
                             </p>
                             <button className="lp-btn-yellow" onClick={handleRetry}>
-                                try again
+                                Try again
                             </button>
                         </div>
                     )}
@@ -593,10 +596,10 @@ export default function SetupWizard() {
                     {step === 'done' && (
                         <div style={{ textAlign: 'center', padding: '60px 0' }}>
                             <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8 }}>
-                                all set!
+                                All set
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-                                your delegate key has been registered onchain. loading dashboard...
+                                Your delegate key has been registered onchain. Loading dashboard…
                             </p>
                         </div>
                     )}

@@ -12,7 +12,7 @@ import {
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
@@ -103,7 +103,7 @@ const walrusCodeTheme = {
         color: '#faf8f5',
     },
     'hljs-string': {
-        color: '#faf8f5',
+        color: '#e8ff75',
     },
     'hljs-comment': {
         color: '#8f9294',
@@ -131,7 +131,7 @@ interface OnChainDelegateKey {
 }
 
 const MAX_DELEGATE_KEYS = 20
-const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
+const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
 const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
@@ -154,6 +154,7 @@ export default function Dashboard({
     previewState?: 'empty' | 'ready'
 }) {
     const currentAccount = useCurrentAccount()
+    const navigate = useNavigate()
     const { mutateAsync: disconnect } = useDisconnectWallet()
     const { mutateAsync: signAndExecuteTx } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
@@ -213,7 +214,8 @@ export default function Dashboard({
         trackEvent('sign_out', { location: 'dashboard' })
         clearDelegateKeys()
         await disconnect()
-    }, [clearDelegateKeys, disconnect])
+        navigate('/')
+    }, [clearDelegateKeys, disconnect, navigate])
 
     const fetchAccountObjectId = useCallback(async () => {
         if (!address || previewMode) {
@@ -282,12 +284,12 @@ export default function Dashboard({
             !normalizedRelayerUrl.includes('staging') &&
             !normalizedRelayerUrl.includes('dev'))
     const dashboardSubtitle = delegateKey || previewReady
-        ? ''
+        ? 'Manage your Walrus Memory account and delegate keys'
         : loadingAccount
-            ? 'checking your Walrus Memory account...'
+            ? 'Checking your Walrus Memory account...'
             : hasResolvedAccount
-                ? 'remove an old delegate key, then create a new one'
-                : 'no Walrus Memory account found for this wallet'
+                ? 'Manage your Walrus Memory account and delegate keys in one place'
+                : 'Manage your Walrus Memory account and delegate keys'
     const showDashboardSubtitle = Boolean(dashboardSubtitle)
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
 
@@ -539,8 +541,8 @@ asyncio.run(main())`
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
                         <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
-                            your wallet already has a Walrus Memory account, but this browser does not have a saved delegate key.
-                            remove an old on-chain key below or create a new delegate key.
+                            We found your Walrus Memory account, but this browser doesn't have a saved delegate key.
+                            Create a new key to continue, or remove an old one you no longer use.
                         </p>
                     </div>
                 )}
@@ -549,8 +551,7 @@ asyncio.run(main())`
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
                         <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
-                            No Walrus Memory account found for this wallet,
-                            create a delegate key to get started.
+                            No Walrus Memory account found for this wallet. Create a delegate key to get started.
                         </p>
                     </div>
                 )}
@@ -574,8 +575,8 @@ asyncio.run(main())`
                                 <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
-                                <div className="dashboard-cta-title">Try the interactive demo</div>
-                                <div className="dashboard-cta-subtitle">Test remember, recall &amp; analyze with your live server</div>
+                                <div className="dashboard-cta-title">Developer playground</div>
+                                <div className="dashboard-cta-subtitle">Test memory features with your current setup.</div>
                             </div>
                             <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
@@ -600,8 +601,8 @@ asyncio.run(main())`
                                 <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
-                                <div className="dashboard-cta-title">Create a delegate key</div>
-                                <div className="dashboard-cta-subtitle">Generate and register a new SDK key</div>
+                                <div className="dashboard-cta-title">Create delegate key</div>
+                                <div className="dashboard-cta-subtitle">Delegate keys let your AI apps access Walrus Memory</div>
                             </div>
                             <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
@@ -618,7 +619,7 @@ asyncio.run(main())`
                         </span>
                         <div className="dashboard-cta-text">
                             <div className="dashboard-cta-title">Documentation</div>
-                            <div className="dashboard-cta-subtitle">Guides, examples &amp; API references</div>
+                            <div className="dashboard-cta-subtitle">Browse guides, explainers, and API reference</div>
                         </div>
                         <CtaArrowIcon className="dashboard-cta-arrow" />
                     </a>
@@ -750,7 +751,7 @@ asyncio.run(main())`
                         <div>
                             <div className="card-title">Delegate keys (on-chain)</div>
                             <div className="card-subtitle">
-                                All Ed25519 keys registered on your Walrus Memory account
+                                All keys registered to your Walrus Memory account
                             </div>
                         </div>
                         <div className="card-header-actions">
@@ -797,25 +798,25 @@ asyncio.run(main())`
                         <div style={{ marginBottom: 12 }}>
                             <div className="warning-box" style={{ marginBottom: 12 }}>
                                 <p>
-                                    <strong>save this private key now!</strong> it has been copied to your clipboard.
-                                    store it securely — it cannot be recovered.
+                                    <strong>Your delegate key is ready.</strong> Save this key now. For your security,
+                                    we won't show it again. You'll need the key to configure the Walrus Memory SDK.
                                 </p>
                             </div>
                             <div className="key-display key-display--white">
-                                <div className="key-label">new private key (keep secret)</div>
+                                <div className="key-label">Delegate private key</div>
                                 <div className="key-value">{newPrivateKey}</div>
                                 <div className="key-actions">
                                     <button
                                         className="btn btn-secondary btn-sm"
                                         onClick={() => copyToClipboard(newPrivateKey, 'new-priv')}
                                     >
-                                        <Copy size={12} /> {copied === 'new-priv' ? 'copied!' : 'copy'}
+                                        <Copy size={12} /> {copied === 'new-priv' ? 'Copied' : 'Copy private key'}
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
                                         onClick={() => setNewPrivateKey(null)}
                                     >
-                                        done
+                                        Continue
                                     </button>
                                 </div>
                             </div>
@@ -833,7 +834,7 @@ asyncio.run(main())`
                         }}>
                             <div style={{ marginBottom: 12 }}>
                                 <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-                                    key label
+                                    Key name
                                 </label>
                                 <input
                                     type="text"
@@ -843,7 +844,7 @@ asyncio.run(main())`
                                         // strip HTML special chars and control characters on every keystroke
                                         setNewKeyLabel(sanitizeLabel(e.target.value))
                                     }
-                                    placeholder="e.g. MacBook Pro, Production Server"
+                                    placeholder="New key"
                                     style={{
                                         width: '100%',
                                         padding: '8px 12px',
@@ -862,19 +863,19 @@ asyncio.run(main())`
                                     onClick={() => { setShowAddForm(false); setKeyError('') }}
                                     disabled={addingKey}
                                 >
-                                    cancel
+                                    Cancel
                                 </button>
                                 <button
                                     className="btn btn-primary btn-sm"
                                     onClick={handleAddKey}
                                     disabled={addingKey || hasMaxDelegateKeys || !effectiveAccountObjectId}
                                 >
-                                    {addingKey ? 'generating & registering...' : 'generate & register on-chain'}
+                                    {addingKey ? 'Creating...' : 'Create'}
                                 </button>
                             </div>
                             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
-                                a new Ed25519 keypair will be generated. the private key will be copied to your clipboard.
-                                save it securely — it cannot be recovered.
+                                A new keypair will be created, and the private key will be copied to your clipboard.
+                                Save it somewhere secure — it can't be shown again.
                             </p>
                         </div>
                     )}
@@ -882,19 +883,21 @@ asyncio.run(main())`
                     {/* Key List */}
                     {loadingAccount ? (
                         <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            loading account...
+                            Loading account...
                         </div>
                     ) : loadingKeys ? (
                         <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            loading keys...
+                            Loading keys...
                         </div>
                     ) : !effectiveAccountObjectId ? (
-                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            no Walrus Memory account found for this wallet. create a delegate key to get started.
+                        <div className="dashboard-empty-message dashboard-empty-message--account">
+                            <span>No Walrus Memory account found for this wallet. </span>
+                            <span className="dashboard-empty-message-link">create a delegate key</span>
+                            <span> to get started.</span>
                         </div>
                     ) : onChainKeys.length === 0 ? (
                         <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            no delegate keys found on-chain
+                            No keys yet. Create one to connect to Walrus Memory.
                         </div>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -943,7 +946,7 @@ asyncio.run(main())`
                     <div className="card-header">
                         <div>
                             <div className="card-title">Quickstart — SDK</div>
-                            <div className="card-subtitle">Use the Walrus Memory SDK to remember and recall</div>
+                            <div className="card-subtitle">Copy the setup code and start in minutes</div>
                         </div>
                         <div className="dashboard-quickstart-toggle" role="tablist" aria-label="SDK language">
                             {(['ts', 'py'] as const).map((language) => (
@@ -978,7 +981,10 @@ asyncio.run(main())`
                 {/* Install */}
                 <div className="card dashboard-install-card" style={{ marginBottom: 40 }}>
                     <div className="card-header">
-                        <div><div className="card-title">Install</div></div>
+                        <div>
+                            <div className="card-title">Install the SDK</div>
+                            <div className="card-subtitle">Choose your package manager and copy the install command</div>
+                        </div>
                     </div>
                     <div className="install-tabs">
                         {(['npm', 'pnpm', 'yarn', 'bun'] as const).map((pm) => (
