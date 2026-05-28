@@ -806,7 +806,7 @@ asyncio.run(main())`
                                 }}
                                 disabled={showAddForm || addingKey || !effectiveAccountObjectId || hasMaxDelegateKeys}
                             >
-                                Add key <Plus size={12} aria-hidden="true" />
+                                Add key <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                             </button>
                         </div>
                     </div>
@@ -927,8 +927,10 @@ asyncio.run(main())`
                             <span> to get started.</span>
                         </div>
                     ) : onChainKeys.length === 0 ? (
-                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            No keys yet. Create one to connect to Walrus Memory.
+                        <div className="dashboard-empty-message dashboard-empty-message--account">
+                            <span>No Walrus Memory account found for this wallet. </span>
+                            <span className="dashboard-empty-message-link">create a delegate key</span>
+                            <span> to get started.</span>
                         </div>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

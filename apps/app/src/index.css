@@ -2364,11 +2364,11 @@ h1, h2, h3 {
 .dash-page .dashboard-keys-card {
   order: 4;
   min-height: 277px;
-  margin-bottom: 54px !important;
+  margin-bottom: 36px !important;
 }
 
 .dash-page .dashboard-keys-card .card-title {
-  font-size: 2.12rem;
+  font-size: 2.25rem;
   font-weight: 500;
   line-height: 0.88;
   color: #faf8f5;
@@ -2377,7 +2377,7 @@ h1, h2, h3 {
 .dash-page .dashboard-quickstart-card {
   order: 5;
   min-height: 572px;
-  margin-bottom: 54px !important;
+  margin-bottom: 36px !important;
 }
 
 .dash-page .dashboard-quickstart-card .card-header {
@@ -4370,14 +4370,14 @@ h1, h2, h3 {
 .dash-page .card-header-actions .btn-secondary,
 .dash-page .dashboard-keys-refresh,
 .dash-page .dashboard-keys-add {
-  /* Match Figma (node 2325-6980): both buttons are 52px-tall pills, radius 26,
-     18px label, px-30. A later rule already sized Add key to 52/26, so Refresh
-     was left uneven at 36px — sizing both here keeps them equal + on-spec. */
+  /* Figma node 2325-6980: 52px pills, radius 26, px-30, 18px label,
+     tracking 0.72px. Both buttons equal. */
   min-height: 52px;
   height: 52px;
   padding: 10px 30px;
   border-radius: 26px;
   font-size: 1.125rem;
+  letter-spacing: 0.72px;
 }
 
 .dash-page .key-display,
@@ -4495,7 +4495,6 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-keys-add {
-  width: 150px;
   height: 52px;
   min-height: 52px;
   padding: 10px 30px;
@@ -4959,8 +4958,139 @@ h1, h2, h3 {
 
 .dash-page .dashboard-quickstart-card .card-subtitle {
   margin-top: 14px;
-  font-size: 20px;
+  font-size: 18px;
+  font-weight: 400;
   line-height: 1.3;
+}
+
+.dash-page .dashboard-header h2 {
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 56px;
+  font-weight: 500;
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-cta-title {
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-cta-subtitle {
+  margin-top: 0;
+  color: #c7c5c1;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-keys-card {
+  min-height: 277px;
+  padding: 39px 40px;
+  border-color: #54575a;
+  border-radius: 24px;
+  background: #000000;
+  overflow: clip;
+}
+
+.dash-page .dashboard-keys-card .card-header {
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 52px;
+}
+
+.dash-page .dashboard-keys-card .card-title {
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-keys-card .card-subtitle {
+  margin-top: 14px;
+  color: #8f9294;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions {
+  align-self: flex-start;
+  gap: 20px;
+}
+
+.dash-page .dashboard-keys-card .dashboard-keys-refresh,
+.dash-page .dashboard-keys-card .dashboard-keys-add {
+  height: 52px;
+  min-height: 52px;
+  border-radius: 26px;
+  padding: 10px 30px;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 0.84;
+  letter-spacing: 0.72px;
+}
+
+.dash-page .dashboard-keys-card .dashboard-keys-refresh {
+  width: 128px;
+  justify-content: center;
+}
+
+.dash-page .dashboard-keys-card .dashboard-keys-refresh svg {
+  display: none;
+}
+
+.dash-page .dashboard-keys-card .dashboard-keys-add {
+  width: 152px;
+  gap: 14px;
+  justify-content: center;
+}
+
+.dash-page .dashboard-keys-card .dashboard-keys-add svg {
+  width: 12.15px;
+  height: 12.15px;
+  stroke-width: 1.8;
+}
+
+.dash-page .dashboard-keys-card .dashboard-empty-message--account {
+  display: block;
+  min-height: 90px;
+  padding: 24px 0 0 !important;
+  color: #54575a !important;
+  font-family: var(--font-sans);
+  font-size: 21px !important;
+  font-weight: 400;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.dash-page .dashboard-install-card .card-title {
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-install-card .install-command-text {
+  font-family: var(--font-mono);
+  color: #faf8f5;
+  font-size: 15px;
+  font-weight: 300;
+  line-height: 1.4;
+  letter-spacing: 0.15px;
 }
 
 .dash-page .dashboard-quickstart-card pre,
@@ -5057,4 +5187,62 @@ h1, h2, h3 {
   .setup-classic-title {
     font-size: 1.38rem;
   }
+}
+
+/* ── Figma 2325-6980: authoritative Delegate-keys header buttons + "+" icon.
+   Appended last (equal-or-higher specificity than the earlier duplicated
+   .dash-page rules) so these values win regardless of source-order conflicts. ── */
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh,
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add {
+  min-height: 52px;
+  height: 52px;
+  padding: 10px 30px;
+  border-radius: 26px;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 0.84;
+  letter-spacing: 0.72px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh {
+  width: 127px;
+  gap: 0;
+  border: 1px solid #faf8f5;
+  background: transparent;
+  color: #faf8f5;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh svg {
+  display: none;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add {
+  width: 150px;
+  gap: 10px;
+  border: 1px solid #faf8f5;
+  background: #faf8f5;
+  color: #000000;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.5;
+  flex-shrink: 0;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh:hover {
+  background: rgba(250, 248, 245, 0.16);
+  border-color: #faf8f5;
+  color: #faf8f5;
+}
+
+.dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-add:hover {
+  background: #e8ff75;
+  border-color: #e8ff75;
+  color: #000000;
 }
