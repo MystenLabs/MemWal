@@ -51,10 +51,12 @@ function getPersistedAuthMethod(): AuthMethod {
 }
 
 const builderLogos = [
-    { label: 'Allium', src: '/walrus-logo-allium.png', className: 'wm-logo-allium', nodeId: '2266:4035' },
-    { label: 'inflectiv', src: '/walrus-logo-inflectiv.svg', className: 'wm-logo-inflectiv', nodeId: '2266:4023' },
-    { label: 'OpenGradient', src: '/walrus-logo-opengradient.svg', className: 'wm-logo-opengradient', nodeId: '2266:4029' },
-    { label: 'TALUS', src: '/walrus-logo-talus.svg', className: 'wm-logo-talus', nodeId: '2266:4033' },
+    { label: 'Allium', src: '/walrus-logo-allium.png', className: 'wm-logo-allium', nodeId: '2425:2711' },
+    { label: 'inflectiv', src: '/walrus-logo-inflectiv.svg', className: 'wm-logo-inflectiv', nodeId: '2425:2696' },
+    { label: 'OpenGradient', src: '/walrus-logo-opengradient.svg', className: 'wm-logo-opengradient', nodeId: '2425:2692' },
+    { label: 'TALUS', src: '/walrus-logo-talus.svg', className: 'wm-logo-talus', nodeId: '2425:2693' },
+    { label: 'TATUM', src: '/walrus-logo-tatum.svg', className: 'wm-logo-tatum', nodeId: '2575:73' },
+    { label: 'CONSO', src: '/walrus-logo-conso.png', className: 'wm-logo-conso', nodeId: '2575:78' },
 ]
 
 const portableCards = [
@@ -90,20 +92,36 @@ const stackItems = [
 
 const builderCards = [
     {
+        nodeId: '2425:2230',
+        iconNodeId: '2425:2232',
+        titleNodeId: '2425:2231',
+        copyNodeId: '2425:2239',
         title: 'Multi-agent workflows',
-        copy: 'Agents share context across tasks, tools, and time. What one agent learns can become available to the entire workflow.',
+        copy: 'Agents share context across tasks, tools, and time. What one agent learns can becomes available to the entire workflow.',
     },
     {
+        nodeId: '2425:2240',
+        iconNodeId: '2425:2242',
+        titleNodeId: '2425:2241',
+        copyNodeId: '2425:2249',
         title: 'Customer support agents',
         copy: 'Picks up where the last conversation ended. Knows what was tried, what failed, and what the customer actually needs.',
     },
     {
+        nodeId: '2425:2250',
+        iconNodeId: '2425:2252',
+        titleNodeId: '2425:2251',
+        copyNodeId: '2425:2259',
         title: 'Notes and research apps',
-        copy: 'A second brain that compounds over time. It captures durable context your assistants can reliably search later.',
+        copy: 'A second brain that compounds over time. Capture ideas continuously and retrieve them naturally weeks later.',
     },
     {
+        nodeId: '2425:2260',
+        iconNodeId: '2425:2262',
+        titleNodeId: '2425:2261',
+        copyNodeId: '2425:2269',
         title: 'Personal assistants',
-        copy: 'Remembers tone, preferences, routines, and relationships. More like an assistant that knows you, not a new hire every session.',
+        copy: 'Remembers tone, preferences, routines, and relationships. Stop starting from scratch every session.',
     },
 ]
 
@@ -408,36 +426,52 @@ export default function LandingPage() {
 
             <main>
                 <section className="wm-hero" id="discover">
-                    <img src="/walrus-memory-aurora-r.png" alt="" className="wm-hero-r" aria-hidden="true" />
+                    <div className="wm-hero-bg" aria-hidden="true">
+                        <img
+                            src="/walrus-memory-aurora-snake.png"
+                            alt=""
+                            className="wm-hero-bg-layer wm-hero-bg-layer--snake"
+                            data-node-id="2425:2274"
+                        />
+                        <img
+                            src="/walrus-memory-aurora-r-layer.png"
+                            alt=""
+                            className="wm-hero-bg-layer wm-hero-bg-layer--r"
+                            data-node-id="2425:2275"
+                        />
+                    </div>
                     <div className="wm-hero-copy">
                         <h1>
-                            Take your agent's<br />
-                            memory <span>anywhere</span>
+                            <span className="wm-hero-title-line" data-node-id="2425:2564">Take your agent’s</span>
+                            <span className="wm-hero-title-line">
+                                <span className="wm-hero-title-memory" data-node-id="2425:2567">memory</span>{' '}
+                                <span className="wm-hero-title-anywhere" data-node-id="2425:2568">anywhere</span>
+                            </span>
                         </h1>
-                        <p>
-                            Walrus Memory is a portable memory layer that makes AI agents reliable across apps,
-                            sessions, and workflows. <strong>Persistent, verifiable, and fully under your control.</strong>
+                        <p data-node-id="2425:2570">
+                            Walrus Memory is a portable memory layer that makes AI agents reliable across apps and sessions.{' '}
+                            <strong>Persistent, verifiable, and fully under your control.</strong>
                         </p>
                         <button className="wm-start-button" onClick={() => openPlayground('landing_hero')}>
                             Start building <ArrowRight size={16} />
                         </button>
                     </div>
 
-                    <div className="wm-code-panel" data-node-id="2361:1154" aria-label="Walrus Memory SDK quickstart">
+                    <div className="wm-code-panel" data-node-id="2425:3223" aria-label="Walrus Memory SDK quickstart">
                         <div className="wm-code-dots" data-node-id="2361:1139" aria-hidden="true">
                             <span />
                             <span />
                             <span />
                         </div>
                         <div className="wm-code-tabs" aria-label="Package manager">
-                            <span className="wm-code-tab wm-code-tab--active" data-node-id="2361:1140">npm</span>
-                            <span className="wm-code-tab" data-node-id="2361:1146">pnpm</span>
-                            <span className="wm-code-tab" data-node-id="2361:1149">yarn</span>
+                            <span className="wm-code-tab wm-code-tab--active" data-node-id="2425:3230">npm</span>
+                            <span className="wm-code-tab" data-node-id="2425:3231">pnpm</span>
+                            <span className="wm-code-tab" data-node-id="2425:3232">yarn</span>
                         </div>
                         <button className="wm-code-copy" type="button" onClick={copyQuickstart} aria-label="Copy SDK quickstart" data-node-id="2361:1112">
                             <Copy size={20} aria-hidden="true" />
                         </button>
-                        <ol className="wm-code-lines" data-node-id="2361:1127">
+                        <ol className="wm-code-lines" data-node-id="2425:3233" data-line-numbers-node-id="2425:3234">
                             <li><code><span className="wm-code-comment">// Step 1 — Install the SDK (run in the terminal)</span></code></li>
                             <li><code><span className="wm-code-comment">// npm install @mysten-incubation/memwal</span></code></li>
                             <li><code>&nbsp;</code></li>
@@ -468,7 +502,7 @@ export default function LandingPage() {
                 </div>
 
                 <section className="wm-builders" aria-label="Builder logos">
-                    <h2><span data-node-id="2266:3986">Builders shipping with</span><br /><span data-node-id="2266:3987">Walrus Memory</span></h2>
+                    <h2><span data-node-id="2425:2565">Builders shipping with</span><span data-node-id="2425:2566">Walrus Memory</span></h2>
                     <div className="wm-logo-row">
                         {builderLogos.map((logo) => (
                             <img
@@ -482,20 +516,20 @@ export default function LandingPage() {
                         ))}
                     </div>
                     <div className="wm-builders-quote-card">
-                        <p data-node-id="2266:4010">
+                        <p data-node-id="2425:2673">
                             “As AI systems become more autonomous and long-running, memory infrastructure needs stronger
                             guarantees around verifiability, portability, and reliability. We see Walrus Memory as part of a
                             broader shift toward open and interoperable AI systems.”
                         </p>
                         <div className="wm-builder-person">
-                            <span>Mike Hanono</span>
+                            <span data-node-id="2425:2671">Mike Hanono</span>
                             <small>CO-FOUNDER AND CEO AT TALUS</small>
                         </div>
                     </div>
                     <div className="wm-builder-lines" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
+                        <span data-node-id="2425:2674" />
+                        <span data-node-id="2425:2675" />
+                        <span data-node-id="2425:2676" />
                     </div>
                 </section>
 
@@ -597,9 +631,10 @@ export default function LandingPage() {
                 </section>
 
                 <section className="wm-light-band" id="ecosystem">
+                    <div className="wm-light-band-bg" data-node-id="2425:2270" aria-hidden="true" />
                     <div className="wm-light-heading">
-                        <h2>What builders are creating<br />with Walrus Memory</h2>
-                        <p>
+                        <h2><span data-node-id="2425:2857">What builders are creating</span><span data-node-id="2425:2861">with</span> <span data-node-id="2425:2858">Walrus Memory</span></h2>
+                        <p data-node-id="2425:2859">
                             A portable agent memory layer doesn’t just improve your stack. It changes
                             how your product behaves — and what users come to rely on.
                             <br /><strong>The moat is the memory, not the model.</strong>
@@ -607,14 +642,14 @@ export default function LandingPage() {
                     </div>
                     <div className="wm-builder-grid">
                         {builderCards.map((card) => (
-                            <article key={card.title}>
-                                <span className="wm-builder-icon" aria-hidden="true" />
-                                <h3>{card.title}</h3>
-                                <p>{card.copy}</p>
+                            <article key={card.title} data-node-id={card.nodeId}>
+                                <span className="wm-builder-icon" data-node-id={card.iconNodeId} aria-hidden="true" />
+                                <h3 data-node-id={card.titleNodeId}>{card.title}</h3>
+                                <p data-node-id={card.copyNodeId}>{card.copy}</p>
                             </article>
                         ))}
                     </div>
-                    <button className="wm-small-cta" onClick={() => openPlayground('builders_section')}>Start building <ArrowRight size={14} /></button>
+                    <button className="wm-small-cta" data-node-id="2425:2744" onClick={() => openPlayground('builders_section')}>Start building <ArrowRight size={14} /></button>
                 </section>
 
                 <section className="wm-production" id="production">
@@ -624,8 +659,8 @@ export default function LandingPage() {
                         no lock-in. Built on{' '}
                         <a href="https://walrus.xyz/" target="_blank" rel="noopener noreferrer">Walrus</a><strong>, the Verifiable Data Platform</strong>.
                     </p>
-                    <div className="wm-production-aurora" data-node-id="2302:2093" aria-hidden="true" />
-                    <div className="wm-production-transition" data-node-id="2302:2095" aria-hidden="true" />
+                    <div className="wm-production-aurora" data-node-id="2425:2227" aria-hidden="true" />
+                    <div className="wm-production-transition" data-node-id="2425:2229" aria-hidden="true" />
                     <div className="wm-production-grid">
                         <div className="wm-flow-column">
                             <button data-node-id="2302:2608">Remember</button>
@@ -637,7 +672,7 @@ export default function LandingPage() {
                             ))}
                         </div>
                         <div className="wm-production-mascot">
-                            <img src="/walrus-memory-monogram.png" alt="Walrus Memory mascot holding a card" data-node-id="2302:2626" />
+                            <img src="/walrus-memory-monogram.png" alt="Walrus Memory mascot holding a card" data-node-id="2425:2740" />
                         </div>
                         <div className="wm-flow-column">
                             <button data-node-id="2302:2609">Recall</button>
@@ -652,8 +687,11 @@ export default function LandingPage() {
                 </section>
 
                 <section className="wm-bottom-cta">
+                    <div className="wm-bottom-dark-base" data-node-id="2425:2228" aria-hidden="true" />
+                    <div className="wm-bottom-dark-gradient" data-node-id="2425:2569" aria-hidden="true" />
+                    <div className="wm-bottom-rounded-gradient" data-node-id="2425:2713" aria-hidden="true" />
                     <div className="wm-aurora wm-aurora--cta" aria-hidden="true" />
-                    <h2>Build agents that<br /><span>remember</span></h2>
+                    <h2><span data-node-id="2425:2276">Build agents that</span><br /><span>remember</span></h2>
                     <div className="wm-spine wm-spine--compact" aria-hidden="true">
                         <span />
                         <i className="wm-spine-gem" />
