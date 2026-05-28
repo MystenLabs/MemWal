@@ -13,15 +13,12 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
+import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
-import bash from 'react-syntax-highlighter/dist/esm/languages/hljs/bash'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
-import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
-SyntaxHighlighter.registerLanguage('bash', bash)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
@@ -184,7 +181,7 @@ export default function Dashboard({
     const [addingKey, setAddingKey] = useState(false)
     const [removingKey, setRemovingKey] = useState<string | null>(null)
     const [showAddForm, setShowAddForm] = useState(false)
-    const [newKeyLabel, setNewKeyLabel] = useState('New Key')
+    const [newKeyLabel, setNewKeyLabel] = useState('New key')
     const [keyError, setKeyError] = useState('')
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
 
@@ -503,6 +500,8 @@ asyncio.run(main())`
     const sdkSnippetLanguage = quickstartLanguage === 'py' ? 'python' : 'javascript'
     const sdkCopyLabel = `sdk-${quickstartLanguage}`
     const docsHref = config.docsUrl || 'https://docs.memwal.ai'
+    const githubHref = 'https://github.com/MystenLabs/memwal'
+    const discordHref = 'https://discord.gg/walrusprotocol'
     const installCommand = pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
@@ -620,6 +619,38 @@ asyncio.run(main())`
                         <div className="dashboard-cta-text">
                             <div className="dashboard-cta-title">Documentation</div>
                             <div className="dashboard-cta-subtitle">Browse guides, explainers, and API reference</div>
+                        </div>
+                        <CtaArrowIcon className="dashboard-cta-arrow" />
+                    </a>
+                    <a
+                        href={githubHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="dashboard-cta"
+                        onClick={() => trackEvent('outbound_link_click', { link: 'github', location: 'dashboard' })}
+                    >
+                        <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                            <Github className="dashboard-cta-icon" />
+                        </span>
+                        <div className="dashboard-cta-text">
+                            <div className="dashboard-cta-title">GitHub</div>
+                            <div className="dashboard-cta-subtitle">Explore SDK source code and releases</div>
+                        </div>
+                        <CtaArrowIcon className="dashboard-cta-arrow" />
+                    </a>
+                    <a
+                        href={discordHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="dashboard-cta"
+                        onClick={() => trackEvent('outbound_link_click', { link: 'discord', location: 'dashboard' })}
+                    >
+                        <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                            <MessageCircle className="dashboard-cta-icon" />
+                        </span>
+                        <div className="dashboard-cta-text">
+                            <div className="dashboard-cta-title">Discord</div>
+                            <div className="dashboard-cta-subtitle">Get help from the community</div>
                         </div>
                         <CtaArrowIcon className="dashboard-cta-arrow" />
                     </a>
@@ -751,7 +782,7 @@ asyncio.run(main())`
                         <div>
                             <div className="card-title">Delegate keys (on-chain)</div>
                             <div className="card-subtitle">
-                                All keys registered to your Walrus Memory account
+                                All Ed25519 keys registered on your Walrus Memory account
                             </div>
                         </div>
                         <div className="card-header-actions">
@@ -1001,9 +1032,7 @@ asyncio.run(main())`
                         ))}
                     </div>
                     <div className="dashboard-install-codewrap">
-                        <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
-                            {installCommand}
-                        </SyntaxHighlighter>
+                        <code className="install-command install-command-text">{installCommand}</code>
                         <button
                             className="dashboard-install-copy"
                             type="button"

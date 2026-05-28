@@ -687,6 +687,33 @@ h1, h2, h3 {
   flex-wrap: wrap;
 }
 
+.lp-legal-copy {
+  margin: 16px 0 28px !important;
+  color: rgba(0, 0, 0, 0.62) !important;
+  font-size: 0.82rem !important;
+  line-height: 1.5 !important;
+}
+
+.lp-trusted-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  max-width: 560px;
+  color: rgba(0, 0, 0, 0.58);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.lp-trusted-copy span {
+  flex: 1 0 100%;
+}
+
+.lp-trusted-copy strong {
+  color: #000000;
+  font-weight: 700;
+}
+
 .lp-btn-yellow {
   background: #E8FF75;
   color: #000000;
@@ -4343,10 +4370,14 @@ h1, h2, h3 {
 .dash-page .card-header-actions .btn-secondary,
 .dash-page .dashboard-keys-refresh,
 .dash-page .dashboard-keys-add {
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: 10px;
-  font-size: 0.82rem;
+  /* Match Figma (node 2325-6980): both buttons are 52px-tall pills, radius 26,
+     18px label, px-30. A later rule already sized Add key to 52/26, so Refresh
+     was left uneven at 36px — sizing both here keeps them equal + on-spec. */
+  min-height: 52px;
+  height: 52px;
+  padding: 10px 30px;
+  border-radius: 26px;
+  font-size: 1.125rem;
 }
 
 .dash-page .key-display,
@@ -4408,25 +4439,27 @@ h1, h2, h3 {
 
 .dash-page .dashboard-install-codewrap {
   position: relative;
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 24px;
   width: 100%;
   max-width: 100%;
 }
 
 .dash-page .dashboard-install-codewrap .install-command {
-  display: block;
-  width: 100%;
-  padding: 10px 42px 10px 0 !important;
+  display: inline-block;
+  width: auto;
+  max-width: calc(100% - 40px);
+  padding: 10px 0 !important;
   white-space: pre;
+  overflow-x: auto;
 }
 
 .dash-page .dashboard-install-copy {
-  position: absolute;
-  right: 0;
-  top: 50%;
+  position: static;
   z-index: 2;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -4436,7 +4469,8 @@ h1, h2, h3 {
   place-items: center;
   box-shadow: none;
   cursor: pointer;
-  transform: translateY(-50%);
+  transform: none;
+  flex: 0 0 24px;
 }
 
 .dash-page .dashboard-install-copy:hover:not(:disabled) {
@@ -4446,9 +4480,18 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-install-copy svg {
-  width: 12.14px;
-  height: 12.14px;
+  width: 18px;
+  height: 18px;
   display: block;
+}
+
+.dash-page .install-command-text {
+  font-family: var(--font-mono);
+  color: #faf8f5;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-weight: 700;
 }
 
 .dash-page .dashboard-keys-add {
@@ -4476,12 +4519,60 @@ h1, h2, h3 {
   stroke-width: 1.8;
 }
 
-.dash-page .dashboard-keys-add:hover:not(:disabled) {
-  background: #faf8f5;
+/* ── Refresh: transparent + white outline; hover LIGHTENS the fill ── */
+.dash-page .dashboard-keys-refresh,
+.dash-page .dashboard-keys-refresh:focus,
+.dash-page .dashboard-keys-refresh:focus-visible,
+.dash-page .dashboard-keys-refresh:disabled {
+  background: transparent;
   border-color: #faf8f5;
-  color: #000000;
+  color: #faf8f5 !important;
+  -webkit-text-fill-color: #faf8f5;
+  opacity: 1;
   transform: none;
   box-shadow: none;
+  transition: background 0.14s ease;
+}
+
+.dash-page .dashboard-keys-refresh:hover:not(:disabled),
+.dash-page .dashboard-keys-refresh:active:not(:disabled) {
+  background: rgba(250, 248, 245, 0.16);
+  border-color: #faf8f5;
+  color: #faf8f5 !important;
+  -webkit-text-fill-color: #faf8f5;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ── Add key: white fill; hover BRIGHTENS to the lime accent ── */
+.dash-page .dashboard-keys-add,
+.dash-page .dashboard-keys-add:focus,
+.dash-page .dashboard-keys-add:focus-visible,
+.dash-page .dashboard-keys-add:disabled {
+  background: #faf8f5;
+  border-color: #faf8f5;
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000;
+  opacity: 1;
+  transform: none;
+  box-shadow: none;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.dash-page .dashboard-keys-add:hover:not(:disabled),
+.dash-page .dashboard-keys-add:active:not(:disabled) {
+  background: #e8ff75;
+  border-color: #e8ff75;
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000;
+  transform: none;
+  box-shadow: none;
+}
+
+.dash-page .dashboard-keys-add svg {
+  width: 12.15px;
+  height: 12.15px;
+  stroke-width: 1.8;
 }
 
 .dash-page .install-tabs {
@@ -4506,15 +4597,15 @@ h1, h2, h3 {
   line-height: 0.84;
   letter-spacing: 0.14px;
   text-transform: lowercase;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
-.dash-page .install-tab:hover,
-.dash-page .install-tab:focus,
-.dash-page .install-tab:focus-visible,
-.dash-page .install-tab:active {
+/* Inactive tab: hover BRIGHTENS the text (matches the TS/PY toggle behavior) */
+.dash-page .install-tab:hover:not(.install-tab--active),
+.dash-page .install-tab:focus-visible:not(.install-tab--active) {
   outline: 0;
-  background: #1d2227;
-  color: #8f9294;
+  background: #262b30;
+  color: #faf8f5;
   box-shadow: none;
 }
 

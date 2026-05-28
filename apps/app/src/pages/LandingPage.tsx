@@ -15,7 +15,7 @@ import {
     useWallets,
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
-import { ChevronDown, Github } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDelegateKey } from '../App'
@@ -233,34 +233,36 @@ export default function LandingPage() {
             <section className="lp-hero">
                 <div className="lp-hero-inner">
                     <div className="lp-hero-copy">
-                        <h1>Long-Term Memory<br />for AI Agents</h1>
+                        <h1>Sign in to start building with portable memory across apps and workflows.</h1>
                         <p>
-                            Walrus Memory introduces a long-term, verifiable memory layer on
-                            Walrus, allowing agents to remember, share, and reuse
-                            information reliably.
+                            Continue with Google or connect your wallet to manage your Walrus Memory account,
+                            delegate keys, and developer setup.
                         </p>
 
                         <div className="lp-hero-actions">
-                            {config.docsUrl && (
-                                <a
-                                    href={config.docsUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                            {hasEnokiConfig && googleWallet && (
+                                <button
                                     className="lp-btn-yellow"
-                                    onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'landing_hero' })}
+                                    onClick={handleEnokiConnect}
                                 >
-                                    Documentation <span className="lp-arrow">↗</span>
-                                </a>
+                                    Continue with Google
+                                </button>
                             )}
-                            <a
-                                href="https://github.com/MystenLabs/memwal"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="lp-btn-outline"
-                                onClick={() => trackEvent('outbound_link_click', { link: 'github', location: 'landing_hero' })}
-                            >
-                                <Github size={18} /> GitHub <span className="lp-arrow">↗</span>
-                            </a>
+                            <div onClick={handleWalletClick}>
+                                <ConnectButton connectText="Connect wallet" />
+                            </div>
+                        </div>
+                        <p className="lp-legal-copy">
+                            By continuing, you agree to our Terms of Service and Privacy Policy.
+                        </p>
+                        <div className="lp-trusted-copy">
+                            <span>Trusted by teams building reliable AI systems</span>
+                            <strong>Allium</strong>
+                            <strong>InflectiveAI</strong>
+                            <strong>OpenGradient</strong>
+                            <strong>Talus Labs</strong>
+                            <strong>Tatum</strong>
+                            <strong>Conso Labs</strong>
                         </div>
                     </div>
 
