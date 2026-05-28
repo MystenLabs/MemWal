@@ -83,6 +83,7 @@ try {
   await expectContentType('/walrus-memory-aurora-snake.png', 'image/png')
   await expectContentType('/walrus-memory-og.jpg', 'image/jpeg')
   await expectContentType('/walrus-memory-og-walm61.jpg', 'image/jpeg')
+  await expectContentType('/walrus-memory-social-preview.jpg', 'image/jpeg')
   await expectContentType('/fonts/Ratch-Variable.ttf', 'font/ttf')
   await expectHead('/', 200, 'text/html')
   await expectHead('/walrus-memory-aurora-snake.png', 200, 'image/png')
