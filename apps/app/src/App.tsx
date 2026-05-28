@@ -7,7 +7,6 @@
 
 import { useEffect, useState, useCallback, useRef, createContext, useContext } from 'react'
 import {
-  ConnectButton,
   createNetworkConfig,
   SuiClientProvider,
   WalletProvider,
@@ -18,8 +17,7 @@ import {
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom'
-import { ArrowLeft, ShieldCheck } from 'lucide-react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -42,17 +40,6 @@ const { networkConfig } = createNetworkConfig({
 })
 
 const queryClient = new QueryClient()
-const AUTH_METHOD_KEY = 'memwal_auth_method'
-const ENOKI_CALLBACK_PATH = '/auth/enoki/callback'
-
-function getEnokiRedirectUrl() {
-  if (config.enokiRedirectUrl) return config.enokiRedirectUrl
-  if (import.meta.env.DEV) {
-    const port = window.location.port ? `:${window.location.port}` : ''
-    return `${window.location.protocol}//localhost${port}${ENOKI_CALLBACK_PATH}`
-  }
-  return `${window.location.origin}${ENOKI_CALLBACK_PATH}`
-}
 
 // ============================================================
 // Delegate Key Context (stored in sessionStorage — cleared on tab close, never persists across sessions)
@@ -193,10 +180,7 @@ function RegisterEnokiWallets() {
     const { unregister } = registerEnokiWallets({
       apiKey: config.enokiApiKey,
       providers: {
-        google: {
-          clientId: config.googleClientId,
-          redirectUrl: getEnokiRedirectUrl(),
-        },
+        google: { clientId: config.googleClientId },
       },
       client,
       network,
@@ -215,24 +199,12 @@ function RegisterEnokiWallets() {
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const { delegateKey } = useDelegateKey()
-  const location = useLocation()
-  const dashboardSearchParams = new URLSearchParams(location.search)
-  const explicitDashboardPreview = import.meta.env.DEV && dashboardSearchParams.get('preview') === '1'
-  const isDashboardPreview = explicitDashboardPreview
-  const dashboardPreviewState =
-    dashboardSearchParams.get('state') === 'empty'
-      ? 'empty'
-      : dashboardSearchParams.get('state') === 'ready'
-          ? 'ready'
-          : 'empty'
 
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/dashboard" element={
-        !currentAccount && !isDashboardPreview ? <DashboardConnectGate /> : (
-          <Dashboard previewMode={isDashboardPreview} previewState={dashboardPreviewState} />
-        )
+        !currentAccount ? <Navigate to="/" replace /> : <Dashboard />
       } />
       <Route path="/setup" element={
         !currentAccount ? <Navigate to="/" replace /> :
@@ -243,69 +215,8 @@ function AppContent() {
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       } />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
-      <Route path={ENOKI_CALLBACK_PATH} element={<EnokiCallback />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-  )
-}
-
-function EnokiCallback() {
-  return (
-    <div className="dash-page">
-      <main className="dash-shell dash-connect-shell">
-        <section className="dash-connect-card">
-          <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-            <ShieldCheck size={26} className="dashboard-cta-icon" />
-          </span>
-          <div>
-            <p className="dash-connect-kicker">google sign-in</p>
-            <h1>Completing sign-in</h1>
-            <p>This popup will close automatically.</p>
-          </div>
-        </section>
-      </main>
-    </div>
-  )
-}
-
-function DashboardConnectGate() {
-  const rememberWalletIntent = useCallback(() => {
-    sessionStorage.setItem(AUTH_METHOD_KEY, 'wallet')
-  }, [])
-
-  return (
-    <div className="dash-page">
-      <nav className="dash-nav">
-        <div className="dash-nav-inner">
-          <Link to="/" className="dash-logo" aria-label="Walrus Memory home">
-            <span>walrus</span>
-            <span>memory</span>
-          </Link>
-          <Link to="/" className="dash-outline-button">
-            <ArrowLeft size={13} /> Back home
-          </Link>
-        </div>
-      </nav>
-
-      <main className="dash-shell dash-connect-shell">
-        <section className="dash-connect-card">
-          <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-            <ShieldCheck size={26} className="dashboard-cta-icon" />
-          </span>
-          <div>
-            <p className="dash-connect-kicker">real wallet required</p>
-            <h1>Connect wallet to open Dashboard</h1>
-            <p>
-              Use the wallet that owns your Walrus Memory account, then
-              create or import a delegate key for the interactive demo.
-            </p>
-          </div>
-          <div className="dash-connect-actions" onClick={rememberWalletIntent}>
-            <ConnectButton connectText="Connect wallet" />
-          </div>
-        </section>
-      </main>
-    </div>
   )
 }
 

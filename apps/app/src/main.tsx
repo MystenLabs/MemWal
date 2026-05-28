@@ -5,15 +5,6 @@ import App from './App.tsx'
 
 const PRELOAD_RELOAD_KEY = 'memwal:preload-error-reloaded-at'
 
-const shouldUseLocalhost = import.meta.env.DEV && window.location.hostname === '127.0.0.1'
-
-if (shouldUseLocalhost) {
-  const port = window.location.port ? `:${window.location.port}` : ''
-  window.location.replace(
-    `${window.location.protocol}//localhost${port}${window.location.pathname}${window.location.search}${window.location.hash}`,
-  )
-}
-
 window.addEventListener('vite:preloadError', (event) => {
   event.preventDefault()
 
@@ -26,10 +17,8 @@ window.addEventListener('vite:preloadError', (event) => {
   }
 })
 
-if (!shouldUseLocalhost) {
-  createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  )
-}
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
