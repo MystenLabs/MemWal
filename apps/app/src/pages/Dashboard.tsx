@@ -2,7 +2,7 @@
  * Dashboard — Account info, delegate keys management, SDK integration guide
  */
 
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, type SVGProps } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
@@ -17,10 +17,12 @@ import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import bash from 'react-syntax-highlighter/dist/esm/languages/hljs/bash'
+import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
 import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -31,7 +33,82 @@ import {
     type DynamicFieldObjectFields,
     type RegistryObjectFields,
 } from '../utils/suiFields'
-import memwalLogo from '../assets/memwal-logo.svg'
+
+function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 34.9865 40.1201" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M34.9835 6.48047V21.043C34.9837 21.0489 34.9843 21.0554 34.9845 21.0625C34.9854 21.0937 34.9861 21.1366 34.9864 21.1904C34.987 21.2981 34.9855 21.4501 34.9767 21.6416C34.9591 22.0249 34.9129 22.568 34.8019 23.2324C34.5798 24.5608 34.0953 26.3809 33.048 28.3838C30.9395 32.4156 26.6048 37.0829 17.8097 40.0146L17.4933 40.1201L17.1769 40.0146C8.38176 37.0829 4.04706 32.4157 1.93859 28.3838C0.891206 26.3809 0.406732 24.5608 0.184682 23.2324C0.0736325 22.568 0.0274786 22.0249 0.00987737 21.6416C0.00108818 21.4501 -0.000482765 21.2981 0.000111746 21.1904C0.000409352 21.1366 0.00114976 21.0937 0.00206487 21.0625C0.002274 21.0554 0.002837 21.0489 0.00304143 21.043V6.48047L17.4933 0L34.9835 6.48047ZM2.00304 7.87207V21.082L2.00206 21.1084C2.00196 21.1111 2.00126 21.1153 2.00109 21.1211C2.00063 21.1368 2.00032 21.1637 2.00011 21.2012C1.9997 21.2763 2.00079 21.3942 2.00792 21.5498C2.02224 21.8614 2.06076 22.3245 2.15734 22.9023C2.35061 24.0586 2.7772 25.6712 3.71105 27.457C5.54154 30.9573 9.37644 35.2273 17.4933 38.0088C25.6101 35.2273 29.445 30.9573 31.2755 27.457C32.2093 25.6712 32.6359 24.0586 32.8292 22.9023C32.9258 22.3245 32.9643 21.8614 32.9786 21.5498C32.9858 21.3942 32.9869 21.2763 32.9864 21.2012C32.9862 21.1637 32.9849 21.1368 32.9845 21.1211C32.9843 21.1153 32.9846 21.1111 32.9845 21.1084L32.9835 21.082V7.87207L17.4933 2.13184L2.00304 7.87207ZM20.1232 13.6367C20.1232 12.2009 18.9593 11.0363 17.5236 11.0361C16.0876 11.0361 14.923 12.2008 14.923 13.6367C14.9231 15.0725 16.0877 16.2363 17.5236 16.2363C18.9592 16.2361 20.123 15.0724 20.1232 13.6367ZM22.1232 13.6367C22.123 15.8334 20.5827 17.6681 18.5236 18.125V31.1162H16.5236V28.7061H13.5831V26.7061H16.5236V24.5566H13.5831V22.5566H16.5236V18.126C14.464 17.6694 12.9231 15.8337 12.923 13.6367C12.923 11.0962 14.983 9.03613 17.5236 9.03613C20.0639 9.03632 22.1232 11.0963 22.1232 13.6367Z"
+                fill="currentColor"
+            />
+        </svg>
+    )
+}
+
+function DocumentationCtaIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 34.81 40" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M31.12 6.81H26.59V3.69C26.59 1.65 24.94 0 22.9 0H3.69C1.65 0 0 1.65 0 3.69V29.51C0 31.55 1.65 33.2 3.69 33.2H8.22V36.32C8.22 38.36 9.87 40.01 11.91 40.01H31.13C33.17 40.01 34.82 38.36 34.82 36.32V10.5C34.82 8.46 33.17 6.81 31.13 6.81H31.12ZM8.22 10.5V31.19H3.69C2.76 31.19 2 30.43 2 29.5V3.69C2 2.76 2.76 2 3.69 2H22.91C23.84 2 24.6 2.76 24.6 3.69V6.81H11.91C9.87 6.81 8.22 8.46 8.22 10.5ZM32.81 36.31C32.81 37.24 32.05 38 31.12 38H11.9C10.97 38 10.21 37.24 10.21 36.31V10.5C10.21 9.57 10.97 8.81 11.9 8.81H31.12C32.05 8.81 32.81 9.57 32.81 10.5V36.32V36.31Z"
+                fill="currentColor"
+            />
+            <path d="M28.48 22.5H14.55V24.5H28.48V22.5Z" fill="currentColor" />
+            <path d="M28.48 16.5H14.55V18.5H28.48V16.5Z" fill="currentColor" />
+            <path d="M28.48 28.5H14.55V30.5H28.48V28.5Z" fill="currentColor" />
+        </svg>
+    )
+}
+
+function CtaArrowIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 20.36 20.36" fill="none" aria-hidden="true" {...props}>
+            <path
+                d="M10.18 0L9.47 0.71L18.45 9.68H0V10.68H18.45L9.47 19.66L10.18 20.36L20.36 10.18L10.18 0Z"
+                fill="currentColor"
+            />
+        </svg>
+    )
+}
+
+const walrusCodeTheme = {
+    hljs: {
+        color: '#faf8f5',
+        background: '#050505',
+    },
+    'hljs-keyword': {
+        color: '#cab1ff',
+    },
+    'hljs-built_in': {
+        color: '#faf8f5',
+    },
+    'hljs-title': {
+        color: '#faf8f5',
+    },
+    'hljs-attr': {
+        color: '#e8ff75',
+    },
+    'hljs-property': {
+        color: '#e8ff75',
+    },
+    'hljs-variable': {
+        color: '#faf8f5',
+    },
+    'hljs-string': {
+        color: '#faf8f5',
+    },
+    'hljs-comment': {
+        color: '#8f9294',
+    },
+    'hljs-number': {
+        color: '#e8ff75',
+    },
+    'hljs-literal': {
+        color: '#e8ff75',
+    },
+    'hljs-params': {
+        color: '#faf8f5',
+    },
+}
 
 // ============================================================
 // Types
@@ -46,26 +123,46 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
+type QuickstartLanguage = 'ts' | 'py'
+
+function bytesToHex(bytes: Uint8Array | number[]): string {
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
 
 // ============================================================
 // Dashboard Component
 // ============================================================
 
-export default function Dashboard() {
+export default function Dashboard({
+    previewMode = false,
+    previewState = 'empty',
+}: {
+    previewMode?: boolean
+    previewState?: 'empty' | 'ready'
+}) {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
     const { mutateAsync: signAndExecuteTx } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
     const suiClient = useSuiClient()
-    const { delegateKey, delegatePublicKey, accountObjectId, clearDelegateKeys } = useDelegateKey()
+    const { delegateKey, delegatePublicKey, accountObjectId, setDelegateKeys, clearDelegateKeys } = useDelegateKey()
 
-    const address = currentAccount?.address || ''
+    const address = currentAccount?.address || (
+        previewMode
+            ? '0x7f33c06e6d144bc3c24aaef7c8f7421c1287df6ce9c5ab74ac729b13f4194'
+            : ''
+    )
+    const previewReady = previewMode && previewState === 'ready'
+    const previewAccountObjectId = previewReady
+        ? '0x7bc62cf958c4b27b16ad2f1a3f33d1f0e811e08d4fc079edc3525a7d2e2dc551'
+        : null
     const [resolvedAccountObjectId, setResolvedAccountObjectId] = useState<string | null>(accountObjectId)
     const [loadingAccount, setLoadingAccount] = useState(false)
-    const effectiveAccountObjectId = accountObjectId ?? resolvedAccountObjectId
+    const effectiveAccountObjectId = accountObjectId ?? previewAccountObjectId ?? resolvedAccountObjectId
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
     const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
+    const [quickstartLanguage, setQuickstartLanguage] = useState<QuickstartLanguage>('ts')
 
     // Delegate key management state
     const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
@@ -106,7 +203,7 @@ export default function Dashboard() {
     }, [clearDelegateKeys, disconnect])
 
     const fetchAccountObjectId = useCallback(async () => {
-        if (!address) {
+        if (!address || previewMode) {
             setResolvedAccountObjectId(null)
             return
         }
@@ -136,7 +233,7 @@ export default function Dashboard() {
         } finally {
             setLoadingAccount(false)
         }
-    }, [address, accountObjectId, suiClient])
+    }, [address, accountObjectId, previewMode, suiClient])
 
     useEffect(() => {
         setResolvedAccountObjectId(accountObjectId)
@@ -147,16 +244,18 @@ export default function Dashboard() {
     }, [fetchAccountObjectId])
 
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
-    const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount
+    const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount && !previewReady
     const isNewAccount = !delegateKey && !loadingAccount && !hasResolvedAccount
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
     const expectedRelayerUrl = config.suiNetwork === 'mainnet'
         ? 'https://relayer.memwal.ai'
-        : 'https://relayer.staging.memwal.ai'
+        : 'https://relayer.dev.memwal.ai'
     const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
-    const relayerEnvironmentLabel = normalizedRelayerUrl.includes('localhost') || normalizedRelayerUrl.includes('127.0.0.1')
+    const relayerEnvironmentLabel = normalizedRelayerUrl.startsWith('/')
+        ? 'local dev proxy / testnet'
+        : normalizedRelayerUrl.includes('localhost') || normalizedRelayerUrl.includes('127.0.0.1')
         ? 'local development'
         : normalizedRelayerUrl.includes('staging')
             ? 'staging / testnet'
@@ -169,13 +268,14 @@ export default function Dashboard() {
             normalizedRelayerUrl.includes('relayer.memwal.ai') &&
             !normalizedRelayerUrl.includes('staging') &&
             !normalizedRelayerUrl.includes('dev'))
-    const dashboardSubtitle = delegateKey
-        ? 'manage your Walrus Memory account and delegate keys'
+    const dashboardSubtitle = delegateKey || previewReady
+        ? ''
         : loadingAccount
             ? 'checking your Walrus Memory account...'
             : hasResolvedAccount
                 ? 'remove an old delegate key, then create a new one'
                 : 'no Walrus Memory account found for this wallet'
+    const showDashboardSubtitle = Boolean(dashboardSubtitle)
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
 
     // ============================================================
@@ -280,16 +380,15 @@ export default function Dashboard() {
                 suiNetwork: config.suiNetwork,
             })
 
+            const delegatePublicKeyHex = bytesToHex(delegate.publicKey)
             setNewPrivateKey(delegate.privateKey)
+            setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
             setShowAddForm(false)
             setNewKeyLabel('New Key')
 
-            // Copy private key to clipboard automatically
-            await navigator.clipboard.writeText(delegate.privateKey)
-
-            // Refresh key list
-            await fetchOnChainKeys()
             trackEvent('delegate_key_add_complete', { location: 'dashboard' })
+            void navigator.clipboard.writeText(delegate.privateKey).catch(() => undefined)
+            void fetchOnChainKeys()
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'failed to add key'
             setKeyError(msg)
@@ -297,7 +396,7 @@ export default function Dashboard() {
         } finally {
             setAddingKey(false)
         }
-    }, [walletSigner, hasMaxDelegateKeys, effectiveAccountObjectId, newKeyLabel, suiClient, fetchOnChainKeys])
+    }, [walletSigner, hasMaxDelegateKeys, effectiveAccountObjectId, newKeyLabel, suiClient, fetchOnChainKeys, setDelegateKeys])
 
     // ============================================================
     // Remove a delegate key (via SDK)
@@ -349,7 +448,7 @@ export default function Dashboard() {
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
 
-    const sdkSnippet = `import { MemWal } from "@mysten-incubation/memwal"
+    const sdkTypeScriptSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
@@ -365,51 +464,59 @@ await memwal.waitForRememberJob(job.job_id)
 const result = await memwal.recall("food allergies")
 console.log(result.results[0].text)`
 
-    const aiSnippet = `import { generateText } from "ai"
-import { withMemWal } from "@mysten-incubation/memwal/ai"
-import { openai } from "@ai-sdk/openai"
+    const sdkPythonSnippet = `import asyncio
+import os
+from memwal import MemWal
 
-const model = withMemWal(openai("gpt-4o"), {
-  key: process.env.MEMWAL_PRIVATE_KEY ?? "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: process.env.MEMWAL_ACCOUNT_ID ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.MEMWAL_SERVER_URL ?? "${config.memwalServerUrl}",
-})
+async def main():
+    memwal = MemWal.create(
+        key=os.environ["MEMWAL_PRIVATE_KEY"],
+        account_id=os.environ["MEMWAL_ACCOUNT_ID"],
+        server_url=os.environ.get("MEMWAL_SERVER_URL", "${config.memwalServerUrl}"),
+    )
 
-const result = await generateText({
-  model,
-  messages: [
-    { role: "user", content: "What foods should I avoid?" }
-  ]
-})
-// → LLM knows: "User is allergic to peanuts"`
+    await memwal.remember_and_wait("I'm allergic to peanuts")
+
+    result = await memwal.recall("food allergies")
+    print(result.results[0].text)
+
+    await memwal.close()
+
+asyncio.run(main())`
+
+    const sdkSnippet = quickstartLanguage === 'py' ? sdkPythonSnippet : sdkTypeScriptSnippet
+    const sdkSnippetLanguage = quickstartLanguage === 'py' ? 'python' : 'javascript'
+    const sdkCopyLabel = `sdk-${quickstartLanguage}`
 
     return (
-        <>
-            <nav className="nav">
-                <div className="nav-inner">
-                    <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
+        <div className="dash-page">
+            <nav className="dash-nav">
+                <div className="dash-nav-inner">
+                    <Link to="/" className="dash-logo" aria-label="Walrus Memory home">
+                        <span>walrus</span>
+                        <span>memory</span>
                     </Link>
-                    <div className="nav-user">
-                        <span className="nav-address">
+                    <div className="dash-nav-actions">
+                        <span className="dash-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="lp-nav-cta" onClick={handleLogout}>
-                            <LogOut size={14} /> sign out
+                        <button className="dash-outline-button" onClick={handleLogout}>
+                            Sign out <LogOut size={13} />
                         </button>
                     </div>
                 </div>
             </nav>
 
-            <div className="container dashboard">
+            <main className="dash-shell">
                 {/* Header */}
-                <div className="dashboard-header">
-                    <h2>dashboard</h2>
-                    <p>{dashboardSubtitle}</p>
+                <div className={`dashboard-header${showDashboardSubtitle ? '' : ' dashboard-header--compact'}`}>
+                    <h2>Dashboard</h2>
+                    {showDashboardSubtitle && <p>{dashboardSubtitle}</p>}
                 </div>
 
                 {isRecoveringExistingAccount && (
-                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                    <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
                             your wallet already has a Walrus Memory account, but this browser does not have a saved delegate key.
                             remove an old on-chain key below or create a new delegate key.
@@ -418,16 +525,18 @@ const result = await generateText({
                 )}
 
                 {isNewAccount && (
-                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                    <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>
-                            no Walrus Memory account found for this wallet.
+                            No Walrus Memory account found for this wallet,
                             create a delegate key to get started.
                         </p>
                     </div>
                 )}
 
                 {hasMaxDelegateKeys && (
-                    <div className="warning-box" style={{ marginBottom: 24 }}>
+                    <div className="dash-alert" style={{ marginBottom: 24 }}>
+                        <span className="dash-alert-icon" aria-hidden="true" />
                         <p>{MAX_DELEGATE_KEYS_MESSAGE}</p>
                     </div>
                 )}
@@ -440,27 +549,25 @@ const result = await generateText({
                             className="dashboard-cta"
                             onClick={() => trackEvent('cta_click', { cta: 'interactive_demo', location: 'dashboard' })}
                         >
-                            <div>
-                                <div className="dashboard-cta-title">
-                                    try interactive demo
-                                </div>
-                                <div className="dashboard-cta-subtitle">
-                                    test remember, recall & analyze with your live server
-                                </div>
+                            <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
+                            </span>
+                            <div className="dashboard-cta-text">
+                                <div className="dashboard-cta-title">Try the interactive demo</div>
+                                <div className="dashboard-cta-subtitle">Test remember, recall &amp; analyze with your live server</div>
                             </div>
-                            <div className="dashboard-cta-arrow">→</div>
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     ) : hasMaxDelegateKeys ? (
                         <div className="dashboard-cta dashboard-cta--disabled">
-                            <div>
-                                <div className="dashboard-cta-title">
-                                    remove a key first
-                                </div>
-                                <div className="dashboard-cta-subtitle">
-                                    this wallet already has {MAX_DELEGATE_KEYS} delegate keys
-                                </div>
+                            <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
+                            </span>
+                            <div className="dashboard-cta-text">
+                                <div className="dashboard-cta-title">Remove a key first</div>
+                                <div className="dashboard-cta-subtitle">This wallet already has {MAX_DELEGATE_KEYS} delegate keys</div>
                             </div>
-                            <div className="dashboard-cta-arrow">↓</div>
+                            <span className="dashboard-cta-arrow" aria-hidden="true">↓</span>
                         </div>
                     ) : (
                         <Link
@@ -468,15 +575,14 @@ const result = await generateText({
                             className="dashboard-cta"
                             onClick={() => trackEvent('cta_click', { cta: 'create_delegate_key', location: 'dashboard' })}
                         >
-                            <div>
-                                <div className="dashboard-cta-title">
-                                    create delegate key
-                                </div>
-                                <div className="dashboard-cta-subtitle">
-                                    generate and register a new SDK key
-                                </div>
+                            <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                                <DelegateKeyCtaIcon className="dashboard-cta-icon" />
+                            </span>
+                            <div className="dashboard-cta-text">
+                                <div className="dashboard-cta-title">Create a delegate key</div>
+                                <div className="dashboard-cta-subtitle">Generate and register a new SDK key</div>
                             </div>
-                            <div className="dashboard-cta-arrow">→</div>
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     )}
                     {config.docsUrl && (
@@ -487,15 +593,14 @@ const result = await generateText({
                             className="dashboard-cta"
                             onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'dashboard' })}
                         >
-                            <div>
-                                <div className="dashboard-cta-title">
-                                    documentation
-                                </div>
-                                <div className="dashboard-cta-subtitle">
-                                    guides, examples & API reference
-                                </div>
+                            <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                                <DocumentationCtaIcon className="dashboard-cta-icon" />
+                            </span>
+                            <div className="dashboard-cta-text">
+                                <div className="dashboard-cta-title">Documentation</div>
+                                <div className="dashboard-cta-subtitle">Guides, examples &amp; API references</div>
                             </div>
-                            <div className="dashboard-cta-arrow">→</div>
+                            <CtaArrowIcon className="dashboard-cta-arrow" />
                         </a>
                     )}
                 </div>
@@ -503,12 +608,50 @@ const result = await generateText({
 
                 {/* Current Delegate Key */}
                 {delegateKey && (
-                    <div className="card" style={{ marginBottom: 24 }}>
+                    <div className="card dashboard-credentials-card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
                             <div className="card-title">SDK credentials</div>
                             <div className="card-subtitle">copy the delegate private key into server env as MEMWAL_PRIVATE_KEY</div>
                         </div>
+                    </div>
+
+                    {/* Private Key */}
+                    <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
+                        <div className="key-label">delegate private key — server-side MEMWAL_PRIVATE_KEY</div>
+                        {showKey ? (
+                            <>
+                                <div className="key-value">{delegateKey}</div>
+                                <div className="key-actions">
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => copyToClipboard(delegateKey!, 'priv')}
+                                    >
+                                        <Copy size={12} /> {copied === 'priv' ? 'copied!' : 'copy'}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => copyToClipboard(`MEMWAL_PRIVATE_KEY=${delegateKey}`, 'priv-env')}
+                                    >
+                                        <Copy size={12} /> {copied === 'priv-env' ? 'copied!' : 'copy env line'}
+                                    </button>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(false)}>
+                                        <EyeOff size={12} /> hide
+                                    </button>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <div className="key-value">
+                                    {'•'.repeat(64)}
+                                </div>
+                                <div className="key-actions">
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(true)}>
+                                        <Eye size={12} /> reveal
+                                    </button>
+                                </div>
+                            </>
+                        )}
                     </div>
 
                     <div className="warning-box" style={{ marginBottom: 12 }}>
@@ -579,66 +722,28 @@ const result = await generateText({
                             </button>
                         </div>
                     </div>
-
-                    {/* Private Key */}
-                    <div className="key-display key-display--white">
-                        <div className="key-label">delegate private key — server-side MEMWAL_PRIVATE_KEY</div>
-                        {showKey ? (
-                            <>
-                                <div className="key-value">{delegateKey}</div>
-                                <div className="key-actions">
-                                    <button
-                                        className="btn btn-secondary btn-sm"
-                                        onClick={() => copyToClipboard(delegateKey!, 'priv')}
-                                    >
-                                        <Copy size={12} /> {copied === 'priv' ? 'copied!' : 'copy'}
-                                    </button>
-                                    <button
-                                        className="btn btn-secondary btn-sm"
-                                        onClick={() => copyToClipboard(`MEMWAL_PRIVATE_KEY=${delegateKey}`, 'priv-env')}
-                                    >
-                                        <Copy size={12} /> {copied === 'priv-env' ? 'copied!' : 'copy env line'}
-                                    </button>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(false)}>
-                                        <EyeOff size={12} /> hide
-                                    </button>
-                                </div>
-                            </>
-                        ) : (
-                            <>
-                                <div className="key-value">
-                                    {'•'.repeat(64)}
-                                </div>
-                                <div className="key-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(true)}>
-                                        <Eye size={12} /> reveal
-                                    </button>
-                                </div>
-                            </>
-                        )}
-                    </div>
                     </div>
                 )}
 
                 {/* On-Chain Delegate Keys Management */}
-                <div className="card" style={{ marginBottom: 24 }}>
+                <div className="card dashboard-keys-card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
-                            <div className="card-title">delegate keys (on-chain)</div>
+                            <div className="card-title">Delegate keys (on-chain)</div>
                             <div className="card-subtitle">
-                                all Ed25519 keys registered on your Walrus Memory account
+                                All Ed25519 keys registered on your Walrus Memory account
                             </div>
                         </div>
                         <div className="card-header-actions">
                             <button
-                                className="btn btn-secondary btn-sm"
+                                className="btn btn-secondary btn-sm dashboard-keys-refresh"
                                 onClick={fetchOnChainKeys}
                                 disabled={loadingKeys || loadingAccount}
                             >
-                                <RefreshCw size={12} /> {loadingKeys || loadingAccount ? '...' : 'refresh'}
+                                <RefreshCw size={12} /> {loadingKeys || loadingAccount ? '...' : 'Refresh'}
                             </button>
                             <button
-                                className="lp-nav-cta"
+                                className="lp-nav-cta dashboard-keys-add"
                                 onClick={() => {
                                     if (hasMaxDelegateKeys) {
                                         setKeyError(MAX_DELEGATE_KEYS_MESSAGE)
@@ -650,7 +755,7 @@ const result = await generateText({
                                 }}
                                 disabled={showAddForm || addingKey || !effectiveAccountObjectId || hasMaxDelegateKeys}
                             >
-                                <Plus size={14} /> add key
+                                Add key <Plus size={12} aria-hidden="true" />
                             </button>
                         </div>
                     </div>
@@ -757,19 +862,19 @@ const result = await generateText({
 
                     {/* Key List */}
                     {loadingAccount ? (
-                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                             loading account...
                         </div>
                     ) : loadingKeys ? (
-                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                             loading keys...
                         </div>
                     ) : !effectiveAccountObjectId ? (
-                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                             no Walrus Memory account found for this wallet. create a delegate key to get started.
                         </div>
                     ) : onChainKeys.length === 0 ? (
-                        <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                             no delegate keys found on-chain
                         </div>
                     ) : (
@@ -815,53 +920,46 @@ const result = await generateText({
                 </div>
 
                 {/* Quick Start: SDK */}
-                <div className="card" style={{ marginBottom: 24 }}>
+                <div className="card dashboard-quickstart-card" style={{ marginBottom: 24 }}>
                     <div className="card-header">
                         <div>
-                            <div className="card-title">quick start — SDK</div>
-                            <div className="card-subtitle">use the Walrus Memory SDK to remember and recall</div>
+                            <div className="card-title">Quickstart — SDK</div>
+                            <div className="card-subtitle">Use the Walrus Memory SDK to remember and recall</div>
+                        </div>
+                        <div className="dashboard-quickstart-toggle" role="tablist" aria-label="SDK language">
+                            {(['ts', 'py'] as const).map((language) => (
+                                <button
+                                    key={language}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={quickstartLanguage === language}
+                                    className={quickstartLanguage === language ? 'dashboard-quickstart-toggle-active' : ''}
+                                    onClick={() => setQuickstartLanguage(language)}
+                                >
+                                    {language}
+                                </button>
+                            ))}
                         </div>
                     </div>
-                    <div style={{ position: 'relative' }}>
+                    <div className="dashboard-quickstart-codewrap">
                         <button
-                            className="btn btn-secondary btn-sm"
-                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1, background: '#ffffff' }}
-                            onClick={() => copyToClipboard(sdkSnippet, 'sdk')}
+                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
+                            onClick={() => copyToClipboard(sdkSnippet, sdkCopyLabel)}
+                            aria-label="Copy SDK snippet"
                         >
-                            <Copy size={12} /> {copied === 'sdk' ? 'done' : 'copy'}
+                            <Copy size={14} />
+                            <span className="dashboard-quickstart-copy-label">{copied === sdkCopyLabel ? 'done' : 'copy'}</span>
                         </button>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 20 }}>
+                        <SyntaxHighlighter language={sdkSnippetLanguage} style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
                             {sdkSnippet}
                         </SyntaxHighlighter>
                     </div>
                 </div>
 
-                {/* Quick Start: AI SDK */}
-                <div className="card" style={{ marginBottom: 24 }}>
-                    <div className="card-header">
-                        <div>
-                            <div className="card-title">AI SDK integration</div>
-                            <div className="card-subtitle">wrap any AI model with automatic memory</div>
-                        </div>
-                    </div>
-                    <div style={{ position: 'relative' }}>
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            style={{ position: 'absolute', top: 8, right: 8, zIndex: 1, background: '#ffffff' }}
-                            onClick={() => copyToClipboard(aiSnippet, 'ai')}
-                        >
-                            <Copy size={12} /> {copied === 'ai' ? 'done' : 'copy'}
-                        </button>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0, padding: 20 }}>
-                            {aiSnippet}
-                        </SyntaxHighlighter>
-                    </div>
-                </div>
-
                 {/* Install */}
-                <div className="card" style={{ marginBottom: 40 }}>
+                <div className="card dashboard-install-card" style={{ marginBottom: 40 }}>
                     <div className="card-header">
-                        <div><div className="card-title">install</div></div>
+                        <div><div className="card-title">Install</div></div>
                     </div>
                     <div className="install-tabs">
                         {(['npm', 'pnpm', 'yarn', 'bun'] as const).map((pm) => (
@@ -877,14 +975,14 @@ const result = await generateText({
                             </button>
                         ))}
                     </div>
-                    <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
+                    <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
                         {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
                          pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
                          pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
                          'bun add @mysten-incubation/memwal'}
                     </SyntaxHighlighter>
                 </div>
-            </div>
-        </>
+            </main>
+        </div>
     )
 }
