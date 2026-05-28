@@ -1,5 +1,16 @@
 # memwal
 
+## 0.1.3
+
+### Added
+
+- Added `RecallParams` for object-style `recall(...)` calls.
+
+### Changed
+
+- Changed the default `restore()` limit from `50` to `10` to match the relayer and TypeScript SDK.
+- Documented `restore()` response fields, default limit, pagination behavior, and performance expectations.
+
 ## 0.1.2
 
 ### Added

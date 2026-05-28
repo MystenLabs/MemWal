@@ -39,7 +39,7 @@ def _load_env() -> None:
 _load_env()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memwal import MemWal, RememberBulkItem, RememberBulkOptions  # noqa: E402
+from memwal import MemWal, RecallParams, RememberBulkItem, RememberBulkOptions  # noqa: E402
 
 # Path to the running server's log so we can show what happens on the
 # server side as each SDK call is made.
@@ -164,7 +164,7 @@ async def main() -> None:
         print(f"  → query='{query}'")
         off = _log_offset()
         t = _now_ms()
-        rc = await memwal.recall(query, limit=3)
+        rc = await memwal.recall(RecallParams(query=query, limit=3))
         rec_ms = _now_ms() - t
         print(f"  ← {rec_ms} ms   {len(rc.results)} results")
         for m in rc.results:
@@ -199,7 +199,7 @@ async def main() -> None:
         # ───────────────────────────────────────────────────────────
         _hr("STEP 6   POST /api/recall   query='japan'")
         off = _log_offset()
-        rc2 = await memwal.recall("japan", limit=2)
+        rc2 = await memwal.recall(RecallParams(query="japan", limit=2))
         print(f"  ← {len(rc2.results)} results")
         for m in rc2.results:
             print(f"     [{m.distance:.3f}] {m.text}")

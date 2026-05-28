@@ -83,10 +83,22 @@ RememberBulkResult(
 
 `remember_bulk_async` + `wait_for_remember_jobs` in one call.
 
-### `recall(query, limit=10, namespace=None, max_distance=None) -> RecallResult`
+### `recall(RecallParams(...)) -> RecallResult`
 
 Search memories matching a natural-language query, scoped to `owner + namespace`.
 When `max_distance` is set, the client drops weak matches where `distance >= max_distance`.
+
+Preferred form:
+
+```python
+from memwal import RecallParams
+
+result = await memwal.recall(
+    RecallParams(query="food allergies", limit=10, namespace="profile")
+)
+```
+
+The legacy positional form `recall(query, limit=10, namespace=None, max_distance=None)` remains supported for backwards compatibility.
 
 ```python
 RecallResult(
@@ -125,9 +137,13 @@ AskResult(
 )
 ```
 
-### `restore(namespace, limit=50) -> RestoreResult`
+### `restore(namespace, limit=10) -> RestoreResult`
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental.
+
+- `limit` defaults to `10` and caps the inspected blob set, newest-first
+- `restored` counts blobs re-indexed in this call; `skipped` counts blobs already in the local index
+- There is no pagination cursor; use a larger `limit` for larger one-shot restores
 
 ```python
 RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: str)

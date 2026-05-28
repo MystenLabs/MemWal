@@ -76,6 +76,12 @@ export interface RecallOptions {
     maxDistance?: number;
 }
 
+/** Recommended object-style recall input — preferred over positional args. */
+export interface RecallParams extends RecallOptions {
+    /** Search query text. */
+    query: string;
+}
+
 /** Optional composite-scoring weights for recall ranking. */
 export interface ScoringWeights {
     /** Weight applied to semantic similarity (`1.0 - distance`). Default: 1. */
