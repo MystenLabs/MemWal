@@ -124,9 +124,9 @@ interface OnChainDelegateKey {
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'this wallet already has 20 delegate keys. remove an old key before creating a new delegate key.'
 const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
-const PRIVATE_KEY_ENV = 'WALRUS_MEMORY_PRIVATE_KEY'
-const ACCOUNT_ID_ENV = 'WALRUS_MEMORY_ACCOUNT_ID'
-const SERVER_URL_ENV = 'WALRUS_MEMORY_SERVER_URL'
+const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
+const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
+const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
 type QuickstartLanguage = 'ts' | 'py'
 
 function bytesToHex(bytes: Uint8Array | number[]): string {
@@ -452,37 +452,39 @@ export default function Dashboard({
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
 
-    const sdkTypeScriptSnippet = `const memory = WalrusMemory.create({
+    const sdkTypeScriptSnippet = `import { MemWal } from "@mysten-incubation/memwal"
+
+const memwal = MemWal.create({
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
   serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
 })
 
 // Remember something
-const job = await memory.remember("I'm allergic to peanuts")
-await memory.waitForRememberJob(job.job_id)
+const job = await memwal.remember("I'm allergic to peanuts")
+await memwal.waitForRememberJob(job.job_id)
 
 // Recall memories
-const result = await memory.recall("food allergies")
+const result = await memwal.recall("food allergies")
 console.log(result.results[0].text)`
 
     const sdkPythonSnippet = `import asyncio
 import os
-	from walrus_memory import WalrusMemory
+from memwal import MemWal
 
 async def main():
-    memory = WalrusMemory.create(
+    memwal = MemWal.create(
         key=os.environ["${PRIVATE_KEY_ENV}"],
         account_id=os.environ["${ACCOUNT_ID_ENV}"],
         server_url=os.environ.get("${SERVER_URL_ENV}", "${SDK_DEFAULT_SERVER_URL}"),
     )
 
-    await memory.remember_and_wait("I'm allergic to peanuts")
+    await memwal.remember_and_wait("I'm allergic to peanuts")
 
-    result = await memory.recall("food allergies")
+    result = await memwal.recall("food allergies")
     print(result.results[0].text)
 
-    await memory.close()
+    await memwal.close()
 
 asyncio.run(main())`
 
@@ -978,10 +980,10 @@ asyncio.run(main())`
                         ))}
                     </div>
                     <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
-                        {pkgManager === 'npm' ? 'npm install walrus-memory' :
-                         pkgManager === 'pnpm' ? 'pnpm add walrus-memory' :
-                         pkgManager === 'yarn' ? 'yarn add walrus-memory' :
-                         'bun add walrus-memory'}
+                        {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
+                         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
+                         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
+                         'bun add @mysten-incubation/memwal'}
                     </SyntaxHighlighter>
                 </div>
             </main>
