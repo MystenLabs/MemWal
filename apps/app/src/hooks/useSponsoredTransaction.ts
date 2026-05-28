@@ -17,13 +17,21 @@ import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, us
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
 
+type SponsoredTransactionInput = {
+    transaction: Transaction
+    allowDirectFallback?: boolean
+}
+
 export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
     const { mutateAsync: directSignAndExecute } = useSignAndExecuteTransaction()
 
-    const mutateAsync = async ({ transaction }: { transaction: Transaction }): Promise<{ digest: string }> => {
+    const mutateAsync = async ({
+        transaction,
+        allowDirectFallback = true,
+    }: SponsoredTransactionInput): Promise<{ digest: string }> => {
         const sender = currentAccount?.address
         if (!sender) throw new Error('No wallet connected')
 
@@ -76,6 +84,10 @@ export function useSponsoredTransaction() {
             console.log(`[sponsored-tx] success, digest=${result.digest}`)
             return { digest: result.digest }
         } catch (err) {
+            if (!allowDirectFallback) {
+                throw err
+            }
+
             // Fallback: try direct signing if sponsor fails
             console.warn('[sponsored-tx] sponsor failed, falling back to direct signing:', err)
             const result = await directSignAndExecute({ transaction })

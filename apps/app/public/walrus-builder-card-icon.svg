@@ -1,0 +1,8 @@
+<svg preserveAspectRatio="none" width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M7 19H31" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+  <path d="M19 31V7" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+  <path d="M10.55 37H1V27.45" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+  <path d="M37 27.45V37H27.45" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+  <path d="M27.45 1H37V10.55" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+  <path d="M1 10.55V1H10.55" stroke="black" stroke-width="2" stroke-miterlimit="10"/>
+</svg>

@@ -198,7 +198,10 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const result = await signAndExecute({ transaction: tx })
+            const result = await signAndExecute({
+                transaction: tx,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: result.digest })
         } else {
             setTxStatus('creating account...')
@@ -210,7 +213,10 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const createResult = await signAndExecute({ transaction: tx })
+            const createResult = await signAndExecute({
+                transaction: tx,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: createResult.digest })
 
             const txDetails = await suiClient.getTransactionBlock({
@@ -242,12 +248,15 @@ export default function SetupWizard() {
                     tx2.object('0x6'),
                 ],
             })
-            const addResult = await signAndExecute({ transaction: tx2 })
+            const addResult = await signAndExecute({
+                transaction: tx2,
+                allowDirectFallback: !isEnoki,
+            })
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
         return knownAccountId!
-    }, [suiClient, signAndExecute])
+    }, [suiClient, signAndExecute, isEnoki])
 
     // ── "Generate delegate key" button handler ──
     const handleGenerate = useCallback(async () => {
