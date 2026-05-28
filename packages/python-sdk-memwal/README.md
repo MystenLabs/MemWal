@@ -177,7 +177,7 @@ Create a new async client.
 | Method | Description |
 |--------|-------------|
 | `await remember(text, namespace?)` | Store a memory |
-| `await recall(query, limit?, namespace?, max_distance?)` | Search memories, optionally filtering by distance |
+| `await recall(RecallParams(query, limit?, namespace?, max_distance?))` | Search memories, optionally filtering by distance |
 | `await analyze(text, namespace?)` | Extract and store facts |
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |

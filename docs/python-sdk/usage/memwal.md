@@ -58,7 +58,7 @@ Every memory method accepts an optional `namespace=` override that wins over the
 Rebuild missing indexed entries for one namespace from Walrus. Incremental and namespace-scoped — meant to repair PostgreSQL vector state from Walrus-backed memory.
 
 ```python
-result = await memwal.restore("chatbot-prod", limit=50)
+result = await memwal.restore("chatbot-prod", limit=10)
 print(result.restored, result.skipped, result.total)
 ```
 

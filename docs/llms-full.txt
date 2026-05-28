@@ -52,7 +52,7 @@ await memwal.health();
 const job = await memwal.remember("I live in Hanoi and prefer dark mode.");
 await memwal.waitForRememberJob(job.job_id);
 
-const result = await memwal.recall("What do we know about this user?");
+const result = await memwal.recall({ query: "What do we know about this user?" });
 console.log(result.results);
 ```
 
@@ -100,12 +100,13 @@ Returns:
 
 Use `rememberAndWait(text, namespace?, opts?)` or `waitForRememberJob(job_id, opts?)` to resolve the completed `{ id, job_id, blob_id, owner, namespace }` result.
 
-### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
+### `recall(params): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limitOrOptions` defaults to `10`
-- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
+- `limit` defaults to `10`; `topK` is an alias and wins when both are set
+- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 Returns:

@@ -37,7 +37,8 @@ await memwal.rememberAndWait(
   undefined,
   { timeoutMs: 30_000 },
 );
-const memories = await memwal.recall("What are the user's preferences?", {
+const memories = await memwal.recall({
+  query: "What are the user's preferences?",
   topK: 10,
   maxDistance: 0.7,
 });

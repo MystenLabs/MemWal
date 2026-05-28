@@ -23,7 +23,7 @@
  * await memwal.waitForRememberJob(accepted.job_id)
  *
  * // Recall — server: verify → embed query → search → download → decrypt
- * const result = await memwal.recall("food allergies")
+ * const result = await memwal.recall({ query: "food allergies" })
  * console.log(result.results[0].text) // "I'm allergic to peanuts"
  * ```
  */
