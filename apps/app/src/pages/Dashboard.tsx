@@ -70,6 +70,15 @@ function CtaArrowIcon(props: SVGProps<SVGSVGElement>) {
     )
 }
 
+function InstallCopyIcon(props: SVGProps<SVGSVGElement>) {
+    return (
+        <svg viewBox="0 0 12.14 12.14" fill="none" aria-hidden="true" {...props}>
+            <rect x="0.5" y="0.5" width="7.73" height="7.73" stroke="currentColor" />
+            <rect x="3.91" y="3.91" width="7.73" height="7.73" stroke="currentColor" />
+        </svg>
+    )
+}
+
 const walrusCodeTheme = {
     hljs: {
         color: '#faf8f5',
@@ -491,6 +500,12 @@ asyncio.run(main())`
     const sdkSnippet = quickstartLanguage === 'py' ? sdkPythonSnippet : sdkTypeScriptSnippet
     const sdkSnippetLanguage = quickstartLanguage === 'py' ? 'python' : 'javascript'
     const sdkCopyLabel = `sdk-${quickstartLanguage}`
+    const docsHref = config.docsUrl || 'https://docs.memwal.ai'
+    const installCommand = pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
+        pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
+        pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
+        'bun add @mysten-incubation/memwal'
+    const installCopyLabel = `install-${pkgManager}`
 
     return (
         <div className="dash-page">
@@ -507,7 +522,7 @@ asyncio.run(main())`
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
                         <button className="lp-nav-cta" onClick={handleLogout}>
-                            <LogOut size={14} /> sign out
+                            Sign out <LogOut size={14} />
                         </button>
                     </div>
                 </div>
@@ -591,24 +606,22 @@ asyncio.run(main())`
                             <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     )}
-                    {config.docsUrl && (
-                        <a
-                            href={config.docsUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="dashboard-cta"
-                            onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'dashboard' })}
-                        >
-                            <span className="dashboard-cta-icon-wrap" aria-hidden="true">
-                                <DocumentationCtaIcon className="dashboard-cta-icon" />
-                            </span>
-                            <div className="dashboard-cta-text">
-                                <div className="dashboard-cta-title">Documentation</div>
-                                <div className="dashboard-cta-subtitle">Guides, examples &amp; API references</div>
-                            </div>
-                            <CtaArrowIcon className="dashboard-cta-arrow" />
-                        </a>
-                    )}
+                    <a
+                        href={docsHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="dashboard-cta"
+                        onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'dashboard' })}
+                    >
+                        <span className="dashboard-cta-icon-wrap" aria-hidden="true">
+                            <DocumentationCtaIcon className="dashboard-cta-icon" />
+                        </span>
+                        <div className="dashboard-cta-text">
+                            <div className="dashboard-cta-title">Documentation</div>
+                            <div className="dashboard-cta-subtitle">Guides, examples &amp; API references</div>
+                        </div>
+                        <CtaArrowIcon className="dashboard-cta-arrow" />
+                    </a>
                 </div>
 
 
@@ -981,12 +994,19 @@ asyncio.run(main())`
                             </button>
                         ))}
                     </div>
-                    <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
-                        {pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
-                         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
-                         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
-                         'bun add @mysten-incubation/memwal'}
-                    </SyntaxHighlighter>
+                    <div className="dashboard-install-codewrap">
+                        <SyntaxHighlighter language="bash" style={githubGist} className="demo-code-block install-command" customStyle={{ margin: 0, padding: 0, background: '#000000', color: '#faf8f5' }}>
+                            {installCommand}
+                        </SyntaxHighlighter>
+                        <button
+                            className="dashboard-install-copy"
+                            type="button"
+                            onClick={() => copyToClipboard(installCommand, installCopyLabel)}
+                            aria-label="Copy install command"
+                        >
+                            <InstallCopyIcon />
+                        </button>
+                    </div>
                 </div>
             </main>
         </div>

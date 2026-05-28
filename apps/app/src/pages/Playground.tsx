@@ -617,7 +617,7 @@ export default function Playground() {
                             className="lp-nav-cta"
                             onClick={handleLogout}
                         >
-                            <LogOut size={14} /> sign out
+                            Sign out <LogOut size={14} />
                         </button>
                     </div>
                 </div>

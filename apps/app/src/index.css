@@ -87,7 +87,7 @@ body,
 
 body {
   background-image: none;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 h1, h2, h3 {
@@ -2029,7 +2029,7 @@ h1, h2, h3 {
   --border: 1px solid #54575a;
   --border-light: 1px solid rgba(250, 248, 245, 0.12);
   min-height: 100vh;
-  overflow-x: hidden;
+  overflow-x: clip;
   background: #000000;
   color: #faf8f5;
 }
@@ -2660,7 +2660,7 @@ h1, h2, h3 {
   background: var(--dash-bg);
   color: var(--dash-text);
   font-family: var(--font-sans);
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .dash-page a {
@@ -4122,22 +4122,25 @@ h1, h2, h3 {
 /* ========== Dashboard density alignment ========== */
 
 .dashboard-nav {
+  position: sticky;
+  top: 0;
+  z-index: 80;
   border-bottom: 1px solid rgba(250, 248, 245, 0.1);
 }
 
 .dashboard-nav .nav-inner {
-  max-width: 960px;
+  max-width: 1280px;
 }
 
 .dashboard-nav .lp-nav-cta {
-  min-height: 48px;
-  padding: 0 24px;
+  min-height: 0;
+  padding: 10px 22px;
   border: 1px solid #faf8f5;
   border-radius: 999px;
   background: #faf8f5;
   color: #000000;
   box-shadow: none;
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 700;
   text-transform: lowercase;
 }
@@ -4150,21 +4153,21 @@ h1, h2, h3 {
 }
 
 .dash-page .dash-shell {
-  width: min(960px, calc(100% - 48px));
-  padding: 38px 0 72px;
+  width: min(900px, calc(100% - 48px));
+  padding: 34px 0 68px;
 }
 
 .dash-page .dashboard-header {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 
 .dash-page .dashboard-header--compact {
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .dash-page .dashboard-header h2 {
   margin: 0 0 8px;
-  font-size: 1.72rem;
+  font-size: 1.54rem;
   font-weight: 800;
   line-height: 1.05;
 }
@@ -4172,14 +4175,14 @@ h1, h2, h3 {
 .dash-page .dashboard-header p {
   max-width: 680px;
   margin-top: 0;
-  font-size: 1rem;
+  font-size: 0.92rem;
   line-height: 1.45;
 }
 
 .dash-page .dash-alert {
-  min-height: 54px;
-  margin-bottom: 22px !important;
-  padding: 13px 18px 13px 52px;
+  min-height: 48px;
+  margin-bottom: 18px !important;
+  padding: 11px 16px 11px 48px;
 }
 
 .dash-alert-icon {
@@ -4203,43 +4206,43 @@ h1, h2, h3 {
 }
 
 .dash-page .dash-alert p {
-  font-size: 0.96rem;
+  font-size: 0.88rem;
   line-height: 1.28;
 }
 
 .dash-page .dashboard-cta-row {
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 20px;
 }
 
 .dash-page .dashboard-cta {
-  min-height: 88px;
+  min-height: 76px;
   height: auto;
-  gap: 16px;
-  padding: 18px 22px;
-  border-radius: 14px;
+  gap: 14px;
+  padding: 15px 18px;
+  border-radius: 12px;
 }
 
 .dash-page .dashboard-cta-icon-wrap {
-  width: 28px;
-  height: 32px;
+  width: 24px;
+  height: 28px;
   margin-top: 1px;
 }
 
 .dash-page .dashboard-cta-icon {
-  width: 28px;
-  height: 32px;
+  width: 24px;
+  height: 28px;
 }
 
 .dash-page .dashboard-cta-title {
-  font-size: 1.15rem;
+  font-size: 1.02rem;
   font-weight: 800;
   line-height: 1.18;
 }
 
 .dash-page .dashboard-cta-subtitle {
   margin-top: 4px;
-  font-size: 0.9rem;
+  font-size: 0.82rem;
   line-height: 1.35;
 }
 
@@ -4249,33 +4252,33 @@ h1, h2, h3 {
 }
 
 .dash-page .card {
-  margin-bottom: 24px !important;
-  padding: 24px;
-  border-radius: 16px;
+  margin-bottom: 20px !important;
+  padding: 20px;
+  border-radius: 12px;
 }
 
 .dash-page .dashboard-keys-card,
 .dash-page .dashboard-quickstart-card,
 .dash-page .dashboard-install-card {
   min-height: 0;
-  margin-bottom: 24px !important;
+  margin-bottom: 20px !important;
 }
 
 .dash-page .card-header {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   gap: 16px;
 }
 
 .dash-page .card-title,
 .dash-page .dashboard-keys-card .card-title {
-  font-size: 1.22rem;
+  font-size: 1.08rem;
   font-weight: 800;
   line-height: 1.15;
 }
 
 .dash-page .card-subtitle {
   margin-top: 4px;
-  font-size: 0.92rem;
+  font-size: 0.82rem;
   line-height: 1.35;
 }
 
@@ -4286,16 +4289,16 @@ h1, h2, h3 {
 .dash-page .card-header-actions .btn-secondary,
 .dash-page .dashboard-keys-refresh,
 .dash-page .dashboard-keys-add {
-  min-height: 42px;
-  padding: 0 18px;
-  border-radius: 12px;
-  font-size: 0.9rem;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
 }
 
 .dash-page .key-display,
 .dash-page .key-display--white {
-  padding: 16px 18px;
-  border-radius: 12px;
+  padding: 13px 15px;
+  border-radius: 10px;
 }
 
 .dash-page .key-display .key-label {
@@ -4303,7 +4306,7 @@ h1, h2, h3 {
 }
 
 .dash-page .key-display .key-value {
-  font-size: 0.84rem;
+  font-size: 0.78rem;
   line-height: 1.5;
 }
 
@@ -4318,17 +4321,17 @@ h1, h2, h3 {
 .dash-page .dashboard-quickstart-card pre,
 .dash-page .dashboard-quickstart-card .demo-code-block {
   min-height: 0;
-  padding: 22px 24px !important;
-  border-radius: 14px;
-  font-size: 13px;
+  padding: 18px 20px !important;
+  border-radius: 12px;
+  font-size: 12.5px;
   line-height: 1.42;
 }
 
 .dash-page .dashboard-quickstart-copy {
-  top: 14px;
-  right: 14px;
-  width: 38px;
-  height: 38px;
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
 }
 
 .dash-page .install-tabs {
@@ -4346,7 +4349,52 @@ h1, h2, h3 {
 .dash-page .install-command,
 .dash-page .install-tabs + .demo-code-block {
   padding: 10px 0 !important;
-  font-size: 0.9rem;
+  font-size: 0.82rem;
+}
+
+.dash-page .dashboard-install-codewrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.dash-page .dashboard-install-codewrap .install-command {
+  display: block;
+  width: 100%;
+  padding: 10px 42px 10px 0 !important;
+  white-space: pre;
+}
+
+.dash-page .dashboard-install-copy {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #54575a;
+  display: grid;
+  place-items: center;
+  box-shadow: none;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.dash-page .dashboard-install-copy:hover:not(:disabled) {
+  background: transparent;
+  color: #8f9294;
+  box-shadow: none;
+}
+
+.dash-page .dashboard-install-copy svg {
+  width: 12.14px;
+  height: 12.14px;
+  display: block;
 }
 
 @media (max-width: 860px) {
@@ -4370,5 +4418,395 @@ h1, h2, h3 {
 
   .dash-page .card {
     padding: 20px;
+  }
+}
+
+/* ========== Walrus Memory app flow system pass ========== */
+
+.setup-classic-nav,
+.playground-nav,
+.dashboard-nav {
+  height: 128px;
+  padding: 0 50px 0 49px;
+  background: #000000;
+  border-bottom: 0;
+  align-items: flex-start;
+}
+
+.setup-classic-nav .nav-inner,
+.playground-nav .nav-inner,
+.dashboard-nav .nav-inner {
+  position: relative;
+  max-width: none;
+  height: 128px;
+}
+
+.setup-classic-nav .nav-brand,
+.playground-nav .nav-brand,
+.dashboard-nav .nav-brand {
+  position: absolute;
+  left: 0;
+  top: 34px;
+}
+
+.setup-classic-nav .walrus-memory-wordmark,
+.playground-nav .walrus-memory-wordmark,
+.dashboard-nav .walrus-memory-wordmark {
+  color: #faf8f5;
+  font-size: 2.23rem;
+  line-height: 0.85;
+  font-weight: 900;
+}
+
+.setup-classic-nav .nav-user,
+.playground-nav .nav-user,
+.dashboard-nav .nav-user {
+  position: absolute;
+  right: 0;
+  top: 27px;
+  height: 52px;
+  gap: 24px;
+}
+
+.setup-classic-nav .nav-address,
+.playground-nav .nav-address,
+.dashboard-nav .nav-address {
+  width: 125px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: #262b30;
+  color: #faf8f5;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.6px;
+  line-height: 0.84;
+  box-shadow: none;
+}
+
+.setup-classic-nav .lp-nav-cta,
+.playground-nav .lp-nav-cta,
+.dashboard-nav .lp-nav-cta {
+  width: 153px;
+  height: 52px;
+  min-height: 52px;
+  padding: 0 30px;
+  border: 1px solid #faf8f5;
+  border-radius: 26px;
+  background: transparent;
+  color: #faf8f5;
+  box-shadow: none;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.72px;
+  line-height: 0.84;
+  text-transform: none;
+}
+
+.setup-classic-nav .lp-nav-cta svg,
+.playground-nav .lp-nav-cta svg,
+.dashboard-nav .lp-nav-cta svg {
+  width: 13.04px;
+  height: 12.14px;
+  flex: 0 0 auto;
+}
+
+.setup-classic-nav .lp-nav-cta:hover:not(:disabled),
+.playground-nav .lp-nav-cta:hover:not(:disabled),
+.dashboard-nav .lp-nav-cta:hover:not(:disabled) {
+  background: rgba(250, 248, 245, 0.08);
+  border-color: #faf8f5;
+  transform: translateY(-1px);
+  box-shadow: none;
+}
+
+.setup-classic-nav .demo-nav-back,
+.playground-nav .demo-nav-back,
+.dashboard-nav .demo-nav-back {
+  color: #8f9294;
+  font-size: 0.82rem;
+}
+
+.setup-classic-nav .demo-nav-back:hover,
+.playground-nav .demo-nav-back:hover,
+.dashboard-nav .demo-nav-back:hover {
+  color: #faf8f5;
+}
+
+.dash-page .dash-shell,
+.playground-dashboard {
+  width: min(900px, calc(100% - 48px));
+  max-width: 900px;
+  padding: 34px 0 68px;
+}
+
+.dash-page .dash-shell {
+  width: min(1240px, calc(100% - 96px));
+  max-width: 1240px;
+}
+
+.setup-classic-container {
+  width: min(900px, calc(100% - 48px));
+  max-width: 900px;
+  min-height: calc(100vh - 128px);
+  padding: 34px 0 68px;
+}
+
+.setup-classic-panel {
+  width: min(520px, 100%);
+}
+
+.playground-dashboard .dashboard-header,
+.dash-page .dashboard-header,
+.setup-classic-intro {
+  margin-bottom: 20px;
+}
+
+.playground-dashboard .dashboard-header h2,
+.dash-page .dashboard-header h2,
+.setup-classic-title {
+  margin: 0 0 8px;
+  font-size: 1.54rem;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: 0;
+  color: #faf8f5;
+}
+
+.playground-dashboard .dashboard-header p,
+.dash-page .dashboard-header p,
+.setup-classic-description {
+  max-width: 680px;
+  margin-top: 0;
+  color: #c7c5c1;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.setup-classic-description {
+  margin: 0 auto 22px;
+}
+
+.playground-dashboard .card,
+.playground-dashboard .demo-step,
+.dash-page .card,
+.setup-classic-feature-card {
+  padding: 20px;
+  border: 1px solid #54575a;
+  border-radius: 12px;
+  background: #0a0a0a;
+  color: #faf8f5;
+  box-shadow: none;
+}
+
+.playground-dashboard .card,
+.playground-dashboard .demo-step,
+.dash-page .card {
+  margin-bottom: 20px !important;
+}
+
+.playground-dashboard .card-header,
+.dash-page .card-header {
+  margin-bottom: 14px;
+  gap: 16px;
+}
+
+.playground-dashboard .card-title,
+.playground-dashboard .demo-step-title,
+.dash-page .card-title,
+.setup-classic-feature strong {
+  color: #faf8f5;
+  font-size: 1.08rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.playground-dashboard .card-subtitle,
+.dash-page .card-subtitle,
+.setup-classic-feature p {
+  color: #8f9294;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.setup-classic-feature {
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.setup-classic-generate,
+.setup-classic .setup-import-button,
+.playground-dashboard .btn,
+.dash-page .btn,
+.dash-page .dash-shell .lp-nav-cta {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+
+.setup-classic-generate,
+.setup-classic .setup-import-button {
+  min-height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
+}
+
+.playground-dashboard .demo-server-info {
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.playground-dashboard .demo-server-tag {
+  border: 1px solid #54575a;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 8px 12px;
+  color: #faf8f5;
+  box-shadow: none;
+  font-size: 0.78rem;
+}
+
+.playground-dashboard .demo-step-badge {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  font-size: 0.92rem;
+}
+
+.playground-dashboard .demo-code-block,
+.dash-page .dashboard-quickstart-card .demo-code-block,
+.dash-page .install-command {
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.42;
+  box-shadow: none;
+}
+
+.dash-page .dashboard-quickstart-card {
+  min-height: 572px;
+  padding: 39px;
+  border-color: #54575a;
+  border-radius: 24px;
+  background: #000000;
+  overflow: clip;
+}
+
+.dash-page .dashboard-quickstart-card .card-header {
+  margin-bottom: 34px;
+}
+
+.dash-page .dashboard-quickstart-card .card-title {
+  color: #faf8f5;
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-quickstart-card .card-subtitle {
+  margin-top: 14px;
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.dash-page .dashboard-quickstart-card pre,
+.dash-page .dashboard-quickstart-card .demo-code-block {
+  min-height: 395px;
+  padding: 31px 39px !important;
+  border: 1px solid #54575a;
+  border-radius: 24px;
+  background: #000000 !important;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.playground-dashboard .demo-code-block {
+  padding: 16px 18px !important;
+}
+
+.setup-classic-divider {
+  margin: 22px 0 16px;
+}
+
+.setup-classic .setup-import-textarea {
+  min-height: 78px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 860px) {
+  .setup-classic-nav,
+  .playground-nav,
+  .dashboard-nav {
+    height: 92px;
+    padding: 0 16px;
+  }
+
+  .setup-classic-nav .nav-inner,
+  .playground-nav .nav-inner,
+  .dashboard-nav .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 92px;
+    min-height: 92px;
+    padding: 0;
+  }
+
+  .setup-classic-nav .nav-brand,
+  .playground-nav .nav-brand,
+  .dashboard-nav .nav-brand {
+    top: 22px;
+  }
+
+  .setup-classic-nav .walrus-memory-wordmark,
+  .playground-nav .walrus-memory-wordmark,
+  .dashboard-nav .walrus-memory-wordmark {
+    font-size: 1.45rem;
+  }
+
+  .setup-classic-nav .nav-user,
+  .playground-nav .nav-user,
+  .dashboard-nav .nav-user {
+    display: flex;
+    align-items: center;
+    top: 18px;
+    gap: 10px;
+  }
+
+  .setup-classic-nav .nav-address,
+  .playground-nav .nav-address,
+  .dashboard-nav .nav-address {
+    width: auto;
+    min-width: 112px;
+  }
+
+  .setup-classic-nav .lp-nav-cta,
+  .playground-nav .lp-nav-cta,
+  .dashboard-nav .lp-nav-cta {
+    width: auto;
+    min-height: 44px;
+    height: 44px;
+    padding: 0 18px;
+    font-size: 0.95rem;
+  }
+
+  .dash-page .dash-shell,
+  .playground-dashboard,
+  .setup-classic-container {
+    width: calc(100% - 32px);
+    padding: 32px 0 56px;
+  }
+
+  .playground-dashboard .dashboard-header h2,
+  .dash-page .dashboard-header h2,
+  .setup-classic-title {
+    font-size: 1.38rem;
   }
 }

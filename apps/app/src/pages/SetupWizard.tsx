@@ -382,7 +382,7 @@ export default function SetupWizard() {
                                 disconnect()
                             }}
                         >
-                            <LogOut size={14} /> sign out
+                            Sign out <LogOut size={14} />
                         </button>
                     </div>
                 </div>
