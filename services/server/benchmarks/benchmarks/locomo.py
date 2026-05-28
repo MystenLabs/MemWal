@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.types import Conversation, Session, Turn, Query, Evidence
@@ -58,6 +59,36 @@ CATEGORY_MAP: dict[int, str] = {
 }
 
 LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
+
+
+# WALM-55: LOCOMO stores session timestamps as natural-language strings
+# like "1:56 pm on 8 May, 2023". Parse them into RFC 3339 UTC strings so
+# the harness can pass occurred_at through to /api/analyze in a format
+# the server expects (`chrono::DateTime<chrono::Utc>` via serde).
+#
+# The format isn't strict — LOCOMO has minor variations ("1:56 pm" vs
+# "01:56 pm"). We try the canonical format first; on failure we return
+# None and the turn just goes through without a temporal anchor (graceful
+# degradation — silence is honest, never fabricate now()).
+_LOCOMO_DATE_FMT = "%I:%M %p on %d %B, %Y"
+
+
+def _normalize_locomo_timestamp(raw: str | None) -> str | None:
+    """Parse a LOCOMO session date string into RFC 3339 UTC.
+
+    The dataset has no timezone information — we treat the times as UTC,
+    which is a benchmark-mode convention (consistent across runs, no
+    DST surprises). Returns None on parse failure so the caller falls
+    back to no-context extraction for that turn.
+    """
+    if raw is None:
+        return None
+    try:
+        dt = datetime.strptime(raw.strip(), _LOCOMO_DATE_FMT)
+    except ValueError:
+        logger.warning("could not parse LOCOMO timestamp %r; skipping temporal anchor", raw)
+        return None
+    return dt.replace(tzinfo=timezone.utc).isoformat()
 
 
 class LocomoBenchmark(BenchmarkAdapter):
@@ -192,7 +223,12 @@ class LocomoBenchmark(BenchmarkAdapter):
                 continue
 
             session_num = session_key.split("_")[1]
-            timestamp = conv.get(f"session_{session_num}_date_time")
+            # WALM-55: normalise the raw LOCOMO date string ("1:56 pm on 8
+            # May, 2023") to RFC 3339 UTC so the harness can pass it to
+            # /api/analyze as `occurred_at`. Falls back to None on
+            # unparseable formats — that turn just goes through without a
+            # temporal anchor (graceful degradation).
+            timestamp = _normalize_locomo_timestamp(conv.get(f"session_{session_num}_date_time"))
 
             turns = []
             for turn_data in session_turns_raw:

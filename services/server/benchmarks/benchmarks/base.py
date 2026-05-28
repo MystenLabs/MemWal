@@ -46,11 +46,14 @@ class BenchmarkAdapter(ABC):
         """
 
     @abstractmethod
-    def build_ingest_text(self, conversation: Conversation) -> list[tuple[str, str]]:
+    def build_ingest_text(
+        self, conversation: Conversation
+    ) -> list[tuple[str, str, str | None]]:
         """
-        Convert a conversation into (session_label, text) pairs for /api/analyze.
+        Convert a conversation into (session_label, text, occurred_at)
+        triples for /api/analyze.
 
-        Each returned pair is fed as ONE /api/analyze call. The choice of
+        Each returned triple is fed as ONE /api/analyze call. The choice of
         chunking strategy is benchmark-specific and directly affects
         extraction quality:
 
@@ -66,14 +69,19 @@ class BenchmarkAdapter(ABC):
         is provided below — adapters that use it should do so by delegation,
         so the choice is visible in the adapter's source.
 
+        WALM-55: `occurred_at` is an RFC 3339 UTC string when the source
+        dataset provides a per-turn (or per-session) timestamp, or None
+        otherwise. The server uses it as the temporal anchor inside the
+        extractor prompt — see `core.client.MemWalClient.analyze`.
+
         Returns:
-            List of (label, text) pairs.
+            List of (label, text, occurred_at) triples.
         """
 
     @staticmethod
     def build_ingest_text_naive_concat(
         conversation: Conversation,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str | None]]:
         """
         Helper: concatenate all turns in each session into one text blob.
 
@@ -81,10 +89,16 @@ class BenchmarkAdapter(ABC):
         mini-haystacks). AVOID for long sessions — the extractor drops
         facts under large input contexts.
 
+        WALM-55: this helper collapses many turns into one ingest call.
+        That collapses temporal granularity — picking any single turn's
+        timestamp to represent the whole session would be arbitrary. So
+        this helper always returns `occurred_at=None`. Adapters that
+        want per-turn timestamps should use `build_ingest_text_per_turn`.
+
         Returns:
-            List of (label, text) pairs, one per session.
+            List of (label, text, occurred_at) triples, one per session.
         """
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, str | None]] = []
         for session in conversation.sessions:
             lines: list[str] = []
             for turn in session.turns:
@@ -92,13 +106,15 @@ class BenchmarkAdapter(ABC):
                 lines.append(f"{prefix}: {turn.text}")
             text = "\n".join(lines)
             label = f"{conversation.conversation_id}/{session.session_id}"
-            result.append((label, text))
+            # See docstring — naive_concat deliberately drops per-turn
+            # timestamps because it collapses many turns into one blob.
+            result.append((label, text, None))
         return result
 
     @staticmethod
     def build_ingest_text_per_turn(
         conversation: Conversation,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str | None]]:
         """
         Helper: emit one ingest chunk per turn.
 
@@ -127,10 +143,17 @@ class BenchmarkAdapter(ABC):
         matches naive_concat so the session→memory map in run.py
         aggregates multiple turn-level chunks under the same session key.
 
+        WALM-55: `occurred_at` is sourced from `turn.timestamp` (which
+        the per-benchmark adapter normalises to RFC 3339 UTC, or sets to
+        None when the source dataset has no timestamp / it failed to
+        parse). The server uses it as the temporal anchor for resolving
+        relative-time references inside the extracted fact text — see
+        `core.client.MemWalClient.analyze` and the v6 extraction prompt.
+
         Returns:
-            List of (label, text) pairs, one per turn.
+            List of (label, text, occurred_at) triples, one per turn.
         """
-        result: list[tuple[str, str]] = []
+        result: list[tuple[str, str, str | None]] = []
         for session in conversation.sessions:
             label = f"{conversation.conversation_id}/{session.session_id}"
             for turn in session.turns:
@@ -155,5 +178,5 @@ class BenchmarkAdapter(ABC):
                     role = role[:1].upper() + role[1:]
                     text = f"{role}: {raw}"
 
-                result.append((label, text))
+                result.append((label, text, turn.timestamp))
         return result

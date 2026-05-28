@@ -93,12 +93,20 @@ class TestLocomoAdapter:
         # Per-turn chunking: 2 sessions × 3 turns each (fixture) = 6 chunks
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        for label, text in chunks:
+        # WALM-55: chunks are 3-tuples (label, text, occurred_at).
+        for label, text, occurred_at in chunks:
             assert "/" in label, "label format is conv_id/session_id"
             # LOCOMO text already has the speaker name baked in
             # ("Caroline: " / "Melanie: ") — the helper detects this
             # and skips double-prefixing.
             assert ": " in text[:30], "turn text should begin with a speaker name"
+            # occurred_at is either None or an RFC 3339 UTC string. The
+            # fixture's LOCOMO date "1:56 pm on 8 May, 2023" parses to
+            # "2023-05-08T13:56:00+00:00". We don't assert the exact
+            # value (that's a separate normaliser test) but the shape.
+            if occurred_at is not None:
+                assert "T" in occurred_at and ("+" in occurred_at or "Z" in occurred_at), \
+                    f"occurred_at must be RFC 3339, got {occurred_at!r}"
 
     def test_multiple_chunks_share_session_label(self, adapter_and_data):
         """
@@ -110,7 +118,8 @@ class TestLocomoAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         from collections import defaultdict
         by_label = defaultdict(int)
-        for label, _ in chunks:
+        # WALM-55: unpack the 3-tuple, ignore text + occurred_at.
+        for label, _text, _occurred_at in chunks:
             by_label[label] += 1
         # Every session should have produced at least one chunk
         assert len(by_label) == len(convs[0].sessions)
@@ -188,10 +197,81 @@ class TestLongMemEvalAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        for label, text in chunks:
+        # WALM-55: chunks are 3-tuples (label, text, occurred_at).
+        for label, text, occurred_at in chunks:
             assert text.strip(), "ingest text should be non-empty"
             # LongMemEval turns are raw content (no embedded speaker name)
             # so the helper prefixes them with "User: " / "Assistant: ".
             assert text.startswith(("User:", "Assistant:")), (
                 f"LongMemEval turn should have role prefix; got {text[:40]!r}"
             )
+            # occurred_at is either None or an RFC 3339 UTC string. LME
+            # haystack_dates "2023/04/10 (Mon) 17:50" parses to
+            # "2023-04-10T17:50:00+00:00".
+            if occurred_at is not None:
+                assert "T" in occurred_at and ("+" in occurred_at or "Z" in occurred_at), \
+                    f"occurred_at must be RFC 3339, got {occurred_at!r}"
+
+
+# ── WALM-55: per-benchmark timestamp normalisation ────────────────────
+
+class TestLocomoTimestampNormalisation:
+    """Pin the LOCOMO date-string → RFC 3339 conversion shape.
+
+    The server expects RFC 3339 UTC strings on AnalyzeRequest.occurred_at.
+    If a future LOCOMO release changes its date format, these tests fail
+    loudly rather than silently shipping unparsed strings to the server.
+    """
+
+    def test_canonical_format_parses_to_rfc3339_utc(self):
+        from benchmarks.locomo import _normalize_locomo_timestamp
+
+        # The canonical LOCOMO format, sampled from the cached fixture.
+        out = _normalize_locomo_timestamp("1:56 pm on 8 May, 2023")
+        assert out == "2023-05-08T13:56:00+00:00", (
+            f"LOCOMO normaliser produced {out!r} for the canonical format; "
+            "if this fails, the format string in _LOCOMO_DATE_FMT drifted"
+        )
+
+    def test_unparseable_input_returns_none(self):
+        # Graceful degradation: the harness shouldn't crash on a malformed
+        # date — the turn just goes through without a temporal anchor.
+        from benchmarks.locomo import _normalize_locomo_timestamp
+
+        assert _normalize_locomo_timestamp("not a date") is None
+        assert _normalize_locomo_timestamp("") is None
+
+    def test_none_input_returns_none(self):
+        from benchmarks.locomo import _normalize_locomo_timestamp
+
+        assert _normalize_locomo_timestamp(None) is None
+
+
+class TestLongMemEvalTimestampNormalisation:
+    """The LME adapter does inline normalisation rather than via a helper.
+    This test goes through the adapter's full parse path to confirm the
+    RFC 3339 conversion fires correctly on the cached fixture's data.
+    """
+
+    def test_fixture_session_dates_become_rfc3339_on_turns(self, tmp_path):
+        from benchmarks.longmemeval import LongMemEvalBenchmark
+
+        fixture_dir = Path(__file__).parent / "fixtures"
+        adapter = LongMemEvalBenchmark()
+        convs, _ = adapter.load(fixture_dir)
+        # Every turn that has a timestamp should now have it in RFC 3339
+        # UTC form (T separator, +00:00 suffix).
+        seen_any = False
+        for conv in convs:
+            for session in conv.sessions:
+                for turn in session.turns:
+                    if turn.timestamp is not None:
+                        seen_any = True
+                        assert "T" in turn.timestamp
+                        assert turn.timestamp.endswith("+00:00"), (
+                            f"LME turn timestamp must be UTC-normalised; "
+                            f"got {turn.timestamp!r}"
+                        )
+        # The fixture must include at least one timestamped session
+        # (otherwise we're not actually testing the conversion path).
+        assert seen_any, "fixture should contain at least one timestamped session"
