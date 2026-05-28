@@ -32,6 +32,8 @@ import { trackEvent } from '../utils/analytics'
 type AuthMethod = 'enoki' | 'wallet' | null
 
 const AUTH_METHOD_KEY = 'memwal_auth_method'
+const MARKETING_ASSET_VERSION = 'walm61-20260529b'
+const marketingAsset = (path: string) => `${path}?v=${MARKETING_ASSET_VERSION}`
 
 function persistAuthMethod(method: AuthMethod) {
     if (method) {
@@ -48,32 +50,32 @@ function getPersistedAuthMethod(): AuthMethod {
 }
 
 const builderLogos = [
-    { label: 'Allium', src: '/walrus-logo-allium.png', className: 'wm-logo-allium', nodeId: '2425:2711' },
-    { label: 'inflectiv', src: '/walrus-logo-inflectiv.svg', className: 'wm-logo-inflectiv', nodeId: '2425:2696' },
-    { label: 'OpenGradient', src: '/walrus-logo-opengradient.svg', className: 'wm-logo-opengradient', nodeId: '2425:2692' },
-    { label: 'TALUS', src: '/walrus-logo-talus.svg', className: 'wm-logo-talus', nodeId: '2425:2693' },
-    { label: 'TATUM', src: '/walrus-logo-tatum.svg', className: 'wm-logo-tatum', nodeId: '2575:73' },
-    { label: 'CONSO', src: '/walrus-logo-conso.png', className: 'wm-logo-conso', nodeId: '2575:78' },
+    { label: 'Allium', src: marketingAsset('/walrus-logo-allium.png'), className: 'wm-logo-allium', nodeId: '2425:2711' },
+    { label: 'inflectiv', src: marketingAsset('/walrus-logo-inflectiv.svg'), className: 'wm-logo-inflectiv', nodeId: '2425:2696' },
+    { label: 'OpenGradient', src: marketingAsset('/walrus-logo-opengradient.svg'), className: 'wm-logo-opengradient', nodeId: '2425:2692' },
+    { label: 'TALUS', src: marketingAsset('/walrus-logo-talus.svg'), className: 'wm-logo-talus', nodeId: '2425:2693' },
+    { label: 'TATUM', src: marketingAsset('/walrus-logo-tatum.svg'), className: 'wm-logo-tatum', nodeId: '2575:73' },
+    { label: 'CONSO', src: marketingAsset('/walrus-logo-conso.png'), className: 'wm-logo-conso', nodeId: '2575:78' },
 ]
 
 const portableCards = [
     {
         nodeId: '2302:2635',
-        iconSrc: '/walrus-card-portable.svg',
+        iconSrc: marketingAsset('/walrus-card-portable.svg'),
         title: 'Portable by design',
         copy: 'Context doesn’t die when the session ends. Your agent picks up where it left off — in a different app, in a different runtime, weeks later.',
         codeLines: ['Your agents keep context', 'wherever they run'],
     },
     {
         nodeId: '2302:2648',
-        iconSrc: '/walrus-card-control.svg',
+        iconSrc: marketingAsset('/walrus-card-control.svg'),
         title: 'Yours to control',
         copy: 'You decide how every memory is shared, accessed, and updated. Programmable permissions, explicit ownership, privacy on your terms.',
         codeLines: ['Explicit privacy and access', 'permissions'],
     },
     {
         nodeId: '2302:2661',
-        iconSrc: '/walrus-card-coordination.svg',
+        iconSrc: marketingAsset('/walrus-card-coordination.svg'),
         title: 'Built for coordination',
         copy: 'In multi-step workflows, your agents share memory and stay coordinated on the same state. Memory integrity is independently verifiable.',
         codeLines: ['Multiple agents, one source', 'of truth'],
@@ -208,20 +210,20 @@ const footerColumns = [
 ]
 
 const socialLinks = [
-    { label: 'Discord', href: '#', src: '/walrus-social-discord.svg' },
-    { label: 'Telegram', href: '#', src: '/walrus-social-telegram.svg' },
-    { label: 'X', href: '#', src: '/walrus-social-x.svg' },
-    { label: 'LinkedIn', href: '#', src: '/walrus-social-linkedin.svg' },
-    { label: 'YouTube', href: '#', src: '/walrus-social-youtube.svg' },
+    { label: 'Discord', href: '#', src: marketingAsset('/walrus-social-discord.svg') },
+    { label: 'Telegram', href: '#', src: marketingAsset('/walrus-social-telegram.svg') },
+    { label: 'X', href: '#', src: marketingAsset('/walrus-social-x.svg') },
+    { label: 'LinkedIn', href: '#', src: marketingAsset('/walrus-social-linkedin.svg') },
+    { label: 'YouTube', href: '#', src: marketingAsset('/walrus-social-youtube.svg') },
 ]
 
 const signinLogos = [
-    { label: 'Allium', src: '/walrus-trust-allium.png', w: 143 },
-    { label: 'inflectiv', src: '/walrus-trust-inflectiv.svg', w: 162 },
-    { label: 'OpenGradient', src: '/walrus-trust-opengradient.svg', w: 191 },
-    { label: 'TALUS', src: '/walrus-trust-talus.svg', w: 117 },
-    { label: 'TATUM', src: '/walrus-trust-tatum.svg', w: 128 },
-    { label: 'CONSO', src: '/walrus-logo-conso.png', w: 146 },
+    { label: 'Allium', src: marketingAsset('/walrus-trust-allium.png'), w: 143 },
+    { label: 'inflectiv', src: marketingAsset('/walrus-trust-inflectiv.svg'), w: 162 },
+    { label: 'OpenGradient', src: marketingAsset('/walrus-trust-opengradient.svg'), w: 191 },
+    { label: 'TALUS', src: marketingAsset('/walrus-trust-talus.svg'), w: 117 },
+    { label: 'TATUM', src: marketingAsset('/walrus-trust-tatum.svg'), w: 128 },
+    { label: 'CONSO', src: marketingAsset('/walrus-logo-conso.png'), w: 146 },
 ]
 
 const HERO_QUICKSTART_CODE = [
@@ -420,13 +422,13 @@ export default function LandingPage() {
                     {loginOpen && (
                         <div className="wm-signin" role="dialog" aria-modal="true" aria-label="Sign in">
                             <div className="wm-signin-backdrop" onClick={() => setLoginOpen(false)} aria-hidden="true" />
-                            <img className="wm-signin-aurora" src="/walrus-signin-bg.png" alt="" aria-hidden="true" />
+                            <img className="wm-signin-aurora" src={marketingAsset('/walrus-signin-bg.png')} alt="" aria-hidden="true" />
                             <button className="wm-signin-close" onClick={() => setLoginOpen(false)} aria-label="Close sign in">
                                 <Plus size={22} />
                             </button>
                             <div className="wm-signin-inner">
                                 <div className="wm-signin-card">
-                                    <img className="wm-signin-logo" src="/walrus-signin-logo.svg" alt="Walrus Memory" />
+                                    <img className="wm-signin-logo" src={marketingAsset('/walrus-signin-logo.svg')} alt="Walrus Memory" />
                                     <p className="wm-signin-sub">Sign in to start building with portable memory across apps and workflows.</p>
                                     {hasEnokiConfig && googleWallet && (
                                         <button className="wm-signin-google" onClick={handleEnokiConnect}>
@@ -464,13 +466,13 @@ export default function LandingPage() {
                 <section className="wm-hero" id="discover">
                     <div className="wm-hero-bg" aria-hidden="true">
                         <img
-                            src="/walrus-memory-aurora-snake.png?v=walm61"
+                            src={marketingAsset('/walrus-memory-aurora-snake.png')}
                             alt=""
                             className="wm-hero-bg-layer wm-hero-bg-layer--snake"
                             data-node-id="2425:2274"
                         />
                         <img
-                            src="/walrus-memory-aurora-r-layer.png?v=walm61"
+                            src={marketingAsset('/walrus-memory-aurora-r-layer.png')}
                             alt=""
                             className="wm-hero-bg-layer wm-hero-bg-layer--r"
                             data-node-id="2425:2275"
@@ -576,8 +578,8 @@ export default function LandingPage() {
                 <section className="wm-reset" id="memory-layer">
                     <h2 data-node-id="2425:2855">Without memory,<br />agents hit reset</h2>
                     <div className="wm-reset-visual">
-                        <img src="/walrus-memory-reset-aurora.png" alt="" className="wm-reset-aurora" data-node-id="2425:2685" aria-hidden="true" />
-                        <img src="/walrus-memory-reset-mascot.png" alt="" className="wm-reset-mascot" data-node-id="2425:2853" aria-hidden="true" />
+                        <img src={marketingAsset('/walrus-memory-reset-aurora.png')} alt="" className="wm-reset-aurora" data-node-id="2425:2685" aria-hidden="true" />
+                        <img src={marketingAsset('/walrus-memory-reset-mascot.png')} alt="" className="wm-reset-mascot" data-node-id="2425:2853" aria-hidden="true" />
                     </div>
                     <div className="wm-command-pill" data-node-id="2425:2849">
                         <span>A workflow spans two agents, and neither knows what th</span>
@@ -695,7 +697,7 @@ export default function LandingPage() {
                             ))}
                         </div>
                         <div className="wm-production-mascot">
-                            <img src="/walrus-memory-monogram.png" alt="Walrus Memory mascot holding a card" data-node-id="2425:2740" />
+                            <img src={marketingAsset('/walrus-memory-monogram.png')} alt="Walrus Memory mascot holding a card" data-node-id="2425:2740" />
                         </div>
                         <div className="wm-flow-column">
                             <button data-node-id="2302:2609">Recall</button>
@@ -830,7 +832,7 @@ export default function LandingPage() {
                         <span className="wm-footer-copyright">©2026 Copyright Walrus Foundation. All rights reserved.</span>
                     </div>
                     <div className="wm-footer-word">walrus</div>
-                    <img src="/walrus-memory-closeup.png" alt="" aria-hidden="true" />
+                    <img src={marketingAsset('/walrus-memory-closeup.png')} alt="" aria-hidden="true" />
                 </div>
             </footer>
         </div>
