@@ -71,41 +71,50 @@ pub trait Extractor: Send + Sync {
     /// response is normalised to an empty list).
     async fn extract(&self, text: &str) -> Result<ExtractedFacts, AppError>;
 
-    /// Extract memorable facts with **pre-extraction dedup context**
-    /// — the caller has already pulled the top-K nearest existing memories
-    /// for `text` and passes them as `related_memories`. The extractor
-    /// shows them to the LLM as a `<related_memories>` block so it can:
+    /// Extract memorable facts with **pre-extraction dedup context** and
+    /// an optional **temporal anchor**.
     ///
-    /// - Skip duplicates ("Bob lives in Seattle" already exists)
-    /// - Anchor borderline content against known facts ("this is new,
-    ///   keep it" vs "this is just a restatement, drop it")
-    /// - Avoid emitting near-paraphrases of existing memories
+    /// - `related_memories`: top-K nearest existing memories for `text`,
+    ///   shown to the LLM as a `<related_memories>` block. Used to:
+    ///   skip duplicates ("Bob lives in Seattle" already exists), anchor
+    ///   borderline content, avoid emitting near-paraphrases. The
+    ///   extractor does NOT auto-merge or supersede — extraction stays
+    ///   ADD-only.
     ///
-    /// This keeps extraction saliency-aware without automatic merging or
-    /// supersede — the extractor just decides what to extract afresh.
+    /// - `occurred_at`: optional RFC-3339 UTC timestamp of when this
+    ///   conversation turn took place. When present, the extractor shows
+    ///   it to the LLM as a `<context occurred_at="..."/>` tag so the
+    ///   LLM can resolve in-turn relative references ("last Friday",
+    ///   "yesterday") to absolute dates *inside the extracted fact text*.
+    ///   The resolved date lives inside the SEAL-encrypted fact on Walrus
+    ///   and inside the embedding — never as a server-readable metadata
+    ///   column. See [`render_occurred_at_block`].
     ///
     /// Default impl falls through to [`Self::extract`] so callers that
     /// don't have related-memory context (manual remember, restore flow)
     /// keep working without changes; the `routes/analyze.rs` handler is
     /// the one site expected to actually pass context.
     ///
-    /// Pass an empty slice (`&[]`) when the namespace has no prior
-    /// memories — the impl is expected to short-circuit and behave
-    /// identically to [`Self::extract`] in that case (no wasted tokens
-    /// on an empty `<related_memories>` block). The caller is the one
-    /// expected to skip the actual `db.search_similar` round-trip when
-    /// it knows the namespace is empty (see `routes/analyze.rs`); the
-    /// short-circuit here is just a defensive no-op for safety.
+    /// Pass an empty slice (`&[]`) for `related_memories` when the
+    /// namespace has no prior memories — the impl is expected to
+    /// short-circuit and behave identically to [`Self::extract`] in
+    /// that case (no wasted tokens on an empty `<related_memories>`
+    /// block). Pass `None` for `occurred_at` when no temporal anchor is
+    /// available; the impl must NOT default to `now()` (silence is
+    /// honest; falling back to `now` would stamp present-time onto
+    /// past-event facts and pollute retrieval).
     async fn extract_with_context(
         &self,
         text: &str,
         related_memories: &[&str],
+        occurred_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<ExtractedFacts, AppError> {
-        // Default — ignore the context. Concrete impls that can use it
+        // Default — ignore both contexts. Concrete impls that can use them
         // (like `LlmExtractor`) override this. Keeping the default sane
         // means a test mock can implement just `extract` and still satisfy
         // the trait for callers that opt into the contextual variant.
         let _ = related_memories;
+        let _ = occurred_at;
         self.extract(text).await
     }
 }
@@ -164,7 +173,34 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// exists, and adds a worked summary-vs-atomic example. Preserves v4's
 /// exact-paraphrase dedup (the mechanism behind the LOCOMO win).
 /// Source: `prompts/extract.txt`.
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v5";
+///
+/// v6 (WALM-55): adds a `<context occurred_at="..."/>` temporal anchor.
+/// When the caller supplies an absolute RFC-3339 timestamp via
+/// `AnalyzeRequest.occurred_at`, the extractor uses it to:
+/// (a) attach a verbose absolute date (`Weekday, D Month YYYY
+/// (YYYY-MM-DD)`) to facts describing current/recent events, (b)
+/// resolve specific relative references ("last Friday", "yesterday")
+/// to absolute dates, (c) keep vague references honest ("a few years
+/// ago" → keep as-is; "next week" → anchor to a month when possible),
+/// and (d) preserve original dates on recounted past events. Defensive
+/// default: when uncertain whether a fact is time-anchored, the LLM
+/// is instructed to prefer leaving the date off (a missing date is
+/// recoverable; a wrongly-stamped date pollutes retrieval).
+///
+/// Architecture A (locked 2026-05-27): the resolved date lives ONLY
+/// inside the extracted fact text. It ends up in the SEAL-encrypted
+/// blob on Walrus and the embedding vector — there is NO new metadata
+/// column on `vector_entries`. The server can never filter or rank by
+/// event time; that's the privacy-floor-preserving trade. Targets the
+/// LOCOMO `temporal` 45.2 / LME `temporal-reasoning` 60.1 categories
+/// (the two weakest after the May 2026 phase-1 cycle).
+///
+/// The `<context>` tag is supplied as a separate user-role message by
+/// `LlmExtractor::extract_with_context` so the static system prompt
+/// stays cacheable (same pattern as the `<related_memories>` block).
+/// Callers without an `occurred_at` pass `None`; the impl does NOT
+/// fall back to `now()`.
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v6";
 
 /// Map a bucket name from the extractor LLM to a numeric importance score.
 /// Unknown / missing buckets default to `IMPORTANCE_STANDARD` so a noisy
@@ -249,15 +285,51 @@ impl LlmExtractor {
             )));
         }
 
-        let api_resp: ChatCompletionResponse = resp
-            .json()
-            .await
+        // WALM-55: read body as text first (was `resp.json()` directly).
+        // This enables two transient-failure detections that route to
+        // `AppError::UpstreamUnavailable` (HTTP 503, retried by the
+        // SDK + benchmark harness) instead of `AppError::Internal`
+        // (HTTP 500, dropped):
+        //
+        // (1) `resp.text()` fails — transport-level: body never fully
+        //     arrived (connection drop, HTTP/2 stream reset). Observed
+        //     during the LME v2 bench investigation.
+        //
+        // (2) Body is an OpenRouter error envelope wrapped in 200 OK:
+        //     `{"error":{"message":"...","code":NNN}}` with no
+        //     `choices` field. Observed when an upstream provider
+        //     times out and OpenRouter swallows the 5xx, emitting 200
+        //     with the embedded error.
+        //
+        // (3) Body deserialises but `content` is `null` — handled at
+        //     the `ChatMessageResp` type (now `Option<String>`),
+        //     degrades to empty string and produces zero facts.
+        //
+        // Cost: holding the body as a String uses ~response-size extra
+        // memory (a few KB per chat completion — trivial).
+        let body = resp.text().await.map_err(|e| {
+            AppError::UpstreamUnavailable(format!("Failed to read LLM response body: {}", e))
+        })?;
+
+        if let Some(envelope) = parse_openrouter_error_envelope(&body) {
+            return Err(AppError::UpstreamUnavailable(format!(
+                "OpenRouter upstream error (code={}): {}",
+                envelope.code, envelope.message
+            )));
+        }
+
+        let api_resp: ChatCompletionResponse = serde_json::from_str(&body)
             .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
+        // WALM-55: `content` is `Option<String>` — `None` on upstream
+        // null-content returns degrades to empty string, which
+        // `parse_extracted_facts` treats as zero facts. Same legitimate
+        // outcome as the prompt's explicit `NONE` reply.
         let content = api_resp
             .choices
             .first()
-            .map(|c| c.message.content.trim().to_string())
+            .and_then(|c| c.message.content.as_deref())
+            .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
         Ok(parse_extracted_facts(&content))
@@ -281,47 +353,77 @@ impl Extractor for LlmExtractor {
         self.call_chat_completion(messages).await
     }
 
-    /// extract with pre-extraction dedup context. Sends two user
-    /// messages — first the `<related_memories>` block, then the actual
-    /// input text. The static system prompt (see
-    /// [`FACT_EXTRACTION_PROMPT_VERSION`]) explains how the LLM should use
-    /// the block (skip exact-paraphrase duplicates, keep atomic facts even
-    /// under a summary, anchor borderline content, do not auto-merge).
+    /// Extract with pre-extraction dedup context and an optional temporal
+    /// anchor. Sends 1-3 user messages depending on which contexts are
+    /// present:
     ///
-    /// On empty `related_memories` slice, short-circuits to plain `extract`
-    /// — no wasted tokens, no second user message. The empty-namespace
-    /// optimisation in the caller (skip the recall round-trip) is what
-    /// actually saves time on first-ingest paths; this is a safety net.
+    /// ```text
+    /// [system: FACT_EXTRACTION_PROMPT]
+    /// [user:   <related_memories>...</related_memories>]   // only if related_memories non-empty
+    /// [user:   <context occurred_at="..."/>]               // only if occurred_at is Some
+    /// [user:   <the actual input text>]                    // always
+    /// ```
+    ///
+    /// Each context block is a separate user message so the static system
+    /// prompt stays cacheable. The system prompt (see
+    /// [`FACT_EXTRACTION_PROMPT_VERSION`]) explains how the LLM should
+    /// use each block.
+    ///
+    /// Short-circuit: when BOTH contexts are empty (no related memories
+    /// AND no occurred_at), delegates to plain `extract` — no wasted
+    /// tokens on empty context messages. The empty-namespace
+    /// optimisation in the caller (skip the pre-extraction recall
+    /// round-trip) is what actually saves time on first-ingest paths;
+    /// this is a safety net.
+    ///
+    /// `occurred_at` is rendered as RFC 3339 UTC inside a self-closing
+    /// `<context>` tag — see [`render_occurred_at_block`]. The tag is a
+    /// known-good shape (no user-controlled content), so it bypasses the
+    /// prompt-injection escaping that the related-memories block needs.
     #[tracing::instrument(
         name = "extractor.extract_with_context",
         skip_all,
-        fields(text_len = text.len(), context_len = related_memories.len())
+        fields(
+            text_len = text.len(),
+            context_len = related_memories.len(),
+            has_occurred_at = occurred_at.is_some(),
+        )
     )]
     async fn extract_with_context(
         &self,
         text: &str,
         related_memories: &[&str],
+        occurred_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<ExtractedFacts, AppError> {
-        if related_memories.is_empty() {
+        // Short-circuit when there's nothing context-worthy to send.
+        // Both `related_memories.is_empty()` AND `occurred_at.is_none()`
+        // must hold — either context alone is reason enough to use the
+        // contextual prompt path.
+        if related_memories.is_empty() && occurred_at.is_none() {
             return self.extract(text).await;
         }
 
-        let context_block = render_related_memories_block(related_memories);
-
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: FACT_EXTRACTION_PROMPT.to_string(),
-            },
-            ChatMessage {
+        let mut messages = Vec::with_capacity(4);
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: FACT_EXTRACTION_PROMPT.to_string(),
+        });
+        if !related_memories.is_empty() {
+            messages.push(ChatMessage {
                 role: "user".to_string(),
-                content: context_block,
-            },
-            ChatMessage {
+                content: render_related_memories_block(related_memories),
+            });
+        }
+        if let Some(ts) = occurred_at {
+            messages.push(ChatMessage {
                 role: "user".to_string(),
-                content: text.to_string(),
-            },
-        ];
+                content: render_occurred_at_block(ts),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: text.to_string(),
+        });
         self.call_chat_completion(messages).await
     }
 }
@@ -367,7 +469,79 @@ fn render_related_memories_block(memories: &[&str]) -> String {
     out
 }
 
-/// escape characters with structural meaning in the
+/// Render a `<context occurred_at="..."/>` block for the temporal-anchor
+/// user message. Format is a single self-closing XML-style tag (no body
+/// content) carrying the RFC 3339 UTC timestamp.
+///
+/// The prompt (see `prompts/extract.txt`, v6 onwards) instructs the LLM
+/// to use this timestamp as the absolute anchor for resolving in-turn
+/// relative-time references ("last Friday", "yesterday") into absolute
+/// dates that end up *inside the extracted fact text* — so the date
+/// flows into both the SEAL-encrypted blob and the embedding vector.
+///
+/// No prompt-injection escaping is needed here: the timestamp value is
+/// a server-controlled RFC 3339 serialisation, not user-supplied text.
+/// `chrono::DateTime<Utc>::to_rfc3339` produces deterministic output
+/// from the standard library — `2023-05-25T17:50:00+00:00` — with no
+/// embeddable control characters.
+fn render_occurred_at_block(occurred_at: chrono::DateTime<chrono::Utc>) -> String {
+    format!("<context occurred_at=\"{}\"/>", occurred_at.to_rfc3339())
+}
+
+/// Parsed shape of OpenRouter's "200 OK wrapping an upstream
+/// gateway-timeout error" envelope. Used to detect this case at the
+/// chat-completion + embedding call sites and route to
+/// `AppError::UpstreamUnavailable` (HTTP 503, retryable by clients)
+/// instead of `AppError::Internal` (HTTP 500, dropped by the SDK +
+/// benchmark harness retry policy).
+///
+/// Observed shape in production:
+///
+/// ```json
+/// {"error":{"message":"The operation was aborted","code":504}}
+/// ```
+///
+/// Sometimes the body is padded with leading whitespace lines before the
+/// JSON object — the parser handles that naturally because
+/// `serde_json::from_str` trims surrounding whitespace.
+pub(crate) struct OpenRouterErrorEnvelope {
+    pub code: i64,
+    pub message: String,
+}
+
+/// Try to parse `body` as the OpenRouter error envelope. Returns
+/// `Some(envelope)` only when the body matches that exact shape (a JSON
+/// object with a top-level `error` field containing `message` + `code`,
+/// AND no top-level `choices` field). Returns `None` for any other body
+/// — including valid chat completions, embeddings, or genuinely
+/// malformed JSON — so the caller can fall through to its existing
+/// error handling.
+///
+/// The `choices.is_none()` guard prevents a false-positive on the edge
+/// case where a body contains BOTH a valid `choices` array AND an
+/// `error` field (some providers emit partial-error metadata alongside
+/// successful completions); in that case we want to deserialise the
+/// completion normally rather than discard it as a 503.
+///
+/// Free function so the unit tests can exercise the envelope detection
+/// independently of the HTTP call sites.
+pub(crate) fn parse_openrouter_error_envelope(body: &str) -> Option<OpenRouterErrorEnvelope> {
+    // serde_json::Value avoids a strict struct shape — OpenRouter has
+    // historically varied the secondary fields (`type`, `param`,
+    // `metadata`) on error envelopes; we only need `code` + `message`.
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Guard: if `choices` is present, the body is (or claims to be) a
+    // successful completion — do not classify as an upstream error.
+    if v.get("choices").is_some() {
+        return None;
+    }
+    let err = v.get("error")?.as_object()?;
+    let code = err.get("code")?.as_i64()?;
+    let message = err.get("message")?.as_str()?.to_string();
+    Some(OpenRouterErrorEnvelope { code, message })
+}
+
+/// Escape characters with structural meaning in the
 /// `<related_memories>` block so stored user content can't inject
 /// prompt-control sequences. We use XML-style entity references
 /// because the LLM is overwhelmingly familiar with that escape
@@ -673,8 +847,12 @@ mod tests {
         };
 
         // Non-empty context, but the default impl should ignore it.
+        // WALM-55: also pass None for occurred_at — the default impl
+        // must ignore both contexts equally.
         let context = ["Existing memory A", "Existing memory B"];
-        let result = mock.extract_with_context("new input text", &context).await;
+        let result = mock
+            .extract_with_context("new input text", &context, None)
+            .await;
         assert!(result.is_ok());
         assert_eq!(
             mock.extract_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -695,12 +873,35 @@ mod tests {
             extract_calls: std::sync::atomic::AtomicUsize::new(0),
             last_text: std::sync::Mutex::new(String::new()),
         };
-        let result = mock.extract_with_context("hello", &[]).await;
+        let result = mock.extract_with_context("hello", &[], None).await;
         assert!(result.is_ok());
         assert_eq!(
             mock.extract_calls.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn extract_with_context_default_handles_only_occurred_at() {
+        // A default-impl Extractor (test mock without override) must
+        // also ignore occurred_at and fall through to extract(). This
+        // pins the trait contract: alternative impls that never opt
+        // into temporal awareness keep working without code changes.
+        let mock = CountingMockExtractor {
+            extract_calls: std::sync::atomic::AtomicUsize::new(0),
+            last_text: std::sync::Mutex::new(String::new()),
+        };
+        let ts = chrono::DateTime::parse_from_rfc3339("2023-05-25T17:50:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let result = mock.extract_with_context("hello", &[], Some(ts)).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            mock.extract_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "default impl should ignore occurred_at and delegate to extract() once"
+        );
+        assert_eq!(*mock.last_text.lock().unwrap(), "hello");
     }
 
     // ── related_memories block rendering ─────────────────────
@@ -857,11 +1058,136 @@ mod tests {
         // mechanism behind the LOCOMO win and v5 must not drop it.
         assert!(
             prompt.contains("EXACT match or close paraphrase"),
-            "v4 exact-paraphrase dedup rule must be preserved in extract.v5"
+            "v4 exact-paraphrase dedup rule must be preserved in extract.v5+"
         );
         // The version const must track the prompt: if the prompt changes,
         // the version should not silently stay behind.
-        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v5");
+        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v6");
+    }
+
+    #[test]
+    fn extract_v6_prompt_contains_temporal_anchor_section() {
+        // WALM-55: the extract.v6 prompt must instruct the LLM about the
+        // `<context occurred_at="..."/>` tag. Pin three load-bearing
+        // pieces of the temporal-anchor section so a future prompt edit
+        // can't silently remove them.
+        let prompt = FACT_EXTRACTION_PROMPT;
+        assert!(
+            prompt.contains("`<context occurred_at=\"...\"/>`"),
+            "v6 must document the context tag the LLM should expect"
+        );
+        assert!(
+            prompt.contains("temporal anchor"),
+            "v6 must use the phrase 'temporal anchor' so the LLM knows the tag's role"
+        );
+        // The defensive opt-out is the load-bearing safety rule against
+        // gpt-4o-mini over-stamping. If a future edit removes it, the
+        // wrongly-stamped-fact failure mode becomes silently more
+        // likely.
+        assert!(
+            prompt.contains("prefer leaving the date off"),
+            "v6 must keep the 'prefer no date when uncertain' defensive rule"
+        );
+        // The verbose date format is what makes natural-language and
+        // ISO date queries both hit. Pin the example so a future edit
+        // can't drop one half of the format.
+        assert!(
+            prompt.contains("Friday, 19 May 2023 (2023-05-19)"),
+            "v6 must keep the worked example with the verbose date format"
+        );
+    }
+
+    // ── WALM-55: occurred_at block rendering ─────────────────────────
+
+    #[test]
+    fn render_occurred_at_block_basic_shape() {
+        // Self-closing XML-style tag with an RFC 3339 attribute. The
+        // LLM-facing prompt expects exactly this shape — drift in the
+        // rendering would silently break the temporal-anchor mechanism.
+        let ts = chrono::DateTime::parse_from_rfc3339("2023-05-25T17:50:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let block = super::render_occurred_at_block(ts);
+        assert_eq!(
+            block, "<context occurred_at=\"2023-05-25T17:50:00+00:00\"/>",
+            "tag shape must match what the prompt's v6 examples reference"
+        );
+    }
+
+    #[test]
+    fn render_occurred_at_block_handles_subsecond_and_non_utc_input() {
+        // Subsecond precision should survive into the rendered tag.
+        // We also pin that callers pre-converting from a fixed offset
+        // to Utc (the standard recipe) produces the +00:00 suffix.
+        let ts_naive = chrono::DateTime::parse_from_rfc3339("2023-05-25T17:50:00.123-07:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let block = super::render_occurred_at_block(ts_naive);
+        // -07:00 + 7h = +00:00 → "2023-05-26T00:50:00.123+00:00"
+        assert_eq!(
+            block, "<context occurred_at=\"2023-05-26T00:50:00.123+00:00\"/>",
+            "non-UTC inputs must be normalised to UTC in the rendered tag"
+        );
+    }
+
+    #[test]
+    fn extract_v6_prompt_blocks_tag_leak_and_date_fabrication() {
+        // WALM-55 smoke-test follow-up: the first prompt-iteration of v6
+        // had two reproducible failure modes when `<context>` was absent:
+        //   1. The LLM hallucinated a `<context occurred_at="..."/>` line
+        //      copied verbatim from the worked examples (then the parser,
+        //      which is too permissive, stored the tag as a "fact").
+        //   2. The LLM fabricated a resolved date for "last Friday" using
+        //      the timestamp from the example, despite no anchor being
+        //      provided in the call.
+        //
+        // The fix added two explicit anti-leak rules to the prompt. Pin
+        // them here so a future edit can't silently regress to the
+        // failure modes.
+        let prompt = FACT_EXTRACTION_PROMPT;
+        assert!(
+            prompt.contains("do NOT resolve relative references"),
+            "v6 must explicitly forbid date fabrication when <context> is absent"
+        );
+        assert!(
+            prompt.contains("Do NOT emit a `<context>` line in your output"),
+            "v6 must explicitly forbid emitting the <context> tag in output"
+        );
+        assert!(
+            prompt.contains("Output format — strict"),
+            "v6 must include the strict-output-format section"
+        );
+        assert!(
+            prompt.contains("fact lines ONLY"),
+            "v6 must emphasise fact-lines-only output"
+        );
+    }
+
+    #[test]
+    fn extract_v6_prompt_documents_three_worked_temporal_examples() {
+        // Pin that v6 keeps a worked example for each of the three
+        // critical temporal cases the diagnosis identified:
+        //   1. current event with specific relative reference (the
+        //      dominant failure mode — ~78% of failing temporal Qs)
+        //   2. recounted old event keeps its own date (the anti-example
+        //      against over-stamping)
+        //   3. stable facts get no date even when occurred_at is present
+        //      (negative case preventing over-stamping)
+        // If a future edit drops any one of these, the corresponding
+        // failure mode becomes silently more likely.
+        let prompt = FACT_EXTRACTION_PROMPT;
+        assert!(
+            prompt.contains("specific relative reference resolved"),
+            "v6 must keep the current-event-with-resolved-reference example"
+        );
+        assert!(
+            prompt.contains("recounted old event keeps its own date"),
+            "v6 must keep the anti-example for recounted-event date preservation"
+        );
+        assert!(
+            prompt.contains("stable facts have no date"),
+            "v6 must keep the no-date-on-stable-facts example"
+        );
     }
 
     // ── prompt-injection guard on related_memories content ──
@@ -959,8 +1285,10 @@ mod tests {
             last_text: std::sync::Mutex::new(String::new()),
         };
 
-        // Empty slice — what every analyze.rs failure-mode path passes.
-        let result = mock.extract_with_context("the user input", &[]).await;
+        // Empty slice + no occurred_at — what every analyze.rs
+        // failure-mode path passes (WALM-55: when occurred_at is also
+        // absent the contract is unchanged from MEM-57).
+        let result = mock.extract_with_context("the user input", &[], None).await;
         assert!(result.is_ok());
 
         // Critical: extract() was called exactly once with the text.
@@ -978,6 +1306,79 @@ mod tests {
             *mock.last_text.lock().unwrap(),
             "the user input",
             "the original input text must reach extract() unchanged — no context wrapping"
+        );
+    }
+
+    // ── WALM-55: OpenRouter "200 OK wrapping upstream error" detection ──
+
+    #[test]
+    fn envelope_detects_200_wrapped_504_from_openrouter() {
+        // Real failing body captured from the LME v2 bench. The whitespace
+        // padding is also realistic — OpenRouter sometimes emits ~78
+        // lines of indented blanks before the JSON envelope.
+        let body = "         \n         \n         \n\
+                    {\"error\":{\"message\":\"The operation was aborted\",\"code\":504}}";
+        let envelope = super::parse_openrouter_error_envelope(body)
+            .expect("must detect the OpenRouter error envelope");
+        assert_eq!(envelope.code, 504);
+        assert_eq!(envelope.message, "The operation was aborted");
+    }
+
+    #[test]
+    fn envelope_returns_none_for_valid_chat_completion() {
+        // The real OpenAI chat completion shape — must NOT be mis-detected
+        // as an error envelope. A successful response has `choices`, not
+        // `error`.
+        let body = r#"{"id":"chatcmpl-abc","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"standard\tA fact"}}]}"#;
+        assert!(
+            super::parse_openrouter_error_envelope(body).is_none(),
+            "valid completion body must not be detected as an error envelope"
+        );
+    }
+
+    #[test]
+    fn envelope_returns_none_when_choices_and_error_both_present() {
+        // Defensive: some providers emit partial-error metadata on an
+        // otherwise-successful completion (top-level `choices` AND
+        // top-level `error`). The `choices.is_none()` guard in
+        // `parse_openrouter_error_envelope` MUST return None here so
+        // the caller deserialises the real completion instead of
+        // discarding it as a 503 upstream failure.
+        let body = r#"{
+            "choices":[{"index":0,"message":{"role":"assistant","content":"standard\tA real fact"}}],
+            "error":{"message":"a non-fatal upstream warning","code":429}
+        }"#;
+        assert!(
+            super::parse_openrouter_error_envelope(body).is_none(),
+            "bodies with BOTH choices and error must defer to completion parsing, not 503-retry"
+        );
+    }
+
+    #[test]
+    fn envelope_returns_none_for_genuinely_malformed_json() {
+        // Truncated body — not valid JSON. Must return None so the
+        // caller's deserialise step (the `serde_json::from_str` for the
+        // expected struct) takes over and surfaces the error. We don't
+        // want to misclassify this as "upstream error" and silently
+        // retry — genuinely malformed JSON could be a bug to
+        // investigate.
+        assert!(super::parse_openrouter_error_envelope("{\"choices\":[{").is_none());
+        assert!(super::parse_openrouter_error_envelope("not json at all").is_none());
+        assert!(super::parse_openrouter_error_envelope("").is_none());
+    }
+
+    #[test]
+    fn envelope_returns_none_when_error_object_lacks_required_fields() {
+        // Defensive: an `error` field that isn't shaped as the expected
+        // {code, message} envelope shouldn't be treated as the
+        // retryable case — only the exact shape we've observed.
+        assert!(super::parse_openrouter_error_envelope(r#"{"error":"just a string"}"#).is_none());
+        assert!(
+            super::parse_openrouter_error_envelope(r#"{"error":{"message":"no code"}}"#).is_none()
+        );
+        assert!(
+            super::parse_openrouter_error_envelope(r#"{"error":{"code":504}}"#).is_none(),
+            "missing message"
         );
     }
 }

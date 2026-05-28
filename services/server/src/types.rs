@@ -678,6 +678,25 @@ pub struct AnalyzeRequest {
     pub text: String,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// WALM-55: optional absolute timestamp of when this conversation turn
+    /// took place (RFC 3339, UTC). When present, the extractor uses it as
+    /// the temporal anchor to resolve relative-time references ("last
+    /// Friday", "yesterday") into absolute dates *inside the extracted
+    /// fact text* — so the date enters both the SEAL-encrypted fact on
+    /// Walrus and the embedding vector, making time-anchored facts
+    /// retrievable.
+    ///
+    /// Caller-trusted: same trust level as the conversation text itself
+    /// (we never validate the text either). Optional. No default-to-`now()`
+    /// fallback — silence is honest. Falling back to `now()` would stamp
+    /// present-time onto past-event facts and pollute retrieval.
+    ///
+    /// Architecture A (locked 2026-05-27): the date lives ONLY inside the
+    /// encrypted fact text + the embedding. There is no metadata column on
+    /// `vector_entries`. The server can never filter or rank by event time
+    /// — that's the privacy-floor-preserving trade we accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// POST /api/analyze (async, returns 202 immediately)
@@ -980,6 +999,14 @@ pub enum AppError {
     RateLimited(String),
     /// Storage quota exceeded (HTTP 402)
     QuotaExceeded(String),
+    /// WALM-55: upstream LLM/embedding provider returned a transient failure
+    /// (gateway timeout / connection reset / "200 OK" wrapping an
+    /// `{"error":{"code":504}}` envelope from OpenRouter). Maps to HTTP 503
+    /// so the SDK + benchmark harness will retry per their transient-error
+    /// policy (`_RETRY_STATUS = (429, 502, 503, 504)`). This converts a
+    /// silently-dropped turn into one retried with exponential backoff —
+    /// closing the bench-completion gap diagnosed during the LME v2 run.
+    UpstreamUnavailable(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -991,6 +1018,7 @@ impl std::fmt::Display for AppError {
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
+            AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
         }
     }
 }
@@ -1020,6 +1048,24 @@ impl axum::response::IntoResponse for AppError {
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
+            AppError::UpstreamUnavailable(msg) => {
+                // WALM-55: log the upstream details server-side, return
+                // 503 so the SDK / harness will retry per their
+                // transient-error policy. Body is a generic message —
+                // we don't leak internal upstream-provider names to
+                // clients.
+                let trace_id = crate::observability::current_request_id()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                tracing::warn!(
+                    request_id = %trace_id,
+                    "Upstream unavailable: {}",
+                    msg,
+                );
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Upstream temporarily unavailable (traceId: {})", trace_id),
+                )
+            }
         };
 
         let body = serde_json::json!({ "error": message });
@@ -1036,6 +1082,7 @@ impl AppError {
             AppError::BlobNotFound(_) => "blob_not_found",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
+            AppError::UpstreamUnavailable(_) => "upstream_unavailable",
         }
     }
 }
@@ -1217,6 +1264,32 @@ mod tests {
         let err = AppError::QuotaExceeded("test".into());
         let resp = axum::response::IntoResponse::into_response(err);
         assert_eq!(resp.status(), axum::http::StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn app_error_upstream_unavailable_status_is_503_for_retryability() {
+        // WALM-55: HTTP 503 is in the SDK + benchmark harness retry
+        // set (429, 502, 503, 504). Pinning this so a future change
+        // can't silently re-map UpstreamUnavailable to a non-retryable
+        // code — that would re-introduce the bench-completion gap that
+        // the LME v2 diagnosis surfaced.
+        let err = AppError::UpstreamUnavailable("OpenRouter upstream error (code=504)".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "UpstreamUnavailable MUST map to 503 so clients retry"
+        );
+    }
+
+    #[test]
+    fn app_error_upstream_unavailable_kind_label() {
+        let err = AppError::UpstreamUnavailable("test".into());
+        assert_eq!(
+            err.kind(),
+            "upstream_unavailable",
+            "observability label must be stable for grafana/loki queries"
+        );
     }
 
     // ── KeyPool: round-robin selection ─────────────────────────────────

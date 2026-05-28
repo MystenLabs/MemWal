@@ -364,10 +364,15 @@ pub async fn ask(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
+    // WALM-55: `content` is `Option<String>` — `None` on upstream null-content
+    // returns. For the ask path, fall back to the existing
+    // "No response from LLM" message so the user sees a useful signal.
     let answer = api_resp
         .choices
         .first()
-        .map(|c| c.message.content.trim().to_string())
+        .and_then(|c| c.message.content.as_deref())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "No response from LLM".to_string());
 
     tracing::info!("ask complete: answer length={} chars", answer.len());

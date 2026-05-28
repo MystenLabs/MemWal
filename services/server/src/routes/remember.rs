@@ -464,10 +464,14 @@ async fn summarize_with_prompt(
         AppError::Internal(format!("Failed to parse summarization response: {}", e))
     })?;
 
+    // WALM-55: `content` is `Option<String>` — `None` on upstream null-content
+    // returns degrades to empty, which the existing is_empty() check below
+    // already handles as a summarisation failure.
     let summary = api_resp
         .choices
         .first()
-        .map(|c| c.message.content.trim().to_string())
+        .and_then(|c| c.message.content.as_deref())
+        .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
     if summary.is_empty() {

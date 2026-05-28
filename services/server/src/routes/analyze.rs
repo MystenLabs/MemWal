@@ -318,9 +318,15 @@ pub async fn analyze(
     // pass `related_memories` as dedup context. The LlmExtractor
     // short-circuits to plain `extract` on empty slice — no wasted tokens
     // when the namespace had no nearest hits.
+    // WALM-55: also pass `body.occurred_at` as the temporal anchor. When
+    // present, the extractor renders a `<context occurred_at="..."/>` tag
+    // alongside the prompt so the LLM can resolve relative-time
+    // references ("last Friday") to absolute dates *inside the extracted
+    // fact text* (Architecture A — no metadata column, date flows into
+    // the encrypted blob + embedding only).
     let extracted = state
         .extractor
-        .extract_with_context(&body.text, &related_texts)
+        .extract_with_context(&body.text, &related_texts, body.occurred_at)
         .await?;
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
