@@ -2940,7 +2940,7 @@ h1, h2, h3 {
 .wm-hero::before {
   content: "";
   position: absolute;
-  z-index: 0;
+  z-index: 1;
   top: -41px;
   left: 50%;
   width: 1908px;
