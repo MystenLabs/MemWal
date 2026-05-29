@@ -162,7 +162,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
                     if sess_idx < len(session_dates)
                     else None
                 )
-                # WALM-55: normalise to RFC 3339 UTC so the harness can
+                # normalise to RFC 3339 UTC so the harness can
                 # pass occurred_at to /api/analyze. LME dates have no
                 # timezone in the source ("2023/04/10 (Mon) 17:50") — we
                 # treat them as UTC, a benchmark-mode convention. Falls

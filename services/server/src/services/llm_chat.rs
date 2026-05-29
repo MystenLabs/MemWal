@@ -37,7 +37,7 @@ pub struct ChatChoice {
 
 #[derive(serde::Deserialize)]
 pub struct ChatMessageResp {
-    /// WALM-55: `Option<String>` because `gpt-4o-mini` (and likely other
+    /// `Option<String>` because `gpt-4o-mini` (and likely other
     /// OpenAI-compatible providers via OpenRouter) occasionally returns
     /// a successful HTTP 200 response with `content: null` and
     /// `completion_tokens: 0` — the model accepted the prompt but

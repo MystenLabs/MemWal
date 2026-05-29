@@ -61,7 +61,7 @@ CATEGORY_MAP: dict[int, str] = {
 LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
 
 
-# WALM-55: LOCOMO stores session timestamps as natural-language strings
+# LOCOMO stores session timestamps as natural-language strings
 # like "1:56 pm on 8 May, 2023". Parse them into RFC 3339 UTC strings so
 # the harness can pass occurred_at through to /api/analyze in a format
 # the server expects (`chrono::DateTime<chrono::Utc>` via serde).
@@ -223,7 +223,7 @@ class LocomoBenchmark(BenchmarkAdapter):
                 continue
 
             session_num = session_key.split("_")[1]
-            # WALM-55: normalise the raw LOCOMO date string ("1:56 pm on 8
+            # normalise the raw LOCOMO date string ("1:56 pm on 8
             # May, 2023") to RFC 3339 UTC so the harness can pass it to
             # /api/analyze as `occurred_at`. Falls back to None on
             # unparseable formats — that turn just goes through without a

@@ -364,7 +364,7 @@ pub async fn ask(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
-    // WALM-55: `content` is `Option<String>` — `None` on upstream null-content
+    // `content` is `Option<String>` — `None` on upstream null-content
     // returns. For the ask path, fall back to the existing
     // "No response from LLM" message so the user sees a useful signal.
     let answer = api_resp

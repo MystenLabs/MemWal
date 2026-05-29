@@ -678,7 +678,7 @@ pub struct AnalyzeRequest {
     pub text: String,
     #[serde(default = "default_namespace")]
     pub namespace: String,
-    /// WALM-55: optional absolute timestamp of when this conversation turn
+    /// optional absolute timestamp of when this conversation turn
     /// took place (RFC 3339, UTC). When present, the extractor uses it as
     /// the temporal anchor to resolve relative-time references ("last
     /// Friday", "yesterday") into absolute dates *inside the extracted
@@ -999,7 +999,7 @@ pub enum AppError {
     RateLimited(String),
     /// Storage quota exceeded (HTTP 402)
     QuotaExceeded(String),
-    /// WALM-55: upstream LLM/embedding provider returned a transient failure
+    /// upstream LLM/embedding provider returned a transient failure
     /// (gateway timeout / connection reset / "200 OK" wrapping an
     /// `{"error":{"code":504}}` envelope from OpenRouter). Maps to HTTP 503
     /// so the SDK + benchmark harness will retry per their transient-error
@@ -1049,7 +1049,7 @@ impl axum::response::IntoResponse for AppError {
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::UpstreamUnavailable(msg) => {
-                // WALM-55: log the upstream details server-side, return
+                // log the upstream details server-side, return
                 // 503 so the SDK / harness will retry per their
                 // transient-error policy. Body is a generic message —
                 // we don't leak internal upstream-provider names to
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn app_error_upstream_unavailable_status_is_503_for_retryability() {
-        // WALM-55: HTTP 503 is in the SDK + benchmark harness retry
+        // HTTP 503 is in the SDK + benchmark harness retry
         // set (429, 502, 503, 504). Pinning this so a future change
         // can't silently re-map UpstreamUnavailable to a non-retryable
         // code — that would re-introduce the bench-completion gap that

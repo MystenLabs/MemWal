@@ -167,7 +167,7 @@ class MemWalClient:
            status "done"; production: SEAL-encrypt + Walrus upload, via an
            async job, status "pending").
 
-        WALM-55: `occurred_at` is an optional RFC 3339 UTC timestamp of
+        `occurred_at` is an optional RFC 3339 UTC timestamp of
         when this conversation turn took place. When passed, the server
         threads it into the extractor's prompt as a `<context
         occurred_at="..."/>` tag so the LLM can resolve relative-time

@@ -183,7 +183,7 @@ def stage_ingest(
 
     # Group (label, text) chunks by conversation so we can process each
     # conversation's chunks serially in one worker.
-    # WALM-55: chunk tuple is now (session_id, label, text, occurred_at)
+    # chunk tuple is now (session_id, label, text, occurred_at)
     # where occurred_at is an RFC 3339 UTC string or None. The adapter is
     # responsible for normalising the source-dataset format to RFC 3339
     # (see locomo._normalize_locomo_timestamp,
@@ -219,7 +219,7 @@ def stage_ingest(
         local_stored = 0
         for session_id, label, text, occurred_at in chunks:
             try:
-                # WALM-55: pass occurred_at (RFC 3339 UTC string or None)
+                # pass occurred_at (RFC 3339 UTC string or None)
                 # to the server. When present, the server uses it as the
                 # temporal anchor for the extractor prompt.
                 result = client.analyze(text, namespace, occurred_at=occurred_at)

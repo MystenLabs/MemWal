@@ -93,7 +93,7 @@ class TestLocomoAdapter:
         # Per-turn chunking: 2 sessions × 3 turns each (fixture) = 6 chunks
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        # WALM-55: chunks are 3-tuples (label, text, occurred_at).
+        # chunks are 3-tuples (label, text, occurred_at).
         for label, text, occurred_at in chunks:
             assert "/" in label, "label format is conv_id/session_id"
             # LOCOMO text already has the speaker name baked in
@@ -118,7 +118,7 @@ class TestLocomoAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         from collections import defaultdict
         by_label = defaultdict(int)
-        # WALM-55: unpack the 3-tuple, ignore text + occurred_at.
+        # unpack the 3-tuple, ignore text + occurred_at.
         for label, _text, _occurred_at in chunks:
             by_label[label] += 1
         # Every session should have produced at least one chunk
@@ -197,7 +197,7 @@ class TestLongMemEvalAdapter:
         chunks = adapter.build_ingest_text(convs[0])
         total_turns = sum(len(s.turns) for s in convs[0].sessions)
         assert len(chunks) == total_turns
-        # WALM-55: chunks are 3-tuples (label, text, occurred_at).
+        # chunks are 3-tuples (label, text, occurred_at).
         for label, text, occurred_at in chunks:
             assert text.strip(), "ingest text should be non-empty"
             # LongMemEval turns are raw content (no embedded speaker name)
@@ -213,7 +213,7 @@ class TestLongMemEvalAdapter:
                     f"occurred_at must be RFC 3339, got {occurred_at!r}"
 
 
-# ── WALM-55: per-benchmark timestamp normalisation ────────────────────
+# ── per-benchmark timestamp normalisation ────────────────────
 
 class TestLocomoTimestampNormalisation:
     """Pin the LOCOMO date-string → RFC 3339 conversion shape.

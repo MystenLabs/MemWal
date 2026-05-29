@@ -69,7 +69,7 @@ class BenchmarkAdapter(ABC):
         is provided below — adapters that use it should do so by delegation,
         so the choice is visible in the adapter's source.
 
-        WALM-55: `occurred_at` is an RFC 3339 UTC string when the source
+        `occurred_at` is an RFC 3339 UTC string when the source
         dataset provides a per-turn (or per-session) timestamp, or None
         otherwise. The server uses it as the temporal anchor inside the
         extractor prompt — see `core.client.MemWalClient.analyze`.
@@ -89,7 +89,7 @@ class BenchmarkAdapter(ABC):
         mini-haystacks). AVOID for long sessions — the extractor drops
         facts under large input contexts.
 
-        WALM-55: this helper collapses many turns into one ingest call.
+        this helper collapses many turns into one ingest call.
         That collapses temporal granularity — picking any single turn's
         timestamp to represent the whole session would be arbitrary. So
         this helper always returns `occurred_at=None`. Adapters that
@@ -143,7 +143,7 @@ class BenchmarkAdapter(ABC):
         matches naive_concat so the session→memory map in run.py
         aggregates multiple turn-level chunks under the same session key.
 
-        WALM-55: `occurred_at` is sourced from `turn.timestamp` (which
+        `occurred_at` is sourced from `turn.timestamp` (which
         the per-benchmark adapter normalises to RFC 3339 UTC, or sets to
         None when the source dataset has no timestamp / it failed to
         parse). The server uses it as the temporal anchor for resolving

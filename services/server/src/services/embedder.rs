@@ -96,7 +96,7 @@ impl Embedder for OpenAiEmbedder {
                     )));
                 }
 
-                // WALM-55: same pattern as the extractor — capture body
+                // same pattern as the extractor — capture body
                 // as text first so we can (1) treat transport-level
                 // failures as transient, and (2) detect OpenRouter
                 // error envelopes wrapped in HTTP 200. Both route to
@@ -174,7 +174,7 @@ struct EmbeddingData {
 
 #[cfg(test)]
 mod tests {
-    /// WALM-55: parity test — the embedder routes OpenRouter-error-envelope
+    /// parity test — the embedder routes OpenRouter-error-envelope
     /// bodies to `AppError::UpstreamUnavailable` via the SHARED helper
     /// `extractor::parse_openrouter_error_envelope`. If a future refactor
     /// breaks the cross-module import or call site, this catches it at

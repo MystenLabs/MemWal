@@ -174,7 +174,7 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// exact-paraphrase dedup (the mechanism behind the LOCOMO win).
 /// Source: `prompts/extract.txt`.
 ///
-/// v6 (WALM-55): adds a `<context occurred_at="..."/>` temporal anchor.
+/// v6: adds a `<context occurred_at="..."/>` temporal anchor.
 /// When the caller supplies an absolute RFC-3339 timestamp via
 /// `AnalyzeRequest.occurred_at`, the extractor uses it to:
 /// (a) attach a verbose absolute date (`Weekday, D Month YYYY
@@ -285,7 +285,7 @@ impl LlmExtractor {
             )));
         }
 
-        // WALM-55: read body as text first (was `resp.json()` directly).
+        // read body as text first (was `resp.json()` directly).
         // This enables two transient-failure detections that route to
         // `AppError::UpstreamUnavailable` (HTTP 503, retried by the
         // SDK + benchmark harness) instead of `AppError::Internal`
@@ -321,7 +321,7 @@ impl LlmExtractor {
         let api_resp: ChatCompletionResponse = serde_json::from_str(&body)
             .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
-        // WALM-55: `content` is `Option<String>` — `None` on upstream
+        // `content` is `Option<String>` — `None` on upstream
         // null-content returns degrades to empty string, which
         // `parse_extracted_facts` treats as zero facts. Same legitimate
         // outcome as the prompt's explicit `NONE` reply.
@@ -847,7 +847,7 @@ mod tests {
         };
 
         // Non-empty context, but the default impl should ignore it.
-        // WALM-55: also pass None for occurred_at — the default impl
+        // also pass None for occurred_at — the default impl
         // must ignore both contexts equally.
         let context = ["Existing memory A", "Existing memory B"];
         let result = mock
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn extract_v6_prompt_contains_temporal_anchor_section() {
-        // WALM-55: the extract.v6 prompt must instruct the LLM about the
+        // the extract.v6 prompt must instruct the LLM about the
         // `<context occurred_at="..."/>` tag. Pin three load-bearing
         // pieces of the temporal-anchor section so a future prompt edit
         // can't silently remove them.
@@ -1097,7 +1097,7 @@ mod tests {
         );
     }
 
-    // ── WALM-55: occurred_at block rendering ─────────────────────────
+    // ── occurred_at block rendering ─────────────────────────
 
     #[test]
     fn render_occurred_at_block_basic_shape() {
@@ -1132,7 +1132,7 @@ mod tests {
 
     #[test]
     fn extract_v6_prompt_blocks_tag_leak_and_date_fabrication() {
-        // WALM-55 smoke-test follow-up: the first prompt-iteration of v6
+        // Smoke-test follow-up: the first prompt-iteration of v6
         // had two reproducible failure modes when `<context>` was absent:
         //   1. The LLM hallucinated a `<context occurred_at="..."/>` line
         //      copied verbatim from the worked examples (then the parser,
@@ -1286,8 +1286,8 @@ mod tests {
         };
 
         // Empty slice + no occurred_at — what every analyze.rs
-        // failure-mode path passes (WALM-55: when occurred_at is also
-        // absent the contract is unchanged from MEM-57).
+        // failure-mode path passes; when occurred_at is also absent
+        // the contract is unchanged from the pre-existing extractor.
         let result = mock.extract_with_context("the user input", &[], None).await;
         assert!(result.is_ok());
 
@@ -1309,7 +1309,7 @@ mod tests {
         );
     }
 
-    // ── WALM-55: OpenRouter "200 OK wrapping upstream error" detection ──
+    // ── OpenRouter "200 OK wrapping upstream error" detection ──
 
     #[test]
     fn envelope_detects_200_wrapped_504_from_openrouter() {
