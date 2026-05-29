@@ -7767,7 +7767,7 @@ h1, h2, h3 {
 .playground-dashboard .card-subtitle,
 .dash-page .card-subtitle,
 .setup-classic-feature p {
-  color: #8f9294;
+  color: #b8bbbe;
   font-size: 0.82rem;
   line-height: 1.35;
 }
@@ -7796,8 +7796,16 @@ h1, h2, h3 {
 }
 
 .playground-dashboard .demo-server-info {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
   gap: 10px;
   margin-bottom: 20px;
+}
+
+@media (max-width: 640px) {
+  .playground-dashboard .demo-server-info {
+    grid-template-columns: 1fr;
+  }
 }
 
 .playground-dashboard .demo-server-tag {
@@ -7908,7 +7916,7 @@ h1, h2, h3 {
 
 .dash-page .dashboard-keys-card .card-subtitle {
   margin-top: 14px;
-  color: #8f9294;
+  color: #b8bbbe;
   font-family: var(--font-sans);
   font-size: 18px;
   font-weight: 400;

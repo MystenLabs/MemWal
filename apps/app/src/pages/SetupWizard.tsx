@@ -541,7 +541,7 @@ export default function SetupWizard() {
                             <div style={{ marginBottom: 24 }}>
                                 <label style={{
                                     display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
-                                    fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5
+                                    fontSize: '0.85rem', color: '#faf8f5', lineHeight: 1.5
                                 }}>
                                     <input
                                         type="checkbox"
