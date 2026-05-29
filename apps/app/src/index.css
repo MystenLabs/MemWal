@@ -3723,7 +3723,7 @@ h1, h2, h3 {
   bottom: auto;
   border: 0;
   transform: translateX(-50%);
-  background: url("/walrus-spine-gem.svg") center / contain no-repeat;
+  background: none;
 }
 
 .wm-spine--lead .wm-spine-gem::after {
@@ -4184,7 +4184,7 @@ h1, h2, h3 {
   margin-top: 6px;
   position: relative;
   display: block;
-  background: url("/walrus-stack-tick-icon.svg") center / 25px 25px no-repeat;
+  background: none;
 }
 
 .wm-stack-item > span::before {
@@ -4228,7 +4228,7 @@ h1, h2, h3 {
   content: "";
   position: absolute;
   inset: 0;
-  background: url("/walrus-memory-stack-aurora-group.png") center / 100% 100% no-repeat;
+  background: none;
   filter: none;
   opacity: 1;
 }
@@ -4320,7 +4320,7 @@ h1, h2, h3 {
   width: 38px;
   height: 38px;
   display: block;
-  background: url("/walrus-builder-card-icon.svg") center / 38px 38px no-repeat;
+  background: none;
 }
 
 .wm-builder-grid h3 {
@@ -4419,7 +4419,7 @@ h1, h2, h3 {
   height: 838px;
   z-index: 0;
   pointer-events: none;
-  background: url("/walrus-memory-production-aurora-glow.png") bottom center / 100% 838px no-repeat;
+  background: none;
   opacity: 0.95;
 }
 
@@ -4669,7 +4669,7 @@ h1, h2, h3 {
   height: 56px;
   border: 0;
   transform: translateX(-50%);
-  background: url("/walrus-spine-gem.svg") center / contain no-repeat;
+  background: none;
 }
 
 .wm-spine--compact .wm-spine-gem::after {
