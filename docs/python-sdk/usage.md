@@ -1,6 +1,6 @@
 ---
 title: "Usage"
-description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the MemWal Python SDK."
+description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the Walrus Memory Python SDK."
 ---
 
 The Python SDK exposes one relayer-backed client in two forms, plus middleware:
@@ -13,7 +13,7 @@ The Python SDK exposes one relayer-backed client in two forms, plus middleware:
 
 Detailed pages:
 
-- [MemWal](/python-sdk/usage/memwal) — the default async/sync client and its core methods
+- [Walrus Memory](/python-sdk/usage/memwal) — the default async/sync client and its core methods
 - [Manual methods](/python-sdk/usage/memwal-manual) — lower-level `remember_manual` / `recall_manual` / `embed`
 - [with_memwal](/python-sdk/usage/with-memwal) — LangChain and OpenAI middleware
 

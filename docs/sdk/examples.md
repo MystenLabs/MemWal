@@ -4,7 +4,7 @@ title: "Examples"
 
 ## Basic: Store and Recall
 
-The shortest working MemWal example using the default relayer-backed SDK.
+The shortest working Walrus Memory example using the default relayer-backed SDK.
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";

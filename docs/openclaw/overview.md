@@ -1,9 +1,9 @@
 ---
 title: "NemoClaw/OpenClaw Plugin"
-description: "Give your OpenClaw AI agents persistent, encrypted long-term memory powered by MemWal."
+description: "Give your OpenClaw AI agents persistent, encrypted long-term memory powered by Walrus Memory."
 ---
 
-The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed.
+The Walrus Memory memory plugin adds a **cloud-based, encrypted memory layer** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed.
 
 ## Features
 
@@ -18,7 +18,7 @@ The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenC
     SEAL-encrypted, stored on Walrus, tied to your delegate key — you own your data
   </Card>
   <Card title="Cross-App Memory" icon="arrows-rotate">
-    Memories stored from any MemWal-connected app are accessible to your OpenClaw agent
+    Memories stored from any Walrus Memory-connected app are accessible to your OpenClaw agent
   </Card>
   <Card title="Multi-Agent Isolation" icon="users">
     Each agent gets its own memory space via namespaces — no cross-contamination
@@ -38,7 +38,7 @@ The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenC
 
 - You want your OpenClaw agents to **remember across conversations** — preferences, decisions, context
 - You need **encrypted, user-owned memory** instead of plaintext files or platform-managed storage
-- You want **cross-app continuity** — memories from other MemWal-connected apps (chatbot, noter, researcher) surface in OpenClaw
+- You want **cross-app continuity** — memories from other Walrus Memory-connected apps (chatbot, noter, researcher) surface in OpenClaw
 - You're running **multiple agents** and need each to have its own isolated memory space
 
 ## Get started

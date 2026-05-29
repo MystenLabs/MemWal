@@ -2,7 +2,7 @@
 title: "Overview"
 ---
 
-MemWal exposes SDK surfaces for TypeScript and Python.
+Walrus Memory exposes SDK surfaces for TypeScript and Python.
 
 ## TypeScript
 

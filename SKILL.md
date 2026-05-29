@@ -146,7 +146,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 
 ## API Surface
 
-### MemWal Methods
+### Walrus Memory Methods
 
 | Method | Description | Returns |
 |---|---|---|

@@ -1,9 +1,9 @@
 ---
 title: "Memory Space"
-description: "The isolated unit of storage in MemWal — how memories are organized, scoped, and retrieved."
+description: "The isolated unit of storage in Walrus Memory — how memories are organized, scoped, and retrieved."
 ---
 
-A **memory space** is the isolated unit of storage in MemWal. Think of it as a folder or bucket for your memories — you choose which memory space to store into and which to retrieve from.
+A **memory space** is the isolated unit of storage in Walrus Memory. Think of it as a folder or bucket for your memories — you choose which memory space to store into and which to retrieve from.
 
 Each user can own as many memory spaces as they want.
 
@@ -15,7 +15,7 @@ Every memory space is uniquely identified by three values:
 |-----------|-----------|
 | **Owner address** | The Sui wallet address that owns the memory |
 | **Namespace** | A developer-defined label to group and organize memories |
-| **App ID** | The MemWal package ID (`MEMWAL_PACKAGE_ID`) — unique per relayer deployment |
+| **App ID** | The Walrus Memory package ID (`MEMWAL_PACKAGE_ID`) — unique per relayer deployment |
 
 Together, `owner + namespace + app_id` form the boundary — no two memory spaces can overlap.
 
@@ -41,9 +41,9 @@ const memwal = MemWal.create({
 
 ## App ID
 
-The **app ID** is the MemWal package ID deployed on Sui (`MEMWAL_PACKAGE_ID`). Each relayer deployment is tied to a single package ID, which is used for SEAL encryption key derivation and Walrus blob metadata.
+The **app ID** is the Walrus Memory package ID deployed on Sui (`MEMWAL_PACKAGE_ID`). Each relayer deployment is tied to a single package ID, which is used for SEAL encryption key derivation and Walrus blob metadata.
 
-Two separate MemWal deployments can each have a user with a `personal` namespace, and their memories will never mix — because the app ID (package ID) is different. This means the vector database scopes queries by `owner + namespace`, while the encryption and blob discovery layer provides an additional isolation boundary through the package ID.
+Two separate Walrus Memory deployments can each have a user with a `personal` namespace, and their memories will never mix — because the app ID (package ID) is different. This means the vector database scopes queries by `owner + namespace`, while the encryption and blob discovery layer provides an additional isolation boundary through the package ID.
 
 ## How it works in practice
 

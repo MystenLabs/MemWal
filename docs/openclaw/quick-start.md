@@ -1,6 +1,6 @@
 ---
 title: "Quick Start"
-description: "Install the MemWal memory plugin for NemoClaw/OpenClaw and verify it works."
+description: "Install the Walrus Memory memory plugin for NemoClaw/OpenClaw and verify it works."
 ---
 
 Get the plugin running and test the memory loop in a few minutes.
@@ -9,7 +9,7 @@ Get the plugin running and test the memory loop in a few minutes.
 
 - [OpenClaw](https://openclaw.ai) `>=2026.3.11` installed and running
 
-You'll also need a **delegate key**, **account ID**, and **relayer URL** from MemWal — the steps below will guide you through getting these.
+You'll also need a **delegate key**, **account ID**, and **relayer URL** from Walrus Memory — the steps below will guide you through getting these.
 
 ## Installation
 
@@ -23,17 +23,17 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Me
   </Step>
 
   <Step>
-    ### Get your MemWal credentials
+    ### Get your Walrus Memory credentials
 
-    The plugin needs three values to connect to MemWal:
+    The plugin needs three values to connect to Walrus Memory:
 
     | Value | What it is |
     |-------|-----------|
     | **Delegate Key** | A private key (64-char hex) used to sign requests and encrypt memories |
     | **Account ID** | Your MemWalAccount object ID on Sui (`0x...`) |
-    | **Relayer URL** | The MemWal relayer endpoint that handles search, storage, and encryption |
+    | **Relayer URL** | The Walrus Memory relayer endpoint that handles search, storage, and encryption |
 
-    The easiest way to get your delegate key and account ID is through the [MemWal dashboard](https://memwal.ai). See the [main Quick Start](/getting-started/quick-start) for detailed setup instructions.
+    The easiest way to get your delegate key and account ID is through the [Walrus Memory dashboard](https://memwal.ai). See the [main Quick Start](/getting-started/quick-start) for detailed setup instructions.
 
     For the relayer URL, use a managed endpoint or deploy your own:
 

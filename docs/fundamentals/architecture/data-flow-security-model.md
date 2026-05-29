@@ -1,15 +1,15 @@
 ---
 title: "Trust & Security Model"
-description: "Where trust lives in MemWal — what's enforced onchain, what's handled by the relayer, and what trade-offs exist."
+description: "Where trust lives in Walrus Memory — what's enforced onchain, what's handled by the relayer, and what trade-offs exist."
 ---
 
-MemWal's security model is split between onchain enforcement and offchain operations. Understanding where trust lives helps you make informed decisions about your deployment.
+Walrus Memory's security model is split between onchain enforcement and offchain operations. Understanding where trust lives helps you make informed decisions about your deployment.
 
 ## What's enforced onchain
 
 These guarantees are cryptographic and tamper-proof — no one can bypass them:
 
-- **Ownership** — only the owner's private key controls a MemWal account
+- **Ownership** — only the owner's private key controls a Walrus Memory account
 - **Delegate authorization** — delegate keys are registered and verified onchain
 - **Access control** — the smart contract determines who can act on an account
 

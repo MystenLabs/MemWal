@@ -1,9 +1,9 @@
 ---
 title: "MCP"
-description: "Give MCP-aware AI clients access to your encrypted Walrus-backed MemWal memory."
+description: "Give MCP-aware AI clients access to your encrypted Walrus-backed Walrus Memory memory."
 ---
 
-MemWal exposes a **Model Context Protocol (MCP) server** so MCP-aware clients can read from and write to your encrypted memory. Use it when you want Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or any other MCP client to call MemWal directly from an agent workflow — without writing custom integration code.
+Walrus Memory exposes a **Model Context Protocol (MCP) server** so MCP-aware clients can read from and write to your encrypted memory. Use it when you want Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or any other MCP client to call Walrus Memory directly from an agent workflow — without writing custom integration code.
 
 ## Features
 
@@ -21,7 +21,7 @@ MemWal exposes a **Model Context Protocol (MCP) server** so MCP-aware clients ca
     SEAL-encrypted, stored on Walrus, tied to your delegate key — you own the data
   </Card>
   <Card title="Cross-Client Memory" icon="arrows-rotate">
-    Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — one MemWal account, every client
+    Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — one Walrus Memory account, every client
   </Card>
   <Card title="Environment Presets" icon="server">
     `--prod` / `--staging` / `--dev` / `--local` flags switch networks without editing client configs
@@ -30,7 +30,7 @@ MemWal exposes a **Model Context Protocol (MCP) server** so MCP-aware clients ca
 
 ## When to use this
 
-- You want an AI client to **call MemWal directly** — no custom SDK integration code in your app
+- You want an AI client to **call Walrus Memory directly** — no custom SDK integration code in your app
 - You need the agent to **remember across conversations and sessions**
 - You're running **multiple MCP clients** and want all of them to share one memory store
 - You need **encrypted, user-owned memory** instead of platform-managed storage
@@ -65,7 +65,7 @@ If your MCP host supports **remote Streamable HTTP** servers with custom headers
   <Card title="Source Code" icon="github" href="https://github.com/MystenLabs/MemWal/tree/main/packages/mcp">
     Browse the `@mysten-incubation/memwal-mcp` package on GitHub
   </Card>
-  <Card title="MemWal Dashboard" icon="window" href="https://memwal.ai">
+  <Card title="Walrus Memory Dashboard" icon="window" href="https://memwal.ai">
     Manage delegate keys, view storage, and revoke connected clients
   </Card>
 </CardGroup>
@@ -77,7 +77,7 @@ The MCP package is not just a thin HTTP wrapper.
 1. It checks for `~/.memwal/credentials.json`.
 2. If the file is missing, it starts in an **auth-required mode** instead of crashing the MCP host.
 3. In that mode the agent can still call `memwal_login` inline.
-4. After wallet approval, the package writes credentials locally and future MemWal tool calls succeed without reconfiguring the client.
+4. After wallet approval, the package writes credentials locally and future Walrus Memory tool calls succeed without reconfiguring the client.
 5. Once signed in, the package bridges local stdio MCP traffic to the relayer and keeps `memwal_login` and `memwal_logout` local-only.
 
 See [How It Works](/mcp/how-it-works) for the full flow and security model.

@@ -1,13 +1,13 @@
 ---
-title: "What is MemWal?"
+title: "What is Walrus Memory?"
 description: "Persistent, verifiable memory for AI agents"
 ---
 
 <Note>
-MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
+Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 </Note>
 
-MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
+Walrus Memory introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encrypted" icon="lock">
@@ -26,7 +26,7 @@ MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agent
 
 ## Motivation
 
-AI agents today lose context between sessions — every conversation starts from scratch. When memory does exist, it's locked inside platform-specific databases that the user doesn't control. MemWal solves this by giving agents:
+AI agents today lose context between sessions — every conversation starts from scratch. When memory does exist, it's locked inside platform-specific databases that the user doesn't control. Walrus Memory solves this by giving agents:
 
 - **Persistent memory** — context that carries across sessions and apps
 - **Decentralized, highly available storage** — with end-to-end encryption baked in
@@ -90,7 +90,7 @@ AI agents today lose context between sessions — every conversation starts from
 
 ## Use Cases
 
-MemWal fits any app that needs to store, retrieve, and update memory persistently:
+Walrus Memory fits any app that needs to store, retrieve, and update memory persistently:
 
 - **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
 - **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory
@@ -98,13 +98,13 @@ MemWal fits any app that needs to store, retrieve, and update memory persistentl
 - **Personal AI assistants** — build agents that learn and adapt over time without losing what they've learned
 - **Cross-app memory** — let users carry their memory between different apps and services, owned by them
 
-And many more — check out the example apps below to see MemWal in action.
+And many more — check out the example apps below to see Walrus Memory in action.
 
 ## Example Apps
 
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/MystenLabs/MemWal/tree/main/apps) directory:
 
-- **Playground** — dashboard demo for MemWal
+- **Playground** — dashboard demo for Walrus Memory
 - **Chatbot** — AI chat app with persistent memory across sessions
 - **Noter** — note-taking tool that stores knowledge as encrypted memory
 - **Researcher** — research assistant that builds and recalls a knowledge base

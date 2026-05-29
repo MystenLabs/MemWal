@@ -1,9 +1,9 @@
 ---
 title: "Usage"
-description: "Detailed usage for all three MemWal clients — MemWal, MemWalManual, and withMemWal."
+description: "Detailed usage for all three Walrus Memory clients — Walrus Memory, MemWalManual, and withMemWal."
 ---
 
-MemWal exposes three entry points:
+Walrus Memory exposes three entry points:
 
 | Entry point | Import | When to use |
 | --- | --- | --- |

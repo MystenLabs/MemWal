@@ -2,7 +2,7 @@
 title: "Versioning and Compatibility"
 ---
 
-The MemWal relayer is the public protocol/API layer for SDKs, MCP clients, and self-hosted deployments. Treat every route, signed header, response field, runtime config field, and documented environment variable on this page as a versioned contract.
+The Walrus Memory relayer is the public protocol/API layer for SDKs, MCP clients, and self-hosted deployments. Treat every route, signed header, response field, runtime config field, and documented environment variable on this page as a versioned contract.
 
 ## Relayer SemVer
 

@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Rebrand package metadata and documentation from MemWal to Walrus Memory.
+- Rebrand package metadata and documentation from Walrus Memory to Walrus Memory.
 
 ## 0.0.2
 
@@ -16,7 +16,7 @@
 
 ### Initial Release
 
-- NemoClaw/OpenClaw memory plugin powered by MemWal
+- NemoClaw/OpenClaw memory plugin powered by Walrus Memory
 - Automatic memory recall via `before_prompt_build` hook
 - Automatic fact capture via `agent_end` hook
 - Session summary on `before_reset` hook

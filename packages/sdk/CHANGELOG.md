@@ -23,7 +23,7 @@
 
 - Prefer Sui gRPC for SEAL sessions, with JSON-RPC fallback.
 - Updated docs/examples for `MEMWAL_PRIVATE_KEY` and hosted relayer defaults.
-- Rebranded package metadata and documentation from MemWal to Walrus Memory.
+- Rebranded package metadata and documentation from Walrus Memory to Walrus Memory.
 
 ### Fixed
 
