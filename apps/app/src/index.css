@@ -8173,6 +8173,24 @@ h1, h2, h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/* One consistent card style across Dashboard + Playground: match the CTA cards
+   (12px radius, subtle border + translucent bg) so content/step cards stop
+   looking like a different component. */
+.dash-page .card,
+.playground-dashboard .card {
+  border-radius: 12px !important;
+  border: 1px solid rgba(250, 248, 245, 0.1) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Mobile: stack the Resources cards instead of cramming 3 columns. Placed after
+   the --resources rule so it wins inside the breakpoint. */
+@media (max-width: 860px) {
+  .dash-page .dashboard-cta-row--resources {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── Alert: icon + text as one centered flex row (replaces the
    absolutely-positioned icon, which left an 8px gap and felt off-center). ── */
 .dash-page .dash-alert {

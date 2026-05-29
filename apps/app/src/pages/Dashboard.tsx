@@ -548,7 +548,7 @@ const result = await generateText({
             <main className="dash-shell">
                 {/* Header */}
                 <div className={`dashboard-header${showDashboardSubtitle ? '' : ' dashboard-header--compact'}`}>
-                    <h2>Dashboard</h2>
+                    <h2>Welcome to your Dashboard</h2>
                     {showDashboardSubtitle && <p>{dashboardSubtitle}</p>}
                 </div>
 
@@ -954,7 +954,7 @@ const result = await generateText({
                             <span> to connect to Walrus Memory</span>
                         </div>
                     ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                             {onChainKeys.map((k) => {
                                 const isCurrentKey = k.publicKey === delegatePublicKey
                                 const isRemoving = removingKey === k.publicKey
