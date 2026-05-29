@@ -8,13 +8,13 @@
 
 ### Changed
 
-- Rebranded package metadata and documentation from Walrus Memory to Walrus Memory.
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ## 0.0.1
 
 ### Initial Release
 
-- Stdio MCP server for Walrus Memory with browser-based wallet login.
+- Stdio MCP server for MemWal with browser-based wallet login.
 - Inline `memwal_login` and `memwal_logout` session tools.
 - Memory tools for remember, recall, analyze, and restore through the Walrus Memory relayer.
 - Environment presets for production, dev, staging, and local relayers.
