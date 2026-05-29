@@ -1,9 +1,9 @@
 ---
 title: "Ownership & Delegates"
-description: "How memory ownership works in Walrus Memory and how delegates enable shared access."
+description: "Programmable permissions and explicit ownership — how you control who can access and update memory."
 ---
 
-Walrus Memory enforces strong, cryptographic ownership over memories — and lets owners grant scoped access to others through delegates.
+Walrus Memory puts you in full control of your memory. Programmable permissions and explicit ownership define how memory is shared, accessed, and updated — with delegate access for agents and workflows.
 
 ## Ownership
 

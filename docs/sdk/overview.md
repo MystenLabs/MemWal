@@ -2,7 +2,7 @@
 title: "Overview"
 ---
 
-Walrus Memory exposes SDK surfaces for TypeScript and Python.
+Walrus Memory exposes SDK surfaces for TypeScript and Python. The SDKs give your agents portable memory that works across apps, sessions, and workflows — fully under your control.
 
 ## TypeScript
 

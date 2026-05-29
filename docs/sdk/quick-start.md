@@ -3,7 +3,7 @@ title: "Quick Start"
 description: "Install the Walrus Memory SDK and store your first memory in under a minute."
 ---
 
-The Walrus Memory SDK gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It exposes three entry points:
+The Walrus Memory SDK gives your agents portable memory that works across apps, sessions, and workflows. Store, recall, and analyze context — fully under your control. It exposes three entry points:
 
 | Entry point | Import | When to use |
 | --- | --- | --- |

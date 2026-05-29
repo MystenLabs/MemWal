@@ -1,6 +1,6 @@
 ---
 title: "Trust & Security Model"
-description: "Where trust lives in Walrus Memory — what's enforced onchain, what's handled by the relayer, and what trade-offs exist."
+description: "Where trust lives in Walrus Memory — memory integrity that can be independently verified without centralized trust."
 ---
 
 Walrus Memory's security model is split between onchain enforcement and offchain operations. Understanding where trust lives helps you make informed decisions about your deployment.

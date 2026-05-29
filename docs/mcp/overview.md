@@ -1,9 +1,9 @@
 ---
 title: "MCP"
-description: "Give MCP-aware AI clients access to your encrypted Walrus-backed Walrus Memory memory."
+description: "Give MCP-aware AI clients access to portable, verifiable agent memory through Walrus Memory."
 ---
 
-Walrus Memory exposes a **Model Context Protocol (MCP) server** so MCP-aware clients can read from and write to your encrypted memory. Use it when you want Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or any other MCP client to call Walrus Memory directly from an agent workflow — without writing custom integration code.
+Walrus Memory exposes a **Model Context Protocol (MCP) server** so MCP-aware clients can read from and write to your portable agent memory. Use it when you want Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or any other MCP client to call Walrus Memory directly from an agent workflow — without writing custom integration code.
 
 ## Features
 
@@ -17,11 +17,11 @@ Walrus Memory exposes a **Model Context Protocol (MCP) server** so MCP-aware cli
   <Card title="Two Transports" icon="arrows-left-right">
     Streamable HTTP for remote MCP clients, or stdio package (`npx`) for local-command clients
   </Card>
-  <Card title="Encrypted & User-Owned" icon="lock">
-    SEAL-encrypted, stored on Walrus, tied to your delegate key — you own the data
+  <Card title="Fully Under Your Control" icon="lock">
+    SEAL-encrypted, stored on Walrus, tied to your delegate key — programmable permissions and explicit ownership
   </Card>
-  <Card title="Cross-Client Memory" icon="arrows-rotate">
-    Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — one Walrus Memory account, every client
+  <Card title="Portable Across Clients" icon="arrows-rotate">
+    Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — not locked to any single client
   </Card>
   <Card title="Environment Presets" icon="server">
     `--prod` / `--staging` / `--dev` / `--local` flags switch networks without editing client configs

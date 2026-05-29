@@ -3,7 +3,7 @@ title: "Core Components"
 description: "The six core components that make up the Walrus Memory system and how they interact."
 ---
 
-Walrus Memory is made up of six core components that work together to give your app encrypted, owner-controlled memory.
+Walrus Memory is made up of six core components that work together to give your agents portable, verifiable memory that they fully control.
 
 ```mermaid
 sequenceDiagram

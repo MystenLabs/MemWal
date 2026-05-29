@@ -1,26 +1,26 @@
 ---
 title: "What is Walrus Memory?"
-description: "Persistent, verifiable memory for AI agents"
+description: "Portable agent memory — take your agent's memory anywhere."
 ---
 
 <Note>
 Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 </Note>
 
-Walrus Memory introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
+Walrus Memory enables AI agents to operate reliably across apps and sessions, without losing context. Portable, verifiable, and fully controlled by you, it's the memory layer that lets agents handle complex workflows and coordinate using data they can trust.
 
 <CardGroup cols={2}>
-  <Card title="End-to-End Encrypted" icon="lock">
-    Client-side encryption — nobody sees your data but you
+  <Card title="Portable by Design" icon="shuffle">
+    Memory operates across agents, apps, and workflows — not locked to a single runtime or provider
   </Card>
-  <Card title="Decentralized Storage" icon="globe">
-    Stored on Walrus — no single point of failure
+  <Card title="Fully Under Your Control" icon="key">
+    Programmable permissions and explicit ownership define how memory is shared, accessed, and updated
   </Card>
-  <Card title="AI-Agent Ready" icon="robot">
-    Give agents scoped access to memory via delegate keys
+  <Card title="Built for Agent Coordination" icon="robot">
+    Shared memory spaces help agents coordinate across long-running and multi-step workflows
   </Card>
-  <Card title="Onchain Ownership" icon="key">
-    Sui smart contracts enforce who can read and write
+  <Card title="Verifiable Integrity" icon="shield-check">
+    Memory integrity can be independently verified without centralized trust
   </Card>
 </CardGroup>
 
@@ -28,10 +28,10 @@ Walrus Memory introduces a long-term, verifiable memory layer on Walrus, allowin
 
 AI agents today lose context between sessions — every conversation starts from scratch. When memory does exist, it's locked inside platform-specific databases that the user doesn't control. Walrus Memory solves this by giving agents:
 
-- **Persistent memory** — context that carries across sessions and apps
-- **Decentralized, highly available storage** — with end-to-end encryption baked in
-- **Provable ownership** — cryptographically enforced, not just a policy promise
-- **Fine-grained access control** — users decide who can read, write, or delegate access
+- **Portable memory** — memory persists outside prompts and context windows, moving across agents, apps, and workflows
+- **Full owner control** — programmable access control and explicit ownership, with delegate access for agents and workflows
+- **Agent coordination** — shared memory spaces help agents coordinate across long-running and multi-step workflows
+- **Verifiable integrity** — memory integrity can be independently verified without centralized trust
 
 ## Features
 
@@ -52,7 +52,7 @@ AI agents today lose context between sessions — every conversation starts from
   </Card>
 </CardGroup>
 
-### Security & Access Control
+### Ownership & Access Control
 
 <CardGroup cols={2}>
   <Card title="End-to-End Encryption" icon="lock">
@@ -61,11 +61,11 @@ AI agents today lose context between sessions — every conversation starts from
   <Card title="Decentralized Storage" icon="globe">
     Encrypted blobs stored on Walrus — no single point of failure, no central operator holding your data.
   </Card>
-  <Card title="Onchain Ownership" icon="key">
-    Ownership and access enforced by Sui smart contracts. Cryptographic and tamper-proof.
+  <Card title="Programmable Permissions" icon="key">
+    Ownership and access rules are enforced by Sui smart contracts, giving you explicit, programmable control over who can read and write.
   </Card>
   <Card title="Delegate Access" icon="user-group">
-    Grant scoped access to other users, agents, or services — all managed onchain by the owner.
+    Grant scoped access to other agents, users, or services — all managed onchain by the owner, enabling agent coordination and cross-app workflows.
   </Card>
 </CardGroup>
 
@@ -90,13 +90,13 @@ AI agents today lose context between sessions — every conversation starts from
 
 ## Use Cases
 
-Walrus Memory fits any app that needs to store, retrieve, and update memory persistently:
+Walrus Memory fits any app where agents need memory that travels with them:
 
-- **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
-- **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory
-- **Multi-agent workflows** — share a common data layer between agents for task lists, knowledge bases, and coordination state
-- **Personal AI assistants** — build agents that learn and adapt over time without losing what they've learned
-- **Cross-app memory** — let users carry their memory between different apps and services, owned by them
+- **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions and apps
+- **Multi-agent workflows** — shared memory spaces let agents coordinate on task lists, knowledge bases, and coordination state
+- **Personal AI assistants** — build agents that learn and adapt over time, with memory the user fully controls
+- **Cross-app memory** — let users carry their memory between different apps and services, not locked to any single provider
+- **Note-taking and knowledge tools** — save user insights, summaries, and references as portable, verifiable memory
 
 And many more — check out the example apps below to see Walrus Memory in action.
 
@@ -105,8 +105,8 @@ And many more — check out the example apps below to see Walrus Memory in actio
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/MystenLabs/MemWal/tree/main/apps) directory:
 
 - **Playground** — dashboard demo for Walrus Memory
-- **Chatbot** — AI chat app with persistent memory across sessions
-- **Noter** — note-taking tool that stores knowledge as encrypted memory
+- **Chatbot** — AI chat app with portable memory across sessions
+- **Noter** — note-taking tool that stores knowledge as verifiable memory
 - **Researcher** — research assistant that builds and recalls a knowledge base
 
 See [Example Apps](/examples/example-apps) for short code examples from each app.

@@ -1,9 +1,9 @@
 ---
 title: "NemoClaw/OpenClaw Plugin"
-description: "Give your OpenClaw AI agents persistent, encrypted long-term memory powered by Walrus Memory."
+description: "Give your OpenClaw AI agents portable, verifiable memory powered by Walrus Memory."
 ---
 
-The Walrus Memory memory plugin adds a **cloud-based, encrypted memory layer** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed.
+The Walrus Memory plugin adds **portable, verifiable agent memory** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed. Memory is not locked to a single runtime: it operates across agents, apps, and workflows.
 
 ## Features
 
@@ -14,11 +14,11 @@ The Walrus Memory memory plugin adds a **cloud-based, encrypted memory layer** t
   <Card title="Automatic Capture" icon="floppy-disk">
     Facts are extracted from conversations and stored as encrypted memories after each turn
   </Card>
-  <Card title="Encrypted & User-Owned" icon="lock">
-    SEAL-encrypted, stored on Walrus, tied to your delegate key — you own your data
+  <Card title="Fully Under Your Control" icon="lock">
+    SEAL-encrypted, stored on Walrus — programmable permissions and explicit ownership over your data
   </Card>
-  <Card title="Cross-App Memory" icon="arrows-rotate">
-    Memories stored from any Walrus Memory-connected app are accessible to your OpenClaw agent
+  <Card title="Portable Across Apps" icon="arrows-rotate">
+    Memories stored from any Walrus Memory-connected app are accessible to your OpenClaw agent — not locked to a single provider
   </Card>
   <Card title="Multi-Agent Isolation" icon="users">
     Each agent gets its own memory space via namespaces — no cross-contamination
