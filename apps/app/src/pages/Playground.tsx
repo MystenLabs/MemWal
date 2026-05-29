@@ -119,7 +119,7 @@ function DemoStep({
             subtitle={description}
             action={
                 <button
-                    className="btn btn-primary btn-sm"
+                    className={`btn btn-primary btn-sm${loading ? ' demo-run-button--loading' : ''}`}
                     onClick={onRun}
                     disabled={loading}
                 >
@@ -884,7 +884,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     subtitle="your LLM key + Walrus Memory layer — like Supermemory"
                     action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${askLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runAsk}
                             disabled={askLoading || !askLlmKey.trim()}
                         >
@@ -1005,7 +1005,7 @@ const { text } = await generateText({
                     subtitle="client: embed → SEAL encrypt → send to server → server uploads Walrus"
                     action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${fullRememberLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRemember}
                             disabled={fullRememberLoading || !memwalManual}
                         >
@@ -1086,7 +1086,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     subtitle="SDK: embed query → search → Walrus download → SEAL decrypt"
                     action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${fullRecallLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRecall}
                             disabled={fullRecallLoading || !memwalManual}
                         >

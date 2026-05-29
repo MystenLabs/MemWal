@@ -10746,9 +10746,18 @@ h1, h2, h3 {
   color: rgba(0, 0, 0, 0.42);
 }
 
+.playground-dashboard .btn-primary.demo-run-button--loading:disabled {
+  border-color: #e8ff75;
+  background: #e8ff75;
+  color: #000000;
+  opacity: 1;
+}
+
 .playground-dashboard .demo-button-spinner {
   width: 14px;
   height: 14px;
+  border-color: rgba(0, 0, 0, 0.28);
+  border-top-color: #000000;
 }
 
 .playground-dashboard .input-group {
