@@ -5805,7 +5805,7 @@ h1, h2, h3 {
 .dash-page .dashboard-cta {
   display: grid;
   grid-template-columns: auto 1fr auto;
-  align-items: start;
+  align-items: center;
   gap: 24px;
   height: 114px;
   min-height: 114px;
@@ -5849,7 +5849,7 @@ h1, h2, h3 {
 .dash-page .dashboard-cta-icon-wrap {
   width: 35px;
   height: 40px;
-  margin-top: 4px;
+  margin-top: 0;
   border-radius: 0;
   border: 0;
   display: grid;
@@ -7268,7 +7268,8 @@ h1, h2, h3 {
 }
 
 .dash-page .warning-box {
-  padding: 13px 16px;
+  padding: 13px 15px;
+  border-radius: 10px;
 }
 
 .dash-page .dashboard-quickstart-card .card-header {
@@ -7559,7 +7560,8 @@ h1, h2, h3 {
 .playground-nav .nav-inner,
 .dashboard-nav .nav-inner {
   position: relative;
-  max-width: none;
+  max-width: 1280px;
+  margin: 0 auto;
   height: 128px;
 }
 
@@ -7578,6 +7580,12 @@ h1, h2, h3 {
   font-size: 2.23rem;
   line-height: 0.85;
   font-weight: 900;
+}
+
+.dashboard-nav .nav-brand-logo {
+  display: block;
+  height: 56px;
+  width: auto;
 }
 
 .setup-classic-nav .nav-user,
@@ -7674,9 +7682,10 @@ h1, h2, h3 {
   padding: 34px 0 68px;
 }
 
-.dash-page .dash-shell {
-  width: min(1240px, calc(100% - 96px));
-  max-width: 1240px;
+.dash-page .dash-shell,
+.playground-dashboard {
+  width: min(960px, calc(100% - 48px));
+  max-width: 960px;
 }
 
 .setup-classic-container {
@@ -8137,6 +8146,58 @@ h1, h2, h3 {
   margin-bottom: 56px;
 }
 
+.dash-page .dashboard-cta-row--primary {
+  margin-bottom: 30px;
+}
+
+.dash-page .dashboard-section-head {
+  order: 2;
+  margin-bottom: 16px;
+}
+
+.dash-page .dashboard-section-head h3 {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #faf8f5;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-section-head p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #8f9294;
+}
+
+.dash-page .dashboard-cta-row--resources {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* ── Alert: icon + text as one centered flex row (replaces the
+   absolutely-positioned icon, which left an 8px gap and felt off-center). ── */
+.dash-page .dash-alert {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 22px;
+  min-height: 56px;
+}
+
+.dash-page .dash-alert .dash-alert-icon {
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 20px;
+}
+
+.dash-page .dash-alert p {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
 /* ── Sign-in screen (Figma 2556:112) ───────────────────────── */
 .wm-signin {
   position: fixed;
@@ -8147,6 +8208,15 @@ h1, h2, h3 {
   display: grid;
   place-items: center;
   font-family: var(--font-sans);
+}
+
+.wm-signin--page {
+  position: relative;
+  inset: auto;
+  z-index: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: clip;
 }
 
 .wm-signin-backdrop {
@@ -8282,6 +8352,7 @@ h1, h2, h3 {
 .wm-signin-google svg {
   position: absolute;
   left: clamp(30px, 10%, 48px);
+  flex: 0 0 auto;
   width: clamp(27px, 1.65vw, 34px);
   height: clamp(27px, 1.65vw, 34px);
 }
@@ -8388,8 +8459,8 @@ h1, h2, h3 {
     margin: 36px auto 58px;
   }
 
-  .wm-signin-google,
-  .wm-signin-wallet {
+  .wm-page .wm-signin-google,
+  .wm-page .wm-signin-wallet {
     width: min(440px, 82%);
   }
 
@@ -8397,6 +8468,11 @@ h1, h2, h3 {
   .wm-signin-wallet button {
     min-height: 72px;
     font-size: clamp(22px, 5.4vw, 30px);
+  }
+
+  .wm-signin-google svg {
+    position: static;
+    left: auto;
   }
 
   .wm-signin-tos {

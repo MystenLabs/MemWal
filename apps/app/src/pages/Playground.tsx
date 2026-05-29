@@ -23,6 +23,7 @@ import { MemWal } from '@mysten-incubation/memwal'
 import type { RememberJobStatus } from '@mysten-incubation/memwal'
 import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
+import { Card } from '../components/Card'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 
@@ -110,17 +111,13 @@ function DemoStep({
 }: DemoStepProps) {
     const hasOutput = result || error
     return (
-        <div className="card demo-step">
-            <div className="card-header">
-                <div className="demo-step-header-row">
-                    <div className={`demo-step-badge${highlight ? ' demo-step-badge--highlight' : ''}`}>
-                        {number}
-                    </div>
-                    <div>
-                        <div className="card-title">{title}</div>
-                        <div className="card-subtitle">{description}</div>
-                    </div>
-                </div>
+        <Card
+            className="demo-step"
+            leading={<div className={`demo-step-badge${highlight ? ' demo-step-badge--highlight' : ''}`}>{number}</div>}
+            leadingRowClassName="demo-step-header-row"
+            title={title}
+            subtitle={description}
+            action={
                 <button
                     className="btn btn-primary btn-sm"
                     onClick={onRun}
@@ -133,7 +130,8 @@ function DemoStep({
                         '▶ run'
                     )}
                 </button>
-            </div>
+            }
+        >
 
             {/* Optional inputs (injected via children) */}
             {children}
@@ -165,7 +163,7 @@ function DemoStep({
                     <pre className="demo-error-pre">{error}</pre>
                 </div>
             )}
-        </div>
+        </Card>
     )
 }
 
@@ -831,23 +829,20 @@ const result = await memwal.restore("${namespace || 'default'}")
                 />
 
                 {/* Step 5: Configure LLM API Key */}
-                <div className="card demo-step">
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>
-                            <div>
-                                <div className="card-title">configure your LLM</div>
-                                <div className="card-subtitle">
-                                    Walrus Memory is just the memory layer — you bring your own LLM
-                                </div>
-                            </div>
-                        </div>
-                        {askLlmKey.trim() && (
+                <Card
+                    className="demo-step"
+                    leading={<div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="configure your LLM"
+                    subtitle="Walrus Memory is just the memory layer — you bring your own LLM"
+                    action={
+                        askLlmKey.trim() && (
                             <span style={{ fontSize: '0.78rem', color: 'var(--success)', fontWeight: 500 }}>
                                 ✓ ready
                             </span>
-                        )}
-                    </div>
+                        )
+                    }
+                >
 
                     <div className="demo-info-panel">
                         <div className="demo-info-label">
@@ -885,20 +880,17 @@ const result = await memwal.restore("${namespace || 'default'}")
 //
 // your key is never sent to Walrus Memory servers.`}
                     </SyntaxHighlighter>
-                </div>
+                </Card>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">7</div>
-                            <div>
-                                <div className="card-title">ask AI (with memory)</div>
-                                <div className="card-subtitle">
-                                    your LLM key + Walrus Memory layer — like Supermemory
-                                </div>
-                            </div>
-                        </div>
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">7</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="ask AI (with memory)"
+                    subtitle="your LLM key + Walrus Memory layer — like Supermemory"
+                    action={
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={runAsk}
@@ -911,7 +903,8 @@ const result = await memwal.restore("${namespace || 'default'}")
                                 '▶ ask'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>your question:</label>
@@ -1004,7 +997,7 @@ const { text } = await generateText({
                             <pre className="demo-error-pre">{askError}</pre>
                         </div>
                     )}
-                </div>
+                </Card>
 
 
 
@@ -1019,17 +1012,14 @@ const { text } = await generateText({
                 </div>
 
                 {/* Step 7: Remember (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">8</div>
-                            <div>
-                                <div className="card-title">remember (hybrid)</div>
-                                <div className="card-subtitle">
-                                    client: embed → SEAL encrypt → send to server → server uploads Walrus
-                                </div>
-                            </div>
-                        </div>
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">8</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="remember (hybrid)"
+                    subtitle="client: embed → SEAL encrypt → send to server → server uploads Walrus"
+                    action={
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={runFullRemember}
@@ -1042,7 +1032,8 @@ const { text } = await generateText({
                                 '▶ run'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>memory text:</label>
@@ -1101,20 +1092,17 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                             <pre className="demo-error-pre">{fullRememberError}</pre>
                         </div>
                     )}
-                </div>
+                </Card>
 
                 {/* Step 8: Recall (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">9</div>
-                            <div>
-                                <div className="card-title">recall (full client-side)</div>
-                                <div className="card-subtitle">
-                                    SDK: embed query → search → Walrus download → SEAL decrypt
-                                </div>
-                            </div>
-                        </div>
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">9</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="recall (full client-side)"
+                    subtitle="SDK: embed query → search → Walrus download → SEAL decrypt"
+                    action={
                         <button
                             className="btn btn-primary btn-sm"
                             onClick={runFullRecall}
@@ -1127,7 +1115,8 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                                 '▶ run'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
                     <div className="input-group" style={{ marginBottom: 12 }}>
                         <label>search query:</label>
@@ -1171,7 +1160,7 @@ const result = await memwal.recallManual("${fullRecallQuery}", 5)
                             <pre className="demo-error-pre">{fullRecallError}</pre>
                         </div>
                     )}
-                </div>
+                </Card>
 
 
             </div>
