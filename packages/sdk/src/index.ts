@@ -34,6 +34,7 @@ export type {
     RecallParams,
     ScoringWeights,
     EmbedResult,
+    AnalyzeOptions,
     AnalyzeResult,
     AnalyzeWaitResult,
     AnalyzedFact,
