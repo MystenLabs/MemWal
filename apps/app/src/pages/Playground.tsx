@@ -122,12 +122,11 @@ function DemoStep({
                     className="btn btn-primary btn-sm"
                     onClick={onRun}
                     disabled={loading}
-                    style={{ minWidth: 80 }}
                 >
                     {loading ? (
-                        <span className="spinner" style={{ width: 14, height: 14 }} />
+                        <span className="spinner demo-button-spinner" />
                     ) : (
-                        '▶ run'
+                        'Run'
                     )}
                 </button>
             }
@@ -638,14 +637,11 @@ export default function Playground() {
             <nav className="nav playground-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
-                            <span>walrus</span>
-                            <span>memory</span>
-                        </span>
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
                         <Link to="/dashboard" className="demo-nav-back">
-                            ← Dashboard
+                            Dashboard
                         </Link>
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
@@ -668,7 +664,7 @@ export default function Playground() {
                         Test Walrus Memory SDK operations with your current server and credentials.
                         Run steps against your server using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
-                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--playground-blue-strong)', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
+                            <> See the <a className="demo-doc-link" href={config.docsUrl} target="_blank" rel="noopener noreferrer" onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
                     </p>
                 </div>
@@ -684,14 +680,14 @@ export default function Playground() {
                     <div className="demo-server-tag">
                         SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten-incubation/memwal</span>
                     </div>
-                    <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
-                        <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
+                    <div className="demo-server-tag demo-server-tag--namespace">
+                        <span>namespace:</span>
                         <input
+                            className="demo-namespace-input"
                             value={namespace}
                             onChange={(e) => setNamespace(e.target.value)}
                             placeholder="default"
                             size={Math.max(namespace.length, 7)}
-                            style={{ padding: '8px 12px 8px 6px', fontSize: '0.8rem', fontFamily: 'var(--font-mono)', background: 'transparent', border: 'none', outline: 'none', color: 'var(--text-primary)', fontWeight: 600, width: 'auto', minWidth: 0 }}
                         />
                     </div>
                 </div>
@@ -745,14 +741,13 @@ while (true) {
                     error={rememberError}
                     loading={rememberLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>memory text:</label>
                         <textarea
                             className="input"
                             rows={3}
                             value={rememberText}
                             onChange={(e) => setRememberText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
                 </DemoStep>
@@ -772,7 +767,7 @@ while (true) {
                     error={recallError}
                     loading={recallLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>search query:</label>
                         <input
                             className="input"
@@ -798,14 +793,13 @@ while (true) {
                     error={analyzeError}
                     loading={analyzeLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>conversation text to analyze:</label>
                         <textarea
                             className="input"
                             rows={3}
                             value={analyzeText}
                             onChange={(e) => setAnalyzeText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
                 </DemoStep>
@@ -837,8 +831,8 @@ const result = await memwal.restore("${namespace || 'default'}")
                     subtitle="Walrus Memory is just the memory layer — you bring your own LLM"
                     action={
                         askLlmKey.trim() && (
-                            <span style={{ fontSize: '0.78rem', color: 'var(--success)', fontWeight: 500 }}>
-                                ✓ ready
+                            <span className="demo-ready-pill">
+                                Ready
                             </span>
                         )
                     }
@@ -848,12 +842,11 @@ const result = await memwal.restore("${namespace || 'default'}")
                         <div className="demo-info-label">
                             your LLM API key (not stored, client-side only)
                         </div>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <div className="demo-llm-controls">
                             <select
                                 className="input"
                                 value={askLlmProvider}
                                 onChange={(e) => setAskLlmProvider(e.target.value as 'openai' | 'openrouter')}
-                                style={{ width: 140, flexShrink: 0 }}
                             >
                                 <option value="openai">OpenAI</option>
                                 <option value="openrouter">OpenRouter</option>
@@ -864,10 +857,9 @@ const result = await memwal.restore("${namespace || 'default'}")
                                 value={askLlmKey}
                                 onChange={(e) => setAskLlmKey(e.target.value)}
                                 placeholder={askLlmProvider === 'openai' ? 'sk-...' : 'sk-or-v1-...'}
-                                style={{ flex: 1 }}
                             />
                         </div>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        <div className="demo-field-note">
                             required for steps 7–9. your key stays in this browser tab — never sent to Walrus Memory.
                         </div>
                     </div>
@@ -895,18 +887,17 @@ const result = await memwal.restore("${namespace || 'default'}")
                             className="btn btn-primary btn-sm"
                             onClick={runAsk}
                             disabled={askLoading || !askLlmKey.trim()}
-                            style={{ minWidth: 80 }}
                         >
                             {askLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ ask'
+                                'Ask'
                             )}
                         </button>
                     }
                 >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>your question:</label>
                         <input
                             className="input"
@@ -941,7 +932,7 @@ const { text } = await generateText({
                     {/* Loading phase */}
                     {askPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {askPhase}
                         </div>
                     )}
@@ -950,7 +941,7 @@ const { text } = await generateText({
                         <>
                             {/* AI Answer */}
                             <div className="demo-ai-panel">
-                                <div className="demo-info-label" style={{ marginBottom: 12 }}>
+                                <div className="demo-info-label">
                                     AI response (your LLM + Walrus Memory)
                                 </div>
                                 <div className="demo-ai-answer">
@@ -959,16 +950,16 @@ const { text } = await generateText({
                             </div>
 
                             {/* Memories Used */}
-                            <div className="demo-result-panel" style={{ marginBottom: 12 }}>
-                                <div className="demo-result-label" style={{ marginBottom: 10 }}>
+                            <div className="demo-result-panel">
+                                <div className="demo-result-label">
                                     {askResult.memories.length} memories injected as context
                                 </div>
                                 {askResult.memories.map((m, i) => (
                                     <div key={i} className="demo-memory-item">
-                                        <span style={{ color: 'var(--success)', flexShrink: 0 }}>
+                                        <span className="demo-memory-score">
                                             {((1 - m.distance) * 100).toFixed(0)}%
                                         </span>
-                                        <span style={{ color: 'var(--text-secondary)' }}>
+                                        <span>
                                             {m.text}
                                         </span>
                                     </div>
@@ -977,15 +968,10 @@ const { text } = await generateText({
 
                             {/* System Prompt Preview */}
                             <details>
-                                <summary style={{
-                                    fontSize: '0.72rem',
-                                    color: 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                    marginBottom: 8,
-                                }}>
+                                <summary className="demo-details-summary">
                                     view system prompt sent to LLM
                                 </summary>
-                                <pre className="demo-code-block" style={{ fontSize: '0.72rem', lineHeight: 1.5, color: 'var(--text-muted)' }}>
+                                <pre className="demo-code-block demo-system-prompt">
                                     {askResult.systemPrompt}
                                 </pre>
                             </details>
@@ -999,13 +985,11 @@ const { text } = await generateText({
                     )}
                 </Card>
 
-
-
                 {/* Divider — Manual / Hybrid mode */}
-                <div style={{ margin: '40px 0 32px', textAlign: 'center' }}>
-                    <hr style={{ border: 'none', borderTop: '2px dashed var(--border-light)', margin: '0 0 16px' }} />
-                    <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                        <strong style={{ color: 'var(--text-primary)' }}>manual mode</strong> — client handles embedding & encryption, server handles storage.
+                <div className="demo-mode-divider">
+                    <hr />
+                    <div>
+                        <strong>manual mode</strong> — client handles embedding & encryption, server handles storage.
                         <br />
                         your data never leaves your browser unencrypted. requires an LLM API key (step 6).
                     </div>
@@ -1024,25 +1008,23 @@ const { text } = await generateText({
                             className="btn btn-primary btn-sm"
                             onClick={runFullRemember}
                             disabled={fullRememberLoading || !memwalManual}
-                            style={{ minWidth: 80 }}
                         >
                             {fullRememberLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ run'
+                                'Run'
                             )}
                         </button>
                     }
                 >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>memory text:</label>
                         <textarea
                             className="input"
                             rows={2}
                             value={fullRememberText}
                             onChange={(e) => setFullRememberText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
 
@@ -1075,7 +1057,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
 
                     {fullRememberPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {fullRememberPhase}
                         </div>
                     )}
@@ -1107,18 +1089,17 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                             className="btn btn-primary btn-sm"
                             onClick={runFullRecall}
                             disabled={fullRecallLoading || !memwalManual}
-                            style={{ minWidth: 80 }}
                         >
                             {fullRecallLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ run'
+                                'Run'
                             )}
                         </button>
                     }
                 >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>search query:</label>
                         <input
                             className="input"
@@ -1143,7 +1124,7 @@ const result = await memwal.recallManual("${fullRecallQuery}", 5)
 
                     {fullRecallPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {fullRecallPhase}
                         </div>
                     )}

@@ -18,7 +18,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, Copy } from 'lucide-react'
+import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import {
@@ -29,7 +29,7 @@ import {
     type RegistryObjectFields,
 } from '../utils/suiFields'
 
-type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
+type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_ERROR = `this wallet already has ${MAX_DELEGATE_KEYS} delegate keys. go to the dashboard, remove an old key, then create a new delegate key.`
@@ -366,10 +366,7 @@ export default function SetupWizard() {
             <nav className="nav setup-classic-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
-                            <span>walrus</span>
-                            <span>memory</span>
-                        </span>
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
@@ -431,13 +428,34 @@ export default function SetupWizard() {
                                 </div>
                             </div>
 
-                            <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
-                                Create delegate key
-                            </button>
-
-                            <div className="setup-classic-divider">
-                                Already have a delegate key?
+                            <div className="setup-classic-actions">
+                                <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
+                                    Create delegate key
+                                </button>
+                                <button
+                                    type="button"
+                                    className="setup-classic-import-trigger"
+                                    onClick={() => {
+                                        setError('')
+                                        setStep('import-key')
+                                    }}
+                                >
+                                    Already have a delegate key?
+                                </button>
                             </div>
+                        </div>
+                    )}
+
+                    {/* ===== Import existing key ===== */}
+                    {step === 'import-key' && (
+                        <div className="setup-classic-import-screen">
+                            <h2 className="setup-classic-title">
+                                Use an existing delegate key
+                            </h2>
+                            <p className="setup-classic-description">
+                                Paste a delegate private key that is already registered on-chain for
+                                this wallet.
+                            </p>
 
                             <div className="setup-classic-import">
                                 <div className="input-group">
@@ -450,112 +468,98 @@ export default function SetupWizard() {
                                         placeholder="Paste an existing delegate key"
                                         aria-label="existing delegate key"
                                         spellCheck={false}
+                                        autoFocus
                                     />
                                 </div>
                                 {error && (
-                                    <div style={{
-                                        background: 'rgba(248,113,113,0.08)',
-                                        border: '1px solid rgba(248,113,113,0.2)',
-                                        borderRadius: 'var(--radius-md)',
-                                        padding: 12,
-                                        marginBottom: 12,
-                                        color: 'var(--danger)',
-                                        fontSize: '0.82rem',
-                                    }}>
+                                    <div className="setup-classic-error">
                                         {error}
                                     </div>
                                 )}
-                                <button
-                                    className="btn btn-secondary setup-import-button"
-                                    onClick={handleImportKey}
-                                    disabled={importingKey || !importKeyHex.trim()}
-                                >
-                                    {importingKey ? 'Checking key…' : 'Continue'}
-                                </button>
+                                <div className="setup-classic-import-actions">
+                                    <button
+                                        className="btn btn-secondary setup-import-button"
+                                        onClick={handleImportKey}
+                                        disabled={importingKey || !importKeyHex.trim()}
+                                    >
+                                        {importingKey ? 'Checking key...' : 'Continue'}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}
 
                     {/* ===== Generating ===== */}
                     {step === 'generating' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
-                            <p style={{ color: 'var(--text-secondary)' }}>Generating keypair…</p>
+                        <div className="setup-classic-state">
+                            <div className="spinner setup-classic-spinner" />
+                            <p className="setup-classic-state-title">Generating keypair...</p>
                         </div>
                     )}
 
                     {/* ===== Step 2: Show Key ===== */}
                     {step === 'show-key' && (
-                        <div>
-                            <div style={{ textAlign: 'center', marginBottom: 24 }}>
-                                <h2 style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
-                                    Your delegate key is ready
-                                </h2>
-                            </div>
+                        <div className="setup-classic-ready-screen">
+                            <h2 className="setup-classic-title">
+                                Your delegate key is ready
+                            </h2>
 
-                            <div className="warning-box">
+                            <div className="warning-box setup-classic-ready-warning">
+                                <TriangleAlert className="setup-classic-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
-                                    Save this key now. For your security, we won't show it again.
-                                    You'll need the key to configure the Walrus Memory SDK.
+                                    <strong>Save this key now.</strong> For your security, we won't show it again.
+                                    You'll need it to configure the Walrus Memory SDK.
                                 </p>
                             </div>
 
-                            <div className="key-display" style={{ marginBottom: 16 }}>
-                                <div className="key-label">Private key (keep secret)</div>
-                                <div className="key-value">{privateKeyHex}</div>
-                                <div className="key-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={copyKey}>
-                                        <Copy size={12} /> {copied ? 'Copied' : 'Copy private key'}
-                                    </button>
+                            <div className="setup-key-panel">
+                                <div className="setup-key-row">
+                                    <div className="setup-key-main">
+                                        <div className="setup-key-label">Private key <span>keep secret</span></div>
+                                        <code className="setup-key-value">{privateKeyHex}</code>
+                                    </div>
+                                    <div className="setup-key-actions">
+                                        <button
+                                            className={`setup-key-copy-button${copied ? ' setup-key-copy-button--copied' : ''}`}
+                                            onClick={copyKey}
+                                            aria-label={copied ? 'Copied private key' : 'Copy private key'}
+                                            title={copied ? 'Copied' : 'Copy private key'}
+                                        >
+                                            <Copy size={16} aria-hidden="true" />
+                                        </button>
+                                    </div>
                                 </div>
-                            </div>
-
-                            <div className="key-display" style={{ marginBottom: 24 }}>
-                                <div className="key-label">
-                                    Public key (shareable)
-                                </div>
-                                <div className="key-value">
-                                    {publicKeyHex}
+                                <div className="setup-key-row">
+                                    <div className="setup-key-main">
+                                        <div className="setup-key-label">Public key <span>shareable</span></div>
+                                        <code className="setup-key-value">{publicKeyHex}</code>
+                                    </div>
                                 </div>
                             </div>
 
                             {error && (
-                                <div style={{
-                                    background: 'rgba(248,113,113,0.08)',
-                                    border: '1px solid rgba(248,113,113,0.2)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 16,
-                                    marginBottom: 20,
-                                    color: 'var(--danger)',
-                                    fontSize: '0.85rem',
-                                }}>
+                                <div className="setup-classic-error setup-classic-ready-error">
                                     <div>{error}</div>
                                     {error === MAX_DELEGATE_KEYS_ERROR && (
-                                        <Link to="/dashboard" className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
+                                        <Link to="/dashboard" className="setup-classic-error-action">
                                             Manage keys in Dashboard
                                         </Link>
                                     )}
                                 </div>
                             )}
 
-                            <div style={{ marginBottom: 24 }}>
-                                <label style={{
-                                    display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
-                                    fontSize: '0.85rem', color: '#faf8f5', lineHeight: 1.5
-                                }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={confirmed}
-                                        onChange={(e) => setConfirmed(e.target.checked)}
-                                        style={{ marginTop: 3 }}
-                                    />
-                                    I've saved my private key. I understand Walrus Memory can't show it again.
-                                </label>
-                            </div>
+                            <label className="setup-classic-confirm">
+                                <input
+                                    type="checkbox"
+                                    checked={confirmed}
+                                    onChange={(e) => setConfirmed(e.target.checked)}
+                                />
+                                <span className="setup-classic-confirm-box" aria-hidden="true" />
+                                <span className="setup-classic-confirm-text">I've saved my private key. I understand Walrus Memory can't show it again.</span>
+                            </label>
 
                             <button
-                                className="lp-btn-yellow"
-                                style={{ width: '100%', justifyContent: 'center' }}
+                                className="setup-classic-register"
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
@@ -566,12 +570,12 @@ export default function SetupWizard() {
 
                     {/* ===== Onchain tx in progress ===== */}
                     {step === 'onchain' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
-                            <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>{txStatus}</p>
-                            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                        <div className="setup-classic-state">
+                            <div className="spinner setup-classic-spinner" />
+                            <p className="setup-classic-state-title">{txStatus}</p>
+                            <p className="setup-classic-state-subtitle">
                                 {isEnoki
-                                    ? 'This may take a few seconds…'
+                                    ? 'This may take a few seconds...'
                                     : 'Please approve the transaction in your wallet'}
                             </p>
                         </div>
@@ -594,12 +598,10 @@ export default function SetupWizard() {
 
                     {/* ===== Done ===== */}
                     {step === 'done' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8 }}>
-                                All set
-                            </h2>
-                            <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-                                Your delegate key has been registered onchain. Loading dashboard…
+                        <div className="setup-classic-state">
+                            <h2 className="setup-classic-state-heading">All set</h2>
+                            <p className="setup-classic-state-subtitle">
+                                Your delegate key has been registered onchain. Loading dashboard...
                             </p>
                         </div>
                     )}

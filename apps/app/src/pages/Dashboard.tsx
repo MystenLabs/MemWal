@@ -2,18 +2,19 @@
  * Dashboard — Account info, delegate keys management, SDK integration guide
  */
 
-import { useState, useCallback, useEffect, useMemo, type SVGProps } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef, type SVGProps } from 'react'
 import {
     useCurrentAccount,
     useDisconnectWallet,
     useSignPersonalMessage,
     useSuiClient,
 } from '@mysten/dapp-kit'
+import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey, removeDelegateKey } from '@mysten-incubation/memwal/account'
+import { generateDelegateKey, addDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
+import { TriangleAlert, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
@@ -64,15 +65,6 @@ function CtaArrowIcon(props: SVGProps<SVGSVGElement>) {
                 d="M10.18 0L9.47 0.71L18.45 9.68H0V10.68H18.45L9.47 19.66L10.18 20.36L20.36 10.18L10.18 0Z"
                 fill="currentColor"
             />
-        </svg>
-    )
-}
-
-function InstallCopyIcon(props: SVGProps<SVGSVGElement>) {
-    return (
-        <svg viewBox="0 0 12.14 12.14" fill="none" aria-hidden="true" {...props}>
-            <rect x="0.5" y="0.5" width="7.73" height="7.73" stroke="currentColor" />
-            <rect x="3.91" y="3.91" width="7.73" height="7.73" stroke="currentColor" />
         </svg>
     )
 }
@@ -135,9 +127,59 @@ const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
 type QuickstartLanguage = 'ts' | 'py'
+type RemoveKeysConfirmState = {
+    publicKeys: string[]
+    source: 'single' | 'selection'
+}
 
 function bytesToHex(bytes: Uint8Array | number[]): string {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function hexToByteArray(hex: string): number[] {
+    const normalized = hex.startsWith('0x') ? hex.slice(2) : hex
+    if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
+        throw new Error('invalid delegate public key')
+    }
+
+    return Array.from({ length: normalized.length / 2 }, (_, i) =>
+        parseInt(normalized.slice(i * 2, i * 2 + 2), 16)
+    )
+}
+
+function compactPublicKey(publicKey: string): string {
+    const normalized = publicKey.startsWith('0x') ? publicKey.slice(2) : publicKey
+    if (normalized.length <= 24) return publicKey
+    return `${normalized.slice(0, 12)}...${normalized.slice(-8)}`
+}
+
+function DelegateKeySkeletonList() {
+    return (
+        <div className="dashboard-key-table-wrap dashboard-key-list--skeleton" aria-hidden="true">
+            <table className="dashboard-key-table">
+                <thead>
+                    <tr>
+                        <th scope="col" className="dashboard-key-table-select">Select</th>
+                        <th scope="col">Key name</th>
+                        <th scope="col">Public key</th>
+                        <th scope="col">Created</th>
+                        <th scope="col" className="dashboard-key-table-actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {[0, 1].map((index) => (
+                        <tr key={index}>
+                            <td><span className="dashboard-key-skeleton-line dashboard-key-skeleton-line--check" /></td>
+                            <td><span className="dashboard-key-skeleton-line dashboard-key-skeleton-line--label" /></td>
+                            <td><span className="dashboard-key-skeleton-line dashboard-key-skeleton-line--value" /></td>
+                            <td><span className="dashboard-key-skeleton-line dashboard-key-skeleton-line--date" /></td>
+                            <td><span className="dashboard-key-skeleton-line dashboard-key-skeleton-line--actions" /></td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    )
 }
 
 // ============================================================
@@ -169,6 +211,9 @@ export default function Dashboard({
         ? '0x7bc62cf958c4b27b16ad2f1a3f33d1f0e811e08d4fc079edc3525a7d2e2dc551'
         : null
     const [resolvedAccountObjectId, setResolvedAccountObjectId] = useState<string | null>(accountObjectId)
+    const shouldResolveAccount = Boolean(address && !previewMode && !accountObjectId)
+    const [accountLookupAddress, setAccountLookupAddress] = useState(address)
+    const [accountLookupComplete, setAccountLookupComplete] = useState(!shouldResolveAccount)
     const [loadingAccount, setLoadingAccount] = useState(false)
     const effectiveAccountObjectId = accountObjectId ?? previewAccountObjectId ?? resolvedAccountObjectId
     const [showKey, setShowKey] = useState(false)
@@ -181,10 +226,15 @@ export default function Dashboard({
     const [loadingKeys, setLoadingKeys] = useState(false)
     const [addingKey, setAddingKey] = useState(false)
     const [removingKey, setRemovingKey] = useState<string | null>(null)
+    const [removingSelectedKeys, setRemovingSelectedKeys] = useState(false)
+    const [removeKeysConfirm, setRemoveKeysConfirm] = useState<RemoveKeysConfirmState | null>(null)
+    const [selectedKeyPublicKeys, setSelectedKeyPublicKeys] = useState<string[]>([])
     const [showAddForm, setShowAddForm] = useState(false)
+    const [addKeyFormClosing, setAddKeyFormClosing] = useState(false)
     const [newKeyLabel, setNewKeyLabel] = useState('New key')
     const [keyError, setKeyError] = useState('')
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
+    const addKeyFormCloseTimerRef = useRef<number | null>(null)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
     const walletSigner = useMemo<WalletSigner | null>(() => {
@@ -215,13 +265,53 @@ export default function Dashboard({
         navigate('/')
     }, [clearDelegateKeys, disconnect, navigate])
 
+    const openAddKeyForm = useCallback(() => {
+        if (addKeyFormCloseTimerRef.current !== null) {
+            window.clearTimeout(addKeyFormCloseTimerRef.current)
+            addKeyFormCloseTimerRef.current = null
+        }
+        setAddKeyFormClosing(false)
+        setShowAddForm(true)
+    }, [])
+
+    const closeAddKeyForm = useCallback(() => {
+        setKeyError('')
+        setAddKeyFormClosing(true)
+        if (addKeyFormCloseTimerRef.current !== null) {
+            window.clearTimeout(addKeyFormCloseTimerRef.current)
+        }
+        addKeyFormCloseTimerRef.current = window.setTimeout(() => {
+            setShowAddForm(false)
+            setAddKeyFormClosing(false)
+            addKeyFormCloseTimerRef.current = null
+        }, 260)
+    }, [])
+
+    useEffect(() => {
+        return () => {
+            if (addKeyFormCloseTimerRef.current !== null) {
+                window.clearTimeout(addKeyFormCloseTimerRef.current)
+            }
+        }
+    }, [])
+
     const fetchAccountObjectId = useCallback(async () => {
         if (!address || previewMode) {
             setResolvedAccountObjectId(null)
+            setAccountLookupAddress(address)
+            setAccountLookupComplete(true)
+            setLoadingAccount(false)
             return
         }
-        if (accountObjectId) return
+        if (accountObjectId) {
+            setResolvedAccountObjectId(accountObjectId)
+            setAccountLookupAddress(address)
+            setAccountLookupComplete(true)
+            setLoadingAccount(false)
+            return
+        }
         setResolvedAccountObjectId(null)
+        setAccountLookupComplete(false)
         setLoadingAccount(true)
         try {
             const registryObj = await suiClient.getObject({
@@ -244,21 +334,28 @@ export default function Dashboard({
             console.error('Failed to fetch account object ID:', err)
             setResolvedAccountObjectId(null)
         } finally {
+            setAccountLookupAddress(address)
+            setAccountLookupComplete(true)
             setLoadingAccount(false)
         }
     }, [address, accountObjectId, previewMode, suiClient])
 
     useEffect(() => {
         setResolvedAccountObjectId(accountObjectId)
-    }, [accountObjectId])
+        if (accountObjectId) {
+            setAccountLookupAddress(address)
+            setAccountLookupComplete(true)
+        }
+    }, [accountObjectId, address])
 
     useEffect(() => {
         fetchAccountObjectId()
     }, [fetchAccountObjectId])
 
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
+    const accountLookupPending = loadingAccount || (shouldResolveAccount && (!accountLookupComplete || accountLookupAddress !== address))
     const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount && !previewReady
-    const isNewAccount = !delegateKey && !loadingAccount && !hasResolvedAccount
+    const isNewAccount = !delegateKey && accountLookupComplete && !hasResolvedAccount
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
@@ -283,13 +380,27 @@ export default function Dashboard({
             !normalizedRelayerUrl.includes('dev'))
     const dashboardSubtitle = delegateKey || previewReady
         ? 'Manage your Walrus Memory account and delegate keys'
-        : loadingAccount
+        : accountLookupPending
             ? 'Checking your Walrus Memory account...'
             : hasResolvedAccount
                 ? 'Manage your Walrus Memory account and delegate keys in one place'
                 : 'Manage your Walrus Memory account and delegate keys'
     const showDashboardSubtitle = Boolean(dashboardSubtitle)
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
+    const isKeyListLoading = accountLookupPending || (loadingKeys && onChainKeys.length === 0)
+    const isKeyListRefreshing = loadingKeys && onChainKeys.length > 0
+    const selectableKeyPublicKeys = useMemo(() => onChainKeys.map((key) => key.publicKey), [onChainKeys])
+    const selectedKeySet = useMemo(() => new Set(selectedKeyPublicKeys), [selectedKeyPublicKeys])
+    const selectedKeyCount = selectedKeyPublicKeys.length
+    const keyRemovalBusy = removingSelectedKeys || Boolean(removingKey)
+    const showKeySelectionControls = Boolean(effectiveAccountObjectId) && selectedKeyCount > 0 && !accountLookupPending
+
+    useEffect(() => {
+        setSelectedKeyPublicKeys((prev) => {
+            const next = prev.filter((publicKey) => selectableKeyPublicKeys.includes(publicKey))
+            return next.length === prev.length ? prev : next
+        })
+    }, [selectableKeyPublicKeys])
 
     // ============================================================
     // Fetch on-chain delegate keys
@@ -396,8 +507,8 @@ export default function Dashboard({
             const delegatePublicKeyHex = bytesToHex(delegate.publicKey)
             setNewPrivateKey(delegate.privateKey)
             setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
-            setShowAddForm(false)
-            setNewKeyLabel('New Key')
+            closeAddKeyForm()
+            setNewKeyLabel('New key')
 
             trackEvent('delegate_key_add_complete', { location: 'dashboard' })
             void navigator.clipboard.writeText(delegate.privateKey).catch(() => undefined)
@@ -409,48 +520,163 @@ export default function Dashboard({
         } finally {
             setAddingKey(false)
         }
-    }, [walletSigner, hasMaxDelegateKeys, effectiveAccountObjectId, newKeyLabel, suiClient, fetchOnChainKeys, setDelegateKeys])
+    }, [
+        walletSigner,
+        hasMaxDelegateKeys,
+        effectiveAccountObjectId,
+        newKeyLabel,
+        suiClient,
+        fetchOnChainKeys,
+        setDelegateKeys,
+        closeAddKeyForm,
+    ])
 
     // ============================================================
-    // Remove a delegate key (via SDK)
+    // Remove delegate keys
     // ============================================================
 
-    const handleRemoveKey = useCallback(async (publicKeyHex: string) => {
-        if (!walletSigner) return
-        if (!confirm('remove this delegate key? this cannot be undone.')) return
-        setRemovingKey(publicKeyHex)
+    const removeDelegateKeysInTransaction = useCallback(async (publicKeyHexes: string[]) => {
+        if (!walletSigner || !effectiveAccountObjectId) return
+
+        const tx = new Transaction()
+        for (const publicKeyHex of publicKeyHexes) {
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::remove_delegate_key`,
+                arguments: [
+                    tx.object(effectiveAccountObjectId),
+                    tx.pure('vector<u8>', hexToByteArray(publicKeyHex)),
+                ],
+            })
+        }
+
+        const result = await signAndExecuteTx({ transaction: tx })
+        await suiClient.waitForTransaction({
+            digest: result.digest,
+            options: { showEffects: true, showObjectChanges: true },
+        })
+    }, [walletSigner, effectiveAccountObjectId, signAndExecuteTx, suiClient])
+
+    const executeRemoveKeys = useCallback(async (publicKeyHexes: string[], source: RemoveKeysConfirmState['source']) => {
+        if (!walletSigner || !effectiveAccountObjectId || publicKeyHexes.length === 0) return
+
+        const isSelectionRemoval = source === 'selection'
+        if (isSelectionRemoval) {
+            setRemovingSelectedKeys(true)
+        } else {
+            setRemovingKey(publicKeyHexes[0])
+        }
         setKeyError('')
         setNewPrivateKey(null)
-        trackEvent('delegate_key_remove_start', { location: 'dashboard' })
+
+        const removeEventPayload = isSelectionRemoval
+            ? { location: 'dashboard', selected_count: publicKeyHexes.length }
+            : { location: 'dashboard' }
+
+        trackEvent('delegate_key_remove_start', removeEventPayload)
         try {
-            await removeDelegateKey({
-                packageId: config.memwalPackageId,
-                accountId: effectiveAccountObjectId!,
-                publicKey: publicKeyHex,
-                walletSigner,
-                suiClient,
-                suiNetwork: config.suiNetwork,
-            })
+            await removeDelegateKeysInTransaction(publicKeyHexes)
 
-            // key removed successfully
-
-            // If we removed our own key, clear local state
-            if (publicKeyHex === delegatePublicKey) {
+            if (delegatePublicKey && publicKeyHexes.includes(delegatePublicKey)) {
                 clearDelegateKeys()
             }
 
-            // Refresh key list
+            setSelectedKeyPublicKeys((prev) =>
+                isSelectionRemoval
+                    ? []
+                    : prev.filter((key) => key !== publicKeyHexes[0])
+            )
             await fetchOnChainKeys()
-            trackEvent('delegate_key_remove_complete', { location: 'dashboard' })
+            trackEvent('delegate_key_remove_complete', removeEventPayload)
         } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : 'failed to remove key'
+            const msg = err instanceof Error
+                ? err.message
+                : isSelectionRemoval
+                    ? 'failed to remove selected keys'
+                    : 'failed to remove key'
             setKeyError(msg)
             trackEvent('delegate_key_remove_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
-
-            setRemovingKey(null)
+            if (isSelectionRemoval) {
+                setRemovingSelectedKeys(false)
+            } else {
+                setRemovingKey(null)
+            }
         }
-    }, [walletSigner, effectiveAccountObjectId, delegatePublicKey, suiClient, fetchOnChainKeys, clearDelegateKeys])
+    }, [
+        walletSigner,
+        effectiveAccountObjectId,
+        removeDelegateKeysInTransaction,
+        delegatePublicKey,
+        clearDelegateKeys,
+        fetchOnChainKeys,
+    ])
+
+    const handleRemoveKey = useCallback((publicKeyHex: string) => {
+        if (!walletSigner || !effectiveAccountObjectId) return
+        setRemoveKeysConfirm({ publicKeys: [publicKeyHex], source: 'single' })
+    }, [walletSigner, effectiveAccountObjectId])
+
+    const toggleKeySelection = useCallback((publicKeyHex: string) => {
+        setSelectedKeyPublicKeys((prev) =>
+            prev.includes(publicKeyHex)
+                ? prev.filter((key) => key !== publicKeyHex)
+                : [...prev, publicKeyHex]
+        )
+    }, [])
+
+    const clearSelectedKeys = useCallback(() => {
+        setSelectedKeyPublicKeys([])
+    }, [])
+
+    const handleRemoveSelectedKeys = useCallback(() => {
+        if (!walletSigner || !effectiveAccountObjectId || selectedKeyPublicKeys.length === 0) return
+
+        const keysToRemove = selectedKeyPublicKeys.filter((publicKey) => selectableKeyPublicKeys.includes(publicKey))
+        if (keysToRemove.length === 0) {
+            setSelectedKeyPublicKeys([])
+            return
+        }
+
+        setRemoveKeysConfirm({ publicKeys: keysToRemove, source: 'selection' })
+    }, [
+        walletSigner,
+        effectiveAccountObjectId,
+        selectedKeyPublicKeys,
+        selectableKeyPublicKeys,
+    ])
+
+    const confirmRemoveKeys = useCallback(async () => {
+        if (!removeKeysConfirm) return
+
+        await executeRemoveKeys(removeKeysConfirm.publicKeys, removeKeysConfirm.source)
+        setRemoveKeysConfirm(null)
+    }, [executeRemoveKeys, removeKeysConfirm])
+
+    useEffect(() => {
+        if (!removeKeysConfirm || keyRemovalBusy) return undefined
+
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setRemoveKeysConfirm(null)
+            }
+        }
+
+        window.addEventListener('keydown', closeOnEscape)
+        return () => window.removeEventListener('keydown', closeOnEscape)
+    }, [keyRemovalBusy, removeKeysConfirm])
+
+    const removeConfirmCount = removeKeysConfirm?.publicKeys.length ?? 0
+    const removeConfirmBusy = removeKeysConfirm
+        ? removeKeysConfirm.source === 'selection'
+            ? removingSelectedKeys
+            : removingKey === removeKeysConfirm.publicKeys[0]
+        : false
+    const removeConfirmTitle = removeConfirmCount === 1
+        ? 'Remove delegate key?'
+        : `Remove ${removeConfirmCount} delegate keys?`
+    const removeConfirmDescription = removeConfirmCount === 1
+        ? 'This key will be removed from your Walrus Memory account. This cannot be undone.'
+        : `${removeConfirmCount} selected keys will be removed from your Walrus Memory account. This cannot be undone.`
 
     // ============================================================
     // SDK code snippets
@@ -554,7 +780,7 @@ const result = await generateText({
 
                 {isRecoveringExistingAccount && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <span className="dash-alert-icon" aria-hidden="true" />
+                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                         <p>
                             Your Walrus Memory account is active, but this browser has no saved delegate key. Create a new key to continue, or revoke an old one below.
                         </p>
@@ -563,7 +789,7 @@ const result = await generateText({
 
                 {isNewAccount && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <span className="dash-alert-icon" aria-hidden="true" />
+                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                         <p>
                             No Walrus Memory account found for this wallet. Create a delegate key to get started.
                         </p>
@@ -572,7 +798,7 @@ const result = await generateText({
 
                 {hasMaxDelegateKeys && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <span className="dash-alert-icon" aria-hidden="true" />
+                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                         <p>{MAX_DELEGATE_KEYS_MESSAGE}</p>
                     </div>
                 )}
@@ -615,20 +841,12 @@ const result = await generateText({
                                 <DelegateKeyCtaIcon className="dashboard-cta-icon" />
                             </span>
                             <div className="dashboard-cta-text">
-                                <div className="dashboard-cta-title">Create delegate key</div>
-                                <div className="dashboard-cta-subtitle">Delegate keys let your AI apps access Walrus Memory</div>
+                                <div className="dashboard-cta-title">Create a delegate key</div>
+                                <div className="dashboard-cta-subtitle">Generate and register a new SDK key</div>
                             </div>
                             <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     )}
-                </div>
-
-                {/* Resources */}
-                <div className="dashboard-section-head">
-                    <h3>Resources</h3>
-                    <p>Quick links for setup, development, and support.</p>
-                </div>
-                <div className="dashboard-cta-row dashboard-cta-row--resources">
                     <a
                         href={docsHref}
                         target="_blank"
@@ -640,11 +858,19 @@ const result = await generateText({
                             <DocumentationCtaIcon className="dashboard-cta-icon" />
                         </span>
                         <div className="dashboard-cta-text">
-                            <div className="dashboard-cta-title">Docs</div>
-                            <div className="dashboard-cta-subtitle">Browse guides, explainers, and API reference</div>
+                            <div className="dashboard-cta-title">Documentation</div>
+                            <div className="dashboard-cta-subtitle">Guides, examples & API references</div>
                         </div>
                         <CtaArrowIcon className="dashboard-cta-arrow" />
                     </a>
+                </div>
+
+                {/* Resources */}
+                <div className="dashboard-section-head">
+                    <h3>Resources</h3>
+                    <p>Quick links for setup, development, and support.</p>
+                </div>
+                <div className="dashboard-cta-row dashboard-cta-row--resources">
                     <a
                         href={githubHref}
                         target="_blank"
@@ -684,124 +910,128 @@ const result = await generateText({
                 {delegateKey && (
                     <Card
                         className="dashboard-credentials-card"
-                        style={{ marginBottom: 56 }}
                         title="SDK credentials"
-                        subtitle={`copy the delegate private key into server env as ${PRIVATE_KEY_ENV}`}
+                        subtitle={`Copy the delegate private key into server env as ${PRIVATE_KEY_ENV}`}
                     >
 
-                    <div className="warning-box" style={{ marginBottom: 12 }}>
-                        <p>
-                            active environment: <strong>{activeEnvironmentLabel}</strong>. configured relayer:
-                            {' '}<code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).
-                            {' '}matching relayer: <code>{expectedRelayerUrl}</code>.
-                            {' '}do not mix staging/testnet credentials with production/mainnet relayer configs.
-                        </p>
-                        {relayerLooksMismatched && (
-                            <p style={{ marginTop: 8 }}>
-                                this dashboard network and relayer URL look mismatched; API calls may fail with 401.
+                    <div className="dashboard-credentials-alert">
+                        <TriangleAlert className="dashboard-credentials-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                        <div className="dashboard-credentials-alert-copy">
+                            <p>
+                                <strong>{activeEnvironmentLabel}</strong>
+                                <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
+                                <span>Expected relayer: <code>{expectedRelayerUrl}</code>.</span>
                             </p>
-                        )}
-                    </div>
-
-                    {/* Account ID */}
-                    {effectiveAccountObjectId && (
-                        <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                            <div className="key-label">account ID — {ACCOUNT_ID_ENV}</div>
-                            <div className="key-value" style={{ fontSize: '0.78rem' }}>
-                                {effectiveAccountObjectId}
-                            </div>
-                            <div className="key-actions">
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => copyToClipboard(effectiveAccountObjectId, 'acct')}
-                                >
-                                    <Copy size={12} /> {copied === 'acct' ? 'copied!' : 'copy'}
-                                </button>
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => copyToClipboard(`${ACCOUNT_ID_ENV}=${effectiveAccountObjectId}`, 'acct-env')}
-                                >
-                                    <Copy size={12} /> {copied === 'acct-env' ? 'copied!' : 'copy env line'}
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                        <div className="key-label">relayer URL — {SERVER_URL_ENV}</div>
-                        <div className="key-value" style={{ fontSize: '0.78rem' }}>
-                            {config.memwalServerUrl}
-                        </div>
-                        <div className="key-actions">
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => copyToClipboard(`${SERVER_URL_ENV}=${config.memwalServerUrl}`, 'server-env')}
-                            >
-                                <Copy size={12} /> {copied === 'server-env' ? 'copied!' : 'copy env line'}
-                            </button>
+                            {relayerLooksMismatched && (
+                                <p>
+                                    This dashboard network and relayer URL look mismatched; API calls may fail with 401.
+                                </p>
+                            )}
                         </div>
                     </div>
 
-                    {/* Public Key */}
-                    <div className="key-display key-display--white" style={{ marginBottom: 12 }}>
-                        <div className="key-label">delegate public key — shareable, not the .env private key</div>
-                        <div className="key-value">
-                            {delegatePublicKey}
-                        </div>
-                        <div className="key-actions">
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => copyToClipboard(delegatePublicKey!, 'pub')}
-                            >
-                                <Copy size={12} /> {copied === 'pub' ? 'copied!' : 'copy'}
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Private Key (last, mirrors staging order) */}
-                    <div className="key-display key-display--white">
-                        <div className="key-label">delegate private key — server-side {PRIVATE_KEY_ENV}</div>
-                        {showKey ? (
-                            <>
-                                <div className="key-value">{delegateKey}</div>
-                                <div className="key-actions">
+                    <div className="dashboard-credentials-panel">
+                        {effectiveAccountObjectId && (
+                            <div className="dashboard-credential-row">
+                                <div className="dashboard-credential-main">
+                                    <div className="dashboard-credential-label">
+                                        Account ID <span>{ACCOUNT_ID_ENV}</span>
+                                    </div>
+                                    <code className="dashboard-credential-value">{effectiveAccountObjectId}</code>
+                                </div>
+                                <div className="dashboard-credential-actions">
                                     <button
-                                        className="btn btn-secondary btn-sm"
-                                        onClick={() => copyToClipboard(delegateKey!, 'priv')}
+                                        type="button"
+                                        className={`dashboard-credential-icon-button${copied === 'acct' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                        onClick={() => copyToClipboard(effectiveAccountObjectId, 'acct')}
+                                        aria-label="Copy account ID"
+                                        title={copied === 'acct' ? 'Copied' : 'Copy account ID'}
                                     >
-                                        <Copy size={12} /> {copied === 'priv' ? 'copied!' : 'copy'}
-                                    </button>
-                                    <button
-                                        className="btn btn-secondary btn-sm"
-                                        onClick={() => copyToClipboard(`${PRIVATE_KEY_ENV}=${delegateKey}`, 'priv-env')}
-                                    >
-                                        <Copy size={12} /> {copied === 'priv-env' ? 'copied!' : 'copy env line'}
-                                    </button>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(false)}>
-                                        <EyeOff size={12} /> hide
+                                        <Copy size={14} />
                                     </button>
                                 </div>
-                            </>
-                        ) : (
-                            <>
-                                <div className="key-value">
-                                    {'•'.repeat(64)}
-                                </div>
-                                <div className="key-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowKey(true)}>
-                                        <Eye size={12} /> reveal
-                                    </button>
-                                </div>
-                            </>
+                            </div>
                         )}
+
+                        <div className="dashboard-credential-row">
+                            <div className="dashboard-credential-main">
+                                <div className="dashboard-credential-label">
+                                    Relayer URL <span>{SERVER_URL_ENV}</span>
+                                </div>
+                                <code className="dashboard-credential-value">{config.memwalServerUrl}</code>
+                            </div>
+                            <div className="dashboard-credential-actions">
+                                <button
+                                    type="button"
+                                    className={`dashboard-credential-icon-button${copied === 'server-env' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                    onClick={() => copyToClipboard(`${SERVER_URL_ENV}=${config.memwalServerUrl}`, 'server-env')}
+                                    aria-label="Copy relayer URL env line"
+                                    title={copied === 'server-env' ? 'Copied' : 'Copy env line'}
+                                >
+                                    <Copy size={14} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="dashboard-credential-row">
+                            <div className="dashboard-credential-main">
+                                <div className="dashboard-credential-label">Delegate public key</div>
+                                <code className="dashboard-credential-value">{delegatePublicKey}</code>
+                            </div>
+                            <div className="dashboard-credential-actions">
+                                <button
+                                    type="button"
+                                    className={`dashboard-credential-icon-button${copied === 'pub' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                    onClick={() => copyToClipboard(delegatePublicKey!, 'pub')}
+                                    aria-label="Copy delegate public key"
+                                    title={copied === 'pub' ? 'Copied' : 'Copy public key'}
+                                >
+                                    <Copy size={14} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="dashboard-credential-row">
+                            <div className="dashboard-credential-main">
+                                <div className="dashboard-credential-label">
+                                    Delegate private key <span>{PRIVATE_KEY_ENV}</span>
+                                </div>
+                                <code className="dashboard-credential-value">
+                                    {showKey ? delegateKey : '•'.repeat(48)}
+                                </code>
+                            </div>
+                            <div className="dashboard-credential-actions">
+                                {showKey && (
+                                    <>
+                                        <button
+                                            type="button"
+                                            className={`dashboard-credential-icon-button${copied === 'priv' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                            onClick={() => copyToClipboard(delegateKey!, 'priv')}
+                                            aria-label="Copy delegate private key"
+                                            title={copied === 'priv' ? 'Copied' : 'Copy private key'}
+                                        >
+                                            <Copy size={14} />
+                                        </button>
+                                    </>
+                                )}
+                                <button
+                                    type="button"
+                                    className="dashboard-credential-icon-button"
+                                    onClick={() => setShowKey((value) => !value)}
+                                    aria-label={showKey ? 'Hide delegate private key' : 'Reveal delegate private key'}
+                                    title={showKey ? 'Hide private key' : 'Reveal private key'}
+                                >
+                                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                                </button>
+                            </div>
+                        </div>
                     </div>
                     </Card>
                 )}
 
                 {/* On-Chain Delegate Keys Management */}
                 <Card
-                    className="dashboard-keys-card"
-                    style={{ marginBottom: 56 }}
+                    className={`dashboard-keys-card${isKeyListRefreshing ? ' dashboard-keys-card--refreshing' : ''}`}
                     title="Delegate keys"
                     subtitle="All keys registered to your Walrus Memory account"
                     action={
@@ -809,9 +1039,10 @@ const result = await generateText({
                             <button
                                 className="btn btn-secondary btn-sm dashboard-keys-refresh"
                                 onClick={fetchOnChainKeys}
-                                disabled={loadingKeys || loadingAccount}
+                                disabled={loadingKeys || accountLookupPending}
+                                aria-busy={loadingKeys || accountLookupPending}
                             >
-                                <RefreshCw size={12} /> {loadingKeys || loadingAccount ? '...' : 'Refresh'}
+                                <RefreshCw size={12} /> Refresh
                             </button>
                             <button
                                 className="lp-nav-cta dashboard-keys-add"
@@ -822,9 +1053,9 @@ const result = await generateText({
                                         return
                                     }
                                     trackEvent('cta_click', { cta: 'show_add_delegate_key_form', location: 'dashboard' })
-                                    setShowAddForm(true)
+                                    openAddKeyForm()
                                 }}
-                                disabled={showAddForm || addingKey || !effectiveAccountObjectId || hasMaxDelegateKeys}
+                                disabled={showAddForm || addingKey || accountLookupPending || !effectiveAccountObjectId || hasMaxDelegateKeys}
                             >
                                 Add key <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                             </button>
@@ -847,14 +1078,15 @@ const result = await generateText({
                         </div>
                     )}
                     {newPrivateKey && (
-                        <div style={{ marginBottom: 12 }}>
-                            <div className="warning-box" style={{ marginBottom: 12 }}>
+                        <div className="dashboard-key-ready-block">
+                            <div className="warning-box dashboard-key-ready-warning">
+                                <TriangleAlert className="dashboard-key-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
                                     <strong>Your delegate key is ready.</strong> Save this key now. For your security,
                                     we won't show it again. You'll need the key to configure the Walrus Memory SDK.
                                 </p>
                             </div>
-                            <div className="key-display key-display--white">
+                            <div className="key-display key-display--white dashboard-key-ready-display">
                                 <div className="key-label">Delegate private key</div>
                                 <div className="key-value">{newPrivateKey}</div>
                                 <div className="key-actions">
@@ -877,18 +1109,13 @@ const result = await generateText({
 
                     {/* Add Key Form */}
                     {showAddForm && (
-                        <div style={{
-                            background: 'rgba(255,255,255,0.03)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-md)',
-                            padding: 16,
-                            marginBottom: 12,
-                        }}>
-                            <div style={{ marginBottom: 12 }}>
-                                <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                        <div className={`dashboard-add-key-form${addKeyFormClosing ? ' dashboard-add-key-form--closing' : ''}`}>
+                            <div className="dashboard-add-key-field">
+                                <label className="dashboard-add-key-label">
                                     Key name
                                 </label>
                                 <input
+                                    className="dashboard-add-key-input"
                                     type="text"
                                     value={newKeyLabel}
                                     maxLength={64}
@@ -897,34 +1124,25 @@ const result = await generateText({
                                         setNewKeyLabel(sanitizeLabel(e.target.value))
                                     }
                                     placeholder="New key"
-                                    style={{
-                                        width: '100%',
-                                        padding: '8px 12px',
-                                        background: 'var(--bg-secondary)',
-                                        border: '1px solid var(--border)',
-                                        borderRadius: 'var(--radius-sm)',
-                                        color: 'var(--text-primary)',
-                                        fontSize: '0.85rem',
-                                        outline: 'none',
-                                    }}
                                 />
                             </div>
-                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 16px', lineHeight: 1.5 }}>
+                            <p className="dashboard-add-key-note">
                                 A new keypair will be created, and the private key will be copied to your clipboard.
                                 Save it somewhere secure — it can't be shown again.
                             </p>
-                            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <div className="dashboard-add-key-actions">
                                 <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => { setShowAddForm(false); setKeyError('') }}
+                                    className="btn btn-secondary btn-sm dashboard-add-key-cancel"
+                                    onClick={closeAddKeyForm}
                                     disabled={addingKey}
                                 >
                                     Cancel
                                 </button>
                                 <button
-                                    className="btn btn-primary btn-sm"
+                                    className="btn btn-primary btn-sm dashboard-add-key-create"
                                     onClick={handleAddKey}
-                                    disabled={addingKey || hasMaxDelegateKeys || !effectiveAccountObjectId}
+                                    disabled={addingKey || hasMaxDelegateKeys || accountLookupPending || !effectiveAccountObjectId}
+                                    aria-busy={addingKey}
                                 >
                                     {addingKey ? 'Creating...' : 'Create'}
                                 </button>
@@ -932,15 +1150,36 @@ const result = await generateText({
                         </div>
                     )}
 
+                    {showKeySelectionControls && (
+                        <div className="dashboard-key-selection-bar">
+                            <span className="dashboard-key-selection-status">
+                                {selectedKeyCount} selected
+                            </span>
+                            <div className="dashboard-key-bulk-actions">
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm dashboard-key-clear-selection"
+                                    onClick={clearSelectedKeys}
+                                    disabled={keyRemovalBusy}
+                                >
+                                    Clear
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-danger btn-sm dashboard-key-remove-selected"
+                                    onClick={handleRemoveSelectedKeys}
+                                    disabled={keyRemovalBusy}
+                                >
+                                    <Trash2 size={12} />
+                                    {removingSelectedKeys ? 'Removing...' : 'Remove selected'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Key List */}
-                    {loadingAccount ? (
-                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            Loading account...
-                        </div>
-                    ) : loadingKeys ? (
-                        <div className="dashboard-empty-message" style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                            Loading keys...
-                        </div>
+                    {isKeyListLoading ? (
+                        <DelegateKeySkeletonList />
                     ) : !effectiveAccountObjectId ? (
                         <div className="dashboard-empty-message dashboard-empty-message--account">
                             <span>No keys yet. </span>
@@ -954,43 +1193,80 @@ const result = await generateText({
                             <span> to connect to Walrus Memory</span>
                         </div>
                     ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-                            {onChainKeys.map((k) => {
-                                const isCurrentKey = k.publicKey === delegatePublicKey
-                                const isRemoving = removingKey === k.publicKey
-                                return (
-                                    <div
-                                        key={k.publicKey}
-                                        className="key-display key-display--white"
-                                    >
-                                        <div className="key-label">
-                                            {k.label || 'Untitled'}
-                                            {isCurrentKey && ' · current'}
-                                            <span style={{ fontWeight: 400, marginLeft: 8 }}>
-                                                {new Date(k.createdAt).toLocaleDateString()}
-                                            </span>
-                                        </div>
-                                        <div className="key-value">
-                                            {k.publicKey}
-                                        </div>
-                                        <div className="key-actions">
-                                            <button
-                                                className="btn btn-secondary btn-sm"
-                                                onClick={() => copyToClipboard(k.publicKey, `pk-${k.publicKey.slice(0,8)}`)}
+                        <div className={`dashboard-key-table-wrap${isKeyListRefreshing ? ' dashboard-key-list--busy' : ''}`}>
+                            <table className="dashboard-key-table">
+                                <thead>
+                                    <tr>
+                                        <th scope="col" className="dashboard-key-table-select">Select</th>
+                                        <th scope="col">Key name</th>
+                                        <th scope="col">Public key</th>
+                                        <th scope="col">Created</th>
+                                        <th scope="col" className="dashboard-key-table-actions">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {onChainKeys.map((k) => {
+                                        const isCurrentKey = k.publicKey === delegatePublicKey
+                                        const isRemoving = removingKey === k.publicKey
+                                        const isSelected = selectedKeySet.has(k.publicKey)
+                                        const copyPublicKeyLabel = `pk-${k.publicKey.slice(0,8)}`
+                                        return (
+                                            <tr
+                                                key={k.publicKey}
+                                                className={`dashboard-key-row${isSelected ? ' dashboard-key-row--selected' : ''}`}
                                             >
-                                                <Copy size={12} /> {copied === `pk-${k.publicKey.slice(0,8)}` ? 'copied!' : 'copy public key'}
-                                            </button>
-                                            <button
-                                                className="btn btn-danger btn-sm"
-                                                onClick={() => handleRemoveKey(k.publicKey)}
-                                                disabled={isRemoving}
-                                            >
-                                                <Trash2 size={12} /> {isRemoving ? '...' : 'remove'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                )
-                            })}
+                                                <td data-label="Select" className="dashboard-key-cell-select">
+                                                    <label className="dashboard-key-checkbox" aria-label={`Select ${k.label || 'delegate key'}`}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() => toggleKeySelection(k.publicKey)}
+                                                            disabled={keyRemovalBusy}
+                                                        />
+                                                        <span className="dashboard-key-checkbox-box" aria-hidden="true" />
+                                                    </label>
+                                                </td>
+                                                <td data-label="Key name">
+                                                    <div className="dashboard-key-name">
+                                                        <span>{k.label || 'Untitled'}</span>
+                                                        {isCurrentKey && <span className="dashboard-key-current-badge">current</span>}
+                                                    </div>
+                                                </td>
+                                                <td data-label="Public key">
+                                                    <code className="dashboard-key-public" title={k.publicKey}>
+                                                        {compactPublicKey(k.publicKey)}
+                                                    </code>
+                                                </td>
+                                                <td data-label="Created" className="dashboard-key-created">
+                                                    {new Date(k.createdAt).toLocaleDateString()}
+                                                </td>
+                                                <td data-label="Actions" className="dashboard-key-row-actions">
+                                                    <div className="dashboard-key-actions">
+                                                        <button
+                                                            className={`btn btn-secondary btn-sm dashboard-key-icon-action${copied === copyPublicKeyLabel ? ' dashboard-key-icon-action--copied' : ''}`}
+                                                            onClick={() => copyToClipboard(k.publicKey, copyPublicKeyLabel)}
+                                                            aria-label={copied === copyPublicKeyLabel ? 'Public key copied' : 'Copy public key'}
+                                                            title={copied === copyPublicKeyLabel ? 'Copied' : 'Copy public key'}
+                                                        >
+                                                            <Copy size={14} />
+                                                        </button>
+                                                        <button
+                                                            className="btn btn-danger btn-sm dashboard-key-icon-action"
+                                                            onClick={() => handleRemoveKey(k.publicKey)}
+                                                            disabled={keyRemovalBusy}
+                                                            aria-busy={isRemoving}
+                                                            aria-label={isRemoving ? 'Removing delegate key' : 'Remove delegate key'}
+                                                            title={isRemoving ? 'Removing' : 'Remove delegate key'}
+                                                        >
+                                                            <Trash2 size={14} />
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )
+                                    })}
+                                </tbody>
+                            </table>
                         </div>
                     )}
                 </Card>
@@ -998,7 +1274,6 @@ const result = await generateText({
                 {/* Quick Start: SDK */}
                 <Card
                     className="dashboard-quickstart-card"
-                    style={{ marginBottom: 56 }}
                     title="Quickstart — SDK"
                     subtitle="Copy the setup code and start in minutes"
                     action={
@@ -1036,7 +1311,6 @@ const result = await generateText({
                 {/* Quick Start: AI SDK */}
                 <Card
                     className="dashboard-quickstart-card"
-                    style={{ marginBottom: 56 }}
                     title="AI SDK integration"
                     subtitle="Wrap your model with Walrus Memory using the AI SDK"
                 >
@@ -1058,7 +1332,6 @@ const result = await generateText({
                 {/* Install */}
                 <Card
                     className="dashboard-install-card"
-                    style={{ marginBottom: 40 }}
                     title="Install the SDK"
                     subtitle="Choose your package manager and copy the install command"
                 >
@@ -1084,10 +1357,54 @@ const result = await generateText({
                             onClick={() => copyToClipboard(installCommand, installCopyLabel)}
                             aria-label="Copy install command"
                         >
-                            <InstallCopyIcon />
+                            <Copy size={14} />
                         </button>
                     </div>
                 </Card>
+
+                {removeKeysConfirm && (
+                    <div
+                        className="dashboard-confirm-backdrop"
+                        onMouseDown={(event) => {
+                            if (event.target === event.currentTarget && !removeConfirmBusy) {
+                                setRemoveKeysConfirm(null)
+                            }
+                        }}
+                    >
+                        <section
+                            className="dashboard-confirm-dialog"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="dashboard-confirm-title"
+                            aria-describedby="dashboard-confirm-description"
+                        >
+                            <div className="dashboard-confirm-copy">
+                                <h3 id="dashboard-confirm-title">{removeConfirmTitle}</h3>
+                                <p id="dashboard-confirm-description">{removeConfirmDescription}</p>
+                            </div>
+                            <div className="dashboard-confirm-actions">
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary dashboard-confirm-cancel"
+                                    onClick={() => setRemoveKeysConfirm(null)}
+                                    disabled={removeConfirmBusy}
+                                    autoFocus
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-danger dashboard-confirm-remove"
+                                    onClick={confirmRemoveKeys}
+                                    disabled={removeConfirmBusy}
+                                    aria-busy={removeConfirmBusy}
+                                >
+                                    {removeConfirmBusy ? 'Removing...' : 'Remove'}
+                                </button>
+                            </div>
+                        </section>
+                    </div>
+                )}
             </main>
         </div>
     )
