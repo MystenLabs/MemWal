@@ -7,7 +7,7 @@
 
 import { useState, useCallback, useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { LogOut } from 'lucide-react'
+import { LayoutDashboard, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 
@@ -640,8 +640,9 @@ export default function Playground() {
                         <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
-                        <Link to="/dashboard" className="demo-nav-back">
-                            Dashboard
+                        <Link to="/dashboard" className="demo-nav-back" aria-label="Dashboard">
+                            <LayoutDashboard className="demo-nav-icon" size={18} aria-hidden="true" />
+                            <span className="demo-nav-label">Dashboard</span>
                         </Link>
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
@@ -985,17 +986,14 @@ const { text } = await generateText({
                     )}
                 </Card>
 
-                {/* Divider — Manual / Hybrid mode */}
+                {/* Manual / Hybrid mode */}
                 <div className="demo-mode-divider">
-                    <hr />
-                    <div>
-                        <strong>manual mode</strong> — client handles embedding & encryption, server handles storage.
-                        <br />
-                        your data never leaves your browser unencrypted. requires an LLM API key (step 6).
-                    </div>
+                    manual mode — client handles embedding & encryption, server handles storage.
+                    <br />
+                    your data never leaves your browser unencrypted. requires an LLM API key (step 6).
                 </div>
 
-                {/* Step 7: Remember (full client-side) */}
+                {/* Step 8: Remember (hybrid) */}
                 <Card
                     className="demo-step"
                     style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
@@ -1076,7 +1074,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     )}
                 </Card>
 
-                {/* Step 8: Recall (full client-side) */}
+                {/* Step 9: Recall (full client-side) */}
                 <Card
                     className="demo-step"
                     style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
