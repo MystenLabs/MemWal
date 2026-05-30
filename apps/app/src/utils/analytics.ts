@@ -11,11 +11,12 @@ declare global {
 }
 
 const GA_SCRIPT_ID = 'memwal-ga4-script'
+const GTM_SCRIPT_ID = 'memwal-gtm-script'
 
 let initialized = false
 
 function analyticsEnabled(): boolean {
-    return typeof window !== 'undefined' && Boolean(config.gaMeasurementId)
+    return typeof window !== 'undefined' && Boolean(config.gaMeasurementId || config.gtmContainerId)
 }
 
 function withDefaultParams(params: AnalyticsParams = {}): Record<string, AnalyticsValue> {
@@ -36,23 +37,41 @@ export function initAnalytics() {
     if (!analyticsEnabled() || initialized) return
 
     window.dataLayer = window.dataLayer ?? []
-    window.gtag = window.gtag ?? function gtag() {
-        // Match Google's snippet exactly: gtag.js consumes the Arguments object.
-        // eslint-disable-next-line prefer-rest-params
-        window.dataLayer?.push(arguments)
+
+    if (config.gtmContainerId) {
+        window.dataLayer.push({
+            'gtm.start': Date.now(),
+            event: 'gtm.js',
+        })
+
+        if (!document.getElementById(GTM_SCRIPT_ID)) {
+            const script = document.createElement('script')
+            script.id = GTM_SCRIPT_ID
+            script.async = true
+            script.src = `https://www.googletagmanager.com/gtm.js?id=${encodeURIComponent(config.gtmContainerId)}`
+            document.head.appendChild(script)
+        }
     }
 
-    window.gtag('js', new Date())
-    window.gtag('config', config.gaMeasurementId, {
-        send_page_view: false,
-    })
+    if (config.gaMeasurementId) {
+        window.gtag = window.gtag ?? function gtag() {
+            // Match Google's snippet exactly: gtag.js consumes the Arguments object.
+            // eslint-disable-next-line prefer-rest-params
+            window.dataLayer?.push(arguments)
+        }
 
-    if (!document.getElementById(GA_SCRIPT_ID)) {
-        const script = document.createElement('script')
-        script.id = GA_SCRIPT_ID
-        script.async = true
-        script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.gaMeasurementId)}`
-        document.head.appendChild(script)
+        window.gtag('js', new Date())
+        window.gtag('config', config.gaMeasurementId, {
+            send_page_view: false,
+        })
+
+        if (!document.getElementById(GA_SCRIPT_ID)) {
+            const script = document.createElement('script')
+            script.id = GA_SCRIPT_ID
+            script.async = true
+            script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.gaMeasurementId)}`
+            document.head.appendChild(script)
+        }
     }
 
     initialized = true
@@ -61,17 +80,39 @@ export function initAnalytics() {
 export function trackPageView(path: string) {
     if (!analyticsEnabled()) return
     initAnalytics()
-    window.gtag?.('event', 'page_view', withDefaultParams({
+    const params = withDefaultParams({
         page_path: path,
         page_location: window.location.href,
         page_title: document.title,
-    }))
+    })
+
+    if (config.gtmContainerId) {
+        window.dataLayer?.push({
+            event: 'page_view',
+            ...params,
+        })
+    }
+
+    if (config.gaMeasurementId) {
+        window.gtag?.('event', 'page_view', params)
+    }
 }
 
 export function trackEvent(eventName: string, params: AnalyticsParams = {}) {
     if (!analyticsEnabled()) return
     initAnalytics()
-    window.gtag?.('event', eventName, withDefaultParams(params))
+    const eventParams = withDefaultParams(params)
+
+    if (config.gtmContainerId) {
+        window.dataLayer?.push({
+            event: eventName,
+            ...eventParams,
+        })
+    }
+
+    if (config.gaMeasurementId) {
+        window.gtag?.('event', eventName, eventParams)
+    }
 }
 
 export function getAnalyticsErrorType(err: unknown): string {
