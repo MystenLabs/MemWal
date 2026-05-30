@@ -28,6 +28,7 @@ import {
     type DynamicFieldObjectFields,
     type RegistryObjectFields,
 } from '../utils/suiFields'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -198,10 +199,7 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const result = await signAndExecute({
-                transaction: tx,
-                allowDirectFallback: !isEnoki,
-            })
+            const result = await signAndExecute({ transaction: tx })
             await suiClient.waitForTransaction({ digest: result.digest })
         } else {
             setTxStatus('creating account...')
@@ -213,10 +211,7 @@ export default function SetupWizard() {
                     tx.object('0x6'),
                 ],
             })
-            const createResult = await signAndExecute({
-                transaction: tx,
-                allowDirectFallback: !isEnoki,
-            })
+            const createResult = await signAndExecute({ transaction: tx })
             await suiClient.waitForTransaction({ digest: createResult.digest })
 
             const txDetails = await suiClient.getTransactionBlock({
@@ -248,15 +243,12 @@ export default function SetupWizard() {
                     tx2.object('0x6'),
                 ],
             })
-            const addResult = await signAndExecute({
-                transaction: tx2,
-                allowDirectFallback: !isEnoki,
-            })
+            const addResult = await signAndExecute({ transaction: tx2 })
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
         return knownAccountId!
-    }, [suiClient, signAndExecute, isEnoki])
+    }, [suiClient, signAndExecute])
 
     // ── "Generate delegate key" button handler ──
     const handleGenerate = useCallback(async () => {
@@ -371,14 +363,11 @@ export default function SetupWizard() {
     }, [])
 
     return (
-        <div className="setup-classic">
-            <nav className="nav setup-classic-nav">
+        <>
+            <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
-                            <span>walrus</span>
-                            <span>memory</span>
-                        </span>
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
@@ -397,55 +386,58 @@ export default function SetupWizard() {
                 </div>
             </nav>
 
-            <main className="container setup-classic-container">
-                <div className="setup-classic-panel">
+            <div className="container">
+                <div style={{ maxWidth: 520, margin: '60px auto' }}>
+
                     {/* ===== Step 1: Intro ===== */}
                     {step === 'intro' && (
-                        <div className="setup-classic-intro">
-                            <h2 className="setup-classic-title">
+                        <div style={{ textAlign: 'center' }}>
+
+                            <h2 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: 12, letterSpacing: '-0.02em' }}>
                                 create your delegate key
                             </h2>
-                            <p className="setup-classic-description">
+                            <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 32 }}>
                                 a delegate key lets your AI apps access Walrus Memory on your behalf.
                                 it's a lightweight Ed25519 keypair — separate from your wallet.
                             </p>
 
-                            <div className="card setup-classic-feature-card">
-                                <div className="setup-classic-feature">
+                            <div className="card" style={{ textAlign: 'left', marginBottom: 24 }}>
+                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+
                                     <div>
-                                        <strong>low risk</strong>
-                                        <p>
+                                        <strong style={{ fontSize: '0.9rem' }}>low risk</strong>
+                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
                                             cannot access funds or sign Sui transactions
                                         </p>
                                     </div>
                                 </div>
-                                <div className="setup-classic-feature">
+                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
                                     <div>
-                                        <strong>revocable</strong>
-                                        <p>
+                                        <strong style={{ fontSize: '0.9rem' }}>revocable</strong>
+                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
                                             remove anytime from your Walrus Memory dashboard
                                         </p>
                                     </div>
                                 </div>
-                                <div className="setup-classic-feature">
+                                <div style={{ display: 'flex', gap: 12 }}>
                                     <div>
-                                        <strong>onchain registration</strong>
-                                        <p>
+                                        <strong style={{ fontSize: '0.9rem' }}>onchain registration</strong>
+                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
                                             key is verified on Sui blockchain for maximum security
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
-                            <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
+                            <button className="lp-btn-yellow" onClick={handleGenerate}>
                                 generate delegate key
                             </button>
 
-                            <div className="setup-classic-divider">
+                            <div style={{ margin: '28px 0 18px', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
                                 or
                             </div>
 
-                            <div className="setup-classic-import">
+                            <div style={{ textAlign: 'left' }}>
                                 <div className="input-group">
                                     <textarea
                                         id="delegate-key-input"
@@ -456,6 +448,7 @@ export default function SetupWizard() {
                                         placeholder="paste your delegate private key"
                                         aria-label="existing delegate key"
                                         spellCheck={false}
+                                        style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }}
                                     />
                                 </div>
                                 {error && (
@@ -494,6 +487,7 @@ export default function SetupWizard() {
                     {step === 'show-key' && (
                         <div>
                             <div style={{ textAlign: 'center', marginBottom: 24 }}>
+
                                 <h2 style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
                                     key generated!
                                 </h2>
@@ -609,8 +603,9 @@ export default function SetupWizard() {
                             </p>
                         </div>
                     )}
+
                 </div>
-            </main>
-        </div>
+            </div>
+        </>
     )
 }

@@ -54,8 +54,6 @@ These are not all enforced at boot, but most real deployments need them.
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
 | `ENOKI_FALLBACK_TO_DIRECT_SIGN` | `false` | If true, sidecar pays gas directly with the server wallet when Enoki sponsorship fails or is not configured |
-| `ENOKI_TRANSIENT_MAX_ATTEMPTS` | `2` | Attempts per Enoki sponsor/execute call for transient `429`/`5xx` responses |
-| `ENOKI_TRANSIENT_RETRY_DELAY_MS` | `30000` | Maximum Enoki transient retry delay. The sidecar also honors shorter `Retry-After` or `try again in N seconds` hints |
 | `MEMWAL_RELAYER_URL` | `http://127.0.0.1:$PORT` | Relayer URL passed from the Rust server to the sidecar for MCP tool calls |
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Maximum active MCP sessions across SSE and Streamable HTTP transports |
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |

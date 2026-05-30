@@ -26,6 +26,7 @@ import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import memwalLogo from '../assets/memwal-logo.svg'
 
 // ============================================================
 // Demo Step — reusable step card
@@ -55,6 +56,7 @@ function trackPlaygroundOperation(
         ...params,
     })
 }
+
 
 function DemoStep({
     number,
@@ -598,13 +600,10 @@ export default function Playground() {
 
     return (
         <>
-            <nav className="nav playground-nav">
+            <nav className="nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <span className="walrus-memory-wordmark" aria-label="Walrus Memory">
-                            <span>walrus</span>
-                            <span>memory</span>
-                        </span>
+                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
                     </Link>
                     <div className="nav-user">
                         <Link to="/dashboard" className="demo-nav-back">
@@ -623,16 +622,16 @@ export default function Playground() {
                 </div>
             </nav>
 
-            <div className="container dashboard playground-dashboard">
+            <div className="container dashboard">
                 {/* Header */}
                 <div className="dashboard-header">
                     <h2>interactive demo</h2>
                     <p>
                         try each Walrus Memory SDK operation live. click{' '}
                         <strong>▶ run</strong> to execute against your server
-                        using the Walrus Memory SDK.
+                        using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
-                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--playground-blue-strong)', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
+                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }} onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
                     </p>
                 </div>
@@ -646,7 +645,7 @@ export default function Playground() {
                         key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
                     </div>
                     <div className="demo-server-tag">
-                        SDK: <span className="demo-tag-value demo-tag-value--sdk">Walrus Memory SDK</span>
+                        SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten-incubation/memwal</span>
                     </div>
                     <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
                         <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
@@ -665,7 +664,9 @@ export default function Playground() {
                     number={1}
                     title="health check"
                     description="verify the Walrus Memory server is running"
-                    code={`const memwal = MemWal.create({
+                    code={`import { MemWal } from "@mysten-incubation/memwal"
+
+const memwal = MemWal.create({
   key: "${keyPreview}",
   accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${serverUrl}",
@@ -779,7 +780,7 @@ while (true) {
                     description="re-index all memories from Walrus → rebuild local DB (supports zero-state restore from chain)"
                     code={`// Restore from Walrus: download → decrypt → re-embed → re-index
 // If DB is empty, queries Sui chain for user's Walrus Blob objects
-// with namespace metadata → zero-state restore!
+// with memwal_namespace metadata → zero-state restore!
 const result = await memwal.restore("${namespace || 'default'}")
 // → { restored: N, namespace, owner }`}
                     onRun={runRestore}
@@ -885,9 +886,9 @@ const result = await memwal.restore("${namespace || 'default'}")
 
                     <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
                         <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
-{`import { openai } from "@ai-sdk/openai"
+{`import { withMemWal } from "@mysten-incubation/memwal/ai"
+import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
-import { withMemWal } from "@mysten-incubation/memwal/ai"
 
 // wrap your model with Walrus Memory — that's it
 const model = withMemWal(openai("gpt-4o-mini"), {
@@ -1017,7 +1018,9 @@ const { text } = await generateText({
 
                     <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
                         <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
-{`const memwalManual = MemWalManual.create({
+{`import { MemWalManual } from "@mysten-incubation/memwal/manual"
+
+const memwal = MemWalManual.create({
   key: delegateKeyHex,
   walletSigner: {           // uses connected wallet!
     address,                // from useCurrentAccount()
@@ -1036,7 +1039,7 @@ const { text } = await generateText({
 // server then:
 // 3. upload encrypted bytes to Walrus (server pays gas)
 // 4. store vector + blob_id in DB
-await memwalManual.rememberManual("${fullRememberText.slice(0, 40)}...")`}
+await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                         </SyntaxHighlighter>
                     </div>
 
@@ -1105,7 +1108,7 @@ await memwalManual.rememberManual("${fullRememberText.slice(0, 40)}...")`}
 //   3. cosine search for matching vectors
 //   4. download encrypted blobs from Walrus
 //   5. return encrypted results to client
-const result = await memwalManual.recallManual("${fullRecallQuery}", 5)
+const result = await memwal.recallManual("${fullRecallQuery}", 5)
 // → { results: [{ blob_id, text, distance }], total }`}
                         </SyntaxHighlighter>
                     </div>

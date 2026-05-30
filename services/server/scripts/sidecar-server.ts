@@ -171,18 +171,6 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
     const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
-const ENOKI_TRANSIENT_MAX_ATTEMPTS = parsePositiveIntEnv(
-    "ENOKI_TRANSIENT_MAX_ATTEMPTS",
-    2,
-    1,
-    5,
-);
-const ENOKI_TRANSIENT_RETRY_DELAY_MS = parsePositiveIntEnv(
-    "ENOKI_TRANSIENT_RETRY_DELAY_MS",
-    30_000,
-    1_000,
-    60_000,
-);
 const WALRUS_CLIENT_MAX_AGE_MS = (() => {
     const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
@@ -304,43 +292,6 @@ function summarizeEnokiError(text: string): Record<string, unknown> {
     return { body: truncateForLog(text) };
 }
 
-function retryAfterMs(raw: string | null, nowMs = Date.now()): number | null {
-    if (!raw) return null;
-    const seconds = Number.parseInt(raw.trim(), 10);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-        return seconds * 1000;
-    }
-
-    const retryAtMs = Date.parse(raw);
-    if (Number.isFinite(retryAtMs)) {
-        return Math.max(0, retryAtMs - nowMs);
-    }
-    return null;
-}
-
-function enokiBodyRetryDelayMs(text: string): number | null {
-    const match = text.match(/try again in\s+(\d+)\s+seconds/i);
-    if (!match) return null;
-    const seconds = Number.parseInt(match[1], 10);
-    return Number.isFinite(seconds) ? seconds * 1000 : null;
-}
-
-function enokiRetryDelayMs(resp: Response, body: string): number {
-    const delayMs = retryAfterMs(resp.headers.get("retry-after")) ?? enokiBodyRetryDelayMs(body);
-    if (!delayMs || delayMs <= 0) {
-        return ENOKI_TRANSIENT_RETRY_DELAY_MS;
-    }
-    return Math.min(delayMs, ENOKI_TRANSIENT_RETRY_DELAY_MS);
-}
-
-function isRetryableEnokiStatus(status: number): boolean {
-    return status === 429 || status >= 500;
-}
-
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isMoveAbortBalanceSplit(message: string): boolean {
     return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
 }
@@ -447,46 +398,28 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
         throw new Error("ENOKI_API_KEY is not configured");
     }
 
-    for (let attempt = 1; attempt <= ENOKI_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
-        const resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${enokiApiKey}`,
-            },
-            body: JSON.stringify(payload),
-        });
+    const resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${enokiApiKey}`,
+        },
+        body: JSON.stringify(payload),
+    });
 
-        const text = await resp.text();
-        if (resp.ok) {
-            const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
-            return parsed.data;
-        }
-
-        const retryable = isRetryableEnokiStatus(resp.status);
-        const canRetry = retryable && attempt < ENOKI_TRANSIENT_MAX_ATTEMPTS;
-        const delayMs = canRetry ? enokiRetryDelayMs(resp, text) : null;
+    const text = await resp.text();
+    if (!resp.ok) {
         console.error(`[enoki] api_error ${JSON.stringify({
             path: redactEnokiPath(path),
             status: resp.status,
             network: enokiNetwork,
-            attempt,
-            maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
-            retryable,
-            retryDelayMs: delayMs,
             ...summarizeEnokiError(text),
         })}`);
-
-        if (canRetry && delayMs !== null) {
-            console.warn(`[enoki] transient error; retrying ${redactEnokiPath(path)} in ${delayMs}ms`);
-            await sleep(delayMs);
-            continue;
-        }
-
         throw new Error(`Enoki API error (${resp.status}): ${text}`);
     }
 
-    throw new Error("Enoki API retry loop exited unexpectedly");
+    const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
+    return parsed.data;
 }
 
 function isSponsoredTransactionExpired(err: unknown): boolean {

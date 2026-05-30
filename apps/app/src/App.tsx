@@ -18,7 +18,7 @@ import {
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, Link } from 'react-router-dom'
 import { ArrowLeft, ShieldCheck } from 'lucide-react'
 import { config } from './config'
 
@@ -215,24 +215,12 @@ function RegisterEnokiWallets() {
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const { delegateKey } = useDelegateKey()
-  const location = useLocation()
-  const dashboardSearchParams = new URLSearchParams(location.search)
-  const explicitDashboardPreview = import.meta.env.DEV && dashboardSearchParams.get('preview') === '1'
-  const isDashboardPreview = explicitDashboardPreview
-  const dashboardPreviewState =
-    dashboardSearchParams.get('state') === 'empty'
-      ? 'empty'
-      : dashboardSearchParams.get('state') === 'ready'
-          ? 'ready'
-          : 'empty'
 
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route path="/dashboard" element={
-        !currentAccount && !isDashboardPreview ? <DashboardConnectGate /> : (
-          <Dashboard previewMode={isDashboardPreview} previewState={dashboardPreviewState} />
-        )
+        !currentAccount ? <DashboardConnectGate /> : <Dashboard />
       } />
       <Route path="/setup" element={
         !currentAccount ? <Navigate to="/" replace /> :
