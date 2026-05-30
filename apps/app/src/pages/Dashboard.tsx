@@ -847,6 +847,14 @@ const result = await generateText({
                             <CtaArrowIcon className="dashboard-cta-arrow" />
                         </Link>
                     )}
+                </div>
+
+                {/* Resources */}
+                <div className="dashboard-section-head">
+                    <h3>Resources</h3>
+                    <p>Quick links for setup, development, and support.</p>
+                </div>
+                <div className="dashboard-cta-row dashboard-cta-row--resources">
                     <a
                         href={docsHref}
                         target="_blank"
@@ -858,19 +866,11 @@ const result = await generateText({
                             <DocumentationCtaIcon className="dashboard-cta-icon" />
                         </span>
                         <div className="dashboard-cta-text">
-                            <div className="dashboard-cta-title">Documentation</div>
-                            <div className="dashboard-cta-subtitle">Guides, examples & API references</div>
+                            <div className="dashboard-cta-title">Docs</div>
+                            <div className="dashboard-cta-subtitle">Browse guides, explainers, and API reference</div>
                         </div>
                         <CtaArrowIcon className="dashboard-cta-arrow" />
                     </a>
-                </div>
-
-                {/* Resources */}
-                <div className="dashboard-section-head">
-                    <h3>Resources</h3>
-                    <p>Quick links for setup, development, and support.</p>
-                </div>
-                <div className="dashboard-cta-row dashboard-cta-row--resources">
                     <a
                         href={githubHref}
                         target="_blank"

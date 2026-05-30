@@ -9274,17 +9274,17 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-cta-row--primary {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   margin-top: 24px;
   margin-bottom: 30px;
 }
 
 .dash-page .dashboard-cta-row--resources {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .dash-page .dashboard-cta-row > :only-child {
-  grid-column: auto;
+  grid-column: 1 / -1;
 }
 
 .dash-page .dashboard-cta {
