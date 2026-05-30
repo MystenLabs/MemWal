@@ -93,6 +93,24 @@ class RecallMemory:
 
 
 @dataclass
+class RecallParams:
+    """Object-style input for :meth:`MemWal.recall`.
+
+    Preferred over positional args because positional ``recall(query, limit,
+    namespace)`` is easy to mis-read as ``recall(query, namespace)`` at call
+    sites. Construct this dataclass and pass it as the sole argument:
+
+        client.recall(RecallParams(query="food allergies", limit=5,
+                                   namespace="profile"))
+    """
+
+    query: str
+    limit: int = 10
+    namespace: Optional[str] = None
+    max_distance: Optional[float] = None
+
+
+@dataclass
 class RecallResult:
     """Result from recall()."""
 

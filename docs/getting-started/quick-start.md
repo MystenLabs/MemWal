@@ -156,7 +156,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
     const job = await memwal.remember("User prefers dark mode and works in TypeScript.");
     await memwal.waitForRememberJob(job.job_id);
 
-    const result = await memwal.recall("What do we know about this user?");
+    const result = await memwal.recall({ query: "What do we know about this user?" });
     console.log(result.results);
     ```
 

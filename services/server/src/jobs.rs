@@ -19,7 +19,9 @@ use redis::AsyncCommands;
 
 use serde::{Deserialize, Serialize};
 
-use crate::alerts::WalrusUploadExhaustedAlert;
+use crate::alerts::{
+    SIDECAR_WALRUS_DEP_VERSION, WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+};
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
@@ -864,6 +866,14 @@ async fn execute_upload_and_transfer(
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
             let classified = WalletJobError::classify_sidecar_error(&msg);
+            maybe_alert_walrus_package_upgrade_detected(
+                state,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
             maybe_alert_walrus_upload_exhausted(
                 state,
                 &classified,
@@ -920,6 +930,59 @@ async fn execute_upload_and_transfer(
         wallet_index,
     )
     .await
+}
+
+/// Mirrors the TS sidecar's `isWalrusPackageVersionMismatch` detector. We
+/// recheck the pattern on the Rust side so we can fire a one-shot informational
+/// Slack alert when the sidecar surfaces an EWrongVersion MoveAbort, without
+/// having to plumb a structured signal back from the subprocess.
+///
+/// Anchor: requires the literal `MoveAbort` token alongside either the
+/// `::system::inner_mut` function-path fragment (cross-transport stable, since
+/// the package component is always a numeric address) OR the symbolic
+/// `EWrongVersion` (only present on gRPC/GraphQL clients). See
+/// `services/server/scripts/walrus-error-detection.ts` for the same pattern.
+fn is_walrus_package_version_mismatch(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    if !lower.contains("moveabort") && !lower.contains("move abort") {
+        return false;
+    }
+    lower.contains("::system::inner_mut") || lower.contains("ewrongversion")
+}
+
+async fn maybe_alert_walrus_package_upgrade_detected(
+    state: &AppState,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    msg: &str,
+) {
+    if !is_walrus_package_version_mismatch(msg) {
+        return;
+    }
+
+    let alert = WalrusPackageUpgradeDetectedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        sidecar_walrus_dep_version: SIDECAR_WALRUS_DEP_VERSION.to_string(),
+        on_chain_version_before: None,
+        on_chain_version_after: None,
+        action_taken: "Sidecar refreshed cached @mysten/walrus client; Apalis will retry against the new package metadata.".to_string(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state
+        .alerts
+        .notify_walrus_package_upgrade_detected(alert)
+        .await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for Walrus package upgrade detected: {}",
+            err
+        );
+    }
 }
 
 async fn maybe_alert_walrus_upload_exhausted(
@@ -1004,6 +1067,16 @@ impl WalletJobError {
         if (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
             && lower.contains("split")
+        {
+            return WalletJobError::Transient(msg.to_string());
+        }
+        // Walrus on-chain package upgrade — the cached @mysten/walrus client
+        // carries stale package metadata until refreshed. The sidecar already
+        // recreates the client on this error; classifying Transient lets
+        // Apalis retry against the refreshed client instead of Dead-marking
+        // a job that the next attempt will succeed on.
+        if (lower.contains("moveabort") || lower.contains("move abort"))
+            && (lower.contains("::system::inner_mut") || lower.contains("ewrongversion"))
         {
             return WalletJobError::Transient(msg.to_string());
         }
@@ -1217,7 +1290,31 @@ pub async fn execute_remember(
             );
             return Ok(());
         }
-        Err(UploadBlobError::App(e)) => fail!(format!("walrus upload failed: {}", e)),
+        Err(UploadBlobError::App(e)) => {
+            let msg = format!("walrus upload failed: {}", e);
+            // EWrongVersion is transient: the sidecar's catch path refreshes
+            // the cached @mysten/walrus client before bubbling this error up,
+            // so the next Apalis attempt sees fresh package metadata. We must
+            // not write `status='failed'` here — that would make the row read
+            // as terminal even though the upload is about to succeed on retry.
+            if is_walrus_package_version_mismatch(&msg) {
+                maybe_alert_walrus_package_upgrade_detected(
+                    state,
+                    Some(&job.job_id),
+                    Some(&job.owner),
+                    Some(&job.namespace),
+                    &msg,
+                )
+                .await;
+                tracing::warn!(
+                    "[remember-job] walrus package upgrade detected, returning Err for Apalis retry job_id={} msg={}",
+                    job.job_id,
+                    msg
+                );
+                return Err(RememberJobError::Internal(msg));
+            }
+            fail!(msg);
+        }
     };
     let blob_id = upload.blob_id.clone();
 
@@ -1402,8 +1499,9 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, mark_remember_job_failed, wallet_job_request,
-        WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
+        classify_wallet_remember_handoff_failure, is_walrus_package_version_mismatch,
+        mark_remember_job_failed, wallet_job_request, WalletJob, WalletJobAttemptInfo,
+        WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -1475,6 +1573,68 @@ mod tests {
                 msg
             );
         }
+    }
+
+    #[test]
+    fn classify_walrus_version_mismatch_as_transient() {
+        // The sidecar refreshes the cached @mysten/walrus client on EWrongVersion;
+        // Apalis must retry against the refreshed client instead of marking Dead.
+        for msg in [
+            // JSON-RPC production format (common): only "abort code: 1", no symbolic name
+            "walrus upload failed: MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut' (instruction 0)",
+            // gRPC/GraphQL: symbolic EWrongVersion
+            "walrus upload failed: MoveAbort in 1st command, 'EWrongVersion': 1, in '0xc1b6::system::inner_mut' (line 42)",
+            // Defensive: lowercase + only symbolic name
+            "moveabort ewrongversion",
+        ] {
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected transient for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn classify_non_walrus_moveabort_stays_permanent() {
+        // The walrus-specific carve-out must NOT widen — other modules' MoveAborts
+        // still classify Permanent (the existing contract for non-retryable errors).
+        for msg in [
+            // generic move abort with no walrus-specific anchors
+            "MoveAbort in 1st command, abort code: 5, in '0x2::coin::join' (instruction 0)",
+            "MoveAbort(MoveLocation { module: 0x3::foo }, 1)",
+        ] {
+            assert!(
+                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                "expected permanent for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn walrus_version_mismatch_detector_pattern() {
+        // Mirrors the sidecar's isWalrusPackageVersionMismatch; keep both in sync.
+        assert!(is_walrus_package_version_mismatch(
+            "MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut'"
+        ));
+        assert!(is_walrus_package_version_mismatch(
+            "MoveAbort 'EWrongVersion': 1"
+        ));
+        // Lowercase / case-insensitive matching
+        assert!(is_walrus_package_version_mismatch(
+            "moveabort ewrongversion"
+        ));
+        // Anchors required — bare tokens alone don't match
+        assert!(!is_walrus_package_version_mismatch("EWrongVersion"));
+        assert!(!is_walrus_package_version_mismatch(
+            "::system::inner_mut without context"
+        ));
+        // Balance-split MoveAbort (the existing handler's domain) does not match
+        assert!(!is_walrus_package_version_mismatch(
+            "MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\"split\") }, 2)"
+        ));
+        assert!(!is_walrus_package_version_mismatch(""));
     }
 
     #[test]

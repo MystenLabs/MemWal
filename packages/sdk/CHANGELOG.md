@@ -1,5 +1,16 @@
 # @mysten-incubation/memwal
 
+## 0.0.6
+
+### Added
+
+- Added `RecallParams` for object-style `recall(...)` calls.
+
+### Changed
+
+- Marked the positional `recall(...)` overload as deprecated in favor of `recall({ query, limit, namespace })`.
+- Documented `restore()` response fields, default limit, pagination behavior, and performance expectations.
+
 ## 0.0.5
 
 ### Added

@@ -13,7 +13,7 @@ The recommended default client. The relayer handles embeddings, SEAL encryption,
 4. `recall` searches by namespace and returns decrypted matches
 
 ```python
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(
     key="<your-ed25519-private-key>",
@@ -33,7 +33,7 @@ done = await memwal.remember_and_wait("User prefers dark mode and works in Pytho
 print(done.blob_id)
 
 # Recall relevant memories
-result = await memwal.recall("What do we know about this user?", limit=5)
+result = await memwal.recall(RecallParams(query="What do we know about this user?", limit=5))
 for memory in result.results:
     print(memory.text, memory.distance)
 
@@ -58,7 +58,7 @@ Every memory method accepts an optional `namespace=` override that wins over the
 Rebuild missing indexed entries for one namespace from Walrus. Incremental and namespace-scoped — meant to repair PostgreSQL vector state from Walrus-backed memory.
 
 ```python
-result = await memwal.restore("chatbot-prod", limit=50)
+result = await memwal.restore("chatbot-prod", limit=10)
 print(result.restored, result.skipped, result.total)
 ```
 

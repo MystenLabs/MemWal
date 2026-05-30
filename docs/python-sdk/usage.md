@@ -22,22 +22,22 @@ Detailed pages:
 `MemWal` is async-native. Every API method is a coroutine:
 
 ```python
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(key="...", account_id="0x...", env="prod")
 job = await memwal.remember("User prefers dark mode.")
-result = await memwal.recall("preferences")
+result = await memwal.recall(RecallParams(query="preferences"))
 await memwal.close()
 ```
 
 `MemWalSync` wraps it through `asyncio.run()` — identical methods, no `await`. It is notebook-safe (detects a running loop and offloads to a worker thread):
 
 ```python
-from memwal import MemWalSync
+from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(key="...", account_id="0x...", env="prod")
 client.remember("User prefers dark mode.")
-result = client.recall("preferences")
+result = client.recall(RecallParams(query="preferences"))
 client.close()
 ```
 
