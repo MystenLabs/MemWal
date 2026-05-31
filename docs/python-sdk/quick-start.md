@@ -60,18 +60,16 @@ Before wiring the SDK into your app:
 | `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
 | `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
-| `env` | `str` | No | — | Relayer preset: `prod` / `dev` / `staging` / `local` |
+| `env` | `str` | No | — | Hosted relayer preset: `staging` for testing or `prod` for production |
 
 ### Environment presets
 
-Instead of hardcoding a URL, pass `env`. Same shorthand as the TypeScript SDK and MCP package.
+Instead of hardcoding a URL, pass `env`. The public docs and Colab example use `staging` for testing and `prod` for production credentials.
 
 | `env` | Relayer URL |
 | --- | --- |
 | `prod` | `https://relayer.memwal.ai` |
-| `dev` | `https://relayer.dev.memwal.ai` |
 | `staging` | `https://relayer.staging.memwal.ai` |
-| `local` | `http://127.0.0.1:8000` |
 
 Precedence: an explicit non-default `server_url` > `env` > the default. An unknown preset raises `ValueError`.
 

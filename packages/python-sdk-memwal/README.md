@@ -109,16 +109,14 @@ from memwal import MemWal
 memwal = MemWal.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    env="prod",   # prod | dev | staging | local
+    env="staging",   # staging for testing, prod for production
 )
 ```
 
 | `env` | Relayer URL |
 |-------|-------------|
 | `prod` | `https://relayer.memwal.ai` |
-| `dev` | `https://relayer.dev.memwal.ai` |
 | `staging` | `https://relayer.staging.memwal.ai` |
-| `local` | `http://127.0.0.1:8000` |
 
 Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
 over the default. An unknown preset raises `ValueError`. `env` is also accepted

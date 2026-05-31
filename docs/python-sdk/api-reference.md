@@ -28,7 +28,7 @@ MemWal.create(
 | `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
 | `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
-| `env` | `str` | No | — | Preset: `prod` / `dev` / `staging` / `local`. Unknown → `ValueError` |
+| `env` | `str` | No | — | Hosted preset: `staging` for testing or `prod` for production. Unknown → `ValueError` |
 
 You may also build a `MemWalConfig` and call `MemWal(config)` directly; `env` resolution happens in `MemWalConfig.__post_init__`.
 
