@@ -16,7 +16,7 @@ import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
+from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
 from memwal.types import (
     RecallManualOptions,
     RecallParams,
@@ -106,6 +106,30 @@ def memwal_client() -> MemWal:
         account_id=_TEST_ACCOUNT_ID,
         server_url=_TEST_SERVER,
     )
+
+
+# ============================================================
+# sync wrapper tests
+# ============================================================
+
+
+class _SyncRunInner:
+    def __init__(self) -> None:
+        self._client = object()
+
+
+class TestMemWalSyncRun:
+    async def test_resets_http_client_when_called_inside_running_loop(self) -> None:
+        inner = _SyncRunInner()
+        sync = MemWalSync(inner)  # type: ignore[arg-type]
+
+        async def operation() -> str:
+            return "ok"
+
+        result = sync._run(operation())
+
+        assert result == "ok"
+        assert inner._client is None
 
 
 # ============================================================

@@ -602,3 +602,35 @@ class TestWithMemWalOpenAI:
 
         # The create method should now be a different callable (patched)
         assert client.chat.completions.create is not original_create
+
+    @respx.mock
+    async def test_sync_client_injects_memory_inside_running_loop(self) -> None:
+        """Sync OpenAI client still injects memory from notebook-style event loops."""
+        _mock_seal_session_prereqs()
+        client = self._make_sync_client()
+        captured: list = []
+
+        def _capture(*args, **kwargs):
+            msgs = kwargs.get("messages") or (args[0] if args else [])
+            captured.extend(msgs)
+            return MagicMock()
+
+        client.chat.completions.create = _capture
+
+        respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "TV support appointment is 9 AM to noon", "distance": 0.05}
+            ])
+        )
+
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        smart.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "When is my TV support appointment?"}],
+        )
+
+        system_msgs = [m for m in captured if isinstance(m, dict) and m.get("role") == "system"]
+        assert len(system_msgs) == 1
+        assert "TV support appointment is 9 AM to noon" in system_msgs[0]["content"]

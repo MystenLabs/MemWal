@@ -1,9 +1,9 @@
 ---
 title: "Quick Start"
-description: "Install the MemWal Python SDK and store your first memory in under a minute."
+description: "Install the Walrus Memory Python SDK and store your first memory in under a minute."
 ---
 
-The MemWal Python SDK (`memwal` on PyPI) gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It mirrors the TypeScript `MemWal` client: same relayer, same Ed25519 auth, same methods.
+The Walrus Memory Python SDK (`memwal` on PyPI) gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It mirrors the TypeScript `MemWal` client: same relayer, same Ed25519 auth, same methods.
 
 | Entry point | Import | When to use |
 | --- | --- | --- |
@@ -16,6 +16,10 @@ The MemWal Python SDK (`memwal` on PyPI) gives your app persistent, encrypted me
 ```bash
 pip install memwal
 ```
+
+## Try It In Colab
+
+Open the runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) for a notebook walkthrough covering installation, secure configuration, health checks, `remember`, async job waiting, `recall`, bulk remember, `remember_bulk_and_wait`, optional SDK utilities, OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and basic troubleshooting. It defaults to `staging` for test credentials and can switch to `prod` for production credentials.
 
 Optional integrations:
 
@@ -41,7 +45,7 @@ Requires Python 3.9+. Core dependencies are `httpx` and `PyNaCl` (Ed25519 signin
 
 Before wiring the SDK into your app:
 
-- Generate a MemWal account ID and delegate private key for your client using the hosted endpoint:
+- Generate a Walrus Memory account ID and delegate private key for your client using the hosted endpoint:
   - Production (mainnet): `https://memwal.ai`
   - Staging (testnet): `https://staging.memwal.ai`
 - Choose a relayer:
@@ -53,7 +57,7 @@ Before wiring the SDK into your app:
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `key` | `str` | Yes | — | Ed25519 delegate private key in hex |
-| `account_id` | `str` | Yes | — | MemWalAccount object ID on Sui |
+| `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
 | `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
 | `env` | `str` | No | — | Relayer preset: `prod` / `dev` / `staging` / `local` |

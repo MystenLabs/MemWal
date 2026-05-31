@@ -128,6 +128,22 @@ def _fire_and_forget(coro: Any) -> None:
         thread.start()
 
 
+def _run_blocking(coro_factory: Callable[[], Any]) -> Any:
+    """Run a coroutine factory from sync code, including notebooks."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(coro_factory())).result()
+
+    return asyncio.run(coro_factory())
+
+
 # ============================================================
 # LangChain Integration
 # ============================================================
@@ -417,9 +433,12 @@ def _wrap_sync_openai(
     """Wrap a sync OpenAI client's chat.completions.create."""
     original_create = client.chat.completions.create
 
-    def patched_create(*args: Any, **kwargs: Any) -> Any:
-        import asyncio
+    def _run_memwal(coro_factory: Callable[[], Any]) -> Any:
+        # Keep httpx clients bound to the short-lived loop that uses them.
+        memwal._client = None
+        return _run_blocking(coro_factory)
 
+    def patched_create(*args: Any, **kwargs: Any) -> Any:
         messages = kwargs.get("messages") or (args[0] if args else None)
         if messages is None:
             return original_create(*args, **kwargs)
@@ -428,8 +447,8 @@ def _wrap_sync_openai(
         user_text = _find_last_user_message(messages)
         if user_text:
             try:
-                recall_result = asyncio.run(
-                    memwal.recall(user_text, max_memories, namespace)
+                recall_result = _run_memwal(
+                    lambda: memwal.recall(user_text, max_memories, namespace)
                 )
                 relevant = [
                     m for m in recall_result.results
@@ -450,13 +469,14 @@ def _wrap_sync_openai(
 
         # Fire-and-forget analyze
         if auto_save and user_text:
-            async def _analyze() -> None:
+            def _analyze() -> None:
                 try:
-                    await memwal.analyze(user_text, namespace)
+                    _run_memwal(lambda: memwal.analyze(user_text, namespace))
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
 
-            _fire_and_forget(_analyze())
+            thread = threading.Thread(target=_analyze, daemon=True)
+            thread.start()
 
         return result
 

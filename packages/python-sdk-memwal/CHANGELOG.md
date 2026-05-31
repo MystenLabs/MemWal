@@ -1,5 +1,11 @@
 # memwal
 
+## Unreleased
+
+### Added
+
+- Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, health checks, async `remember` job waiting, `recall`, bulk remember, manual methods with scoring weights, middleware examples, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+
 ## 0.1.3
 
 ### Added

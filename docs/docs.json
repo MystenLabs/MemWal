@@ -97,6 +97,7 @@
             "group": "Python SDK",
             "pages": [
               "python-sdk/quick-start",
+              "python-sdk/colab",
               {
                 "group": "Usage",
                 "root": "python-sdk/usage",
