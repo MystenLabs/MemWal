@@ -16,7 +16,7 @@ The notebook covers:
 - storing memory with `remember`
 - waiting for async remember jobs to persist on Walrus
 - retrieving memory with `recall`
-- using `remember_and_wait`, bulk remember, `remember_bulk_and_wait`, `ask`, `analyze`, `analyze_and_wait`, `embed`, manual search/register with scoring weights, and `restore`
+- using `remember_async`, `remember_and_wait`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, `ask`, `analyze`, `analyze_and_wait`, `embed`, manual search/register with scoring weights, and `restore`
 - optionally wrapping OpenAI and LangChain clients with Walrus Memory middleware
 - using `OPENAI_BASE_URL` for OpenAI-compatible providers such as OpenRouter
 - basic troubleshooting for auth, namespaces, and async remember jobs

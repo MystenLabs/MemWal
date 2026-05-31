@@ -50,6 +50,8 @@ import pytest
 from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
 from memwal.utils import build_signature_message, bytes_to_hex
 
+pytestmark = pytest.mark.integration
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.staging.memwal.ai")
