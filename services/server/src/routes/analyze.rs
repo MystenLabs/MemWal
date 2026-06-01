@@ -324,10 +324,24 @@ pub async fn analyze(
     // references ("last Friday") to absolute dates *inside the extracted
     // fact text* (Architecture A — no metadata column, date flows into
     // the encrypted blob + embedding only).
-    let extracted = state
-        .extractor
-        .extract_with_context(&body.text, &related_texts, body.occurred_at)
-        .await?;
+    //
+    // when `body.extract_with_critique` is true, route through
+    // the two-pass critique path instead. The critique pass internally
+    // reuses `extract_with_context` for the first pass, so the same
+    // `related_texts` + `occurred_at` context applies to both passes —
+    // the critic sees the same anchor the extractor did. ~2x LLM cost
+    // when enabled; default false preserves the single-pass behaviour.
+    let extracted = if body.extract_with_critique {
+        state
+            .extractor
+            .extract_with_critique(&body.text, &related_texts, body.occurred_at)
+            .await?
+    } else {
+        state
+            .extractor
+            .extract_with_context(&body.text, &related_texts, body.occurred_at)
+            .await?
+    };
     let raw_fact_count = extracted.raw_count;
     let facts = extracted.facts;
     let reserved_additional_weight = rate_limit::analyze_additional_weight(facts.len());

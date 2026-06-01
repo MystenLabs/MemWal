@@ -155,6 +155,7 @@ class MemWalClient:
         text: str,
         namespace: str,
         occurred_at: str | None = None,
+        extract_with_critique: bool = False,
     ) -> AnalyzeResult:
         """
         POST /api/analyze — feed conversation text, extract and store memories.
@@ -175,6 +176,13 @@ class MemWalClient:
         *inside the extracted fact text* — making time-anchored facts
         retrievable. Omit (or pass None) when no anchor is available;
         the server does NOT default to now() — silence is honest.
+
+        `extract_with_critique` flips the server into the
+        two-pass critique path: first pass via the normal
+        extract.v6 extractor, second pass via the critique.v1
+        critic that verifies and corrects the first-pass facts.
+        Doubles the per-analyze LLM call count when set. Default
+        False preserves the single-pass write path.
         """
         body: dict = {
             "text": text,
@@ -182,6 +190,8 @@ class MemWalClient:
         }
         if occurred_at is not None:
             body["occurred_at"] = occurred_at
+        if extract_with_critique:
+            body["extract_with_critique"] = True
         data = self._post("/api/analyze", body)
         # Response shape varies between server versions:
         # - Synchronous (reference branch): {facts, total, owner}

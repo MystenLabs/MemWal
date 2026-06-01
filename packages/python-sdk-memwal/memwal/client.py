@@ -614,6 +614,7 @@ class MemWal:
         text: str,
         namespace: Optional[str] = None,
         occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
     ) -> AnalyzeResult:
         """Analyze conversation text and return as soon as facts are accepted.
 
@@ -645,6 +646,15 @@ class MemWal:
                 (no ``now()`` fallback). The resolved date lives only
                 inside the encrypted fact text + embedding; there is no
                 server-readable metadata column for it (Architecture A).
+            extract_with_critique: Opt into the two-pass extraction
+                critique. When ``True``, the server runs a
+                second LLM pass that critiques and corrects the
+                first-pass extracted facts before any fact is embedded
+                or stored. The critic sees the same ``occurred_at``
+                anchor and related-memories context the first pass
+                saw. **Doubles the per-analyze LLM call count** —
+                default ``False`` preserves the single-pass write
+                path. Wire field is omitted when ``False``.
 
         Returns:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
@@ -657,6 +667,11 @@ class MemWal:
         wire_occurred_at = _occurred_at_to_wire(occurred_at)
         if wire_occurred_at is not None:
             body["occurred_at"] = wire_occurred_at
+        # Only include the critique flag when explicitly True; matches
+        # the server's `#[serde(default)]` shape so the wire payload is
+        # byte-identical for existing callers.
+        if extract_with_critique:
+            body["extract_with_critique"] = True
         data = await self._signed_request(
             "POST",
             "/api/analyze",
@@ -690,6 +705,7 @@ class MemWal:
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
         occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
     ) -> AnalyzeWaitResult:
         """Analyze + wait for every extracted fact to finish persisting.
 
@@ -698,11 +714,16 @@ class MemWal:
         result combines the analyze fact list with the bulk-style settled
         per-job results.
 
-        ``occurred_at`` carries the same temporal-anchor semantics as
-        :meth:`analyze` — see that method's docstring for details.
+        ``occurred_at`` and ``extract_with_critique`` carry the same
+        semantics as :meth:`analyze` — see that method's docstring.
         """
 
-        accepted = await self.analyze(text, namespace, occurred_at=occurred_at)
+        accepted = await self.analyze(
+            text,
+            namespace,
+            occurred_at=occurred_at,
+            extract_with_critique=extract_with_critique,
+        )
         completed = await self.wait_for_remember_jobs(accepted.job_ids, opts)
         return AnalyzeWaitResult(
             results=completed.results,
@@ -1360,9 +1381,17 @@ class MemWalSync:
         text: str,
         namespace: Optional[str] = None,
         occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
     ) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
-        return self._run(self._inner.analyze(text, namespace, occurred_at=occurred_at))
+        return self._run(
+            self._inner.analyze(
+                text,
+                namespace,
+                occurred_at=occurred_at,
+                extract_with_critique=extract_with_critique,
+            )
+        )
 
     def analyze_and_wait(
         self,
@@ -1370,10 +1399,17 @@ class MemWalSync:
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
         occurred_at: Optional[Union[str, datetime]] = None,
+        extract_with_critique: bool = False,
     ) -> AnalyzeWaitResult:
         """Synchronous version of :meth:`MemWal.analyze_and_wait`."""
         return self._run(
-            self._inner.analyze_and_wait(text, namespace, opts, occurred_at=occurred_at)
+            self._inner.analyze_and_wait(
+                text,
+                namespace,
+                opts,
+                occurred_at=occurred_at,
+                extract_with_critique=extract_with_critique,
+            )
         )
 
     def embed(self, text: str) -> EmbedResult:
