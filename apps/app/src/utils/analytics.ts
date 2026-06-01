@@ -34,6 +34,7 @@ declare global {
 }
 
 const GA_SCRIPT_ID = 'memwal-ga4-script'
+const GTM_SCRIPT_ID = 'memwal-gtm-script'
 const POSTHOG_SCRIPT_ID = 'memwal-posthog-script'
 const POSTHOG_STUB_METHODS = [
     'capture',
@@ -97,12 +98,20 @@ function googleAnalyticsEnabled(): boolean {
     return analyticsHostAllowed() && Boolean(config.gaMeasurementId)
 }
 
+function googleTagManagerEnabled(): boolean {
+    return analyticsHostAllowed() && Boolean(config.gtmContainerId)
+}
+
+function googleTagsEnabled(): boolean {
+    return googleAnalyticsEnabled() || googleTagManagerEnabled()
+}
+
 function posthogEnabled(): boolean {
     return analyticsHostAllowed() && Boolean(config.posthogProjectApiKey)
 }
 
 function analyticsEnabled(): boolean {
-    return googleAnalyticsEnabled() || posthogEnabled()
+    return googleTagsEnabled() || posthogEnabled()
 }
 
 function withDefaultParams(params: AnalyticsParams = {}): Record<string, AnalyticsValue> {
@@ -120,26 +129,44 @@ function withDefaultParams(params: AnalyticsParams = {}): Record<string, Analyti
 }
 
 function initGoogleAnalytics() {
-    if (!googleAnalyticsEnabled() || googleAnalyticsInitialized) return
+    if (!googleTagsEnabled() || googleAnalyticsInitialized) return
 
     window.dataLayer = window.dataLayer ?? []
-    window.gtag = window.gtag ?? function gtag() {
-        // Match Google's snippet exactly: gtag.js consumes the Arguments object.
-        // eslint-disable-next-line prefer-rest-params
-        window.dataLayer?.push(arguments)
+
+    if (config.gtmContainerId) {
+        window.dataLayer.push({
+            'gtm.start': Date.now(),
+            event: 'gtm.js',
+        })
+
+        if (!document.getElementById(GTM_SCRIPT_ID)) {
+            const script = document.createElement('script')
+            script.id = GTM_SCRIPT_ID
+            script.async = true
+            script.src = `https://www.googletagmanager.com/gtm.js?id=${encodeURIComponent(config.gtmContainerId)}`
+            document.head.appendChild(script)
+        }
     }
 
-    window.gtag('js', new Date())
-    window.gtag('config', config.gaMeasurementId, {
-        send_page_view: false,
-    })
+    if (config.gaMeasurementId) {
+        window.gtag = window.gtag ?? function gtag() {
+            // Match Google's snippet exactly: gtag.js consumes the Arguments object.
+            // eslint-disable-next-line prefer-rest-params
+            window.dataLayer?.push(arguments)
+        }
 
-    if (!document.getElementById(GA_SCRIPT_ID)) {
-        const script = document.createElement('script')
-        script.id = GA_SCRIPT_ID
-        script.async = true
-        script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.gaMeasurementId)}`
-        document.head.appendChild(script)
+        window.gtag('js', new Date())
+        window.gtag('config', config.gaMeasurementId, {
+            send_page_view: false,
+        })
+
+        if (!document.getElementById(GA_SCRIPT_ID)) {
+            const script = document.createElement('script')
+            script.id = GA_SCRIPT_ID
+            script.async = true
+            script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.gaMeasurementId)}`
+            document.head.appendChild(script)
+        }
     }
 
     googleAnalyticsInitialized = true
@@ -237,6 +264,13 @@ export function trackPageView(path: string) {
         page_title: document.title,
     })
 
+    if (googleTagManagerEnabled()) {
+        window.dataLayer?.push({
+            event: 'page_view',
+            ...params,
+        })
+    }
+
     if (googleAnalyticsEnabled()) {
         window.gtag?.('event', 'page_view', params)
     }
@@ -253,6 +287,13 @@ export function trackEvent(eventName: string, params: AnalyticsParams = {}) {
     if (!analyticsEnabled()) return
     initAnalytics()
     const eventParams = withDefaultParams(params)
+
+    if (googleTagManagerEnabled()) {
+        window.dataLayer?.push({
+            event: eventName,
+            ...eventParams,
+        })
+    }
 
     if (googleAnalyticsEnabled()) {
         window.gtag?.('event', eventName, eventParams)

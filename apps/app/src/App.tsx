@@ -10,6 +10,7 @@ import {
   createNetworkConfig,
   SuiClientProvider,
   WalletProvider,
+  useAutoConnectWallet,
   useCurrentAccount,
   useDisconnectWallet,
   useSuiClientContext,
@@ -196,24 +197,38 @@ function RegisterEnokiWallets() {
 // App content — route based on auth + key state
 // ============================================================
 
+function RoutePending() {
+  return (
+    <div className="wm-route-pending" role="status" aria-label="Restoring wallet session">
+      <img src="/walrus-memory-logo.svg" alt="Walrus Memory" />
+    </div>
+  )
+}
+
 function AppContent() {
   const currentAccount = useCurrentAccount()
+  const autoConnectStatus = useAutoConnectWallet()
   const { delegateKey } = useDelegateKey()
+  const authPending = autoConnectStatus === 'idle'
+
+  const requireAccount = (element: React.ReactNode) => {
+    if (authPending) return <RoutePending />
+    return currentAccount ? element : <Navigate to="/" replace />
+  }
 
   return (
     <Routes>
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/dashboard" element={
-        !currentAccount ? <Navigate to="/" replace /> : <Dashboard />
+      <Route path="/" element={
+        authPending ? <RoutePending /> :
+        currentAccount ? <Navigate to="/dashboard" replace /> : <LandingPage />
       } />
-      <Route path="/setup" element={
-        !currentAccount ? <Navigate to="/" replace /> :
+      <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
+      <Route path="/setup" element={requireAccount(
         delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
-      } />
-      <Route path="/playground" element={
-        !currentAccount ? <Navigate to="/" replace /> :
+      )} />
+      <Route path="/playground" element={requireAccount(
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
-      } />
+      )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
