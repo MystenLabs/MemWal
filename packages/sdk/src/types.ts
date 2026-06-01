@@ -183,6 +183,19 @@ export interface AnalyzeOptions {
      * no server-readable metadata column for it (Architecture A).
      */
     occurredAt?: string | Date;
+    /**
+     * Opt-in two-pass extraction with self-critique. When `true`, the
+     * server runs a second LLM pass that critiques and corrects the
+     * first-pass extracted facts before any fact is embedded or
+     * stored. The critic sees the same `occurredAt` anchor and
+     * related-memories context the first pass saw.
+     *
+     * **Cost:** doubles the per-analyze LLM call count. Default
+     * `false` (or undefined) preserves the single-pass write path —
+     * only flip when the measured benefit justifies the cost. Wire
+     * field is omitted when `false`/`undefined`.
+     */
+    extractWithCritique?: boolean;
 }
 
 /** A fact extracted by analyze() and accepted for background storage. */

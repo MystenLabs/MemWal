@@ -697,6 +697,23 @@ pub struct AnalyzeRequest {
     /// — that's the privacy-floor-preserving trade we accept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Opt-in two-pass extraction: when true, the extractor runs a
+    /// second LLM pass that critiques and corrects the first-pass facts
+    /// before any fact is embedded or stored. The critic sees the same
+    /// `<context occurred_at>` anchor and `<related_memories>` block
+    /// the first pass saw, plus the rendered first-pass facts.
+    ///
+    /// Default false preserves the current single-pass write path.
+    /// Enabling this **doubles the per-analyze LLM call count** —
+    /// callers should flip it only when the measured benefit justifies
+    /// the cost. The bench harness uses this for the critique stacked
+    /// re-bench against the timestamp-anchor baseline.
+    ///
+    /// Architecture A (locked 2026-05-27) is unaffected: critique is
+    /// purely write-side and adds no new server-readable metadata. The
+    /// privacy floor is unchanged.
+    #[serde(default)]
+    pub extract_with_critique: bool,
 }
 
 /// POST /api/analyze (async, returns 202 immediately)
@@ -891,6 +908,11 @@ pub struct PromptVersions {
     /// extractor system prompt used by `/api/analyze` and the
     /// summarise-long-text path in `/api/remember`.
     pub extract: String,
+    /// `FACT_EXTRACTION_CRITIQUE_PROMPT_VERSION` from
+    /// `services::extractor` — the second-pass critic system prompt
+    /// used by `/api/analyze` when `extract_with_critique: true`.
+    /// Omitted from artifacts that don't exercise the critique path.
+    pub critique: String,
     /// `ASK_SYSTEM_PROMPT_VERSION` from `routes::admin` — the LLM
     /// system prompt that wraps recalled memories on `/api/ask`.
     pub ask: String,
@@ -1526,6 +1548,7 @@ mod tests {
             mode: "benchmark".to_string(),
             prompt_versions: PromptVersions {
                 extract: "extract.v1".to_string(),
+                critique: "critique.v1".to_string(),
                 ask: "ask.v1".to_string(),
             },
         };

@@ -129,6 +129,8 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         // and ask (`/api/ask`) — no separate config to drift.
         prompt_versions: PromptVersions {
             extract: crate::services::extractor::FACT_EXTRACTION_PROMPT_VERSION.to_string(),
+            critique: crate::services::extractor::FACT_EXTRACTION_CRITIQUE_PROMPT_VERSION
+                .to_string(),
             ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
     })

@@ -592,6 +592,43 @@ class TestAnalyze:
                 occurred_at="2023-05-25T17:50:00",  # no Z, no offset
             )
 
+    @respx.mock
+    async def test_analyze_with_extract_with_critique_true_sends_flag(
+        self, memwal_client: MemWal
+    ) -> None:
+        """When ``extract_with_critique=True`` the wire body must
+        carry ``extract_with_critique: true`` so the server routes
+        through the two-pass critique path."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(200, json={"facts": [], "total": 0, "owner": ""})
+        )
+
+        await memwal_client.analyze(
+            "I moved last Friday",
+            extract_with_critique=True,
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["extract_with_critique"] is True
+
+    @respx.mock
+    async def test_analyze_with_extract_with_critique_false_omits_flag(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Default ``False`` must omit the field from the wire body so
+        existing callers see byte-identical payloads (the server's
+        ``#[serde(default)]`` resolves the absent field to ``false``)."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(200, json={"facts": [], "total": 0, "owner": ""})
+        )
+
+        await memwal_client.analyze("I moved last Friday")
+
+        body = json.loads(route.calls[0].request.content)
+        assert "extract_with_critique" not in body
+
 
 class TestRestore:
     @respx.mock

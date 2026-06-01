@@ -736,6 +736,10 @@ export class MemWal {
         };
         const wireOccurredAt = occurredAtToWire(options.occurredAt);
         if (wireOccurredAt !== undefined) body.occurred_at = wireOccurredAt;
+        // Only include the critique flag when explicitly true; default
+        // off matches the server's `#[serde(default)]` shape and keeps
+        // the wire payload byte-identical for existing callers.
+        if (options.extractWithCritique === true) body.extract_with_critique = true;
         return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202]);
     }
 
