@@ -1,6 +1,15 @@
 /**
  * App-wide configuration from environment variables
  */
+const DEFAULT_ANALYTICS_ALLOWED_HOSTS = 'walrus.xyz,www.walrus.xyz'
+
+function parseCsv(value: string | undefined, fallback = '') {
+    return (value || fallback)
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+}
+
 export const config = {
     enokiApiKey: import.meta.env.VITE_ENOKI_API_KEY as string || '',
     googleClientId: import.meta.env.VITE_GOOGLE_CLIENT_ID as string || '',
@@ -14,7 +23,19 @@ export const config = {
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
     docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
+    gtmContainerId: import.meta.env.VITE_GTM_CONTAINER_ID as string || '',
     gaMeasurementId: import.meta.env.VITE_GA_MEASUREMENT_ID as string || '',
+    posthogProjectApiKey: (
+        (import.meta.env.VITE_POSTHOG_PROJECT_API_KEY as string | undefined) ||
+        (import.meta.env.VITE_POSTHOG_KEY as string | undefined) ||
+        ''
+    ),
+    posthogHost: import.meta.env.VITE_POSTHOG_HOST as string || 'https://t.walrus.xyz',
+    posthogUiHost: import.meta.env.VITE_POSTHOG_UI_HOST as string || 'https://us.posthog.com',
+    analyticsAllowedHosts: parseCsv(
+        import.meta.env.VITE_ANALYTICS_ALLOWED_HOSTS as string | undefined,
+        DEFAULT_ANALYTICS_ALLOWED_HOSTS,
+    ),
     demoUrls: (import.meta.env.VITE_DEMO_URLS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean)
         .map(entry => {

@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "postbuild": "node scripts/verify-dist-assets.mjs",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "serve:dist": "node server.mjs",
+    "verify:static-server": "node scripts/verify-static-server.mjs"
   },
   "dependencies": {
     "@mysten/dapp-kit": "^1.0.3",
