@@ -548,7 +548,7 @@ pub(crate) async fn execute_wallet_job(
                         remember_job_id.as_deref().unwrap_or("-"),
                         msg,
                         err.kind(),
-                        !err.is_permanent()
+                        !err.aborts_retries()
                     );
                     Err(err)
                 }
@@ -668,7 +668,7 @@ async fn insert_vector_and_mark_remember_done(
             remember_job_id.unwrap_or("-"),
             msg,
             classified.kind(),
-            !classified.is_permanent()
+            !classified.aborts_retries()
         );
         return Err(classified);
     }
@@ -915,7 +915,7 @@ async fn execute_upload_and_transfer(
                 remember_job_id.as_deref().unwrap_or("-"),
                 msg,
                 classified.kind(),
-                !classified.is_permanent()
+                !classified.aborts_retries()
             );
             return Err(classified);
         }
@@ -1209,16 +1209,24 @@ impl WalletJobError {
         // clears (typically the next epoch boundary), so retrying within this
         // epoch deterministically re-fails against the same object. Distinct
         // from the recoverable `locked at version` case below — there is no
-        // fresh version to rebuild against until the lock resolves. Checked
-        // before the MoveAbort→Permanent catch so a "non-retriable" MoveAbort
-        // is classified as a lock (recoverable next epoch) rather than Dead.
-        if lower.contains("already locked by a different transaction")
-            || lower.contains("rejected as invalid by more than 1/3 of validators by stake")
-            || lower.contains("non-retriable")
-            || lower.contains("equivocated")
-            || lower.contains("equivocation")
+        // fresh version to rebuild against until the lock resolves.
+        //
+        // Requires a lock/equivocation-specific anchor. The "non-retriable" /
+        // ">1/3 of validators by stake" preamble is NOT lock-specific on its
+        // own (a generic invalid MoveAbort is also non-retriable), so it only
+        // qualifies when corroborated by object-lock evidence in the same
+        // message. Checked before the MoveAbort→Permanent catch so a genuine
+        // lock isn't Dead-marked, while a bare non-retriable MoveAbort falls
+        // through to Permanent.
+        let has_lock_anchor = lower.contains("already locked by a different transaction")
             || lower.contains("reserved for another transaction")
-        {
+            || lower.contains("equivocated")
+            || lower.contains("equivocation");
+        let corroborated_lock = (lower.contains("non-retriable")
+            || lower.contains("rejected as invalid by more than 1/3 of validators by stake"))
+            && lower.contains("object (")
+            && lower.contains("locked");
+        if has_lock_anchor || corroborated_lock {
             return WalletJobError::ObjectLockedUntilEpoch(msg.to_string());
         }
         if lower.contains("moveabort") || lower.contains("move abort") {
@@ -1741,12 +1749,15 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn classify_equivocation_phrase_variants() {
+        // Lock-specific anchors classify on their own.
         for msg in [
             "object 0xabc already locked by a different transaction: TransactionDigest(d)",
-            "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)",
             "the input object is equivocated",
             "equivocation detected on gas coin",
             "object reserved for another transaction",
+            // Corroborated: non-retriable preamble + object-lock evidence.
+            "rejected as invalid by more than 1/3 of validators by stake (non-retriable). \
+             Object (0xabc, SequenceNumber(1)) already locked",
         ] {
             assert!(
                 matches!(
@@ -1757,6 +1768,25 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 msg
             );
         }
+    }
+
+    #[test]
+    fn bare_non_retriable_is_not_an_object_lock() {
+        // The "non-retriable" / ">1/3 of validators" preamble alone is not
+        // lock-specific. Without object-lock evidence it must NOT be classified
+        // as ObjectLockedUntilEpoch.
+        // - generic invalid tx (no MoveAbort) → default Transient
+        let invalid = "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(invalid),
+            WalletJobError::Transient(_)
+        ));
+        // - generic non-retriable MoveAbort → Permanent (not a lock)
+        let move_abort = "MoveAbort in 1st command, abort code: 3 — non-retriable";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(move_abort),
+            WalletJobError::Permanent(_)
+        ));
     }
 
     #[test]

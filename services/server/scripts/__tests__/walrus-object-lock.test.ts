@@ -15,11 +15,9 @@ test("detects the exact production object-lock error", () => {
     assert.equal(isWalrusObjectLockEquivocation(PROD_OBJECT_LOCK_ERROR), true);
 });
 
-test("detects each equivocation phrase variant", () => {
+test("detects each lock-specific anchor on its own", () => {
     const cases = [
         "object 0xabc already locked by a different transaction",
-        "rejected as invalid by more than 1/3 of validators by stake",
-        "this error is non-retriable",
         "the input object is equivocated",
         "equivocation detected on gas coin",
         "object reserved for another transaction",
@@ -27,6 +25,28 @@ test("detects each equivocation phrase variant", () => {
     for (const msg of cases) {
         assert.equal(isWalrusObjectLockEquivocation(msg), true, msg);
     }
+});
+
+test("detects a corroborated non-retriable lock (preamble + object + locked)", () => {
+    const msg =
+        "rejected as invalid by more than 1/3 of validators by stake (non-retriable). " +
+        "Object (0xabc, SequenceNumber(1)) already locked";
+    assert.equal(isWalrusObjectLockEquivocation(msg), true);
+});
+
+test("bare non-retriable / >1/3 preamble is NOT an object lock", () => {
+    // Not lock-specific without object-lock evidence — must not misclassify
+    // generic invalid / non-retriable failures.
+    assert.equal(
+        isWalrusObjectLockEquivocation(
+            "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)",
+        ),
+        false,
+    );
+    assert.equal(
+        isWalrusObjectLockEquivocation("MoveAbort in 1st command, abort code: 3 — non-retriable"),
+        false,
+    );
 });
 
 test("matching is case-insensitive", () => {

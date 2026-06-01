@@ -39,12 +39,23 @@ export function isWalrusPackageVersionMismatch(message: string): boolean {
  * (`classify_sidecar_error` → `ObjectLockedUntilEpoch`); keep both in sync.
  * Distinct from the recoverable `locked at version` case, where a retry can
  * rebuild against a fresh version.
+ *
+ * Requires a lock/equivocation-specific anchor. The `non-retriable` /
+ * ">1/3 of validators by stake" preamble is NOT lock-specific on its own (a
+ * generic invalid MoveAbort is also non-retriable), so it only qualifies when
+ * corroborated by object-lock evidence (`Object (` + `locked`) in the same
+ * message.
  */
 export function isWalrusObjectLockEquivocation(message: string): boolean {
     if (!message) return false;
-    return /already locked by a different transaction/i.test(message)
-        || /rejected as invalid by more than 1\/3 of validators by stake/i.test(message)
-        || /non-retriable/i.test(message)
-        || /equivocated|equivocation/i.test(message)
-        || /reserved for another transaction/i.test(message);
+    const hasLockAnchor =
+        /already locked by a different transaction/i.test(message)
+        || /reserved for another transaction/i.test(message)
+        || /equivocated|equivocation/i.test(message);
+    const corroboratedLock =
+        (/non-retriable/i.test(message)
+            || /rejected as invalid by more than 1\/3 of validators by stake/i.test(message))
+        && /object \(/i.test(message)
+        && /locked/i.test(message);
+    return hasLockAnchor || corroboratedLock;
 }
