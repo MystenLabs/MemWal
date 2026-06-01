@@ -8,6 +8,8 @@ const ALERT_TO_SLACK_ENV: &str = "ALERT_TO_SLACK";
 const MAX_SLACK_ERROR_LEN: usize = 1_500;
 const WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_PACKAGE_UPGRADE_ALERT_DEDUP_SECS";
 const WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
+const WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS";
+const WALRUS_OBJECT_LOCK_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 
 /// Mirrors the `@mysten/walrus` dep version in
 /// `services/server/scripts/package.json`. Bump this constant in lockstep
@@ -15,18 +17,62 @@ const WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 /// runtime version, not a stale label.
 pub const SIDECAR_WALRUS_DEP_VERSION: &str = "1.1.7";
 
+/// Time-window dedup keyed by a `(String, String)` identity. Suppresses
+/// duplicate alerts for the same logical event during a burst.
+#[derive(Debug)]
+struct AlertDedup {
+    seen: Mutex<HashMap<(String, String), Instant>>,
+    window: Duration,
+}
+
+impl AlertDedup {
+    fn new(window: Duration) -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
+            window,
+        }
+    }
+
+    /// Returns `true` if an alert with this key fired within the window —
+    /// caller should drop it. On the firing path (returns `false`) the entry
+    /// is stamped to `now`, so the window slides from the most-recent fire.
+    fn should_suppress(&self, key: (String, String)) -> bool {
+        let now = Instant::now();
+        let mut guard = self.seen.lock().expect("dedup mutex poisoned");
+        // Opportunistic cleanup so the map can't grow without bound on a
+        // long-running relayer: drop entries older than 2× the window.
+        let cleanup_horizon = self.window.saturating_mul(2);
+        guard.retain(|_, fired_at| {
+            now.checked_duration_since(*fired_at)
+                .map(|elapsed| elapsed < cleanup_horizon)
+                .unwrap_or(true)
+        });
+        if let Some(fired_at) = guard.get(&key) {
+            if let Some(elapsed) = now.checked_duration_since(*fired_at) {
+                if elapsed < self.window {
+                    return true;
+                }
+            }
+        }
+        guard.insert(key, now);
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct AlertManager {
     slack: Option<SlackNotifier>,
     /// Suppresses Walrus package-upgrade alert spam during an upgrade burst.
-    /// Keyed by `(sui_network, sidecar_walrus_dep_version)` because that's
-    /// what makes two alerts "the same event" — concurrent queued jobs all
-    /// hit EWrongVersion against the same on-chain package change, so a
-    /// single notification per (network, dep) is enough until either the
-    /// dep bumps or enough time passes that this is plausibly a separate
-    /// upgrade event.
-    walrus_upgrade_dedup: Mutex<HashMap<(String, String), Instant>>,
-    walrus_upgrade_dedup_window: Duration,
+    /// Keyed by `(sui_network, sidecar_walrus_dep_version)` — concurrent queued
+    /// jobs all hit EWrongVersion against the same on-chain package change, so
+    /// one notification per (network, dep) is enough until the dep bumps or the
+    /// window elapses.
+    walrus_upgrade_dedup: AlertDedup,
+    /// Suppresses Walrus object-lock alert spam. Keyed by
+    /// `(sui_network, locked_object_id)` — when one owned object equivocates,
+    /// every concurrent job touching it raises the same error, so one
+    /// notification per (network, object) is enough until the window elapses.
+    walrus_object_lock_dedup: AlertDedup,
 }
 
 impl AlertManager {
@@ -34,17 +80,17 @@ impl AlertManager {
         let slack = std::env::var(ALERT_TO_SLACK_ENV)
             .ok()
             .and_then(|raw| SlackNotifier::from_env_value(http_client, &raw));
-        let window = std::env::var(WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV)
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .filter(|secs| *secs > 0)
-            .map(Duration::from_secs)
-            .unwrap_or(WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT);
 
         Self {
             slack,
-            walrus_upgrade_dedup: Mutex::new(HashMap::new()),
-            walrus_upgrade_dedup_window: window,
+            walrus_upgrade_dedup: AlertDedup::new(dedup_window_from_env(
+                WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV,
+                WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT,
+            )),
+            walrus_object_lock_dedup: AlertDedup::new(dedup_window_from_env(
+                WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS_ENV,
+                WALRUS_OBJECT_LOCK_ALERT_DEDUP_DEFAULT,
+            )),
         }
     }
 
@@ -70,40 +116,51 @@ impl AlertManager {
         let Some(slack) = &self.slack else {
             return Ok(());
         };
-        if self.suppress_walrus_upgrade_alert(&alert.sui_network, &alert.sidecar_walrus_dep_version)
-        {
+        let key = (
+            alert.sui_network.clone(),
+            alert.sidecar_walrus_dep_version.clone(),
+        );
+        if self.walrus_upgrade_dedup.should_suppress(key) {
             return Ok(());
         }
         let payload = SlackPayload::for_walrus_package_upgrade_detected(&alert);
         slack.send_payload(&payload).await
     }
 
-    /// Returns `true` if a Walrus-upgrade alert with the same
-    /// (network, dep version) fired within the dedup window — caller should
-    /// drop the alert. Updates the entry to `now` on the *firing* path (i.e.
-    /// returns `false`), so the window slides from the most-recent fire.
-    fn suppress_walrus_upgrade_alert(&self, sui_network: &str, dep_version: &str) -> bool {
-        let key = (sui_network.to_string(), dep_version.to_string());
-        let now = Instant::now();
-        let mut guard = self.walrus_upgrade_dedup.lock().expect("dedup mutex poisoned");
-        // Opportunistic cleanup so the map can't grow without bound on a
-        // long-running relayer: drop entries older than 2× the window.
-        let cleanup_horizon = self.walrus_upgrade_dedup_window.saturating_mul(2);
-        guard.retain(|_, fired_at| {
-            now.checked_duration_since(*fired_at)
-                .map(|elapsed| elapsed < cleanup_horizon)
-                .unwrap_or(true)
-        });
-        if let Some(fired_at) = guard.get(&key) {
-            if let Some(elapsed) = now.checked_duration_since(*fired_at) {
-                if elapsed < self.walrus_upgrade_dedup_window {
-                    return true;
-                }
-            }
+    pub async fn notify_walrus_object_locked(
+        &self,
+        alert: WalrusObjectLockedAlert,
+    ) -> Result<(), AlertError> {
+        let Some(slack) = &self.slack else {
+            return Ok(());
+        };
+        // Dedup per (network, object). When object id is unparseable, fall back
+        // to a constant so a burst of unparseable locks still collapses to one
+        // alert per network rather than spamming.
+        let key = (
+            alert.sui_network.clone(),
+            alert
+                .locked_object_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        );
+        if self.walrus_object_lock_dedup.should_suppress(key) {
+            return Ok(());
         }
-        guard.insert(key, now);
-        false
+        let payload = SlackPayload::for_walrus_object_locked(&alert);
+        slack.send_payload(&payload).await
     }
+}
+
+/// Read a dedup window (seconds) from `env_var`, falling back to `default`
+/// when unset, unparseable, or zero.
+fn dedup_window_from_env(env_var: &str, default: Duration) -> Duration {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default)
 }
 
 #[derive(Clone, Debug)]
@@ -180,6 +237,24 @@ pub struct WalrusPackageUpgradeDetectedAlert {
     pub on_chain_version_before: Option<String>,
     pub on_chain_version_after: Option<String>,
     pub action_taken: String,
+    pub error: String,
+}
+
+/// Fired when a wallet job fails because a Sui owned object/version is locked
+/// to a competing transaction (equivocation / ">1/3 of validators …
+/// non-retriable"). Distinct from the "exhausted retries" alert: this case
+/// aborts immediately rather than burning the wallet budget, and the on-call
+/// message must name the real cause and surface the locked object + locking
+/// transaction so they can check lock status / wait for the epoch boundary.
+#[derive(Debug)]
+pub struct WalrusObjectLockedAlert {
+    pub remember_job_id: Option<String>,
+    pub owner: Option<String>,
+    pub namespace: Option<String>,
+    pub sui_network: String,
+    pub locked_object_id: Option<String>,
+    pub locked_object_version: Option<String>,
+    pub locking_transaction_digest: Option<String>,
     pub error: String,
 }
 
@@ -292,6 +367,55 @@ impl SlackPayload {
             alert.sui_network,
             alert.wallet_index,
             alert.configured_wallets,
+            truncate(&alert.error, MAX_SLACK_ERROR_LEN),
+        );
+
+        Self {
+            text: summary.clone(),
+            blocks: vec![
+                SlackBlock::Header {
+                    text: plain_text(title),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(summary),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(details),
+                },
+            ],
+        }
+    }
+
+    fn for_walrus_object_locked(alert: &WalrusObjectLockedAlert) -> Self {
+        let title = "MemWal Walrus upload blocked — Sui object lock".to_string();
+        let summary = format!(
+            "Walrus upload hit a Sui owned-object lock / equivocation on {}. \
+             Not retried (would re-fail against the same locked object); the lock \
+             typically clears at the next epoch boundary.",
+            alert.sui_network,
+        );
+        let object = alert.locked_object_id.as_deref().unwrap_or("unparsed");
+        let version = alert.locked_object_version.as_deref().unwrap_or("unparsed");
+        let locking = alert
+            .locking_transaction_digest
+            .as_deref()
+            .unwrap_or("unparsed");
+        let job = alert.remember_job_id.as_deref().unwrap_or("-");
+        let owner = alert
+            .owner
+            .as_deref()
+            .map(short_address)
+            .unwrap_or_else(|| "-".to_string());
+        let namespace = alert.namespace.as_deref().unwrap_or("-");
+        let details = format!(
+            "*Network:* `{}`\n*Locked object:* `{}`\n*Object version:* `{}`\n*Locked by tx:* `{}`\n*Job:* `{}`\n*Owner:* `{}`\n*Namespace:* `{}`\n*Error:* ```{}```",
+            alert.sui_network,
+            object,
+            version,
+            locking,
+            job,
+            owner,
+            namespace,
             truncate(&alert.error, MAX_SLACK_ERROR_LEN),
         );
 
@@ -468,52 +592,91 @@ mod tests {
         assert!(json.len() < MAX_SLACK_ERROR_LEN * 3);
     }
 
-    fn test_alert_manager_with_window(window: Duration) -> AlertManager {
-        AlertManager {
-            // No Slack notifier so we test the dedup gate in isolation —
-            // suppress_walrus_upgrade_alert is the unit we care about; the
-            // outer notify_* short-circuits on `slack=None` anyway.
-            slack: None,
-            walrus_upgrade_dedup: Mutex::new(HashMap::new()),
-            walrus_upgrade_dedup_window: window,
-        }
+    fn key(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
     }
 
     #[test]
-    fn walrus_upgrade_dedup_lets_first_alert_through() {
-        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+    fn alert_dedup_lets_first_through() {
+        let dedup = AlertDedup::new(Duration::from_secs(600));
+        assert!(!dedup.should_suppress(key("mainnet", "1.1.7")));
     }
 
     #[test]
-    fn walrus_upgrade_dedup_suppresses_burst_within_window() {
-        // Concurrent queued jobs all hit EWrongVersion on the same upgrade —
-        // only the first one fires; the rest are suppressed.
-        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+    fn alert_dedup_suppresses_burst_within_window() {
+        // Concurrent jobs all raise the same logical event — only the first
+        // fires; the rest are suppressed until the window elapses.
+        let dedup = AlertDedup::new(Duration::from_secs(600));
+        assert!(!dedup.should_suppress(key("mainnet", "obj-A")));
         for _ in 0..50 {
-            assert!(mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+            assert!(dedup.should_suppress(key("mainnet", "obj-A")));
         }
     }
 
     #[test]
-    fn walrus_upgrade_dedup_separates_networks_and_dep_versions() {
-        // Mainnet vs testnet are independent events. A dep bump between
-        // upgrades also resets — we want to know about the next event.
-        let mgr = test_alert_manager_with_window(Duration::from_secs(600));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
-        assert!(!mgr.suppress_walrus_upgrade_alert("testnet", "1.1.7"));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.2.0"));
+    fn alert_dedup_separates_distinct_keys() {
+        // Different network or different second component are independent events.
+        let dedup = AlertDedup::new(Duration::from_secs(600));
+        assert!(!dedup.should_suppress(key("mainnet", "obj-A")));
+        assert!(!dedup.should_suppress(key("testnet", "obj-A")));
+        assert!(!dedup.should_suppress(key("mainnet", "obj-B")));
         // …but a repeat on the same key is still suppressed.
-        assert!(mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        assert!(dedup.should_suppress(key("mainnet", "obj-A")));
     }
 
     #[test]
-    fn walrus_upgrade_dedup_re_fires_after_window_expires() {
+    fn alert_dedup_re_fires_after_window_expires() {
         // Very short window → immediately past it on the second call.
-        let mgr = test_alert_manager_with_window(Duration::from_millis(1));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        let dedup = AlertDedup::new(Duration::from_millis(1));
+        assert!(!dedup.should_suppress(key("mainnet", "1.1.7")));
         std::thread::sleep(Duration::from_millis(5));
-        assert!(!mgr.suppress_walrus_upgrade_alert("mainnet", "1.1.7"));
+        assert!(!dedup.should_suppress(key("mainnet", "1.1.7")));
+    }
+
+    #[test]
+    fn walrus_object_locked_payload_surfaces_lock_metadata_not_exhausted_copy() {
+        let payload = SlackPayload::for_walrus_object_locked(&WalrusObjectLockedAlert {
+            remember_job_id: Some("3d607892".into()),
+            owner: Some(
+                "0xab27e2141234567890abcdef1234567890abcdef1234567890abcdef0064e132".into(),
+            ),
+            namespace: Some("autonomous-participation".into()),
+            sui_network: "testnet".into(),
+            locked_object_id: Some("0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e".into()),
+            locked_object_version: Some("884613305".into()),
+            locking_transaction_digest: Some("8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F".into()),
+            error: "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)".into(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        // Names the real cause, NOT the misleading "exhausted retries" copy.
+        assert!(json.contains("object lock") || json.contains("Sui object lock"));
+        assert!(!json.to_lowercase().contains("exhausted retries"));
+        // Surfaces lock metadata for triage.
+        assert!(json.contains("0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e"));
+        assert!(json.contains("884613305"));
+        assert!(json.contains("8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F"));
+        assert!(json.contains("testnet"));
+        assert!(json.contains("autonomous-participation"));
+    }
+
+    #[test]
+    fn walrus_object_locked_payload_handles_unparsed_metadata() {
+        // When the error didn't yield object/version/digest, the payload still
+        // ships with explicit `unparsed` placeholders rather than crashing.
+        let payload = SlackPayload::for_walrus_object_locked(&WalrusObjectLockedAlert {
+            remember_job_id: None,
+            owner: None,
+            namespace: None,
+            sui_network: "mainnet".into(),
+            locked_object_id: None,
+            locked_object_version: None,
+            locking_transaction_digest: None,
+            error: "equivocation detected".into(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("unparsed"));
+        assert!(json.contains("mainnet"));
     }
 }

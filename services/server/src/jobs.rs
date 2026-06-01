@@ -20,7 +20,8 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
-    SIDECAR_WALRUS_DEP_VERSION, WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+    SIDECAR_WALRUS_DEP_VERSION, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
+    WalrusUploadExhaustedAlert,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
@@ -168,7 +169,12 @@ async fn update_remember_job_after_wallet_error(
         return;
     };
 
-    let status = if error.is_permanent() {
+    // Aborting errors (Permanent or ObjectLockedUntilEpoch) get no further
+    // retries, so the row is terminal — mark it failed rather than leaving it
+    // stuck on `running` forever. Retryable errors stay `running` for the next
+    // attempt. The error_msg carries the lock detail; the object-lock case
+    // also fires its own distinct Slack alert.
+    let status = if error.aborts_retries() {
         "failed"
     } else {
         "running"
@@ -364,7 +370,10 @@ pub(crate) struct WalletJobAttemptInfo {
 
 impl WalletJobAttemptInfo {
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
-        !error.is_permanent() && self.current >= self.max
+        // Only retryable (non-aborting) errors can "exhaust" the budget. An
+        // aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
+        // immediately, so it never produces a misleading "exhausted" alert.
+        !error.aborts_retries() && self.current >= self.max
     }
 }
 
@@ -539,7 +548,7 @@ pub(crate) async fn execute_wallet_job(
                         remember_job_id.as_deref().unwrap_or("-"),
                         msg,
                         err.kind(),
-                        !err.is_permanent()
+                        !err.aborts_retries()
                     );
                     Err(err)
                 }
@@ -659,7 +668,7 @@ async fn insert_vector_and_mark_remember_done(
             remember_job_id.unwrap_or("-"),
             msg,
             classified.kind(),
-            !classified.is_permanent()
+            !classified.aborts_retries()
         );
         return Err(classified);
     }
@@ -874,6 +883,15 @@ async fn execute_upload_and_transfer(
                 &msg,
             )
             .await;
+            maybe_alert_walrus_object_locked(
+                state,
+                &classified,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
             maybe_alert_walrus_upload_exhausted(
                 state,
                 &classified,
@@ -897,7 +915,7 @@ async fn execute_upload_and_transfer(
                 remember_job_id.as_deref().unwrap_or("-"),
                 msg,
                 classified.kind(),
-                !classified.is_permanent()
+                !classified.aborts_retries()
             );
             return Err(classified);
         }
@@ -985,6 +1003,88 @@ async fn maybe_alert_walrus_package_upgrade_detected(
     }
 }
 
+/// Identifiers parsed from a Sui owned-object lock / equivocation error, used
+/// to enrich the object-lock alert and the persisted job row. Every field is
+/// best-effort: Sui error formatting varies, so a field stays `None` when its
+/// token isn't present rather than failing the whole parse.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LockedObjectInfo {
+    object_id: Option<String>,
+    version: Option<String>,
+    locking_digest: Option<String>,
+}
+
+/// Extract the text between the first `open` delimiter and the next `close`
+/// after it. Returns `None` if either delimiter is missing or the span is
+/// empty.
+fn extract_delimited(haystack: &str, open: &str, close: &str) -> Option<String> {
+    let start = haystack.find(open)? + open.len();
+    let rest = &haystack[start..];
+    let end = rest.find(close)?;
+    let value = rest[..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Extract the first `0x`-prefixed hex object id in the message (the locked
+/// object always appears first inside `Object (0x…, …)`).
+fn extract_first_object_id(haystack: &str) -> Option<String> {
+    let idx = haystack.find("0x")?;
+    let hex: String = haystack[idx + 2..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    (!hex.is_empty()).then(|| format!("0x{hex}"))
+}
+
+/// Parse the locked object id, version, and locking transaction digest out of
+/// a Sui object-lock error string, e.g.:
+/// `…[Object (0xabc…, SequenceNumber(884613305), o#…) already locked by a
+///  different transaction: TransactionDigest(8bjFg…) … with 6842 stake]`.
+fn parse_locked_object_info(msg: &str) -> LockedObjectInfo {
+    LockedObjectInfo {
+        object_id: extract_first_object_id(msg),
+        version: extract_delimited(msg, "SequenceNumber(", ")"),
+        locking_digest: extract_delimited(msg, "TransactionDigest(", ")"),
+    }
+}
+
+/// Fire the distinct object-lock / equivocation alert when a wallet job fails
+/// with `ObjectLockedUntilEpoch`. Kept separate from the "exhausted retries"
+/// alert: this case never reaches retry exhaustion (it aborts immediately), so
+/// the on-call message must name the real cause — an owned-object lock — and
+/// surface the object id / version / locking digest for triage.
+async fn maybe_alert_walrus_object_locked(
+    state: &AppState,
+    error: &WalletJobError,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    msg: &str,
+) {
+    if !matches!(error, WalletJobError::ObjectLockedUntilEpoch(_)) {
+        return;
+    }
+
+    let info = parse_locked_object_info(msg);
+    let alert = WalrusObjectLockedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        locked_object_id: info.object_id,
+        locked_object_version: info.version,
+        locking_transaction_digest: info.locking_digest,
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state.alerts.notify_walrus_object_locked(alert).await {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for Walrus object lock: {}",
+            err
+        );
+    }
+}
+
 async fn maybe_alert_walrus_upload_exhausted(
     state: &AppState,
     error: &WalletJobError,
@@ -1034,6 +1134,9 @@ async fn maybe_alert_walrus_upload_exhausted(
 ///   `balance::split` stale-state failures that can recover after sidecar refresh
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
+/// - owned-object lock / equivocation ("already locked by a different
+///   transaction", ">1/3 of validators … non-retriable", "equivocated") →
+///   `ObjectLockedUntilEpoch` (abort: retrying within the epoch re-fails)
 /// - `InsufficientGas` / `ObjectNotFound` /
 ///   `ObjectVersionUnavailableForConsumption` → `Transient` (refill wallet,
 ///   refresh local state, retry)
@@ -1044,6 +1147,14 @@ pub enum WalletJobError {
     Transient(String),
     /// Permanent failure — Apalis should mark Dead immediately (no retry).
     Permanent(String),
+    /// A Sui owned object/version is locked to a competing transaction. The
+    /// lock does not clear with immediate retries — it holds until the lock
+    /// resolves, typically at the next epoch boundary — so retrying within the
+    /// epoch re-fails against the same object and only burns the wallet attempt
+    /// budget. NOT `Permanent`: the same input can succeed in a later epoch.
+    /// Apalis aborts so we surface a distinct object-lock alert rather than a
+    /// misleading "wallet retries exhausted" one.
+    ObjectLockedUntilEpoch(String),
 }
 
 impl WalletJobError {
@@ -1051,12 +1162,25 @@ impl WalletJobError {
         match self {
             WalletJobError::Transient(_) => "transient",
             WalletJobError::Permanent(_) => "permanent",
+            WalletJobError::ObjectLockedUntilEpoch(_) => "object_locked_until_epoch",
         }
     }
 
     /// True if the error is `Permanent` — caller should NOT retry.
     pub fn is_permanent(&self) -> bool {
         matches!(self, WalletJobError::Permanent(_))
+    }
+
+    /// True if Apalis should stop retrying this job (abort rather than
+    /// re-queue). Covers both `Permanent` (never valid) and
+    /// `ObjectLockedUntilEpoch` (not valid again until the lock clears).
+    /// Used to gate both the Apalis disposition and the "exhausted retries"
+    /// alert so a single locked object doesn't burn the whole wallet budget.
+    pub fn aborts_retries(&self) -> bool {
+        matches!(
+            self,
+            WalletJobError::Permanent(_) | WalletJobError::ObjectLockedUntilEpoch(_)
+        )
     }
 
     /// Heuristic classification from the sidecar's error string. The sidecar
@@ -1080,6 +1204,31 @@ impl WalletJobError {
         {
             return WalletJobError::Transient(msg.to_string());
         }
+        // Sui owned-object lock / equivocation. The referenced object+version
+        // is locked to a competing transaction and stays locked until the lock
+        // clears (typically the next epoch boundary), so retrying within this
+        // epoch deterministically re-fails against the same object. Distinct
+        // from the recoverable `locked at version` case below — there is no
+        // fresh version to rebuild against until the lock resolves.
+        //
+        // Requires a lock/equivocation-specific anchor. The "non-retriable" /
+        // ">1/3 of validators by stake" preamble is NOT lock-specific on its
+        // own (a generic invalid MoveAbort is also non-retriable), so it only
+        // qualifies when corroborated by object-lock evidence in the same
+        // message. Checked before the MoveAbort→Permanent catch so a genuine
+        // lock isn't Dead-marked, while a bare non-retriable MoveAbort falls
+        // through to Permanent.
+        let has_lock_anchor = lower.contains("already locked by a different transaction")
+            || lower.contains("reserved for another transaction")
+            || lower.contains("equivocated")
+            || lower.contains("equivocation");
+        let corroborated_lock = (lower.contains("non-retriable")
+            || lower.contains("rejected as invalid by more than 1/3 of validators by stake"))
+            && lower.contains("object (")
+            && lower.contains("locked");
+        if has_lock_anchor || corroborated_lock {
+            return WalletJobError::ObjectLockedUntilEpoch(msg.to_string());
+        }
         if lower.contains("moveabort") || lower.contains("move abort") {
             return WalletJobError::Permanent(msg.to_string());
         }
@@ -1100,7 +1249,9 @@ impl WalletJobError {
         let error = io::Error::other(self.to_string());
         match self {
             WalletJobError::Transient(_) => Error::Failed(Arc::new(Box::new(error))),
-            WalletJobError::Permanent(_) => Error::Abort(Arc::new(Box::new(error))),
+            WalletJobError::Permanent(_) | WalletJobError::ObjectLockedUntilEpoch(_) => {
+                Error::Abort(Arc::new(Box::new(error)))
+            }
         }
     }
 }
@@ -1110,6 +1261,9 @@ impl std::fmt::Display for WalletJobError {
         match self {
             WalletJobError::Transient(msg) => write!(f, "wallet job error (transient): {}", msg),
             WalletJobError::Permanent(msg) => write!(f, "wallet job error (permanent): {}", msg),
+            WalletJobError::ObjectLockedUntilEpoch(msg) => {
+                write!(f, "wallet job error (object locked until epoch): {}", msg)
+            }
         }
     }
 }
@@ -1500,9 +1654,18 @@ mod tests {
 
     use super::{
         classify_wallet_remember_handoff_failure, is_walrus_package_version_mismatch,
-        mark_remember_job_failed, wallet_job_request, WalletJob, WalletJobAttemptInfo,
-        WalletJobError, WalletOperation, MAX_ATTEMPTS,
+        mark_remember_job_failed, parse_locked_object_info, wallet_job_request, WalletJob,
+        WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
+
+    /// The exact production error string from the object-lock incident
+    /// (testnet job 3d607892…). Used to pin the classifier against real output.
+    const PROD_OBJECT_LOCK_ERROR: &str = "walrus upload failed: Internal Error: walrus upload failed: \
+Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable). \
+Non-retriable errors: [Object (0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e, \
+SequenceNumber(884613305), o#B61aVqEgDskxru255FTdzua2RxbbnhDMFxmQ8SCxvj3n) already locked by a \
+different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F) \
+{ k#80127c70.., k#81626d03.. } with 6842 stake].";
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -1544,7 +1707,124 @@ mod tests {
                 "expected transient for: {}",
                 msg
             );
+            assert!(
+                !WalletJobError::classify_sidecar_error(msg).aborts_retries(),
+                "recoverable lock-at-version should stay retryable: {}",
+                msg
+            );
         }
+    }
+
+    #[test]
+    fn classify_prod_equivocation_as_object_locked_until_epoch() {
+        let classified = WalletJobError::classify_sidecar_error(PROD_OBJECT_LOCK_ERROR);
+        assert!(
+            matches!(classified, WalletJobError::ObjectLockedUntilEpoch(_)),
+            "prod equivocation error must classify as ObjectLockedUntilEpoch, got {}",
+            classified.kind()
+        );
+        // It aborts retries (doesn't burn the wallet budget) but is NOT
+        // "permanent" — the same input can succeed in a later epoch.
+        assert!(classified.aborts_retries());
+        assert!(!classified.is_permanent());
+    }
+
+    #[test]
+    fn object_locked_until_epoch_aborts_apalis() {
+        let err = WalletJobError::ObjectLockedUntilEpoch("locked".to_string());
+        assert!(matches!(
+            err.into_apalis_error(),
+            apalis::prelude::Error::Abort(_)
+        ));
+    }
+
+    #[test]
+    fn object_locked_until_epoch_does_not_exhaust_wallet_budget() {
+        // At the final attempt, an object-lock error must NOT trigger the
+        // "exhausted retries" alert — that gate is what produced the
+        // misleading prod alert.
+        let err = WalletJobError::ObjectLockedUntilEpoch("locked".to_string());
+        assert!(!WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&err));
+    }
+
+    #[test]
+    fn classify_equivocation_phrase_variants() {
+        // Lock-specific anchors classify on their own.
+        for msg in [
+            "object 0xabc already locked by a different transaction: TransactionDigest(d)",
+            "the input object is equivocated",
+            "equivocation detected on gas coin",
+            "object reserved for another transaction",
+            // Corroborated: non-retriable preamble + object-lock evidence.
+            "rejected as invalid by more than 1/3 of validators by stake (non-retriable). \
+             Object (0xabc, SequenceNumber(1)) already locked",
+        ] {
+            assert!(
+                matches!(
+                    WalletJobError::classify_sidecar_error(msg),
+                    WalletJobError::ObjectLockedUntilEpoch(_)
+                ),
+                "expected ObjectLockedUntilEpoch for: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn bare_non_retriable_is_not_an_object_lock() {
+        // The "non-retriable" / ">1/3 of validators" preamble alone is not
+        // lock-specific. Without object-lock evidence it must NOT be classified
+        // as ObjectLockedUntilEpoch.
+        // - generic invalid tx (no MoveAbort) → default Transient
+        let invalid = "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(invalid),
+            WalletJobError::Transient(_)
+        ));
+        // - generic non-retriable MoveAbort → Permanent (not a lock)
+        let move_abort = "MoveAbort in 1st command, abort code: 3 — non-retriable";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(move_abort),
+            WalletJobError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn equivocation_does_not_regress_recoverable_classes() {
+        // balance::split and EWrongVersion must still be Transient (recoverable),
+        // not swept into the new abort path.
+        let balance = "Enoki dry run failed: MoveAbort(0x2::balance, split, 2)";
+        let ewrong = "MoveAbort in 1st command, abort code: 1, in '0xabc::system::inner_mut'";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(balance),
+            WalletJobError::Transient(_)
+        ));
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(ewrong),
+            WalletJobError::Transient(_)
+        ));
+    }
+
+    #[test]
+    fn parse_locked_object_info_from_prod_error() {
+        let info = parse_locked_object_info(PROD_OBJECT_LOCK_ERROR);
+        assert_eq!(
+            info.object_id.as_deref(),
+            Some("0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e")
+        );
+        assert_eq!(info.version.as_deref(), Some("884613305"));
+        assert_eq!(
+            info.locking_digest.as_deref(),
+            Some("8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F")
+        );
+    }
+
+    #[test]
+    fn parse_locked_object_info_tolerates_missing_tokens() {
+        let info = parse_locked_object_info("some unrelated error with no object tokens");
+        assert!(info.object_id.is_none());
+        assert!(info.version.is_none());
+        assert!(info.locking_digest.is_none());
     }
 
     #[test]
