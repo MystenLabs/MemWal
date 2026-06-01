@@ -48,8 +48,10 @@ export function isWalrusPackageVersionMismatch(message: string): boolean {
  */
 export function isWalrusObjectLockEquivocation(message: string): boolean {
     if (!message) return false;
+    // "locked by a different transaction" (not anchored on "already") so we
+    // catch Sui lock-conflict phrasings that omit the "already" prefix.
     const hasLockAnchor =
-        /already locked by a different transaction/i.test(message)
+        /locked by a different transaction/i.test(message)
         || /reserved for another transaction/i.test(message)
         || /equivocated|equivocation/i.test(message);
     const corroboratedLock =

@@ -18,6 +18,8 @@ test("detects the exact production object-lock error", () => {
 test("detects each lock-specific anchor on its own", () => {
     const cases = [
         "object 0xabc already locked by a different transaction",
+        // Same conflict without the "already" prefix — must still match.
+        "object 0xabc locked by a different transaction",
         "the input object is equivocated",
         "equivocation detected on gas coin",
         "object reserved for another transaction",

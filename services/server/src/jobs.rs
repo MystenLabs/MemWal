@@ -536,6 +536,15 @@ pub(crate) async fn execute_wallet_job(
                 },
                 Err(err) => {
                     let msg = err.to_string();
+                    maybe_alert_walrus_object_locked(
+                        state,
+                        &err,
+                        remember_job_id.as_deref(),
+                        Some(&owner),
+                        Some(&namespace),
+                        &msg,
+                    )
+                    .await;
                     update_remember_job_after_wallet_error(
                         state,
                         remember_job_id.as_deref(),
@@ -1218,7 +1227,9 @@ impl WalletJobError {
         // message. Checked before the MoveAbort→Permanent catch so a genuine
         // lock isn't Dead-marked, while a bare non-retriable MoveAbort falls
         // through to Permanent.
-        let has_lock_anchor = lower.contains("already locked by a different transaction")
+        // "locked by a different transaction" (not anchored on "already") so
+        // we catch Sui lock-conflict phrasings that omit the "already" prefix.
+        let has_lock_anchor = lower.contains("locked by a different transaction")
             || lower.contains("reserved for another transaction")
             || lower.contains("equivocated")
             || lower.contains("equivocation");
@@ -1752,6 +1763,8 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         // Lock-specific anchors classify on their own.
         for msg in [
             "object 0xabc already locked by a different transaction: TransactionDigest(d)",
+            // Same conflict without the "already" prefix — must still match.
+            "object 0xabc locked by a different transaction: TransactionDigest(d)",
             "the input object is equivocated",
             "equivocation detected on gas coin",
             "object reserved for another transaction",
