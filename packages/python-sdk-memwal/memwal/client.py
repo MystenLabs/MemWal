@@ -633,9 +633,14 @@ class MemWal:
                 resolves in-turn relative references ("last Friday",
                 "yesterday") into absolute dates inside the fact text
                 before embedding/encryption. Accepts a
-                :class:`datetime.datetime` (preferred — naïve datetimes
-                are assumed UTC) or an ISO-8601 / RFC-3339 string. Wire
-                format is RFC-3339 UTC with trailing ``Z``. Omit when
+                :class:`datetime.datetime` (preferred — **must be
+                timezone-aware**; naïve datetimes raise ``ValueError``
+                because silently assuming UTC would mis-anchor by N
+                hours for callers outside UTC) or an ISO-8601 / RFC-3339
+                string (must carry a ``Z`` suffix or UTC offset; raises
+                ``ValueError`` if malformed or naïve). Wire format is
+                RFC-3339 UTC with millisecond precision and trailing
+                ``Z`` (byte-identical to the TypeScript SDK). Omit when
                 no anchor is available — the server will not invent one
                 (no ``now()`` fallback). The resolved date lives only
                 inside the encrypted fact text + embedding; there is no

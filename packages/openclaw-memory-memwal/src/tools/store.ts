@@ -3,7 +3,7 @@
  *
  * Uses analyze() instead of remember() so the server LLM extracts
  * individual facts from the text, producing cleaner, more searchable
- * memories (same approach as Mem0's memory_store).
+ * memories than storing the raw input verbatim.
  */
 
 import type { MemWal } from "@mysten-incubation/memwal";
@@ -36,13 +36,17 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
         occurredAt: Type.Optional(
           Type.String({
             description:
-              "Optional RFC-3339 / ISO-8601 timestamp of when the event " +
-              "actually happened (e.g. '2024-03-15T14:30:00Z'). When the " +
-              "user is storing a recounted past event, pass the date the " +
-              "event occurred, not the date the user is telling you about " +
-              "it — the server resolves relative references ('last Friday') " +
-              "to absolute dates inside the stored fact text. Omit when " +
-              "unknown; do not guess.",
+              "Optional RFC-3339 / ISO-8601 timestamp of when the source " +
+              "text or conversation actually occurred (e.g. " +
+              "'2024-03-15T14:30:00Z'). The server uses this as the " +
+              "temporal anchor for resolving in-turn relative references " +
+              "like 'last Friday' or 'yesterday' against. For real-time " +
+              "stores, pass the current time. For recounted past events " +
+              "where the user is talking about something that happened " +
+              "earlier (e.g. 'remember I called Alex last Friday'), OMIT " +
+              "this field — do NOT pass the recounted event date while " +
+              "leaving relative wording in the text; that produces wrong " +
+              "anchors. When unknown, omit; do not guess.",
           }),
         ),
       }),
