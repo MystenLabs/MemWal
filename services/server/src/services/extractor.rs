@@ -299,7 +299,7 @@ impl LlmExtractor {
         }
 
         // read body as text first (was `resp.json()` directly).
-        // This enables two transient-failure detections that route to
+        // This enables three transient-failure detections that route to
         // `AppError::UpstreamUnavailable` (HTTP 503, retried by the
         // SDK + benchmark harness) instead of `AppError::Internal`
         // (HTTP 500, dropped):
@@ -315,8 +315,9 @@ impl LlmExtractor {
         //     with the embedded error.
         //
         // (3) Body deserialises but `content` is `null` — handled at
-        //     the `ChatMessageResp` type (now `Option<String>`),
-        //     degrades to empty string and produces zero facts.
+        //     the `ChatMessageResp` type (now `Option<String>`) so we
+        //     can classify it as a retryable upstream failure instead
+        //     of silently producing zero facts.
         //
         // Cost: holding the body as a String uses ~response-size extra
         // memory (a few KB per chat completion — trivial).
