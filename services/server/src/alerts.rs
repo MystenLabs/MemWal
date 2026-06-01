@@ -679,4 +679,106 @@ mod tests {
         assert!(json.contains("unparsed"));
         assert!(json.contains("mainnet"));
     }
+
+    // ── Dispatch-level integration: drive the real AlertManager against a
+    //    local capture server so we assert the actual HTTP send, not just the
+    //    payload struct. Proves the object-lock alert reaches Slack with the
+    //    parsed metadata and that dedup suppresses a burst. ──
+
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    fn enabled_manager(webhook_url: String) -> AlertManager {
+        AlertManager {
+            slack: Some(SlackNotifier {
+                http_client: reqwest::Client::new(),
+                webhook_url,
+            }),
+            walrus_upgrade_dedup: AlertDedup::new(Duration::from_secs(600)),
+            walrus_object_lock_dedup: AlertDedup::new(Duration::from_secs(600)),
+        }
+    }
+
+    /// Bind a webhook capture server on an ephemeral port; returns its URL and
+    /// the shared buffer of received request bodies.
+    async fn spawn_capture_server() -> (String, Arc<StdMutex<Vec<String>>>) {
+        use axum::{extract::State, routing::post, Router};
+
+        async fn capture(
+            State(buf): State<Arc<StdMutex<Vec<String>>>>,
+            body: String,
+        ) -> &'static str {
+            buf.lock().expect("capture mutex").push(body);
+            "ok"
+        }
+
+        let buf = Arc::new(StdMutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/hook", post(capture))
+            .with_state(buf.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{}/hook", addr), buf)
+    }
+
+    fn prod_object_lock_alert() -> WalrusObjectLockedAlert {
+        WalrusObjectLockedAlert {
+            remember_job_id: Some("3d607892".into()),
+            owner: Some(
+                "0xab27e2141234567890abcdef1234567890abcdef1234567890abcdef0064e132".into(),
+            ),
+            namespace: Some("autonomous-participation".into()),
+            sui_network: "testnet".into(),
+            locked_object_id: Some(
+                "0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e".into(),
+            ),
+            locked_object_version: Some("884613305".into()),
+            locking_transaction_digest: Some("8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F".into()),
+            error: "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn object_lock_alert_is_dispatched_with_lock_metadata() {
+        // #given a webhook capture server and a Slack-enabled manager
+        let (url, buf) = spawn_capture_server().await;
+        let mgr = enabled_manager(url);
+
+        // #when the dedicated object-lock alert is sent
+        mgr.notify_walrus_object_locked(prod_object_lock_alert())
+            .await
+            .expect("alert send");
+
+        // #then exactly one POST lands, carrying the parsed lock metadata and
+        //       the object-lock copy — NOT the generic exhausted-retries copy.
+        let posts = buf.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "expected exactly one webhook POST");
+        let body = &posts[0];
+        assert!(body.contains("0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e"));
+        assert!(body.contains("884613305"));
+        assert!(body.contains("8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F"));
+        assert!(body.to_lowercase().contains("object lock"));
+        assert!(!body.to_lowercase().contains("exhausted retries"));
+    }
+
+    #[tokio::test]
+    async fn object_lock_alert_burst_is_deduped_to_one_post() {
+        // #given a Slack-enabled manager
+        let (url, buf) = spawn_capture_server().await;
+        let mgr = enabled_manager(url);
+
+        // #when the same (network, object) raises the alert repeatedly
+        for _ in 0..5 {
+            mgr.notify_walrus_object_locked(prod_object_lock_alert())
+                .await
+                .expect("alert send");
+        }
+
+        // #then only the first POST reaches Slack; the burst is suppressed
+        assert_eq!(buf.lock().unwrap().len(), 1);
+    }
 }
