@@ -2,7 +2,7 @@
 title: "Choose Your Path"
 ---
 
-MemWal supports several integration modes depending on how much control you need. Pick the one that fits your use case.
+Walrus Memory supports several integration modes depending on how much control you need. Pick the one that fits your use case.
 
 <Tip>
 These paths aren't mutually exclusive. You can combine them - for example, use the **Default SDK** with the **AI Middleware**, or start with the **Managed Relayer** and move to **Self-Hosting** later. They all share the same backend and data layer.
@@ -55,7 +55,7 @@ Go to: [Self-Hosting](/relayer/self-hosting)
 
 ## 6. MCP Clients
 
-Use MemWal's MCP server when you want Cursor, Claude Desktop, Claude Code, Antigravity, or another MCP-aware agent to save and recall memory during tool use.
+Use Walrus Memory's MCP server when you want Cursor, Claude Desktop, Claude Code, Antigravity, or another MCP-aware agent to save and recall memory during tool use.
 
 - connect directly to the hosted relayer with Streamable HTTP at `/api/mcp`
 - or run the local stdio package with `npx -y @mysten-incubation/memwal-mcp`

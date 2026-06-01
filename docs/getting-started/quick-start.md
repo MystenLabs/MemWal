@@ -2,7 +2,7 @@
 title: "Quick Start"
 ---
 
-The fastest way to get MemWal running is through the TypeScript SDK.
+The fastest way to get Walrus Memory running is through the TypeScript SDK.
 
 ## Prerequisites
 
@@ -93,7 +93,7 @@ The fastest way to get MemWal running is through the TypeScript SDK.
   <Step>
     ### Generate your account ID and delegate key
 
-    Create a MemWal account ID and delegate private key for your SDK client using one of the hosted endpoints below.
+    Create a Walrus Memory account ID and delegate private key for your SDK client using one of the hosted endpoints below.
 
     <Note>
     The following endpoints are provided as a public good by Walrus Foundation.
@@ -101,10 +101,10 @@ The fastest way to get MemWal running is through the TypeScript SDK.
 
     | App | URL |
     | --- | --- |
-    | **MemWal Playground** | [memwal.ai](https://memwal.ai) |
+    | **Walrus Memory Playground** | [memwal.ai](https://memwal.ai) |
     | **Walrus-hosted Playground** | [memwal.wal.app](https://memwal.wal.app) |
 
-    For the contract-based setup flow, see [Delegate Key Management](/contract/delegate-key-management) and [MemWal smart contract](/contract/overview).
+    For the contract-based setup flow, see [Delegate Key Management](/contract/delegate-key-management) and [Walrus Memory smart contract](/contract/overview).
   </Step>
 
   <Step>

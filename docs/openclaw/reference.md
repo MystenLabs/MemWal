@@ -13,7 +13,7 @@ Hooks are the primary mechanism — they run automatically on every conversation
 
 **Hook:** `before_prompt_build`
 
-Searches MemWal for memories relevant to the user's prompt and injects them into the LLM's context.
+Searches Walrus Memory for memories relevant to the user's prompt and injects them into the LLM's context.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -42,7 +42,7 @@ The hook also injects a **namespace instruction** via `appendSystemContext`, tel
 
 **Hook:** `agent_end`
 
-Extracts facts from the conversation after each turn and stores them via MemWal's `analyze()` endpoint.
+Extracts facts from the conversation after each turn and stores them via Walrus Memory's `analyze()` endpoint.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -65,7 +65,7 @@ And accepts immediately if trigger patterns match:
 - Personal statements ("I like", "my ... is", "I work")
 - Contact info (phone numbers, email addresses)
 
-Messages that pass the filter are sent to the MemWal server, where a server-side LLM extracts individual facts and stores each as an encrypted blob.
+Messages that pass the filter are sent to the Walrus Memory server, where a server-side LLM extracts individual facts and stores each as an encrypted blob.
 
 ## Tools
 
@@ -82,7 +82,7 @@ Semantic search across the agent's memory space.
 | `namespace` | string | No | Memory namespace (auto-filled from system context) |
 
 **Behavior:**
-- Searches MemWal via `recall()` with the query text
+- Searches Walrus Memory via `recall()` with the query text
 - Filters out prompt injection attempts from results
 - HTML-escapes result text before returning to the LLM
 - Returns ranked results with relevance percentages
@@ -173,7 +173,7 @@ Each OpenClaw agent gets its own memory namespace derived from the session key. 
 
 All recall, capture, and tool operations are scoped to the current namespace. One agent cannot see another agent's memories.
 
-**Namespace isolation** uses the same Ed25519 key with server-side filtering. For stronger separation, MemWal also supports **cryptographic isolation** — assigning different keys to different agents so they literally cannot decrypt each other's memories.
+**Namespace isolation** uses the same Ed25519 key with server-side filtering. For stronger separation, Walrus Memory also supports **cryptographic isolation** — assigning different keys to different agents so they literally cannot decrypt each other's memories.
 
 ## Prompt Injection Protection
 
@@ -201,7 +201,7 @@ Full list of config options for `openclaw.json`:
 |--------|------|---------|----------|-------------|
 | `privateKey` | string | — | Yes | Ed25519 private key (hex). Supports `${ENV_VAR}`. |
 | `accountId` | string | — | Yes | MemWalAccount object ID on Sui (`0x...`) |
-| `serverUrl` | string | — | Yes | MemWal server URL |
+| `serverUrl` | string | — | Yes | Walrus Memory server URL |
 | `defaultNamespace` | string | `"default"` | No | Memory scope for the main agent |
 | `autoRecall` | boolean | `true` | No | Inject relevant memories before each turn |
 | `autoCapture` | boolean | `true` | No | Extract and store facts after each turn |

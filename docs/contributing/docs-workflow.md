@@ -2,7 +2,7 @@
 title: "Docs Workflow"
 ---
 
-MemWal is still in beta, so documentation is an active part of product hardening.
+Walrus Memory is still in beta, so documentation is an active part of product hardening.
 If you see unclear guidance, outdated flows, or missing examples, contributions are welcome.
 
 ## Source of Truth

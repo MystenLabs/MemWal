@@ -1,5 +1,5 @@
 ---
-title: "MemWal"
+title: "Walrus Memory"
 description: "The recommended default client — relayer handles embeddings, SEAL, and storage."
 ---
 

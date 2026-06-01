@@ -2,11 +2,11 @@
 title: "Smart Contract Overview"
 ---
 
-The smart contract (`memwal::account`) defines the onchain account model for MemWal. It is a Move module deployed on Sui.
+The smart contract (`memwal::account`) defines the onchain account model for Walrus Memory. It is a Move module deployed on Sui.
 
 ## Network IDs
 
-These are the onchain IDs for the current public MemWal deployments:
+These are the onchain IDs for the current public Walrus Memory deployments:
 
 ### Staging (Testnet)
 
@@ -28,7 +28,7 @@ For relayer setup and environment variable usage, see [Self-Hosting](/relayer/se
 
 ## What It Manages
 
-- **Ownership** — who owns a MemWal account
+- **Ownership** — who owns a Walrus Memory account
 - **Delegate keys** — which Ed25519 keys are authorized to act through the relayer
 - **SEAL access control** — who can decrypt encrypted memories via `seal_approve`
 - **Account lifecycle** — activation and deactivation (freeze/unfreeze)

@@ -16,7 +16,7 @@ The indexer is a standalone Rust service (`services/indexer`) that:
 
 1. Connects to the same PostgreSQL database as the relayer
 2. Polls Sui blockchain events using `suix_queryEvents`
-3. Filters for `AccountCreated` events from the MemWal package
+3. Filters for `AccountCreated` events from the Walrus Memory package
 4. Inserts `account_id → owner` mappings into the `accounts` table
 5. Stores its event cursor in `indexer_state` so it can resume after restarts
 
@@ -39,7 +39,7 @@ The indexer reads these environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `MEMWAL_PACKAGE_ID` | Yes | — | MemWal contract package ID to filter events |
+| `MEMWAL_PACKAGE_ID` | Yes | — | Walrus Memory contract package ID to filter events |
 | `SUI_RPC_URL` | No | Mainnet fullnode | Sui RPC endpoint |
 | `POLL_INTERVAL_SECS` | No | `5` | Seconds between event poll cycles |
 

@@ -2,7 +2,7 @@
 title: "Observability"
 ---
 
-Production relayers should emit structured logs, scrape Prometheus metrics, and send alerts for the external systems MemWal depends on: PostgreSQL, Redis, Sui RPC, OpenAI-compatible embedding/LLM APIs, SEAL, Walrus, and the TypeScript sidecar.
+Production relayers should emit structured logs, scrape Prometheus metrics, and send alerts for the external systems Walrus Memory depends on: PostgreSQL, Redis, Sui RPC, OpenAI-compatible embedding/LLM APIs, SEAL, Walrus, and the TypeScript sidecar.
 
 ## Request Correlation
 
@@ -107,7 +107,7 @@ Create panels for:
 
 ## APM Integration
 
-MemWal emits structured logs and Prometheus metrics in vendor-neutral formats. For Datadog, New Relic, Grafana Cloud, or OpenTelemetry Collector based setups:
+Walrus Memory emits structured logs and Prometheus metrics in vendor-neutral formats. For Datadog, New Relic, Grafana Cloud, or OpenTelemetry Collector based setups:
 
 1. Scrape `/metrics` from the Rust relayer.
 2. Collect stdout/stderr logs from both the Rust process and sidecar.
