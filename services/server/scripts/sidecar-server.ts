@@ -21,7 +21,10 @@ import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
-import { isWalrusPackageVersionMismatch } from "./walrus-error-detection.js";
+import {
+    isWalrusObjectLockEquivocation,
+    isWalrusPackageVersionMismatch,
+} from "./walrus-error-detection.js";
 
 // ============================================================
 // Shared clients (initialized once at boot — the whole point!)
@@ -190,16 +193,19 @@ type EnokiSponsorResponse = { bytes: string; digest: string };
 type EnokiExecuteResponse = { digest: string };
 
 // in-memory counters surfaced via /metrics/wallet.
-// Per Will Bradley (Mysten, 2026-05-12 Slack): Sui no longer permanently
-// locks coin objects on equivocation, so the original multi-wallet routing
-// is unnecessary. We use a single wallet concurrently and rely on Apalis
-// retries for transient Sui/RPC/coin-selection races.
 //
-// `walletLockErrorsTotal` should stay at 0 under load and is the canary
-// for re-evaluating the simplification if the Sui guarantee changes.
+// `walletLockErrorsTotal` counts the recoverable "locked at version" class,
+// where a retry can rebuild against a fresh version. `walletObjectLockEquivocationTotal`
+// counts the NON-recoverable class — an owned object equivocated and is locked
+// to a competing transaction until the lock clears (typically the next epoch
+// boundary). The latter has been observed in production despite earlier
+// guidance that Sui no longer permanently locks coin objects on equivocation,
+// so it is tracked separately as the canary for whether concurrent uploads are
+// still equivocating owned objects.
 const sidecarMetrics = {
     walletSubmittedTotal: 0,
     walletLockErrorsTotal: 0,
+    walletObjectLockEquivocationTotal: 0,
     walletPermanentFailuresTotal: 0,
 };
 
@@ -362,6 +368,7 @@ function sidecarStateSnapshot(): Record<string, unknown> {
         activeWalrusUploads,
         walletSubmittedTotal: sidecarMetrics.walletSubmittedTotal,
         walletLockErrorsTotal: sidecarMetrics.walletLockErrorsTotal,
+        walletObjectLockEquivocationTotal: sidecarMetrics.walletObjectLockEquivocationTotal,
         walletPermanentFailuresTotal: sidecarMetrics.walletPermanentFailuresTotal,
         uploadRelayTipCache:
             uploadRelayTipAddressCache === undefined
@@ -562,7 +569,14 @@ async function submitWalletTransaction(
         return digest;
     } catch (err: any) {
         const msg = err?.message || String(err);
-        if (/objectlocked|locked at version|object is locked/i.test(msg)) {
+        if (isWalrusObjectLockEquivocation(msg)) {
+            // Non-recoverable owned-object lock — held until the lock clears
+            // (typically the next epoch boundary). The Rust worker classifies
+            // this as ObjectLockedUntilEpoch and aborts rather than burning
+            // wallet retries; here we only categorize the metric.
+            sidecarMetrics.walletObjectLockEquivocationTotal += 1;
+            console.error(`[wallet] object lock / equivocation: ${msg}`);
+        } else if (/objectlocked|locked at version|object is locked/i.test(msg)) {
             sidecarMetrics.walletLockErrorsTotal += 1;
             console.error(`[wallet] coin-object lock error: ${msg}`);
         } else if (/moveabort|move abort/i.test(msg)) {
@@ -667,10 +681,10 @@ mountMcpRoutes(app, {
 // Wallet-execution metrics (observability). Placed before auth so
 // operators / scrapers don't need a token.
 //
-// `walletLockErrorsTotal` is the canary for the simplification: it should
-// stay at 0 because Sui no longer permanently locks coin objects on
-// equivocation. If it ever climbs, the original multi-wallet rationale
-// would need re-evaluating.
+// `walletObjectLockEquivocationTotal` is the canary for concurrent uploads
+// equivocating owned objects: a non-zero value means jobs are hitting Sui
+// object locks that hold until the epoch boundary, which is the signal for
+// the follow-up single-flight / coin-reservation work.
 //
 // Values are integer counters that monotonically increase; clients compute
 // deltas.

@@ -27,3 +27,24 @@ export function isWalrusPackageVersionMismatch(message: string): boolean {
     if (!/moveabort/i.test(message)) return false;
     return /::system::inner_mut/i.test(message) || /ewrongversion/i.test(message);
 }
+
+/**
+ * Detect a Sui owned-object lock / equivocation error: a specific
+ * object+version is locked to a competing transaction, so the transaction is
+ * rejected by >1/3 of validator stake and is non-retriable within the epoch.
+ * Retrying re-fails against the same locked object until the lock clears
+ * (typically the next epoch boundary).
+ *
+ * Mirrors the Rust classifier in `services/server/src/jobs.rs`
+ * (`classify_sidecar_error` → `ObjectLockedUntilEpoch`); keep both in sync.
+ * Distinct from the recoverable `locked at version` case, where a retry can
+ * rebuild against a fresh version.
+ */
+export function isWalrusObjectLockEquivocation(message: string): boolean {
+    if (!message) return false;
+    return /already locked by a different transaction/i.test(message)
+        || /rejected as invalid by more than 1\/3 of validators by stake/i.test(message)
+        || /non-retriable/i.test(message)
+        || /equivocated|equivocation/i.test(message)
+        || /reserved for another transaction/i.test(message);
+}
