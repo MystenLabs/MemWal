@@ -36,6 +36,7 @@ import type {
     RecallOptions,
     RecallParams,
     EmbedResult,
+    AnalyzeOptions,
     AnalyzeResult,
     AnalyzeWaitResult,
     HealthResult,
@@ -121,6 +122,49 @@ function pollingDelayMs(baseMs: number, attempt: number): number {
 
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
+}
+
+/**
+ * Normalise the legacy `(text, namespace)` and new `(text, options)`
+ * overloads of `analyze()` / `analyzeAndWait()` into a single
+ * `AnalyzeOptions` object. Preserves backwards compatibility — a plain
+ * string is treated as the namespace.
+ */
+function normalizeAnalyzeOptions(
+    namespaceOrOptions?: string | AnalyzeOptions,
+): AnalyzeOptions {
+    if (namespaceOrOptions == null) return {};
+    if (typeof namespaceOrOptions === "string") return { namespace: namespaceOrOptions };
+    return namespaceOrOptions;
+}
+
+/**
+ * Render an `occurredAt` argument to the wire format the server
+ * expects: RFC-3339 UTC with trailing `Z` and millisecond precision
+ * (e.g. `"2023-05-25T17:50:00.000Z"`). `Date` objects are normalised
+ * via `toISOString()` (which always emits this exact shape); strings
+ * are passed through verbatim — the caller is trusted to have given
+ * us a valid RFC-3339 timestamp. Invalid `Date` instances (constructed
+ * from garbage input — `Date` silently produces "Invalid Date" rather
+ * than throwing) are rejected at the SDK boundary with a diagnostic
+ * `TypeError`, so a bad timestamp doesn't surface as an opaque
+ * `RangeError: Invalid time value` from `.toISOString()` later.
+ * Returns `undefined` when no anchor is supplied so the field is
+ * omitted from the request body.
+ */
+function occurredAtToWire(occurredAt?: string | Date): string | undefined {
+    if (occurredAt == null) return undefined;
+    if (occurredAt instanceof Date) {
+        if (Number.isNaN(occurredAt.getTime())) {
+            throw new TypeError(
+                "occurredAt is an Invalid Date — likely constructed from a " +
+                "malformed string. `Date` accepts garbage silently; check " +
+                "the source value before passing it as occurredAt.",
+            );
+        }
+        return occurredAt.toISOString();
+    }
+    return occurredAt;
 }
 
 function normalizeSuiNetworkForGrpc(network: string): string {
@@ -681,11 +725,18 @@ export class MemWal {
      * console.log(result.job_ids)
      * ```
      */
-    async analyze(text: string, namespace?: string): Promise<AnalyzeResult> {
-        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", {
+    async analyze(
+        text: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
+    ): Promise<AnalyzeResult> {
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
+        const body: Record<string, unknown> = {
             text,
-            namespace: namespace ?? this.namespace,
-        }, [200, 202]);
+            namespace: options.namespace ?? this.namespace,
+        };
+        const wireOccurredAt = occurredAtToWire(options.occurredAt);
+        if (wireOccurredAt !== undefined) body.occurred_at = wireOccurredAt;
+        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202]);
     }
 
     /**
@@ -693,11 +744,13 @@ export class MemWal {
      */
     async analyzeAndWait(
         text: string,
-        namespace?: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
         opts: RememberBulkOptions = {},
     ): Promise<AnalyzeWaitResult> {
-        const accepted = await this.analyze(text, namespace);
-        const namespaces = accepted.job_ids.map(() => namespace ?? this.namespace);
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
+        const namespace = options.namespace ?? this.namespace;
+        const accepted = await this.analyze(text, options);
+        const namespaces = accepted.job_ids.map(() => namespace);
         const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
         return {
             ...completed,

@@ -30,7 +30,8 @@ import base64
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import httpx
 import nacl.signing
@@ -121,6 +122,81 @@ def _is_transient_polling_status(status: int) -> bool:
     """
 
     return status == 0 or status == 429 or status >= 500
+
+
+def _occurred_at_to_wire(
+    occurred_at: Optional[Union[str, datetime]],
+) -> Optional[str]:
+    """Render an ``occurred_at`` argument to the wire format.
+
+    The server's ``AnalyzeRequest.occurred_at`` field expects RFC-3339
+    UTC with a trailing ``Z``. Output precision matches the TS SDK's
+    ``Date.toISOString()`` (milliseconds), e.g.
+    ``"2023-05-25T17:50:00.000Z"`` — so the two SDKs produce
+    byte-identical wire payloads for the same instant.
+
+    Aware ``datetime`` objects are converted to UTC. **Naïve datetimes
+    are rejected** with ``ValueError``: silently assuming UTC would
+    produce timezone-off-by-N anchors for callers outside UTC and
+    undermine WALM-55's "honest temporal anchoring" guarantee. Callers
+    should pass ``datetime.now(timezone.utc)`` or attach a ``tzinfo``
+    explicitly.
+
+    String inputs are validated as RFC-3339 / ISO-8601 (accepting
+    trailing ``Z`` as a UTC shorthand, per RFC-3339 §4.2) and
+    re-formatted to canonical form. Invalid strings raise
+    ``ValueError`` at the SDK boundary rather than being forwarded as
+    a 400 from the server.
+
+    Returns ``None`` when no anchor is supplied so the field is
+    omitted from the request body.
+    """
+
+    if occurred_at is None:
+        return None
+    if isinstance(occurred_at, datetime):
+        if occurred_at.tzinfo is None:
+            raise ValueError(
+                "occurred_at datetime must be timezone-aware. Pass "
+                "datetime.now(timezone.utc), datetime(..., tzinfo=...), "
+                "or an RFC-3339 string. Naïve datetimes are rejected "
+                "because they would be silently mis-anchored for "
+                "callers outside UTC."
+            )
+        dt = occurred_at.astimezone(timezone.utc)
+        # Drop tzinfo before `isoformat` to suppress the "+00:00"
+        # suffix; we append "Z" manually to match the TS SDK + server
+        # canonical form. `timespec="milliseconds"` matches JS
+        # `Date.toISOString()` precision so the two SDKs are
+        # byte-identical for the same instant.
+        return dt.replace(tzinfo=None).isoformat(timespec="milliseconds") + "Z"
+    if isinstance(occurred_at, str):
+        # Validate at the SDK boundary so a bad timestamp doesn't
+        # bring down the whole analyze() call with an opaque 400 from
+        # the server's serde layer. RFC-3339 §4.2 allows "Z" as a UTC
+        # shorthand; `fromisoformat` only accepts it on Python 3.11+,
+        # so we normalise to "+00:00" before parsing for 3.9/3.10
+        # compatibility.
+        normalised = occurred_at.replace("Z", "+00:00", 1) if occurred_at.endswith("Z") else occurred_at
+        try:
+            parsed = datetime.fromisoformat(normalised)
+        except ValueError as exc:
+            raise ValueError(
+                f"occurred_at must be RFC-3339 / ISO-8601, got: {occurred_at!r}"
+            ) from exc
+        # Round-trip through the datetime branch so the wire format is
+        # canonical (UTC, milliseconds, trailing "Z"). Naïve inputs
+        # here are rare but possible; reuse the aware-required guard
+        # by attaching tzinfo if the string carried one.
+        if parsed.tzinfo is None:
+            raise ValueError(
+                f"occurred_at string must carry a UTC offset or 'Z' suffix, "
+                f"got: {occurred_at!r}"
+            )
+        return _occurred_at_to_wire(parsed)
+    raise TypeError(
+        f"occurred_at must be datetime, str, or None; got {type(occurred_at).__name__}"
+    )
 
 
 class MemWal:
@@ -533,7 +609,12 @@ class MemWal:
             return RecallResult(results=memories, total=len(memories))
         return RecallResult(results=memories, total=data.get("total", len(memories)))
 
-    async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    async def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+    ) -> AnalyzeResult:
         """Analyze conversation text and return as soon as facts are accepted.
 
         Per PR #121: server extracts atomic facts synchronously via LLM, then
@@ -546,15 +627,40 @@ class MemWal:
         Args:
             text: Conversation text to analyze.
             namespace: Override the default namespace.
+            occurred_at: Optional valid-time timestamp — when the
+                conversation/event actually happened. When supplied, the
+                server extractor uses it as a temporal anchor and
+                resolves in-turn relative references ("last Friday",
+                "yesterday") into absolute dates inside the fact text
+                before embedding/encryption. Accepts a
+                :class:`datetime.datetime` (preferred — **must be
+                timezone-aware**; naïve datetimes raise ``ValueError``
+                because silently assuming UTC would mis-anchor by N
+                hours for callers outside UTC) or an ISO-8601 / RFC-3339
+                string (must carry a ``Z`` suffix or UTC offset; raises
+                ``ValueError`` if malformed or naïve). Wire format is
+                RFC-3339 UTC with millisecond precision and trailing
+                ``Z`` (byte-identical to the TypeScript SDK). Omit when
+                no anchor is available — the server will not invent one
+                (no ``now()`` fallback). The resolved date lives only
+                inside the encrypted fact text + embedding; there is no
+                server-readable metadata column for it (Architecture A).
 
         Returns:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        body: Dict[str, Any] = {
+            "text": text,
+            "namespace": namespace or self._namespace,
+        }
+        wire_occurred_at = _occurred_at_to_wire(occurred_at)
+        if wire_occurred_at is not None:
+            body["occurred_at"] = wire_occurred_at
         data = await self._signed_request(
             "POST",
             "/api/analyze",
-            {"text": text, "namespace": namespace or self._namespace},
+            body,
             accepted_statuses=(200, 202),
         )
         # Backward-compat: older server shape returned `facts[].id` and
@@ -583,6 +689,7 @@ class MemWal:
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
         """Analyze + wait for every extracted fact to finish persisting.
 
@@ -590,9 +697,12 @@ class MemWal:
         :meth:`wait_for_remember_jobs` on the returned ``job_ids``. The
         result combines the analyze fact list with the bulk-style settled
         per-job results.
+
+        ``occurred_at`` carries the same temporal-anchor semantics as
+        :meth:`analyze` — see that method's docstring for details.
         """
 
-        accepted = await self.analyze(text, namespace)
+        accepted = await self.analyze(text, namespace, occurred_at=occurred_at)
         completed = await self.wait_for_remember_jobs(accepted.job_ids, opts)
         return AnalyzeWaitResult(
             results=completed.results,
@@ -1245,18 +1355,26 @@ class MemWalSync:
         :class:`RecallParams` for the recommended object-style call)."""
         return self._run(self._inner.recall(query, limit, namespace, max_distance))
 
-    def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+    ) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
-        return self._run(self._inner.analyze(text, namespace))
+        return self._run(self._inner.analyze(text, namespace, occurred_at=occurred_at))
 
     def analyze_and_wait(
         self,
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
         """Synchronous version of :meth:`MemWal.analyze_and_wait`."""
-        return self._run(self._inner.analyze_and_wait(text, namespace, opts))
+        return self._run(
+            self._inner.analyze_and_wait(text, namespace, opts, occurred_at=occurred_at)
+        )
 
     def embed(self, text: str) -> EmbedResult:
         """Synchronous version of :meth:`MemWal.embed`."""

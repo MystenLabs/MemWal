@@ -150,7 +150,12 @@ class MemWalClient:
         resp.raise_for_status()
         return resp.json()
 
-    def analyze(self, text: str, namespace: str) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: str,
+        occurred_at: str | None = None,
+    ) -> AnalyzeResult:
         """
         POST /api/analyze — feed conversation text, extract and store memories.
 
@@ -161,11 +166,23 @@ class MemWalClient:
            synchronously — the response carries the stored ids and
            status "done"; production: SEAL-encrypt + Walrus upload, via an
            async job, status "pending").
+
+        `occurred_at` is an optional RFC 3339 UTC timestamp of
+        when this conversation turn took place. When passed, the server
+        threads it into the extractor's prompt as a `<context
+        occurred_at="..."/>` tag so the LLM can resolve relative-time
+        references ("last Friday", "yesterday") to absolute dates
+        *inside the extracted fact text* — making time-anchored facts
+        retrievable. Omit (or pass None) when no anchor is available;
+        the server does NOT default to now() — silence is honest.
         """
-        data = self._post("/api/analyze", {
+        body: dict = {
             "text": text,
             "namespace": namespace,
-        })
+        }
+        if occurred_at is not None:
+            body["occurred_at"] = occurred_at
+        data = self._post("/api/analyze", body)
         # Response shape varies between server versions:
         # - Synchronous (reference branch): {facts, total, owner}
         # Async / benchmark-mode (dev): {facts, fact_count,

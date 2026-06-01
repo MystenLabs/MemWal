@@ -90,13 +90,46 @@ impl Embedder for OpenAiEmbedder {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
+                    // Same transient-vs-permanent split as the
+                    // extractor: 429 + 5xx → 503 (retryable); other
+                    // 4xx → 500 (genuine bug). See
+                    // `extractor::is_upstream_status_transient`.
+                    if crate::services::extractor::is_upstream_status_transient(status) {
+                        return Err(AppError::UpstreamUnavailable(format!(
+                            "Embedding API upstream error ({}): {}",
+                            status, body
+                        )));
+                    }
                     return Err(AppError::Internal(format!(
                         "Embedding API error ({}): {}",
                         status, body
                     )));
                 }
 
-                let api_resp: EmbeddingApiResponse = resp.json().await.map_err(|e| {
+                // same pattern as the extractor — capture body
+                // as text first so we can (1) treat transport-level
+                // failures as transient, and (2) detect OpenRouter
+                // error envelopes wrapped in HTTP 200. Both route to
+                // `AppError::UpstreamUnavailable` (HTTP 503) so the
+                // SDK / harness retry policy can recover. See
+                // `extractor::parse_openrouter_error_envelope`.
+                let body = resp.text().await.map_err(|e| {
+                    AppError::UpstreamUnavailable(format!(
+                        "Failed to read embedding response body: {}",
+                        e
+                    ))
+                })?;
+
+                if let Some(envelope) =
+                    crate::services::extractor::parse_openrouter_error_envelope(&body)
+                {
+                    return Err(AppError::UpstreamUnavailable(format!(
+                        "OpenRouter upstream error (code={}): {}",
+                        envelope.code, envelope.message
+                    )));
+                }
+
+                let api_resp: EmbeddingApiResponse = serde_json::from_str(&body).map_err(|e| {
                     AppError::Internal(format!("Failed to parse embedding response: {}", e))
                 })?;
 
@@ -147,4 +180,29 @@ struct EmbeddingApiResponse {
 #[derive(serde::Deserialize)]
 struct EmbeddingData {
     embedding: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    /// parity test — the embedder routes OpenRouter-error-envelope
+    /// bodies to `AppError::UpstreamUnavailable` via the SHARED helper
+    /// `extractor::parse_openrouter_error_envelope`. If a future refactor
+    /// breaks the cross-module import or call site, this catches it at
+    /// compile time + test time without needing to mock reqwest.
+    ///
+    /// The full unit coverage of the envelope-parser shape (whitespace
+    /// padding, valid-completion non-matches, both-fields edge case,
+    /// malformed-JSON fallthrough) lives in `extractor::tests`. Don't
+    /// duplicate it here — duplicating only adds maintenance cost; the
+    /// helper is the same function.
+    #[test]
+    fn embedder_uses_shared_openrouter_envelope_parser() {
+        // Real failing body shape captured from the LME v2 bench
+        // investigation (200 OK wrapping a 504-gateway-timeout error).
+        let body = r#"{"error":{"message":"The operation was aborted","code":504}}"#;
+        let envelope = crate::services::extractor::parse_openrouter_error_envelope(body)
+            .expect("embedder must be able to detect the same envelope shape as the extractor");
+        assert_eq!(envelope.code, 504);
+        assert_eq!(envelope.message, "The operation was aborted");
+    }
 }
