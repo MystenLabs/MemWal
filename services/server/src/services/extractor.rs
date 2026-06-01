@@ -279,6 +279,19 @@ impl LlmExtractor {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // Transient upstream statuses (429 + 5xx) route to 503 so
+            // the SDK/harness retry policy can recover. Non-transient
+            // (4xx other than 429) stays as 500 — that's a real bug
+            // (bad auth, malformed request, etc.) that retrying won't
+            // fix. Mirrors the 200-wrapped envelope handling below
+            // for the case where the upstream returns the same 5xx
+            // condition as a raw HTTP status instead of wrapping it.
+            if is_upstream_status_transient(status) {
+                return Err(AppError::UpstreamUnavailable(format!(
+                    "LLM API upstream error ({}): {}",
+                    status, body
+                )));
+            }
             return Err(AppError::Internal(format!(
                 "LLM API error ({}): {}",
                 status, body
@@ -321,16 +334,28 @@ impl LlmExtractor {
         let api_resp: ChatCompletionResponse = serde_json::from_str(&body)
             .map_err(|e| AppError::Internal(format!("Failed to parse LLM response: {}", e)))?;
 
-        // `content` is `Option<String>` — `None` on upstream
-        // null-content returns degrades to empty string, which
-        // `parse_extracted_facts` treats as zero facts. Same legitimate
-        // outcome as the prompt's explicit `NONE` reply.
-        let content = api_resp
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_deref())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        // `content` is `Option<String>` to deserialise cleanly when the
+        // upstream returns HTTP 200 with `content: null` (observed from
+        // `gpt-4o-mini` via OpenRouter — model accepted the prompt but
+        // produced no output). We treat that as a transient upstream
+        // failure (`UpstreamUnavailable` → HTTP 503 → retried) rather
+        // than silently emitting zero facts: a successful empty extract
+        // is indistinguishable from "no memorable content" at the
+        // client, and the SDK/harness will not retry a 202 with
+        // facts=[]. The explicit string `"NONE"` from the LLM remains
+        // the valid no-facts path (handled by `parse_extracted_facts`).
+        let raw_content = api_resp.choices.first().and_then(|c| c.message.content.as_deref());
+        let content = match raw_content {
+            Some(s) => s.trim().to_string(),
+            None => {
+                return Err(AppError::UpstreamUnavailable(
+                    "LLM upstream returned content=null — treating as transient \
+                     failure (retryable). Explicit NONE replies are the valid \
+                     no-facts path and are handled separately."
+                        .to_string(),
+                ));
+            }
+        };
 
         Ok(parse_extracted_facts(&content))
     }
@@ -539,6 +564,18 @@ pub(crate) fn parse_openrouter_error_envelope(body: &str) -> Option<OpenRouterEr
     let code = err.get("code")?.as_i64()?;
     let message = err.get("message")?.as_str()?.to_string();
     Some(OpenRouterErrorEnvelope { code, message })
+}
+
+/// Classify a non-success upstream HTTP status as transient or
+/// non-transient. Transient statuses (429 rate-limit and 5xx server
+/// errors) route to `AppError::UpstreamUnavailable` → HTTP 503 so the
+/// SDK + benchmark harness retry policy (`_RETRY_STATUS = (429, 502,
+/// 503, 504)`) can recover. Non-transient statuses (4xx other than
+/// 429 — bad auth, malformed request) stay as `AppError::Internal` →
+/// HTTP 500 so they surface as a genuine bug rather than burning
+/// retry budget against an unrecoverable error.
+pub(crate) fn is_upstream_status_transient(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 /// Escape characters with structural meaning in the
@@ -1380,5 +1417,37 @@ mod tests {
             super::parse_openrouter_error_envelope(r#"{"error":{"code":504}}"#).is_none(),
             "missing message"
         );
+    }
+
+    #[test]
+    fn upstream_status_transient_recognises_5xx_and_429() {
+        // 429 (rate-limit) and any 5xx upstream → retryable (503 to
+        // the SDK/harness). Other 4xx → permanent (500). Pinned
+        // because the bench harness retry set
+        // `(429, 502, 503, 504)` depends on this classification —
+        // mis-mapping a 429 to 500 means we burn through OpenRouter
+        // rate-limit windows without backing off.
+        use super::is_upstream_status_transient;
+        use reqwest::StatusCode;
+
+        // Transient
+        assert!(is_upstream_status_transient(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_upstream_status_transient(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_upstream_status_transient(StatusCode::BAD_GATEWAY));
+        assert!(is_upstream_status_transient(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_upstream_status_transient(StatusCode::GATEWAY_TIMEOUT));
+
+        // Not transient — real bugs / config errors that retrying won't fix
+        assert!(!is_upstream_status_transient(StatusCode::UNAUTHORIZED));
+        assert!(!is_upstream_status_transient(StatusCode::FORBIDDEN));
+        assert!(!is_upstream_status_transient(StatusCode::NOT_FOUND));
+        assert!(!is_upstream_status_transient(StatusCode::BAD_REQUEST));
+        assert!(!is_upstream_status_transient(StatusCode::PAYLOAD_TOO_LARGE));
+
+        // Sanity: success codes shouldn't be classified as transient
+        // failures (the call site guards with `!is_success()`, but
+        // pin the helper's behaviour for defensive callers).
+        assert!(!is_upstream_status_transient(StatusCode::OK));
+        assert!(!is_upstream_status_transient(StatusCode::ACCEPTED));
     }
 }

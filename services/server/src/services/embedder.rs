@@ -90,6 +90,16 @@ impl Embedder for OpenAiEmbedder {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
+                    // Same transient-vs-permanent split as the
+                    // extractor: 429 + 5xx → 503 (retryable); other
+                    // 4xx → 500 (genuine bug). See
+                    // `extractor::is_upstream_status_transient`.
+                    if crate::services::extractor::is_upstream_status_transient(status) {
+                        return Err(AppError::UpstreamUnavailable(format!(
+                            "Embedding API upstream error ({}): {}",
+                            status, body
+                        )));
+                    }
                     return Err(AppError::Internal(format!(
                         "Embedding API error ({}): {}",
                         status, body
