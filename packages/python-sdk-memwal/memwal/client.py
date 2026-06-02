@@ -177,7 +177,11 @@ def _occurred_at_to_wire(
         # shorthand; `fromisoformat` only accepts it on Python 3.11+,
         # so we normalise to "+00:00" before parsing for 3.9/3.10
         # compatibility.
-        normalised = occurred_at.replace("Z", "+00:00", 1) if occurred_at.endswith("Z") else occurred_at
+        normalised = (
+            occurred_at.replace("Z", "+00:00", 1)
+            if occurred_at.endswith("Z")
+            else occurred_at
+        )
         try:
             parsed = datetime.fromisoformat(normalised)
         except ValueError as exc:
@@ -1251,6 +1255,12 @@ class MemWalSync:
         except RuntimeError:
             loop = None
 
+        # Reset the httpx client before every asyncio.run() path so it is
+        # recreated inside the loop that will use it. This matters in
+        # notebooks/Jupyter where the sync wrapper runs coroutines in worker
+        # threads with short-lived event loops.
+        self._inner._client = None
+
         if loop is not None and loop.is_running():
             # Already inside an event loop (e.g. Jupyter).
             # Create a new loop in a thread.
@@ -1259,12 +1269,6 @@ class MemWalSync:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
-            # Reset the httpx client before each asyncio.run() so it is
-            # recreated fresh inside the new event loop.  Without this,
-            # reusing a MemWalSync instance across multiple calls raises
-            # "RuntimeError: Event loop is closed" because the client's
-            # transport is still bound to the previous (now-closed) loop.
-            self._inner._client = None
             return asyncio.run(coro)
 
     def remember(

@@ -25,7 +25,7 @@ Detailed pages:
 from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(key="...", account_id="0x...", env="prod")
-job = await memwal.remember("User prefers dark mode.")
+done = await memwal.remember_and_wait("User prefers dark mode.")
 result = await memwal.recall(RecallParams(query="preferences"))
 await memwal.close()
 ```
@@ -36,7 +36,7 @@ await memwal.close()
 from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(key="...", account_id="0x...", env="prod")
-client.remember("User prefers dark mode.")
+client.remember_and_wait("User prefers dark mode.")
 result = client.recall(RecallParams(query="preferences"))
 client.close()
 ```

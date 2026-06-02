@@ -1,5 +1,15 @@
 # memwal
 
+## Unreleased
+
+### Added
+
+- Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, `MemWalSync`, health/compatibility checks, delegate public-key/address derivation, `remember`, `remember_async`, async job waiting, `recall`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, optional `ask`, `analyze`, `analyze_and_wait`, `embed`, manual methods with scoring weights, `restore`, optional OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+
+### Fixed
+
+- Fixed `MemWalSync` reuse inside notebooks so repeated calls do not reuse an HTTP transport from a closed event loop.
+
 ## 0.1.4
 
 ### Added
