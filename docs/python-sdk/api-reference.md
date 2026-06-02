@@ -1,6 +1,6 @@
 ---
 title: "API Reference"
-description: "Full method signatures, result dataclasses, and utilities for the MemWal Python SDK."
+description: "Full method signatures, result dataclasses, and utilities for the Walrus Memory Python SDK."
 ---
 
 See also:

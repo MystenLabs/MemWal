@@ -2,11 +2,11 @@
 title: "Onchain Events"
 ---
 
-The indexer listens to Sui events emitted by the MemWal contract and uses them to update local backend state.
+The indexer listens to Sui events emitted by the Walrus Memory contract and uses them to update local backend state.
 
 ## Events
 
-The MemWal contract emits the following events:
+The Walrus Memory contract emits the following events:
 
 | Event | Emitted when | Fields |
 |-------|-------------|--------|

@@ -1,9 +1,9 @@
 ---
 title: "Reference"
-description: "Complete reference for MemWal MCP tools, CLI flags, environment presets, transport routes, and self-hosting."
+description: "Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting."
 ---
 
-This page documents every tool, flag, environment variable, and transport route the MemWal MCP package exposes. For a guided walkthrough, start with the [Quick Start](/mcp/quick-start).
+This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For a guided walkthrough, start with the [Quick Start](/mcp/quick-start).
 
 ## Tools
 
@@ -23,7 +23,7 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a fact to the user's MemWal personal memory. Call only when the user explicitly asks to remember or save something. Pass the full statement — do not summarize.
+Save a fact to the user's Walrus Memory personal memory. Call only when the user explicitly asks to remember or save something. Pass the full statement — do not summarize.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -32,7 +32,7 @@ Save a fact to the user's MemWal personal memory. Call only when the user explic
 
 ### memwal_recall
 
-Search the user's MemWal memory for facts relevant to a query. Returns matches ranked by relevance.
+Search the user's Walrus Memory memory for facts relevant to a query. Returns matches ranked by relevance.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -69,7 +69,7 @@ Returns a one-time URL valid for **5 minutes**. If it expires, call the tool aga
 Remove the saved credentials from this machine (`~/.memwal/credentials.json`). Takes no parameters.
 
 <Warning>
-The on-chain delegate key registration is **not** revoked by `memwal_logout` — only the local file is wiped. Visit the [MemWal dashboard](https://memwal.ai) to remove the delegate key from your account.
+The on-chain delegate key registration is **not** revoked by `memwal_logout` — only the local file is wiped. Visit the [Walrus Memory dashboard](https://memwal.ai) to remove the delegate key from your account.
 </Warning>
 
 <Note>
@@ -84,7 +84,7 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | --- | --- | --- |
 | `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
-| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the MemWal dashboard. |
+| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the Walrus Memory dashboard. |
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
 | `--login` (or `login` subcommand) | — | Force a re-login even when credentials exist. |
 | `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
@@ -180,7 +180,7 @@ Explicit `--relayer` and `--web-url` override the preset. You can also pass eith
 
 ## Transports
 
-MemWal supports two MCP connection modes.
+Walrus Memory supports two MCP connection modes.
 
 | Mode | Best for | Configured via |
 | --- | --- | --- |
@@ -245,7 +245,7 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 | `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
 | `DELETE /api/mcp` | Close a Streamable HTTP session |
 
-The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal MemWal SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
+The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
 
 ## Runtime safety notes
 
@@ -281,7 +281,7 @@ See [Environment Variables](/reference/environment-variables) for the full list 
 They do **not**:
 
 - revoke the on-chain delegate key
-- remove the delegate from the MemWal dashboard
+- remove the delegate from the Walrus Memory dashboard
 
 If the delegate itself should stop working, revoke it from the dashboard too.
 

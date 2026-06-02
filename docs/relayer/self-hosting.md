@@ -2,7 +2,7 @@
 title: "Self-Hosting"
 ---
 
-Self-hosting means running your own relayer — either pointing at an existing MemWal package ID or deploying an entirely new MemWal instance with your own contract, database, and server wallet.
+Self-hosting means running your own relayer — either pointing at an existing Walrus Memory package ID or deploying an entirely new Walrus Memory instance with your own contract, database, and server wallet.
 
 The managed relayer provided by Walrus Foundation is a reference implementation. You can also build your own implementation that fits the same API surface with custom logic. This guide covers how to run the reference implementation as your own self-hosted relayer.
 
@@ -19,13 +19,13 @@ There are two primary personas who typically self-host the relayer:
 The most common reasons to self-host include:
 
 - **Control the trust boundary** — keeping plaintext, encryption, and embedding under your own control rather than trusting a third-party.
-- **Run your own MemWal instance** — deploying your own contract with a separate package ID, SEAL encryption keys, and hard data isolation.
+- **Run your own Walrus Memory instance** — deploying your own contract with a separate package ID, SEAL encryption keys, and hard data isolation.
 - **Choose your own embedding provider** — using your own OpenAI-compatible API and credentials.
 - **Guarantee availability** — the managed relayer is a beta service with no SLA.
 
 ## Data Isolation (Namespaces)
 
-With the current architecture, MemWal isolates data strictly by **User (Owner address)** and **Namespace**.
+With the current architecture, Walrus Memory isolates data strictly by **User (Owner address)** and **Namespace**.
 Because the relayer inherently scopes all vector searches and storage operations by `owner + namespace`, multiple agents or applications can safely share the same relayer deployment simply by using different namespaces or operating under different delegate keys.
 
 ## Horizontal Scaling
@@ -38,7 +38,7 @@ If you are a Managed Service Provider or need to handle high agentic throughput,
 
 ## What Runs
 
-A self-hosted MemWal backend has:
+A self-hosted Walrus Memory backend has:
 
 | Component | Location | Description |
 |-----------|----------|-------------|
@@ -106,7 +106,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
 - `SEAL_SERVER_CONFIGS` and `SEAL_KEY_SERVERS` are optional overrides for encrypt/decrypt; prefer `SEAL_SERVER_CONFIGS` for custom committees
 - `WALRUS_AGGREGATOR_URLS` can add comma-separated proxy/aggregator candidates for cold-read tail racing after Redis cache misses
-- `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted MemWal-written cold reads after accepting the consistency tradeoff
+- `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted Walrus Memory-written cold reads after accepting the consistency tradeoff
 - The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
 - `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 

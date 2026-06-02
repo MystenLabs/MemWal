@@ -73,7 +73,7 @@ response = await smart_client.chat.completions.create(
 **Before generation:**
 
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by `min_relevance` (default `0.3`)
 - Injects matching memories as a system message before the last user message
 

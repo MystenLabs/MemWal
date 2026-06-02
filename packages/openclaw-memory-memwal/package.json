@@ -40,7 +40,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@mysten-incubation/memwal": "^0.0.2",
+    "@mysten-incubation/memwal": "workspace:*",
     "@sinclair/typebox": "0.34.48",
     "zod": "^3.23.0"
   },

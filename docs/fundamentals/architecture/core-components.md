@@ -1,9 +1,9 @@
 ---
 title: "Core Components"
-description: "The six core components that make up the MemWal system and how they interact."
+description: "The six core components that make up the Walrus Memory system and how they interact."
 ---
 
-MemWal is made up of six core components that work together to give your app encrypted, owner-controlled memory.
+Walrus Memory is made up of six core components that work together to give your agents portable, verifiable memory that they fully control.
 
 ```mermaid
 sequenceDiagram
@@ -28,7 +28,7 @@ sequenceDiagram
 
 ## SDK
 
-The TypeScript SDK is the main entry point for developers. It wraps all MemWal operations into a simple client that your app calls directly.
+The TypeScript SDK is the main entry point for developers. It wraps all Walrus Memory operations into a simple client that your app calls directly.
 
 **Responsibilities:**
 - Signs every request with the configured key
@@ -49,9 +49,9 @@ await memwal.waitForRememberJob(job.job_id);
 
 ## Relayer
 
-The relayer is the backend service that processes all SDK requests. It abstracts all Web3 complexity behind a familiar REST API — developers interact with MemWal using standard HTTP calls, while the relayer handles blockchain transactions, encryption, and decentralized storage behind the scenes.
+The relayer is the backend service that processes all SDK requests. It abstracts all Web3 complexity behind a familiar REST API — developers interact with Walrus Memory using standard HTTP calls, while the relayer handles blockchain transactions, encryption, and decentralized storage behind the scenes.
 
-This means Web2 developers can integrate MemWal without touching wallets, signing transactions, or understanding Sui directly. The relayer can also sponsor transaction fees and storage costs on behalf of users, removing onchain friction entirely.
+This means Web2 developers can integrate Walrus Memory without touching wallets, signing transactions, or understanding Sui directly. The relayer can also sponsor transaction fees and storage costs on behalf of users, removing onchain friction entirely.
 
 **Responsibilities:**
 - Exposes a Web2-friendly REST API for all memory operations
@@ -69,12 +69,12 @@ Because the relayer handles encryption and plaintext data, you are placing trust
 
 You can use the [managed relayer](/relayer/public-relayer) to get started, [self-host](/relayer/self-hosting) your own, or use the manual client flow for full client-side control.
 
-## MemWal Smart Contract
+## Walrus Memory Smart Contract
 
 The Sui smart contract is the source of truth for ownership and access control.
 
 **Responsibilities:**
-- Defines who owns a MemWal account
+- Defines who owns a Walrus Memory account
 - Stores which delegate keys are authorized
 - Enforces access rules on every request (verified by the relayer)
 - Emits events when accounts or delegates change
@@ -86,7 +86,7 @@ The contract doesn't store memory content — it only manages identity and permi
 The indexer keeps the backend in sync with onchain state so the relayer doesn't need to query the blockchain on every request.
 
 **Responsibilities:**
-- Listens for MemWal contract events (account creation, delegate changes)
+- Listens for Walrus Memory contract events (account creation, delegate changes)
 - Syncs account and delegate data into the indexed database
 - Enables fast lookups for the relayer during request verification
 
@@ -99,7 +99,7 @@ Walrus is the decentralized storage layer where encrypted memory payloads live.
 - Returns blobs on demand for decryption and recall
 - Carries blob metadata (including namespace) for discovery during restore
 
-Walrus is an external protocol — MemWal uses it as infrastructure, not as something you interact with directly.
+Walrus is an external protocol — Walrus Memory uses it as infrastructure, not as something you interact with directly.
 
 ## Indexed Database
 

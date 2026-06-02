@@ -161,6 +161,30 @@ export interface EmbedResult {
     vector: number[];
 }
 
+/** Options for analyze() / analyzeAndWait(). */
+export interface AnalyzeOptions {
+    /** Override the default namespace for this call. */
+    namespace?: string;
+    /**
+     * Optional valid-time timestamp for the analyzed input — when the
+     * conversation/event actually happened. When supplied, the server
+     * extractor uses it as a temporal anchor and resolves in-turn
+     * relative references ("last Friday", "yesterday") into absolute
+     * dates inside the resulting fact text (and the embedding) before
+     * encryption.
+     *
+     * Accepts a `Date` object (preferred) or an ISO-8601 / RFC-3339
+     * string. The wire format sent to the server is RFC-3339 UTC with
+     * a trailing `Z` (e.g. `"2023-05-25T17:50:00Z"`).
+     *
+     * Omit when no anchor is available — the server will not invent
+     * one (no `now()` fallback; silence is honest). The resolved date
+     * lives only inside the encrypted fact text + embedding; there is
+     * no server-readable metadata column for it (Architecture A).
+     */
+    occurredAt?: string | Date;
+}
+
 /** A fact extracted by analyze() and accepted for background storage. */
 export interface AnalyzedFact {
     text: string;

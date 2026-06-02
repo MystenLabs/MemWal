@@ -183,16 +183,21 @@ def stage_ingest(
 
     # Group (label, text) chunks by conversation so we can process each
     # conversation's chunks serially in one worker.
-    conv_tasks: list[tuple[str, str, list[tuple[str, str, str]]]] = []
-    # each entry: (conv_id, namespace, [(session_id, label, text), ...])
+    # chunk tuple is now (session_id, label, text, occurred_at)
+    # where occurred_at is an RFC 3339 UTC string or None. The adapter is
+    # responsible for normalising the source-dataset format to RFC 3339
+    # (see locomo._normalize_locomo_timestamp,
+    # longmemeval._parse_haystack_date).
+    conv_tasks: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] = []
+    # each entry: (conv_id, namespace, [(session_id, label, text, occurred_at), ...])
     total_chunk_count = 0
     for conv in conversations:
         namespace = f"bench-{benchmark_name}-{conv.conversation_id}-{run_id}"
-        pairs = adapter.build_ingest_text(conv)
-        chunks: list[tuple[str, str, str]] = []
-        for label, text in pairs:
+        triples = adapter.build_ingest_text(conv)
+        chunks: list[tuple[str, str, str, str | None]] = []
+        for label, text, occurred_at in triples:
             session_id = _parse_label(label, conv.conversation_id)
-            chunks.append((session_id, label, text))
+            chunks.append((session_id, label, text, occurred_at))
         conv_tasks.append((conv.conversation_id, namespace, chunks))
         total_chunk_count += len(chunks)
 
@@ -212,9 +217,12 @@ def stage_ingest(
         conv_id, namespace, chunks = task
         local_memories: dict[str, list[str]] = {}
         local_stored = 0
-        for session_id, label, text in chunks:
+        for session_id, label, text, occurred_at in chunks:
             try:
-                result = client.analyze(text, namespace)
+                # pass occurred_at (RFC 3339 UTC string or None)
+                # to the server. When present, the server uses it as the
+                # temporal anchor for the extractor prompt.
+                result = client.analyze(text, namespace, occurred_at=occurred_at)
                 memory_ids = [fact.get("id", "") for fact in result.facts if fact.get("id")]
                 if memory_ids:
                     key = session_map_key(conv_id, session_id)

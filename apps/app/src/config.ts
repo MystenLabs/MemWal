@@ -23,6 +23,10 @@ export const config = {
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
     docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
+    termsOfServiceUrl: import.meta.env.VITE_TERMS_OF_SERVICE_URL as string ||
+        'https://docs.wal.app/docs/legal/walrus_general_tos',
+    privacyPolicyUrl: import.meta.env.VITE_PRIVACY_POLICY_URL as string ||
+        'https://docs.wal.app/docs/legal/privacy',
     gtmContainerId: import.meta.env.VITE_GTM_CONTAINER_ID as string || '',
     gaMeasurementId: import.meta.env.VITE_GA_MEASUREMENT_ID as string || '',
     posthogProjectApiKey: (
