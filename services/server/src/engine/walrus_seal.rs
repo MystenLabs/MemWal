@@ -254,6 +254,7 @@ impl MemoryEngine for WalrusSealEngine {
             namespace,
             &self.config.package_id,
             agent_public_key,
+            None,
         )
         .await?;
         let blob_id = upload.blob_id;

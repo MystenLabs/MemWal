@@ -132,6 +132,19 @@ type RemoveKeysConfirmState = {
     source: 'single' | 'selection'
 }
 
+// sanitize a key label — strip HTML special chars and control characters
+function sanitizeLabelInput(raw: string): string {
+    return raw
+        // Strip HTML special characters
+        .replace(/[<>&"'/]/g, '')
+        // Strip Unicode control characters.
+        .replace(/\p{Cc}/gu, '')
+}
+
+function normalizeLabelForSubmit(raw: string): string {
+    return sanitizeLabelInput(raw).trim()
+}
+
 function bytesToHex(bytes: Uint8Array | number[]): string {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
@@ -448,15 +461,6 @@ export default function Dashboard({
     // Generate + add a new delegate key (via SDK)
     // ============================================================
 
-    // sanitize a key label — strip HTML special chars and control characters
-    const sanitizeLabel = (raw: string): string =>
-        raw
-            // Strip HTML special characters
-            .replace(/[<>&"'/]/g, '')
-            // Strip Unicode control characters.
-            .replace(/\p{Cc}/gu, '')
-            .trim()
-
     const handleAddKey = useCallback(async () => {
         if (!walletSigner) return
 
@@ -473,7 +477,7 @@ export default function Dashboard({
         }
 
         // validate label before submitting on-chain
-        const trimmedLabel = sanitizeLabel(newKeyLabel)
+        const trimmedLabel = normalizeLabelForSubmit(newKeyLabel)
         if (!trimmedLabel) {
             setKeyError('key label cannot be empty')
             trackEvent('delegate_key_add_failed', { error_type: 'invalid_input' })
@@ -1120,8 +1124,8 @@ const result = await generateText({
                                     value={newKeyLabel}
                                     maxLength={64}
                                     onChange={(e) =>
-                                        // strip HTML special chars and control characters on every keystroke
-                                        setNewKeyLabel(sanitizeLabel(e.target.value))
+                                        // strip unsafe characters while preserving whitespace during typing
+                                        setNewKeyLabel(sanitizeLabelInput(e.target.value))
                                     }
                                     placeholder="New key"
                                 />

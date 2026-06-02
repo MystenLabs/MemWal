@@ -29,6 +29,19 @@ export function isWalrusPackageVersionMismatch(message: string): boolean {
 }
 
 /**
+ * Detect Enoki dry-run failures caused by a transaction that references a
+ * Walrus/Sui object version that is no longer available. This is recoverable
+ * when the sidecar rebuilds the Walrus client and the Apalis worker retries
+ * the upload from a fresh writeBlobFlow.
+ */
+export function isWalrusReferencedObjectStale(message: string): boolean {
+    if (!message) return false;
+    return /dry_run_failed/i.test(message)
+        && /could not find the referenced object/i.test(message)
+        && /at version/i.test(message);
+}
+
+/**
  * Detect a Sui owned-object lock / equivocation error: a specific
  * object+version is locked to a competing transaction, so the transaction is
  * rejected by >1/3 of validator stake and is non-retriable within the epoch.
