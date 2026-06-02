@@ -81,6 +81,8 @@ struct QueryBlobsResponse {
 struct WalrusUploadRequest {
     data: String,
     key_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
     owner: String,
     namespace: String,
     package_id: String,
@@ -153,6 +155,7 @@ pub async fn upload_blob(
     namespace: &str,
     package_id: &str,
     agent_id: Option<&str>,
+    job_id: Option<&str>,
 ) -> Result<UploadResult, UploadBlobError> {
     upload_blob_inner(
         client,
@@ -165,6 +168,7 @@ pub async fn upload_blob(
         namespace,
         package_id,
         agent_id,
+        job_id,
         false,
     )
     .await
@@ -182,6 +186,7 @@ async fn upload_blob_inner(
     namespace: &str,
     package_id: &str,
     agent_id: Option<&str>,
+    job_id: Option<&str>,
     defer_transfer: bool,
 ) -> Result<UploadResult, UploadBlobError> {
     let url = format!("{}/walrus/upload", sidecar_url);
@@ -190,6 +195,7 @@ async fn upload_blob_inner(
     let mut req = client.post(&url).json(&WalrusUploadRequest {
         data: data_b64,
         key_index,
+        job_id: job_id.map(|s| s.to_string()),
         owner: owner_address.to_string(),
         namespace: namespace.to_string(),
         package_id: package_id.to_string(),

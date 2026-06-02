@@ -123,7 +123,7 @@ export default function LandingPage() {
                         <ConnectButton connectText="Connect wallet" />
                     </div>
                     <p className="wm-signin-tos">
-                        By continuing, you agree to our <a href={config.docsUrl || '#'} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.docsUrl || '#'} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+                        By continuing, you agree to our <a href={config.termsOfServiceUrl} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.privacyPolicyUrl} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
                     </p>
                 </div>
                 <div className="wm-signin-trusted" aria-hidden="true">

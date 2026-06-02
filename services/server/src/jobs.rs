@@ -801,6 +801,7 @@ async fn execute_upload_and_transfer(
         &namespace,
         &package_id,
         agent_public_key.as_deref(),
+        remember_job_id.as_deref(),
     )
     .await;
 
@@ -1381,6 +1382,7 @@ pub async fn execute_remember(
         &job.namespace,
         &job.package_id,
         job.agent_public_key.as_deref(),
+        Some(&job.job_id),
     )
     .await;
 

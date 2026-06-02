@@ -22,8 +22,10 @@ import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 import {
+    isWalrusBlobObjectMissingFromEffects,
     isWalrusObjectLockEquivocation,
     isWalrusPackageVersionMismatch,
+    isWalrusReferencedObjectStale,
 } from "./walrus-error-detection.js";
 
 // ============================================================
@@ -212,6 +214,156 @@ const sidecarMetrics = {
 let uploadRelayTipAddressCache: string | null | undefined = undefined;
 let uploadRelayTipAddressCacheLoadedAtMs = 0;
 let activeWalrusUploads = 0;
+let queuedWalrusUploads = 0;
+
+class WalrusUploadLimitError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "WalrusUploadLimitError";
+    }
+}
+
+class AsyncSemaphore {
+    private available: number;
+    private waiters: Array<() => void> = [];
+
+    constructor(private readonly capacity: number) {
+        this.available = capacity;
+    }
+
+    acquire(timeoutMs: number, label: string): Promise<() => void> {
+        if (this.available > 0) {
+            this.available -= 1;
+            return Promise.resolve(() => this.release());
+        }
+
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const waiter = () => {
+                if (settled) return;
+                settled = true;
+                if (timer) clearTimeout(timer);
+                this.available -= 1;
+                resolve(() => this.release());
+            };
+
+            this.waiters.push(waiter);
+            timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                this.waiters = this.waiters.filter((entry) => entry !== waiter);
+                reject(new WalrusUploadLimitError(`timed out waiting for ${label} upload slot`));
+            }, timeoutMs);
+        });
+    }
+
+    snapshot(): Record<string, number> {
+        return {
+            capacity: this.capacity,
+            available: this.available,
+            queued: this.waiters.length,
+        };
+    }
+
+    private release(): void {
+        this.available = Math.min(this.capacity, this.available + 1);
+        this.drain();
+    }
+
+    private drain(): void {
+        while (this.available > 0 && this.waiters.length > 0) {
+            const next = this.waiters.shift();
+            if (next) next();
+        }
+    }
+}
+
+const WALRUS_UPLOAD_MAX_CONCURRENCY = parsePositiveIntEnv(
+    "WALRUS_UPLOAD_MAX_CONCURRENCY",
+    Math.max(1, SERVER_SUI_PRIVATE_KEYS.length || 1),
+    1,
+    100,
+);
+const WALRUS_UPLOAD_PER_WALLET_CONCURRENCY = parsePositiveIntEnv(
+    "WALRUS_UPLOAD_PER_WALLET_CONCURRENCY",
+    1,
+    1,
+    10,
+);
+const WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS = parsePositiveIntEnv(
+    "WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS",
+    120_000,
+    1_000,
+    180_000,
+);
+const WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000] as const;
+const walrusUploadGlobalLimiter = new AsyncSemaphore(WALRUS_UPLOAD_MAX_CONCURRENCY);
+const walrusUploadWalletLimiters = new Map<number, AsyncSemaphore>();
+
+function walrusUploadWalletLimiter(keyIndex: number): AsyncSemaphore {
+    let limiter = walrusUploadWalletLimiters.get(keyIndex);
+    if (!limiter) {
+        limiter = new AsyncSemaphore(WALRUS_UPLOAD_PER_WALLET_CONCURRENCY);
+        walrusUploadWalletLimiters.set(keyIndex, limiter);
+    }
+    return limiter;
+}
+
+function walrusUploadLimitSnapshot(keyIndex?: number): Record<string, unknown> {
+    return {
+        global: walrusUploadGlobalLimiter.snapshot(),
+        perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
+        wallet: typeof keyIndex === "number"
+            ? walrusUploadWalletLimiter(keyIndex).snapshot()
+            : undefined,
+    };
+}
+
+async function acquireWalrusUploadSlots(
+    keyIndex: number,
+    traceId: string,
+    jobId?: string | null,
+): Promise<() => void> {
+    queuedWalrusUploads += 1;
+    const startedAt = Date.now();
+    let releaseWallet: (() => void) | undefined;
+    let releaseGlobal: (() => void) | undefined;
+
+    try {
+        releaseWallet = await walrusUploadWalletLimiter(keyIndex).acquire(
+            WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+            `wallet ${keyIndex}`,
+        );
+        releaseGlobal = await walrusUploadGlobalLimiter.acquire(
+            WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+            "global",
+        );
+        queuedWalrusUploads = Math.max(0, queuedWalrusUploads - 1);
+        activeWalrusUploads += 1;
+
+        const waitMs = Date.now() - startedAt;
+        if (waitMs >= 1_000) {
+            console.warn(`[walrus/upload] [${traceId}] limiter_acquired ${JSON.stringify({
+                jobId,
+                keyIndex,
+                waitMs,
+                limits: walrusUploadLimitSnapshot(keyIndex),
+            })}`);
+        }
+
+        return () => {
+            activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
+            releaseGlobal?.();
+            releaseWallet?.();
+        };
+    } catch (err) {
+        queuedWalrusUploads = Math.max(0, queuedWalrusUploads - 1);
+        releaseGlobal?.();
+        releaseWallet?.();
+        throw err;
+    }
+}
 
 function shortAddress(address: unknown): string | undefined {
     if (typeof address !== "string") return undefined;
@@ -238,6 +390,21 @@ function parsePositiveIntEnv(
         return fallback;
     }
     return Math.min(parsed, max);
+}
+
+function parseWalrusKeySlot(value: unknown): number | null {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+        return value;
+    }
+    if (typeof value === "string" && /^\d+$/.test(value)) {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isSafeInteger(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errorMessage(err: unknown): string {
@@ -366,6 +533,12 @@ function sidecarStateSnapshot(): Record<string, unknown> {
             externalMb: Math.round(memory.external / 1024 / 1024),
         },
         activeWalrusUploads,
+        queuedWalrusUploads,
+        walrusUploadLimits: {
+            globalCapacity: WALRUS_UPLOAD_MAX_CONCURRENCY,
+            perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
+            acquireTimeoutMs: WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+        },
         walletSubmittedTotal: sidecarMetrics.walletSubmittedTotal,
         walletLockErrorsTotal: sidecarMetrics.walletLockErrorsTotal,
         walletObjectLockEquivocationTotal: sidecarMetrics.walletObjectLockEquivocationTotal,
@@ -665,6 +838,12 @@ app.get("/health", (_req: Request, res: Response) => {
         status: "ok",
         uptimeMs: Date.now() - sidecarStartedAtMs,
         activeWalrusUploads,
+        queuedWalrusUploads,
+        walrusUploadLimits: {
+            globalCapacity: WALRUS_UPLOAD_MAX_CONCURRENCY,
+            perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
+            acquireTimeoutMs: WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+        },
     });
 });
 
@@ -1014,6 +1193,40 @@ function extractBlobObjectId(blob: any): string | null {
     return null;
 }
 
+async function uploadWalrusBlobWithEffectsRetry(
+    flow: any,
+    registerDigest: string,
+    context: {
+        traceId: string;
+        jobId?: string | null;
+        keyIndex: number;
+    },
+): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            await flow.upload({ digest: registerDigest });
+            return;
+        } catch (err: unknown) {
+            const message = errorMessage(err);
+            const retryDelayMs = WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS[attempt - 1];
+            if (!retryDelayMs || !isWalrusBlobObjectMissingFromEffects(message)) {
+                throw err;
+            }
+
+            console.warn(`[walrus/upload] [${context.traceId}] upload_blob_retry ${JSON.stringify({
+                jobId: context.jobId,
+                keyIndex: context.keyIndex,
+                attempt,
+                nextAttempt: attempt + 1,
+                retryDelayMs,
+                registerDigest,
+                message: truncateForLog(message),
+            })}`);
+            await sleep(retryDelayMs);
+        }
+    }
+}
+
 async function setMetadataAndTransferBlobs(
     signer: Ed25519Keypair,
     blobs: MetadataTransferBlob[],
@@ -1097,13 +1310,47 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
     let keyIndexForLog: unknown;
     let ownerForLog: unknown;
     let namespaceForLog: unknown;
+    let jobIdForLog: string | null = null;
     let signerAddressForLog: string | undefined;
     let blobBytesForLog: number | undefined;
-    activeWalrusUploads += 1;
+    let releaseWalrusUploadSlots: (() => void) | undefined;
+    const phaseLogContext = (): Record<string, unknown> => ({
+        jobId: jobIdForLog,
+        keyIndex: keyIndexForLog,
+        owner: shortAddress(ownerForLog),
+        namespace: typeof namespaceForLog === "string" && namespaceForLog ? namespaceForLog : "default",
+    });
+    const timedPhase = async <T>(
+        nextPhase: string,
+        action: () => Promise<T>,
+        resultFields?: (result: T) => Record<string, unknown>,
+    ): Promise<T> => {
+        phase = nextPhase;
+        const startedAt = Date.now();
+        try {
+            const result = await action();
+            console.log(`[walrus/upload] [${traceId}] phase_ok ${JSON.stringify({
+                ...phaseLogContext(),
+                phase: nextPhase,
+                durationMs: Date.now() - startedAt,
+                ...(resultFields ? resultFields(result) : {}),
+            })}`);
+            return result;
+        } catch (phaseErr: unknown) {
+            console.warn(`[walrus/upload] [${traceId}] phase_failed ${JSON.stringify({
+                ...phaseLogContext(),
+                phase: nextPhase,
+                durationMs: Date.now() - startedAt,
+                message: truncateForLog(errorMessage(phaseErr)),
+            })}`);
+            throw phaseErr;
+        }
+    };
     try {
         const {
             data,
             keyIndex,
+            jobId: rawJobId,
             owner,
             namespace,
             packageId,
@@ -1114,6 +1361,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         keyIndexForLog = keyIndex;
         ownerForLog = owner;
         namespaceForLog = namespace;
+        jobIdForLog = sanitizeRequestId(rawJobId);
         // Cap epochs to prevent accidental large storage purchases.
         const epochs = clampWalrusEpochs(rawEpochs);
 
@@ -1121,9 +1369,15 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             return res.status(400).json({ error: "Missing required fields: data, keyIndex" });
         }
 
-        const privateKey = SERVER_SUI_PRIVATE_KEYS[keyIndex];
-        if (!privateKey) {
+        const keySlot = parseWalrusKeySlot(keyIndex);
+        if (keySlot === null) {
             return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
+        }
+        keyIndexForLog = keySlot;
+
+        const privateKey = SERVER_SUI_PRIVATE_KEYS[keySlot];
+        if (!privateKey) {
+            return res.status(400).json({ error: `Invalid keyIndex: ${keySlot}` });
         }
 
         // Validate packageId resembles a Sui address to prevent injection
@@ -1135,6 +1389,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
             return res.status(400).json({ error: "Invalid owner address format" });
         }
+
+        phase = "acquire_limit";
+        releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId, jobIdForLog);
 
         // Decode signer
         phase = "decode_signer";
@@ -1148,7 +1405,8 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         refreshWalrusClientIfStale();
         const signerSuiBalanceMist = await getSuiBalanceMist(signerAddress);
         console.log(`[walrus/upload] [${traceId}] begin ${JSON.stringify({
-            keyIndex,
+            jobId: jobIdForLog,
+            keyIndex: keySlot,
             signer: shortAddress(signerAddress),
             owner: shortAddress(owner),
             namespace: namespace || "default",
@@ -1161,9 +1419,9 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             state: sidecarStateSnapshot(),
         })}`);
 
-        // writeBlobFlow is intentionally not serialized by signer. Current Sui
-        // no longer permanently locks coin objects for concurrent submissions;
-        // transient gas/RPC races are retried by the Apalis wallet job layer.
+        // Keep Walrus write flows bounded in-process. The Rust worker can retry
+        // faster than old sidecar requests unwind, so the sidecar owns the
+        // effective global/per-wallet upload concurrency limit.
         phase = "encode";
         const flow = walrusClient.writeBlobFlow({ blob: blobData });
         await flow.encode();
@@ -1190,45 +1448,71 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         const registerAllowedAddresses = dedupeAddresses([signerAddress, tipRecipient]);
         phase = "register_sponsor";
         console.log(`[walrus/upload] [${traceId}] register_sponsor ${JSON.stringify({
-            keyIndex,
+            jobId: jobIdForLog,
+            keyIndex: keySlot,
             signer: shortAddress(signerAddress),
             tipRecipient: shortAddress(tipRecipient),
             allowedAddresses: registerAllowedAddresses.map(shortAddress),
         })}`);
-        const registerDigest = await submitWalletTransaction(
-            registerTx,
-            signer,
-            registerAllowedAddresses,
+        const registerDigest = await timedPhase(
+            "register_sponsor",
+            () => submitWalletTransaction(
+                registerTx,
+                signer,
+                registerAllowedAddresses,
+            ),
+            (digest) => ({ digest }),
         );
-        phase = "register_wait";
-        await suiClient.waitForTransaction({ digest: registerDigest });
+        await timedPhase(
+            "register_wait",
+            () => suiClient.waitForTransaction({ digest: registerDigest }),
+            () => ({ digest: registerDigest }),
+        );
 
-        phase = "upload_blob";
-        await flow.upload({ digest: registerDigest });
+        await timedPhase(
+            "upload_blob",
+            () => uploadWalrusBlobWithEffectsRetry(
+                flow,
+                registerDigest,
+                { traceId, jobId: jobIdForLog, keyIndex: keySlot },
+            ),
+            () => ({ registerDigest }),
+        );
 
-        phase = "certify_sponsor";
+        phase = "certify_build";
         const certifyTx = flow.certify();
-        const certifyDigest = await submitWalletTransaction(certifyTx, signer);
-        phase = "certify_wait";
-        await suiClient.waitForTransaction({ digest: certifyDigest });
+        const certifyDigest = await timedPhase(
+            "certify_sponsor",
+            () => submitWalletTransaction(certifyTx, signer),
+            (digest) => ({ digest }),
+        );
+        await timedPhase(
+            "certify_wait",
+            () => suiClient.waitForTransaction({ digest: certifyDigest }),
+            () => ({ digest: certifyDigest }),
+        );
 
-        phase = "get_blob";
-        const blob = await flow.getBlob();
+        const blob = await timedPhase("get_blob", () => flow.getBlob());
 
         const blobObjectId = extractBlobObjectId(blob);
 
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
             try {
-                phase = "metadata_transfer";
-                await setMetadataAndTransferBlobs(
-                    signer,
-                    [{ blobObjectId, namespace }],
-                    owner,
-                    packageId,
-                    agentId,
+                const metadataTransferDigest = await timedPhase(
+                    "metadata_transfer",
+                    () => setMetadataAndTransferBlobs(
+                        signer,
+                        [{ blobObjectId, namespace }],
+                        owner,
+                        packageId,
+                        agentId,
+                    ),
+                    (digest) => ({ digest, blobObjectId }),
                 );
                 console.log(`[walrus/upload] [${traceId}] metadata_transfer_ok ${JSON.stringify({
+                    jobId: jobIdForLog,
+                    digest: metadataTransferDigest,
                     blobObjectId,
                     owner: shortAddress(owner),
                     namespace: namespace || "default",
@@ -1242,10 +1526,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                 // 500 so the caller can react (retry / mark stored-but-not-owned).
                 console.error(
                     `[walrus/upload] [${traceId}] metadata+transfer FAILED for blob_object=${blobObjectId} ` +
-                    `ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
+                    `jobId=${jobIdForLog ?? "-"} ns=${namespace || "default"}: ${metaErr?.message || metaErr}`
                 );
                 return res.status(500).json({
                     error: "Blob uploaded but metadata/transfer to owner failed",
+                    jobId: jobIdForLog,
                     blobId: blob.blobId,
                     objectId: blobObjectId,
                     transferStatus: "failed",
@@ -1255,10 +1540,11 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
 
         phase = "respond";
         console.log(`[walrus/upload] [${traceId}] ok ${JSON.stringify({
+            jobId: jobIdForLog,
             blobId: blob.blobId,
             objectId: blobObjectId,
             transferStatus: deferTransfer ? "deferred" : "ok",
-            keyIndex,
+            keyIndex: keySlot,
             bytes: blobBytesForLog,
         })}`);
         res.json({
@@ -1268,6 +1554,21 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         });
     } catch (err: any) {
         const message = err?.message || String(err);
+        if (err instanceof WalrusUploadLimitError) {
+            console.warn(`[walrus/upload] [${traceId}] limit_timeout ${JSON.stringify({
+                jobId: jobIdForLog,
+                phase,
+                keyIndex: keyIndexForLog,
+                owner: shortAddress(ownerForLog),
+                namespace: namespaceForLog || "default",
+                message,
+                limits: walrusUploadLimitSnapshot(
+                    typeof keyIndexForLog === "number" ? keyIndexForLog : undefined,
+                ),
+                state: sidecarStateSnapshot(),
+            })}`);
+            return res.status(503).json({ error: message, traceId, jobId: jobIdForLog });
+        }
         if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
             refreshWalrusClient("register_sponsor_balance_split");
         }
@@ -1284,13 +1585,21 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                 `Action: client refreshed, Apalis will retry against new package metadata. ` +
                 `Walrus system version: before=${versionBefore ?? "unknown"} after=${versionAfter ?? "unknown"}. ` +
                 `Sidecar @mysten/walrus dep=${WALRUS_DEP_VERSION}. ` +
-                `traceId=${traceId}`
+                `traceId=${traceId} jobId=${jobIdForLog ?? "-"}`
+            );
+        } else if (isWalrusReferencedObjectStale(message)) {
+            refreshWalrusClient("walrus_referenced_object_stale");
+            console.warn(
+                `[walrus/client] referenced object stale during ${phase}; ` +
+                `Action: client refreshed, Apalis will retry with a fresh flow. ` +
+                `traceId=${traceId} jobId=${jobIdForLog ?? "-"}`
             );
         }
         const postFailureSignerSuiBalanceMist = signerAddressForLog
             ? await getSuiBalanceMist(signerAddressForLog)
             : null;
         console.error(`[walrus/upload] [${traceId}] failed ${JSON.stringify({
+            jobId: jobIdForLog,
             phase,
             keyIndex: keyIndexForLog,
             signer: shortAddress(signerAddressForLog),
@@ -1306,12 +1615,13 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         })}`, err);
         sidecarLog("error", "walrus_upload_failed", {
             requestId: traceId,
+            jobId: jobIdForLog,
             phase,
             error: message,
         });
-        res.status(500).json({ error: message, traceId });
+        res.status(500).json({ error: message, traceId, jobId: jobIdForLog });
     } finally {
-        activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
+        releaseWalrusUploadSlots?.();
     }
 });
 
