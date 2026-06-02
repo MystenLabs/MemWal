@@ -30,7 +30,7 @@ const result = await generateText({
 Before generation:
 
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by relevance
 - Injects memory context into the prompt
 

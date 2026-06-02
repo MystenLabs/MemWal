@@ -2,7 +2,7 @@
 """
 Integration tests for the Walrus Memory Python SDK against a live server.
 
-Targets MEMWAL_SERVER_URL (default: https://relayer.dev.memwal.ai).
+Targets MEMWAL_SERVER_URL (default: https://relayer.staging.memwal.ai).
 
 No-auth tests (always run, no env vars needed):
   - /health endpoint
@@ -28,10 +28,10 @@ Usage:
   # Run full suite with real credentials
   MEMWAL_PRIVATE_KEY=<hex> MEMWAL_ACCOUNT_ID=0x... python -m pytest tests/test_integration.py -v
 
-  # Run against dev server using env vars
-  export MEMWAL_PRIVATE_KEY="944aa24c09d8b6d6cc6a8fbedc6dc0942a46e49db7d36596e1b6af6061ec9261"
-  export MEMWAL_ACCOUNT_ID="0x70f9a6ff2df0ef6a9ecbfdc3f44c27c289ec3eb0cab5e10a5c07ca6165528565"
-  export MEMWAL_SERVER_URL="https://relayer.dev.memwal.ai"
+  # Run against staging using env vars
+  export MEMWAL_PRIVATE_KEY="<your-ed25519-delegate-private-key-hex>"
+  export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
+  export MEMWAL_SERVER_URL="https://relayer.staging.memwal.ai"
   python -m pytest tests/test_integration.py -v
 """
 
@@ -50,9 +50,11 @@ import pytest
 from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
 from memwal.utils import build_signature_message, bytes_to_hex
 
+pytestmark = pytest.mark.integration
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
-SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.dev.memwal.ai")
+SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.staging.memwal.ai")
 PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 

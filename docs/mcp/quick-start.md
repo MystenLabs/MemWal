@@ -1,14 +1,14 @@
 ---
 title: "Quick Start"
-description: "Install the MemWal MCP package, sign in with your wallet, and wire it into an MCP client in under five minutes."
+description: "Install the Walrus Memory MCP package, sign in with your wallet, and wire it into an MCP client in under five minutes."
 ---
 
-This page gets you from zero to a working MemWal MCP server inside Cursor, Claude Desktop, Claude Code, or Codex.
+This page gets you from zero to a working Walrus Memory MCP server inside Cursor, Claude Desktop, Claude Code, or Codex.
 
 ## Prerequisites
 
 - **Node.js 20** or newer (`node -v` to check)
-- A **Sui wallet** with the MemWal app authorized — Sui Wallet, Suiet, Phantom, or any [Sui-compatible wallet](https://memwal.ai)
+- A **Sui wallet** with the Walrus Memory app authorized — Sui Wallet, Suiet, Phantom, or any [Sui-compatible wallet](https://memwal.ai)
 - An **MCP-aware client**: Cursor, Claude Desktop, Claude Code, Codex, Antigravity, or another MCP host
 
 No npm install needed — `npx` fetches the `@mysten-incubation/memwal-mcp` package on demand.
@@ -47,7 +47,7 @@ For most teams, the best default is:
   </Step>
 
   <Step>
-    ### Add MemWal to your MCP client
+    ### Add Walrus Memory to your MCP client
 
     Pick the snippet for your client. Drop it into the client's MCP config file.
 
@@ -138,7 +138,7 @@ You should see six tools:
 
 If you only see five — or only `memwal_login` — credentials are missing. This is the expected first-run state in many MCP clients. Run the login command from step 1 again or ask the agent to call `memwal_login`.
 
-If you do **not** see any MemWal tools at all, the MCP host likely never loaded the package. Double-check the config file path, restart the client fully, and confirm you are on Node 20+.
+If you do **not** see any Walrus Memory tools at all, the MCP host likely never loaded the package. Double-check the config file path, restart the client fully, and confirm you are on Node 20+.
 
 ### Save and recall a memory
 
@@ -206,7 +206,7 @@ Ask the agent to call `memwal_logout`, or run from your terminal:
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
 
-This deletes the local credentials file. The on-chain delegate key is **not** revoked — visit the [MemWal dashboard](https://memwal.ai) to remove it from your account if needed.
+This deletes the local credentials file. The on-chain delegate key is **not** revoked — visit the [Walrus Memory dashboard](https://memwal.ai) to remove it from your account if needed.
 
 ## Next steps
 

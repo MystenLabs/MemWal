@@ -1,6 +1,6 @@
 ---
 title: "Run the Repo Locally"
-description: "Step-by-step guide to set up the MemWal monorepo for local development."
+description: "Step-by-step guide to set up the Walrus Memory monorepo for local development."
 ---
 
 ## Prerequisites

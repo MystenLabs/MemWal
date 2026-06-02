@@ -1,6 +1,6 @@
 ---
 title: "Usage"
-description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the MemWal Python SDK."
+description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the Walrus Memory Python SDK."
 ---
 
 The Python SDK exposes one relayer-backed client in two forms, plus middleware:
@@ -13,7 +13,7 @@ The Python SDK exposes one relayer-backed client in two forms, plus middleware:
 
 Detailed pages:
 
-- [MemWal](/python-sdk/usage/memwal) — the default async/sync client and its core methods
+- [Walrus Memory](/python-sdk/usage/memwal) — the default async/sync client and its core methods
 - [Manual methods](/python-sdk/usage/memwal-manual) — lower-level `remember_manual` / `recall_manual` / `embed`
 - [with_memwal](/python-sdk/usage/with-memwal) — LangChain and OpenAI middleware
 
@@ -25,7 +25,7 @@ Detailed pages:
 from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(key="...", account_id="0x...", env="prod")
-job = await memwal.remember("User prefers dark mode.")
+done = await memwal.remember_and_wait("User prefers dark mode.")
 result = await memwal.recall(RecallParams(query="preferences"))
 await memwal.close()
 ```
@@ -36,7 +36,7 @@ await memwal.close()
 from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(key="...", account_id="0x...", env="prod")
-client.remember("User prefers dark mode.")
+client.remember_and_wait("User prefers dark mode.")
 result = client.recall(RecallParams(query="preferences"))
 client.close()
 ```

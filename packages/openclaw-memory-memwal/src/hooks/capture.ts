@@ -47,8 +47,28 @@ export function registerCaptureHook(api: any, client: MemWal, config: PluginConf
         .join("\n\n");
 
       // analyze() calls the server LLM for fact extraction — retry once
-      // since transient failures are common with remote LLM calls
-      const result = await withRetry(() => client.analyze(conversation, namespace));
+      // since transient failures are common with remote LLM calls.
+      //
+      // Pass `occurredAt: new Date()` so the server extractor can
+      // resolve in-turn relative references ("yesterday", "last
+      // Friday") into absolute dates inside the fact text before
+      // encryption.
+      //
+      // Caveat: this is hook-fire time, not strictly per-message
+      // time. The hook fires on agent_end — *after* the LLM finishes
+      // responding — and `event.messages` may carry the last N turns
+      // (captureMaxMessages) spanning a longer window. All extracted
+      // facts share this one anchor. For coarse relative references
+      // ("yesterday", "last Friday") this is accurate enough; for
+      // fine-grained ones ("an hour ago", "this morning") the anchor
+      // can be off by minutes-to-hours. Acceptable for an opt-in
+      // auto-capture path where the alternative is no anchor at all.
+      // (The "no silent now() fallback" rule is about the server
+      // defaulting for callers that passed nothing; here the caller
+      // IS passing, with real-ish knowledge of when the event happened.)
+      const result = await withRetry(() =>
+        client.analyze(conversation, { namespace, occurredAt: new Date() }),
+      );
 
       if (result.facts?.length) {
         api.logger.info(

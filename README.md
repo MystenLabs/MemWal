@@ -1,7 +1,11 @@
 # Walrus Memory
 
-Privacy-first AI memory layer for storing encrypted memories on Walrus and
-retrieving them with semantic search.
+Portable agent memory — take your agent's memory anywhere.
+
+Walrus Memory enables AI agents to operate reliably across apps and sessions,
+without losing context. Portable, verifiable, and fully controlled by you, it's
+the memory layer that lets agents handle complex workflows and coordinate using
+data they can trust.
 
 > Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
@@ -96,7 +100,7 @@ For the full step-by-step setup guide, see:
 
 ## OpenClaw / NemoClaw Plugin
 
-[`@mysten-incubation/oc-memwal`](packages/openclaw-memory-memwal) — a memory plugin for [OpenClaw](https://openclaw.ai) agents. It gives OpenClaw persistent, encrypted memory via Walrus Memory with automatic recall and capture hooks.
+[`@mysten-incubation/oc-memwal`](packages/openclaw-memory-memwal) — a memory plugin for [OpenClaw](https://openclaw.ai) agents. It gives OpenClaw agents portable, verifiable memory through Walrus Memory with automatic recall and capture hooks.
 
 ```bash
 openclaw plugins install @mysten-incubation/oc-memwal

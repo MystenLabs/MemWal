@@ -73,7 +73,7 @@ response = await smart_client.chat.completions.create(
 **Before generation:**
 
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by `min_relevance` (default `0.3`)
 - Injects matching memories as a system message before the last user message
 
@@ -89,7 +89,7 @@ Both wrappers accept the same keyword arguments:
 | Option | Default | Description |
 | --- | --- | --- |
 | `server_url` | `http://localhost:8000` | Explicit relayer URL (wins over `env`) |
-| `env` | — | Relayer preset: `prod` / `dev` / `staging` / `local` |
+| `env` | — | Hosted relayer preset: `staging` for testing or `prod` for production |
 | `namespace` | `"default"` | Memory namespace |
 | `max_memories` | `5` | Max memories injected per request |
 | `auto_save` | `True` | Auto-save new facts from the conversation |

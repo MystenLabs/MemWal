@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -16,7 +17,7 @@ import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalCompatibilityError, MemWalError
+from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
 from memwal.types import (
     RecallManualOptions,
     RecallParams,
@@ -106,6 +107,30 @@ def memwal_client() -> MemWal:
         account_id=_TEST_ACCOUNT_ID,
         server_url=_TEST_SERVER,
     )
+
+
+# ============================================================
+# sync wrapper tests
+# ============================================================
+
+
+class _SyncRunInner:
+    def __init__(self) -> None:
+        self._client = object()
+
+
+class TestMemWalSyncRun:
+    async def test_resets_http_client_when_called_inside_running_loop(self) -> None:
+        inner = _SyncRunInner()
+        sync = MemWalSync(inner)  # type: ignore[arg-type]
+
+        async def operation() -> str:
+            return "ok"
+
+        result = sync._run(operation())
+
+        assert result == "ok"
+        assert inner._client is None
 
 
 # ============================================================
@@ -494,9 +519,102 @@ class TestAnalyze:
 
         body = json.loads(route.calls[0].request.content)
         assert body["text"] == "I love coffee and live in Tokyo"
+        assert "occurred_at" not in body  # omitted when not supplied
         assert len(result.facts) == 1
         assert result.facts[0].text == "User loves coffee"
         assert result.owner == "0xowner"
+
+    @respx.mock
+    async def test_analyze_with_occurred_at_datetime(
+        self, memwal_client: MemWal
+    ) -> None:
+        """A UTC-aware datetime renders as RFC-3339 millis with 'Z'."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(200, json={"facts": [], "total": 0, "owner": ""})
+        )
+
+        await memwal_client.analyze(
+            "I moved last Friday",
+            occurred_at=datetime(2023, 5, 25, 17, 50, tzinfo=timezone.utc),
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        # Millisecond precision matches the TS SDK's Date.toISOString().
+        assert body["occurred_at"] == "2023-05-25T17:50:00.000Z"
+
+    @respx.mock
+    async def test_analyze_with_occurred_at_nonutc_tz(
+        self, memwal_client: MemWal
+    ) -> None:
+        """An aware datetime in a non-UTC tz is converted to UTC."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(200, json={"facts": [], "total": 0, "owner": ""})
+        )
+
+        # 17:50 in +07:00 (Hanoi) is 10:50 UTC.
+        ict = timezone(timedelta(hours=7))
+        await memwal_client.analyze(
+            "I moved last Friday",
+            occurred_at=datetime(2023, 5, 25, 17, 50, tzinfo=ict),
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["occurred_at"] == "2023-05-25T10:50:00.000Z"
+
+    @respx.mock
+    async def test_analyze_with_occurred_at_string(
+        self, memwal_client: MemWal
+    ) -> None:
+        """An RFC-3339 string is validated and re-formatted to canonical."""
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/analyze").mock(
+            return_value=httpx.Response(200, json={"facts": [], "total": 0, "owner": ""})
+        )
+
+        await memwal_client.analyze(
+            "I moved last Friday",
+            occurred_at="2023-05-25T17:50:00Z",
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        # Canonical form: millis appended.
+        assert body["occurred_at"] == "2023-05-25T17:50:00.000Z"
+
+    async def test_analyze_naive_datetime_raises(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Naïve datetimes are rejected — silently assuming UTC would
+        produce timezone-off-by-N anchors for callers outside UTC and
+        undermine WALM-55's honest-temporal-anchoring guarantee."""
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await memwal_client.analyze(
+                "I moved last Friday",
+                occurred_at=datetime(2023, 5, 25, 17, 50),  # naïve
+            )
+
+    async def test_analyze_garbage_string_raises(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Malformed occurred_at strings are rejected at the SDK
+        boundary, not forwarded as an opaque 400 from the server."""
+        with pytest.raises(ValueError, match="RFC-3339"):
+            await memwal_client.analyze(
+                "I moved last Friday",
+                occurred_at="yesterday",
+            )
+
+    async def test_analyze_naive_string_raises(
+        self, memwal_client: MemWal
+    ) -> None:
+        """A timezone-less ISO string is rejected — same reasoning as
+        the naïve-datetime case."""
+        with pytest.raises(ValueError, match="UTC offset"):
+            await memwal_client.analyze(
+                "I moved last Friday",
+                occurred_at="2023-05-25T17:50:00",  # no Z, no offset
+            )
 
 
 class TestRestore:

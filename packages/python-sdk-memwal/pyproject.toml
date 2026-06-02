@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memwal"
-version = "0.1.3"
+version = "0.1.4"
 description = "Python SDK for Walrus Memory — Privacy-first AI memory with Ed25519 signing"
 readme = "README.md"
 license = "MIT"
@@ -54,6 +54,9 @@ packages = ["memwal"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: live relayer integration tests",
+]
 
 [tool.ruff]
 target-version = "py39"

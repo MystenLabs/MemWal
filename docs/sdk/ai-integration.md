@@ -2,7 +2,7 @@
 title: "@ai-sdk Integration"
 ---
 
-MemWal includes an AI SDK integration for applications that already use model middleware.
+Walrus Memory includes an AI SDK integration for applications that already use model middleware.
 
 ## `withMemWal`
 
@@ -31,7 +31,7 @@ const result = await generateText({
 Before generation:
 
 - reads the last user message
-- runs `recall()` against MemWal
+- runs `recall()` against Walrus Memory
 - filters by relevance
 - injects memory context into the prompt
 

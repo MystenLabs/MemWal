@@ -10,6 +10,22 @@ You may receive a `<related_memories>` block alongside the input. It lists exist
 - Do NOT edit, merge, or supersede existing memories — only emit what is new in the input
 - If no `<related_memories>` block is present, or it is empty, extract as usual without context
 
+You may also receive a `<context occurred_at="..."/>` tag alongside the input. The `occurred_at` value is the absolute timestamp (RFC 3339) of when this conversation turn took place. Use it as the **temporal anchor** for facts extracted from this input:
+
+- **Default to attaching a date** when a fact describes a current event, recent action, state change happening now, or near-future plan. Use the format `Weekday, D Month YYYY (YYYY-MM-DD)` — for example `Friday, 19 May 2023 (2023-05-19)` — embedding both the natural-language form and the ISO date.
+- **Resolve specific relative time references against `occurred_at` before writing the fact.** "Yesterday" + occurred_at=2023-05-25 → `Wednesday, 24 May 2023 (2023-05-24)`. "Last Friday" → use occurred_at's weekday to compute the prior Friday. "Two weeks ago" → subtract 14 days. "This morning" → the same date as occurred_at.
+- **Keep vague references honest.** If a relative reference is too imprecise to resolve to a specific date (e.g. "a few years ago", "recently", "sometime in March", "next week"), do NOT fabricate a specific date. Either preserve the user's vague phrasing as-is, or — when the conversation timestamp lets you narrow it without inventing — anchor to a month using the format `around late May 2023 (2023-05)`.
+- **CRITICAL: if a fact is recounting an event from the past that has its own original date or relative reference (e.g. "I went to Paris in 2019", "I broke my arm when I was twelve"), keep that original date — do NOT replace it with `occurred_at`.** The `occurred_at` anchor is only for events happening *in* or *around* this conversation turn, not for arbitrary recounted memories.
+- **When you are uncertain whether a fact is time-anchored or stable, prefer leaving the date off.** A timeless fact is recoverable; a wrongly-stamped fact pollutes retrieval. Stable traits (allergies, names, locations, preferences, ongoing roles) should never carry a date.
+- If no `<context>` tag is present, extract as usual without temporal information. **CRITICAL: when `<context>` is absent from the input messages, do NOT resolve relative references like "last Friday" or "yesterday" to specific dates — keep the original wording in the fact text. Do NOT invent or assume a timestamp. Do NOT emit a `<context>` line in your output.** The examples below contain `<context>` tags as part of the *example input* — those tags are illustrative, never something for you to emit yourself.
+
+**Output format — strict.** Your output is fact lines ONLY, in the `BUCKET<TAB>FACT_TEXT` format. Do NOT include any other content:
+
+- Never emit `<context>`, `<related_memories>`, or any other tag from the examples.
+- Never emit `Input:`, `Output:`, `Example`, or any other structural marker from the prompt.
+- Never repeat the input text or the related-memories block.
+- If there are no memorable facts, the entire output is exactly `NONE` (no surrounding tags, no explanation).
+
 For each fact, assign an importance bucket:
 - vital: safety-critical, hard constraints, allergies, medical conditions, irreversible commitments, identity-defining facts (names, locations, roles)
 - standard: stable preferences, habits, biographical info, ongoing interests, plans, recommendations
@@ -66,6 +82,40 @@ standard	Assistant recommended "How to Sit Properly at a Desk to Avoid Back Pain
 standard	Assistant recommended "5 Tips for Better Posture" by Harvard Health
 
 (Note: the related memory is only a SUMMARY of the list. The specific video titles are atomic facts not covered by the summary, so they ARE extracted.)
+
+Example with `<context>` — current event, specific relative reference resolved:
+<context occurred_at="2023-05-25T17:50:00Z"/>
+Input: "User: I went hiking last Friday with my brother."
+Output:
+standard	User went hiking on Friday, 19 May 2023 (2023-05-19) with their brother
+
+(Note: "last Friday" was resolved against occurred_at=2023-05-25 (a Thursday), so the prior Friday is 19 May 2023. The absolute date in both natural-language and ISO form is attached to the fact.)
+
+Example with `<context>` — recounted old event keeps its own date:
+<context occurred_at="2023-05-25T17:50:00Z"/>
+Input: "User: I broke my arm when I was twelve, back in 2008."
+Output:
+vital	User broke their arm in 2008 (when they were twelve)
+
+(Note: this is a recounted past event with its own original date — "2008" stays as the fact's date. The occurred_at=2023-05-25 is NOT used here because the event is not happening now.)
+
+Example with `<context>` — fuzzy past reference kept honest, future reference month-anchored:
+<context occurred_at="2023-05-25T17:50:00Z"/>
+Input: "User: I got into pottery a few years ago and I'm planning to try a new technique next week."
+Output:
+standard	User got into pottery a few years ago
+standard	User is planning to try a new pottery technique around late May 2023 (2023-05)
+
+(Note: "a few years ago" is genuinely vague — kept as-is rather than fabricating a year. "Next week" is also imprecise but the conversation timestamp lets us narrow it to late May 2023 without inventing a specific day.)
+
+Example with `<context>` — stable facts have no date:
+<context occurred_at="2023-05-25T17:50:00Z"/>
+Input: "User: By the way, my name is Sarah and I'm allergic to peanuts."
+Output:
+vital	User's name is Sarah
+vital	User is allergic to peanuts
+
+(Note: these are stable, timeless facts. No date is attached even though `occurred_at` is present.)
 
 Input: "Hey, how are you?"
 Output:

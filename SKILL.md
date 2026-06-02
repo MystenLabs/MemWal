@@ -2,14 +2,14 @@
 name: memwal
 version: 0.0.1
 description: |
-  Walrus Memory SDK for privacy-first AI memory on Sui blockchain with Walrus.
+  Walrus Memory SDK — portable agent memory that works across apps, sessions, and workflows.
 
   Use when users say:
   - "add memory to my app"
-  - "store encrypted memories"
+  - "portable agent memory"
   - "integrate Walrus Memory"
   - "AI agent memory"
-  - "persistent memory SDK"
+  - "memory across agents"
   - "Walrus memory storage"
   - "setup Walrus Memory"
   - "recall memories"
@@ -19,7 +19,7 @@ keywords:
   - walrus memory
   - memory sdk
   - ai memory
-  - encrypted memory
+  - portable memory
   - walrus storage
   - sui blockchain
   - delegate key
@@ -27,9 +27,9 @@ keywords:
   - vercel ai sdk
 ---
 
-# Walrus Memory — Privacy-First AI Memory SDK
+# Walrus Memory — Portable Agent Memory
 
-Walrus Memory is a TypeScript SDK for persistent, encrypted AI memory. It stores memories on Walrus (decentralized storage), encrypts them with SEAL, enforces ownership onchain via Sui smart contracts, and retrieves them with semantic (vector) search. Memories are scoped by `owner + namespace` — each namespace is an isolated memory space.
+Walrus Memory enables AI agents to operate reliably across apps and sessions, without losing context. It stores memories on Walrus (decentralized storage), encrypts them with SEAL, enforces ownership onchain via Sui smart contracts, and retrieves them with semantic (vector) search. Memory is portable by design — not tied to a single runtime or provider — and scoped by `owner + namespace` for isolation and coordination.
 
 ---
 
@@ -37,12 +37,12 @@ Walrus Memory is a TypeScript SDK for persistent, encrypted AI memory. It stores
 
 Use Walrus Memory when your app or agent needs:
 
-- **Persistent memory** across sessions, devices, or restarts
-- **Encrypted storage** — end-to-end encryption, only the owner and authorized delegates can decrypt
+- **Portable memory** — persists outside prompts and context windows, moves across agents, apps, and workflows
+- **Full owner control** — programmable permissions and explicit ownership define how memory is shared and accessed
+- **Agent coordination** — shared memory spaces help agents coordinate across long-running and multi-step workflows
 - **Semantic recall** — retrieve memories by meaning, not just keywords
-- **Decentralized storage** — no single point of failure, stored on Walrus
-- **Onchain ownership** — cryptographically enforced access control on Sui
-- **Cross-app memory** — share memory between apps via delegate keys
+- **Verifiable integrity** — memory integrity can be independently verified without centralized trust
+- **Cross-app memory** — not tied to a single runtime or provider, share memory between apps via delegate keys
 
 ---
 
@@ -146,7 +146,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 
 ## API Surface
 
-### MemWal Methods
+### Walrus Memory Methods
 
 | Method | Description | Returns |
 |---|---|---|

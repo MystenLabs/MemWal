@@ -1,10 +1,10 @@
 ---
 title: "Example Apps"
-description: "Short examples showing how each demo app uses MemWal."
+description: "Short examples showing how each demo app uses Walrus Memory."
 ---
 
-The repo includes ready-to-run apps in `apps/` that show different MemWal integration patterns.
-This page focuses on app-level patterns,the basic SDK flow covered in [Quick Start](/sdk/quick-start) and [MemWal Usage](/sdk/usage/memwal).
+The repo includes ready-to-run apps in `apps/` that show different Walrus Memory integration patterns.
+This page focuses on app-level patterns,the basic SDK flow covered in [Quick Start](/sdk/quick-start) and [Walrus Memory Usage](/sdk/usage/memwal).
 
 ## Run Locally
 
@@ -17,7 +17,7 @@ pnpm dev:researcher
 
 ## [Playground](https://github.com/MystenLabs/MemWal/tree/main/apps/app)
 
-Dashboard, playground, and interactive demo for MemWal.
+Dashboard, playground, and interactive demo for Walrus Memory.
 
 ```ts
 const memwal = MemWal.create({
@@ -51,7 +51,7 @@ const model = withMemWal(baseModel, {
 });
 ```
 
-This app shows AI middleware integration in a production-style chat app. The UI can enable MemWal, collect a delegate key and account ID, and pass them to the chat API. The server wraps the selected model with `withMemWal`, so recall happens before generation and new context can be auto-saved after each turn.
+This app shows AI middleware integration in a production-style chat app. The UI can enable Walrus Memory, collect a delegate key and account ID, and pass them to the chat API. The server wraps the selected model with `withMemWal`, so recall happens before generation and new context can be auto-saved after each turn.
 
 ## [Noter](https://github.com/MystenLabs/MemWal/tree/main/apps/noter)
 
@@ -65,7 +65,7 @@ export const extractMemories = async (text: string): Promise<string[]> => {
 };
 ```
 
-This app shows note-to-memory extraction. Noter keeps a shared server-side MemWal client, lets the user configure the key and account at runtime, and uses `analyze()` to turn note content into structured facts while the relayer stores them asynchronously.
+This app shows note-to-memory extraction. Noter keeps a shared server-side Walrus Memory client, lets the user configure the key and account at runtime, and uses `analyze()` to turn note content into structured facts while the relayer stores them asynchronously.
 
 ## [Researcher](https://github.com/MystenLabs/MemWal/tree/main/apps/researcher)
 
@@ -83,4 +83,4 @@ await memwal.waitForRememberJob(job.job_id);
 const { results } = await memwal.recall({ query, limit: 5 });
 ```
 
-This app shows long-form research memory and session rehydration. Researcher saves each sprint as a structured report in MemWal, then generates recall queries from sprint metadata, pulls back the most relevant findings, and rebuilds context for a fresh session.
+This app shows long-form research memory and session rehydration. Researcher saves each sprint as a structured report in Walrus Memory, then generates recall queries from sprint metadata, pulls back the most relevant findings, and rebuilds context for a fresh session.
