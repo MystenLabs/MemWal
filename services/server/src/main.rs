@@ -41,6 +41,33 @@ use types::{
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
+fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
+    let Ok(raw) = std::env::var(name) else {
+        return fallback;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return fallback;
+    }
+    let Ok(parsed) = raw.parse::<u64>() else {
+        tracing::warn!("ignoring invalid {}={}; using {}", name, raw, fallback);
+        return fallback;
+    };
+    if parsed < min {
+        tracing::warn!("ignoring too-small {}={}; using {}", name, parsed, fallback);
+        return fallback;
+    }
+    if parsed > max {
+        tracing::warn!("clamping {}={} to {}", name, parsed, max);
+        return max;
+    }
+    parsed
+}
+
+fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
+    parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
+}
+
 #[tokio::main]
 async fn main() {
     // Load .env file (optional, won't error if missing)
@@ -130,16 +157,28 @@ async fn main() {
 
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
     // Enoki/Walrus failures from the sidecar process becoming unavailable.
+    // If the sidecar remains unhealthy, exit the relayer so Railway restarts
+    // the whole container and brings up a fresh sidecar process.
+    let sidecar_watch_interval_secs = parse_env_u64("SIDECAR_WATCHDOG_INTERVAL_SECS", 30, 5, 300);
+    let sidecar_watch_timeout_secs = parse_env_u64("SIDECAR_WATCHDOG_TIMEOUT_SECS", 2, 1, 30);
+    let sidecar_watch_max_failures = parse_env_u32("SIDECAR_WATCHDOG_MAX_FAILURES", 6, 1, 100);
+    tracing::info!(
+        "  sidecar watchdog: interval={}s timeout={}s max_failures={}",
+        sidecar_watch_interval_secs,
+        sidecar_watch_timeout_secs,
+        sidecar_watch_max_failures
+    );
     let sidecar_watch_client = http_client.clone();
     let sidecar_watch_url = health_url.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
         let mut consecutive_failures = 0u32;
         loop {
             interval.tick().await;
             match sidecar_watch_client
                 .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
                 .send()
                 .await
             {
@@ -168,6 +207,13 @@ async fn main() {
                         e
                     );
                 }
+            }
+            if consecutive_failures >= sidecar_watch_max_failures {
+                tracing::error!(
+                    "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
+                    consecutive_failures
+                );
+                std::process::exit(1);
             }
         }
     });

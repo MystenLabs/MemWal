@@ -22,6 +22,7 @@ import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 import {
+    isWalrusBlobObjectMissingFromEffects,
     isWalrusObjectLockEquivocation,
     isWalrusPackageVersionMismatch,
     isWalrusReferencedObjectStale,
@@ -296,6 +297,7 @@ const WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS = parsePositiveIntEnv(
     1_000,
     180_000,
 );
+const WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000] as const;
 const walrusUploadGlobalLimiter = new AsyncSemaphore(WALRUS_UPLOAD_MAX_CONCURRENCY);
 const walrusUploadWalletLimiters = new Map<number, AsyncSemaphore>();
 
@@ -399,6 +401,10 @@ function parseWalrusKeySlot(value: unknown): number | null {
         return Number.isSafeInteger(parsed) ? parsed : null;
     }
     return null;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errorMessage(err: unknown): string {
@@ -1187,6 +1193,40 @@ function extractBlobObjectId(blob: any): string | null {
     return null;
 }
 
+async function uploadWalrusBlobWithEffectsRetry(
+    flow: any,
+    registerDigest: string,
+    context: {
+        traceId: string;
+        jobId?: string | null;
+        keyIndex: number;
+    },
+): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            await flow.upload({ digest: registerDigest });
+            return;
+        } catch (err: unknown) {
+            const message = errorMessage(err);
+            const retryDelayMs = WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS[attempt - 1];
+            if (!retryDelayMs || !isWalrusBlobObjectMissingFromEffects(message)) {
+                throw err;
+            }
+
+            console.warn(`[walrus/upload] [${context.traceId}] upload_blob_retry ${JSON.stringify({
+                jobId: context.jobId,
+                keyIndex: context.keyIndex,
+                attempt,
+                nextAttempt: attempt + 1,
+                retryDelayMs,
+                registerDigest,
+                message: truncateForLog(message),
+            })}`);
+            await sleep(retryDelayMs);
+        }
+    }
+}
+
 async function setMetadataAndTransferBlobs(
     signer: Ed25519Keypair,
     blobs: MetadataTransferBlob[],
@@ -1274,6 +1314,38 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
     let signerAddressForLog: string | undefined;
     let blobBytesForLog: number | undefined;
     let releaseWalrusUploadSlots: (() => void) | undefined;
+    const phaseLogContext = (): Record<string, unknown> => ({
+        jobId: jobIdForLog,
+        keyIndex: keyIndexForLog,
+        owner: shortAddress(ownerForLog),
+        namespace: typeof namespaceForLog === "string" && namespaceForLog ? namespaceForLog : "default",
+    });
+    const timedPhase = async <T>(
+        nextPhase: string,
+        action: () => Promise<T>,
+        resultFields?: (result: T) => Record<string, unknown>,
+    ): Promise<T> => {
+        phase = nextPhase;
+        const startedAt = Date.now();
+        try {
+            const result = await action();
+            console.log(`[walrus/upload] [${traceId}] phase_ok ${JSON.stringify({
+                ...phaseLogContext(),
+                phase: nextPhase,
+                durationMs: Date.now() - startedAt,
+                ...(resultFields ? resultFields(result) : {}),
+            })}`);
+            return result;
+        } catch (phaseErr: unknown) {
+            console.warn(`[walrus/upload] [${traceId}] phase_failed ${JSON.stringify({
+                ...phaseLogContext(),
+                phase: nextPhase,
+                durationMs: Date.now() - startedAt,
+                message: truncateForLog(errorMessage(phaseErr)),
+            })}`);
+            throw phaseErr;
+        }
+    };
     try {
         const {
             data,
@@ -1382,41 +1454,65 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
             tipRecipient: shortAddress(tipRecipient),
             allowedAddresses: registerAllowedAddresses.map(shortAddress),
         })}`);
-        const registerDigest = await submitWalletTransaction(
-            registerTx,
-            signer,
-            registerAllowedAddresses,
+        const registerDigest = await timedPhase(
+            "register_sponsor",
+            () => submitWalletTransaction(
+                registerTx,
+                signer,
+                registerAllowedAddresses,
+            ),
+            (digest) => ({ digest }),
         );
-        phase = "register_wait";
-        await suiClient.waitForTransaction({ digest: registerDigest });
+        await timedPhase(
+            "register_wait",
+            () => suiClient.waitForTransaction({ digest: registerDigest }),
+            () => ({ digest: registerDigest }),
+        );
 
-        phase = "upload_blob";
-        await flow.upload({ digest: registerDigest });
+        await timedPhase(
+            "upload_blob",
+            () => uploadWalrusBlobWithEffectsRetry(
+                flow,
+                registerDigest,
+                { traceId, jobId: jobIdForLog, keyIndex: keySlot },
+            ),
+            () => ({ registerDigest }),
+        );
 
-        phase = "certify_sponsor";
+        phase = "certify_build";
         const certifyTx = flow.certify();
-        const certifyDigest = await submitWalletTransaction(certifyTx, signer);
-        phase = "certify_wait";
-        await suiClient.waitForTransaction({ digest: certifyDigest });
+        const certifyDigest = await timedPhase(
+            "certify_sponsor",
+            () => submitWalletTransaction(certifyTx, signer),
+            (digest) => ({ digest }),
+        );
+        await timedPhase(
+            "certify_wait",
+            () => suiClient.waitForTransaction({ digest: certifyDigest }),
+            () => ({ digest: certifyDigest }),
+        );
 
-        phase = "get_blob";
-        const blob = await flow.getBlob();
+        const blob = await timedPhase("get_blob", () => flow.getBlob());
 
         const blobObjectId = extractBlobObjectId(blob);
 
         // Set on-chain metadata + transfer blob to user in a single transaction
         if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
             try {
-                phase = "metadata_transfer";
-                await setMetadataAndTransferBlobs(
-                    signer,
-                    [{ blobObjectId, namespace }],
-                    owner,
-                    packageId,
-                    agentId,
+                const metadataTransferDigest = await timedPhase(
+                    "metadata_transfer",
+                    () => setMetadataAndTransferBlobs(
+                        signer,
+                        [{ blobObjectId, namespace }],
+                        owner,
+                        packageId,
+                        agentId,
+                    ),
+                    (digest) => ({ digest, blobObjectId }),
                 );
                 console.log(`[walrus/upload] [${traceId}] metadata_transfer_ok ${JSON.stringify({
                     jobId: jobIdForLog,
+                    digest: metadataTransferDigest,
                     blobObjectId,
                     owner: shortAddress(owner),
                     namespace: namespace || "default",

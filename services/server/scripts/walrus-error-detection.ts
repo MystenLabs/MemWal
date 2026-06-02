@@ -42,6 +42,17 @@ export function isWalrusReferencedObjectStale(message: string): boolean {
 }
 
 /**
+ * Detect Walrus SDK upload failures where register succeeded, but the SDK/RPC
+ * path cannot observe the newly-created blob object in transaction effects yet.
+ * Retrying `flow.upload({ digest })` against the same register digest is safe
+ * and avoids rebuilding a new register transaction.
+ */
+export function isWalrusBlobObjectMissingFromEffects(message: string): boolean {
+    if (!message) return false;
+    return /blob object not found in transaction effects/i.test(message);
+}
+
+/**
  * Detect a Sui owned-object lock / equivocation error: a specific
  * object+version is locked to a competing transaction, so the transaction is
  * rejected by >1/3 of validator stake and is non-retriable within the epoch.
