@@ -2,7 +2,7 @@
 """
 Integration tests for the Walrus Memory Python SDK against a live server.
 
-Targets MEMWAL_SERVER_URL (default: https://relayer.staging.memwal.ai).
+Targets MEMWAL_SERVER_URL (default: https://relayer-staging.memory.walrus.xyz).
 
 No-auth tests (always run, no env vars needed):
   - /health endpoint
@@ -31,7 +31,7 @@ Usage:
   # Run against staging using env vars
   export MEMWAL_PRIVATE_KEY="<your-ed25519-delegate-private-key-hex>"
   export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
-  export MEMWAL_SERVER_URL="https://relayer.staging.memwal.ai"
+  export MEMWAL_SERVER_URL="https://relayer-staging.memory.walrus.xyz"
   python -m pytest tests/test_integration.py -v
 """
 
@@ -48,13 +48,13 @@ import nacl.signing
 import pytest
 
 from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
-from memwal.utils import build_signature_message, bytes_to_hex
+from memwal.utils import build_signature_message
 
 pytestmark = pytest.mark.integration
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer.staging.memwal.ai")
+SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer-staging.memory.walrus.xyz")
 PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 

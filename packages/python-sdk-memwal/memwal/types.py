@@ -20,13 +20,10 @@ from typing import Any, Dict, List, Optional
 #: untouched default apart from an explicitly-passed custom URL.
 DEFAULT_SERVER_URL = "http://localhost:8000"
 
-#: Named relayer environments. Mirrors the TypeScript SDK / MCP package
-#: ``--prod`` / ``--dev`` / ``--staging`` / ``--local`` presets so the same
-#: shorthand works across every Walrus Memory client.
+#: Named relayer environments for the public Walrus Memory deployments.
 ENV_PRESETS = {
-    "prod": "https://relayer.memwal.ai",
-    "dev": "https://relayer.dev.memwal.ai",
-    "staging": "https://relayer.staging.memwal.ai",
+    "prod": "https://relayer.memory.walrus.xyz",
+    "staging": "https://relayer-staging.memory.walrus.xyz",
     "local": "http://127.0.0.1:8000",
 }
 
@@ -42,8 +39,8 @@ class MemWalConfig:
         server_url: Server URL (default: http://localhost:8000). An explicit
             non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
-        env: Optional relayer preset — one of ``"prod"``, ``"dev"``,
-            ``"staging"``, ``"local"``. Resolves ``server_url`` to the matching
+        env: Optional relayer preset — one of ``"prod"``, ``"staging"``,
+            ``"local"``. Resolves ``server_url`` to the matching
             hosted relayer when ``server_url`` is left at its default.
             Precedence: explicit ``server_url`` > ``env`` > default.
     """
