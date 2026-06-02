@@ -13,7 +13,7 @@ The Python SDK exposes one relayer-backed client in two forms, plus middleware:
 
 Detailed pages:
 
-- [MemWal](/python-sdk/usage/memwal) — the default async/sync client and its core methods
+- [Walrus Memory](/python-sdk/usage/memwal) — the default async/sync client and its core methods
 - [Manual methods](/python-sdk/usage/memwal-manual) — lower-level `remember_manual` / `recall_manual` / `embed`
 - [with_memwal](/python-sdk/usage/with-memwal) — LangChain and OpenAI middleware
 

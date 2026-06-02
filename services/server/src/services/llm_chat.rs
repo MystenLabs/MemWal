@@ -37,5 +37,19 @@ pub struct ChatChoice {
 
 #[derive(serde::Deserialize)]
 pub struct ChatMessageResp {
-    pub content: String,
+    /// `Option<String>` because `gpt-4o-mini` (and likely other
+    /// OpenAI-compatible providers via OpenRouter) occasionally returns
+    /// a successful HTTP 200 response with `content: null` and
+    /// `completion_tokens: 0` — the model accepted the prompt but
+    /// produced no output. Previously this was typed as `String` and
+    /// the deserialiser rejected it with "invalid type: null, expected
+    /// a string", returning HTTP 500 which the SDK / harness retry
+    /// policy does not retry — silently dropping the turn.
+    ///
+    /// Callers treat `None` as "" (empty string). For the extractor
+    /// that flows through `parse_extracted_facts` and produces zero
+    /// facts — the same legitimate outcome as the prompt's explicit
+    /// `NONE` response, so this is correct degradation rather than
+    /// an error.
+    pub content: Option<String>,
 }

@@ -1,6 +1,6 @@
 ---
 title: "How Storage Works"
-description: "The lifecycle of a memory in MemWal — from plaintext to encrypted blob on Walrus and searchable vector in the database."
+description: "The lifecycle of a memory in Walrus Memory — from plaintext to encrypted blob on Walrus and searchable vector in the database."
 ---
 
 When you call `memwal.remember(...)`, the relayer accepts a background job immediately and then stores the memory asynchronously. Here's what happens.

@@ -206,7 +206,7 @@ Wraps a Vercel AI SDK model with automatic memory recall and save.
 
 **Before generation:**
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by minimum relevance (`minRelevance`, default `0.3`)
 - Injects matching memories into the prompt as a system message
 

@@ -1,9 +1,9 @@
 ---
 title: "Quick Start"
-description: "Install the MemWal SDK and store your first memory in under a minute."
+description: "Install the Walrus Memory SDK and store your first memory in under a minute."
 ---
 
-The MemWal SDK gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It exposes three entry points:
+The Walrus Memory SDK gives your agents portable memory that works across apps, sessions, and workflows. Store, recall, and analyze context — fully under your control. It exposes three entry points:
 
 | Entry point | Import | When to use |
 | --- | --- | --- |
@@ -70,7 +70,7 @@ yarn add ai zod
 Before wiring the SDK into your app:
 
 - These hosted endpoints are provided by Walrus Foundation.
-- Generate a MemWal account ID and delegate private key for your client using the hosted endpoint:
+- Generate a Walrus Memory account ID and delegate private key for your client using the hosted endpoint:
   - Production (mainnet): `https://memwal.ai` or `https://memwal.wal.app`
   - Staging (testnet): `https://staging.memwal.ai`
 - Choose a relayer:

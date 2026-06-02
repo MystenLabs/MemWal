@@ -3,7 +3,7 @@ title: "Quick Start"
 description: "Install the Walrus Memory Python SDK and store your first memory in under a minute."
 ---
 
-The Walrus Memory Python SDK (`memwal` on PyPI) gives your app persistent, encrypted memory — store, recall, and analyze context across sessions. It mirrors the TypeScript `MemWal` client: same relayer, same Ed25519 auth, same methods.
+The Walrus Memory Python SDK (`memwal` on PyPI) gives your agents portable memory that works across apps, sessions, and workflows. Store, recall, and analyze context — fully under your control. It mirrors the TypeScript `MemWal` client: same relayer, same Ed25519 auth, same methods.
 
 | Entry point | Import | When to use |
 | --- | --- | --- |

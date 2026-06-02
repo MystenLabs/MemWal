@@ -1,6 +1,6 @@
 ---
 title: "How It Works"
-description: "Runtime behavior of the MemWal MCP package: auth-required mode, browser login, local credentials, and the stdio bridge."
+description: "Runtime behavior of the Walrus Memory MCP package: auth-required mode, browser login, local credentials, and the stdio bridge."
 ---
 
 This page explains what `@mysten-incubation/memwal-mcp` actually does on the client machine.
@@ -19,7 +19,7 @@ This mode runs when:
 Instead of exiting, the package starts a minimal MCP server that:
 
 - responds to `initialize`
-- advertises the normal MemWal memory tools
+- advertises the normal Walrus Memory memory tools
 - also advertises `memwal_login`
 - returns an actionable error for the memory tools until sign-in completes
 
@@ -66,7 +66,7 @@ It contains:
 - delegate public key
 - delegate address
 - wallet address
-- MemWal account ID
+- Walrus Memory account ID
 - package ID
 - relayer URL
 - label
@@ -99,7 +99,7 @@ That design avoids a few common MCP-host failure modes:
 - browser tabs opening in the background
 - agents paraphrasing a timeout error and dropping the actual login URL
 
-The local listener stays alive in the background for up to **5 minutes**. After the browser flow completes, the next MemWal tool call picks up the saved credentials automatically.
+The local listener stays alive in the background for up to **5 minutes**. After the browser flow completes, the next Walrus Memory tool call picks up the saved credentials automatically.
 
 ## Remote memory tools
 
@@ -110,7 +110,7 @@ These tools go through the relayer:
 - `memwal_analyze`
 - `memwal_restore`
 
-Those requests hit the same relayer-backed MemWal stack used by direct SDK clients:
+Those requests hit the same relayer-backed Walrus Memory stack used by direct SDK clients:
 
 - embeddings
 - SEAL encryption and decryption
@@ -189,7 +189,7 @@ This matters because login should open the dashboard that matches the relayer en
 It does **not**:
 
 - revoke the on-chain delegate key
-- remove the delegate from the MemWal dashboard
+- remove the delegate from the Walrus Memory dashboard
 
 If you need full revocation, remove the delegate key from the dashboard too.
 
@@ -203,7 +203,7 @@ That avoids MCP tool-call timeouts when:
 - the browser tab is not focused immediately
 - the wallet requires extra review or hardware confirmation
 
-Once the browser shows the connection succeeded, the next MemWal tool call picks up the saved credentials.
+Once the browser shows the connection succeeded, the next Walrus Memory tool call picks up the saved credentials.
 
 ## Related pages
 

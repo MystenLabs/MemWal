@@ -4,7 +4,23 @@
 
 ### Added
 
-- Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, health checks, async `remember` and `remember_async` job waiting, `recall`, bulk remember, `remember_bulk_async`, manual methods with scoring weights, middleware examples, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+- Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, `MemWalSync`, health/compatibility checks, delegate public-key/address derivation, `remember`, `remember_async`, async job waiting, `recall`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, optional `ask`, `analyze`, `analyze_and_wait`, `embed`, manual methods with scoring weights, `restore`, optional OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+
+### Fixed
+
+- Fixed `MemWalSync` reuse inside notebooks so repeated calls do not reuse an HTTP transport from a closed event loop.
+
+## 0.1.4
+
+### Added
+
+- Added optional `occurred_at` to `analyze()` and `analyze_and_wait()` (both async and sync) for temporal anchoring of extracted facts. When supplied, the server resolves in-turn relative references ("last Friday", "yesterday") into absolute dates inside the extracted fact text before embedding and encryption.
+- Accepts `datetime` or RFC-3339 string. Wire format is RFC-3339 UTC with millisecond precision (e.g. `"2023-05-25T17:50:00.000Z"`) — byte-identical to the TypeScript SDK.
+- Field is omitted from the request body when not supplied.
+
+### Changed
+
+- `occurred_at` validates input at the SDK boundary rather than forwarding malformed values to the server: naïve `datetime` instances raise `ValueError` (silently assuming UTC would mis-anchor by N hours for callers outside UTC), and malformed RFC-3339 strings raise `ValueError` with a diagnostic message instead of surfacing as opaque 400s.
 
 ## 0.1.3
 
