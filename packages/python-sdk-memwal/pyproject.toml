@@ -54,6 +54,9 @@ packages = ["memwal"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: live relayer integration tests",
+]
 
 [tool.ruff]
 target-version = "py39"
