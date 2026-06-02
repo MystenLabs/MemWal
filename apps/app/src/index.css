@@ -9867,7 +9867,7 @@ h1, h2, h3 {
 
 .wm-signin-tos a {
   color: #faf8f5;
-  text-decoration: none;
+  text-decoration: underline;
 }
 
 .wm-signin-trusted {
