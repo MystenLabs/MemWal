@@ -11,11 +11,9 @@ const WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 const WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS";
 const WALRUS_OBJECT_LOCK_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 
-/// Mirrors the `@mysten/walrus` dep version in
-/// `services/server/scripts/package.json`. Bump this constant in lockstep
-/// when bumping the sidecar dep so the Slack alert reports the actual
-/// runtime version, not a stale label.
-pub const SIDECAR_WALRUS_DEP_VERSION: &str = "1.1.7";
+/// Human-readable Walrus client label used in package-upgrade alerts. Keep it
+/// aligned with the self-hosted publisher image/runtime deployed in prod.
+pub const WALRUS_CLIENT_DEP_VERSION: &str = "memwal-publisher";
 
 /// Time-window dedup keyed by a `(String, String)` identity. Suppresses
 /// duplicate alerts for the same logical event during a burst.
@@ -63,7 +61,7 @@ impl AlertDedup {
 pub struct AlertManager {
     slack: Option<SlackNotifier>,
     /// Suppresses Walrus package-upgrade alert spam during an upgrade burst.
-    /// Keyed by `(sui_network, sidecar_walrus_dep_version)` — concurrent queued
+    /// Keyed by `(sui_network, walrus_client_version)` — concurrent queued
     /// jobs all hit EWrongVersion against the same on-chain package change, so
     /// one notification per (network, dep) is enough until the dep bumps or the
     /// window elapses.
@@ -118,7 +116,7 @@ impl AlertManager {
         };
         let key = (
             alert.sui_network.clone(),
-            alert.sidecar_walrus_dep_version.clone(),
+            alert.walrus_client_version.clone(),
         );
         if self.walrus_upgrade_dedup.should_suppress(key) {
             return Ok(());
@@ -217,23 +215,21 @@ pub struct WalrusUploadExhaustedAlert {
     pub error: String,
 }
 
-/// Fired when the TS sidecar surfaces a MoveAbort from
+/// Fired when the upload path surfaces a MoveAbort from
 /// `walrus::system::inner_mut` (EWrongVersion = abort code 1). This means the
-/// on-chain Walrus package was upgraded after the sidecar booted, and the
-/// cached `@mysten/walrus` client is carrying stale package metadata.
+/// on-chain Walrus package was upgraded and the upload client may be carrying
+/// stale package metadata.
 ///
-/// The sidecar auto-recovers by recreating the client (sidecar logs
-/// `[walrus/client] refreshed reason=walrus_package_version_mismatch`), and
-/// the next Apalis retry succeeds. This alert is informational — it tells
-/// the team that a Walrus on-chain upgrade just affected the upload path so
-/// they can verify `@mysten/walrus` dep version is current.
+/// This alert is informational — it tells the team that a Walrus on-chain
+/// upgrade just affected the upload path so they can verify the publisher
+/// runtime is current if retries continue to fail.
 #[derive(Debug, Clone)]
 pub struct WalrusPackageUpgradeDetectedAlert {
     pub remember_job_id: Option<String>,
     pub owner: Option<String>,
     pub namespace: Option<String>,
     pub sui_network: String,
-    pub sidecar_walrus_dep_version: String,
+    pub walrus_client_version: String,
     pub on_chain_version_before: Option<String>,
     pub on_chain_version_after: Option<String>,
     pub action_taken: String,
@@ -303,7 +299,7 @@ impl SlackPayload {
     fn for_walrus_package_upgrade_detected(alert: &WalrusPackageUpgradeDetectedAlert) -> Self {
         let title = "MemWal Walrus on-chain package upgrade detected".to_string();
         let summary = format!(
-            "Walrus package upgrade detected on {}; sidecar auto-recovered. Verify @mysten/walrus dep version is current.",
+            "Walrus package upgrade detected on {}; upload will retry. Verify the publisher Walrus client if errors continue.",
             alert.sui_network,
         );
         let job = alert.remember_job_id.as_deref().unwrap_or("-");
@@ -325,9 +321,9 @@ impl SlackPayload {
             (None, None) => String::new(),
         };
         let details = format!(
-            "*Network:* `{}`\n*Sidecar @mysten/walrus dep:* `{}`\n{}*Action taken:* {}\n*Job:* `{}`\n*Owner:* `{}`\n*Namespace:* `{}`\n*Original error:* ```{}```",
+            "*Network:* `{}`\n*Walrus client:* `{}`\n{}*Action taken:* {}\n*Job:* `{}`\n*Owner:* `{}`\n*Namespace:* `{}`\n*Original error:* ```{}```",
             alert.sui_network,
-            alert.sidecar_walrus_dep_version,
+            alert.walrus_client_version,
             version_line,
             alert.action_taken,
             job,
@@ -524,16 +520,16 @@ mod tests {
                 ),
                 namespace: Some("notes".into()),
                 sui_network: "mainnet".into(),
-                sidecar_walrus_dep_version: "1.1.7".into(),
+                walrus_client_version: "memwal-publisher".into(),
                 on_chain_version_before: Some("3".into()),
                 on_chain_version_after: Some("4".into()),
-                action_taken: "Sidecar refreshed cached client; Apalis will retry.".into(),
+                action_taken: "Apalis will retry; verify publisher client if repeated.".into(),
                 error: "MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut' (instruction 0)".into(),
             });
 
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("mainnet"));
-        assert!(json.contains("1.1.7"));
+        assert!(json.contains("memwal-publisher"));
         assert!(json.contains("job-42"));
         assert!(json.contains("notes"));
         assert!(json.contains("inner_mut"));
@@ -541,7 +537,7 @@ mod tests {
         assert!(json.contains("3"));
         assert!(json.contains("4"));
         // action narrative present
-        assert!(json.contains("refreshed"));
+        assert!(json.contains("retry"));
     }
 
     #[test]
@@ -553,7 +549,7 @@ mod tests {
                 owner: None,
                 namespace: None,
                 sui_network: "testnet".into(),
-                sidecar_walrus_dep_version: SIDECAR_WALRUS_DEP_VERSION.into(),
+                walrus_client_version: WALRUS_CLIENT_DEP_VERSION.into(),
                 on_chain_version_before: None,
                 on_chain_version_after: None,
                 action_taken: "n/a".into(),
@@ -578,10 +574,10 @@ mod tests {
                 owner: None,
                 namespace: None,
                 sui_network: "mainnet".into(),
-                sidecar_walrus_dep_version: "1.1.7".into(),
+                walrus_client_version: "memwal-publisher".into(),
                 on_chain_version_before: None,
                 on_chain_version_after: None,
-                action_taken: "client refreshed".into(),
+                action_taken: "client retry".into(),
                 error: huge_error,
             });
 

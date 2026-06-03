@@ -20,10 +20,10 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
-    SIDECAR_WALRUS_DEP_VERSION, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
-    WalrusUploadExhaustedAlert,
+    WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+    WALRUS_CLIENT_DEP_VERSION,
 };
-use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
+use crate::storage::walrus::UploadBlobError;
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
 // ============================================================
@@ -240,23 +240,10 @@ async fn classify_wallet_remember_handoff_failure(
     }
 }
 
-async fn handle_legacy_remember_handoff_failure(
-    pool: &sqlx::PgPool,
-    remember_job_id: &str,
-    msg: String,
-) -> Result<(), RememberJobError> {
-    match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
-        Ok(()) => Ok(()),
-        Err(persist_err) => Err(RememberJobError::Internal(
-            remember_job_persist_failure_message(&msg, &persist_err),
-        )),
-    }
-}
-
 /// A wallet job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletJob {
-    /// Index into `config.sui_private_keys` used by the sidecar for signing.
+    /// Index into `config.sui_private_keys` used by the upload/publisher flow.
     /// For `UploadAndTransfer`, this is the enqueue-time assignment used for
     /// logging only; the worker selects a fresh round-robin wallet at execution
     /// time so retries can move to another wallet.
@@ -296,13 +283,15 @@ pub struct MetaTransferJob {
 
 #[derive(Debug)]
 pub enum MetaTransferError {
-    SidecarError(String),
+    MetadataUnavailable(String),
 }
 
 impl std::fmt::Display for MetaTransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MetaTransferError::SidecarError(msg) => write!(f, "sidecar call failed: {}", msg),
+            MetaTransferError::MetadataUnavailable(msg) => {
+                write!(f, "metadata transfer unavailable: {}", msg)
+            }
         }
     }
 }
@@ -337,7 +326,7 @@ pub async fn execute_meta_transfer(
         job.agent_id,
     )
     .await
-    .map_err(|e| MetaTransferError::SidecarError(e.to_string()))
+    .map_err(|e| MetaTransferError::MetadataUnavailable(e.to_string()))
 }
 
 // ============================================================
@@ -604,32 +593,22 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    crate::storage::walrus::set_metadata_batch(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        wallet_index,
-        &owner,
-        package_id.as_deref().unwrap_or(&state.config.package_id),
-        agent_id.as_deref(),
-        vec![SetMetadataBatchEntry {
+    if state.config.walrus_publisher_sets_memwal_metadata {
+        tracing::info!(
+            "[wallet-job:set-metadata] skipped; publisher already set metadata and transfer (wallet_index={}, blob_object_id={}, owner={}, namespace={}, package_id={}, agent_id={:?})",
+            wallet_index,
             blob_object_id,
+            owner,
             namespace,
-        }],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
-        let msg = e.to_string();
-        let classified = WalletJobError::classify_sidecar_error(&msg);
-        if classified.is_permanent() {
-            tracing::error!(
-                "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
-                msg
-            );
-        }
-        classified
-    })
+            package_id.as_deref().unwrap_or(&state.config.package_id),
+            agent_id,
+        );
+        return Ok(());
+    }
+
+    Err(WalletJobError::Permanent(
+        "SetMetadataAndTransfer requires WALRUS_PUBLISHER_SETS_MEMWAL_METADATA=true; legacy metadata-transfer path has been removed".into(),
+    ))
 }
 
 async fn insert_vector_and_mark_remember_done(
@@ -661,7 +640,7 @@ async fn insert_vector_and_mark_remember_done(
         .await
     {
         let msg = format!("insert_vector failed: {}", e);
-        let classified = WalletJobError::classify_sidecar_error(&msg);
+        let classified = WalletJobError::classify_wallet_error(&msg);
         update_remember_job_after_wallet_error(state, remember_job_id, &classified, &msg).await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
@@ -789,11 +768,10 @@ async fn execute_upload_and_transfer(
         encrypted.len(),
     );
 
-    // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
-    let upload_result = crate::storage::walrus::upload_blob(
+    // ── Upload to Walrus using the configured backend (using pinned wallet_index) ─
+    let upload_result = crate::storage::walrus::upload_blob_for_config(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.config,
         &encrypted,
         epochs as u64,
         &owner,
@@ -807,75 +785,9 @@ async fn execute_upload_and_transfer(
 
     let upload = match upload_result {
         Ok(u) => u,
-        Err(UploadBlobError::MetadataTransferFailed {
-            blob_id,
-            object_id,
-            message,
-        }) => {
-            tracing::warn!(
-                "[wallet-job:upload] job_id={} upload succeeded but metadata/transfer failed: {}",
-                remember_job_id.as_deref().unwrap_or("-"),
-                message,
-            );
-
-            warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
-
-            if let Some(ref jid) = remember_job_id {
-                let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(&blob_id)
-                .bind(jid)
-                .execute(state.db.pool())
-                .await;
-            }
-
-            let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
-            let recovery_remember_job_id = remember_job_id.clone();
-            let mut storage = state.wallet_storage.clone();
-            if let Err(e) = storage
-                .push_request(wallet_job_request(WalletJob {
-                    wallet_index,
-                    operation: WalletOperation::SetMetadataAndTransfer {
-                        blob_object_id: object_id,
-                        owner,
-                        namespace,
-                        package_id: Some(package_id),
-                        agent_id: agent_public_key,
-                        remember_job_id,
-                        blob_id: Some(blob_id.clone()),
-                        vector: Some(vector),
-                        blob_size_bytes: Some(encrypted.len() as i64),
-                        importance,
-                    },
-                }))
-                .await
-            {
-                let classified = classify_wallet_remember_handoff_failure(
-                    state.db.pool(),
-                    recovery_remember_job_id.as_deref(),
-                    format!("failed to enqueue metadata/transfer recovery job: {}", e),
-                )
-                .await;
-                tracing::error!(
-                    "[wallet-job:upload] job_id={} {}",
-                    job_id_for_log,
-                    classified,
-                );
-                return Err(classified);
-            }
-
-            tracing::info!(
-                "[wallet-job:upload] job_id={} enqueued metadata/transfer recovery for blob_id={} key={}",
-                job_id_for_log,
-                blob_id,
-                wallet_index,
-            );
-            return Ok(());
-        }
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
-            let classified = WalletJobError::classify_sidecar_error(&msg);
+            let classified = WalletJobError::classify_wallet_error(&msg);
             maybe_alert_walrus_package_upgrade_detected(
                 state,
                 remember_job_id.as_deref(),
@@ -935,8 +847,9 @@ async fn execute_upload_and_transfer(
         .await;
     }
 
-    // The sidecar's `/walrus/upload` endpoint already performs metadata+transfer
-    // atomically. A successful upload response means the blob is ready to index.
+    // The configured upload backend performs metadata+transfer before it
+    // returns success. A successful upload response means the blob is ready to
+    // index.
     insert_vector_and_mark_remember_done(
         state,
         remember_job_id.as_deref(),
@@ -951,16 +864,13 @@ async fn execute_upload_and_transfer(
     .await
 }
 
-/// Mirrors the TS sidecar's `isWalrusPackageVersionMismatch` detector. We
-/// recheck the pattern on the Rust side so we can fire a one-shot informational
-/// Slack alert when the sidecar surfaces an EWrongVersion MoveAbort, without
-/// having to plumb a structured signal back from the subprocess.
+/// Detects Walrus `EWrongVersion` package-metadata failures so we can fire a
+/// one-shot informational Slack alert before Apalis retries the upload.
 ///
 /// Anchor: requires the literal `MoveAbort` token alongside either the
 /// `::system::inner_mut` function-path fragment (cross-transport stable, since
 /// the package component is always a numeric address) OR the symbolic
 /// `EWrongVersion` (only present on gRPC/GraphQL clients). See
-/// `services/server/scripts/walrus-error-detection.ts` for the same pattern.
 fn is_walrus_package_version_mismatch(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     if !lower.contains("moveabort") && !lower.contains("move abort") {
@@ -985,10 +895,10 @@ async fn maybe_alert_walrus_package_upgrade_detected(
         owner: owner.map(str::to_owned),
         namespace: namespace.map(str::to_owned),
         sui_network: state.config.sui_network.clone(),
-        sidecar_walrus_dep_version: SIDECAR_WALRUS_DEP_VERSION.to_string(),
+        walrus_client_version: WALRUS_CLIENT_DEP_VERSION.to_string(),
         on_chain_version_before: None,
         on_chain_version_after: None,
-        action_taken: "Sidecar refreshed cached @mysten/walrus client; Apalis will retry against the new package metadata.".to_string(),
+        action_taken: "Apalis will retry the upload; verify the publisher Walrus client is current if the error repeats.".to_string(),
         error: msg.to_string(),
     };
 
@@ -1132,7 +1042,7 @@ async fn maybe_alert_walrus_upload_exhausted(
 ///
 /// Mapping rules (enforced at the point of error origination):
 /// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure), except
-///   `balance::split` stale-state failures that can recover after sidecar refresh
+///   `balance::split` stale-state failures that can recover after state refresh
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
 /// - owned-object lock / equivocation ("already locked by a different
@@ -1168,6 +1078,7 @@ impl WalletJobError {
     }
 
     /// True if the error is `Permanent` — caller should NOT retry.
+    #[cfg(test)]
     pub fn is_permanent(&self) -> bool {
         matches!(self, WalletJobError::Permanent(_))
     }
@@ -1184,10 +1095,10 @@ impl WalletJobError {
         )
     }
 
-    /// Heuristic classification from the sidecar's error string. The sidecar
-    /// surfaces Sui execution errors verbatim (Move abort codes, lock errors).
-    /// Until the sidecar emits structured error codes, we match on substrings.
-    pub fn classify_sidecar_error(msg: &str) -> Self {
+    /// Heuristic classification from Walrus/Sui upload error strings. Upstream
+    /// surfaces Sui execution errors verbatim (Move abort codes, lock errors),
+    /// so we match on substrings until the upload path emits structured codes.
+    pub fn classify_wallet_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
         if (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
@@ -1195,11 +1106,9 @@ impl WalletJobError {
         {
             return WalletJobError::Transient(msg.to_string());
         }
-        // Walrus on-chain package upgrade — the cached @mysten/walrus client
-        // carries stale package metadata until refreshed. The sidecar already
-        // recreates the client on this error; classifying Transient lets
-        // Apalis retry against the refreshed client instead of Dead-marking
-        // a job that the next attempt will succeed on.
+        // Walrus on-chain package upgrade — the upload client can carry stale
+        // package metadata until refreshed. Classifying Transient lets Apalis
+        // retry instead of Dead-marking a job that the next attempt may satisfy.
         if (lower.contains("moveabort") || lower.contains("move abort"))
             && (lower.contains("::system::inner_mut") || lower.contains("ewrongversion"))
         {
@@ -1322,7 +1231,7 @@ impl std::error::Error for RememberJobError {}
 /// Steps:
 ///   1. Mark job `running` in `remember_jobs`
 ///   2. embed() + seal_encrypt() concurrently
-///   3. walrus upload_blob()
+///   3. Walrus upload via configured backend
 ///   4. insert_vector()
 ///   5. Mark job `done` with blob_id
 ///
@@ -1371,10 +1280,9 @@ pub async fn execute_remember(
     };
 
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
-    let upload_result = crate::storage::walrus::upload_blob(
+    let upload_result = crate::storage::walrus::upload_blob_for_config(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.config,
         &encrypted,
         state.config.walrus_storage_epochs as u64,
         &job.owner,
@@ -1388,71 +1296,13 @@ pub async fn execute_remember(
 
     let upload = match upload_result {
         Ok(u) => u,
-        Err(UploadBlobError::MetadataTransferFailed {
-            blob_id,
-            object_id,
-            message,
-        }) => {
-            tracing::warn!(
-                "[remember-job] job_id={} upload succeeded but metadata/transfer failed: {}",
-                job.job_id,
-                message,
-            );
-            warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
-
-            let _ = sqlx::query(
-                "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(&blob_id)
-            .bind(&job.job_id)
-            .execute(state.db.pool())
-            .await;
-
-            let mut storage = state.wallet_storage.clone();
-            if let Err(e) = storage
-                .push_request(wallet_job_request(WalletJob {
-                    wallet_index: key_index,
-                    operation: WalletOperation::SetMetadataAndTransfer {
-                        blob_object_id: object_id,
-                        owner: job.owner.clone(),
-                        namespace: job.namespace.clone(),
-                        package_id: Some(job.package_id.clone()),
-                        agent_id: job.agent_public_key.clone(),
-                        remember_job_id: Some(job.job_id.clone()),
-                        blob_id: Some(blob_id.clone()),
-                        vector: Some(job.vector.clone()),
-                        blob_size_bytes: Some(encrypted.len() as i64),
-                        // legacy RememberJob payload predates the
-                        // importance field. Drain the queue at the neutral
-                        // "standard" bucket; new requests go through
-                        // WalletOperation::UploadAndTransfer which carries
-                        // importance through end-to-end.
-                        importance: crate::services::extractor::IMPORTANCE_STANDARD,
-                    },
-                }))
-                .await
-            {
-                let msg = format!("failed to enqueue metadata/transfer recovery job: {}", e);
-                tracing::error!("[remember-job] {} job_id={}", msg, job.job_id);
-                return handle_legacy_remember_handoff_failure(state.db.pool(), &job.job_id, msg)
-                    .await;
-            }
-
-            tracing::info!(
-                "[remember-job] job_id={} enqueued metadata/transfer recovery for blob_id={} key={}",
-                job.job_id,
-                blob_id,
-                key_index,
-            );
-            return Ok(());
-        }
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
-            // EWrongVersion is transient: the sidecar's catch path refreshes
-            // the cached @mysten/walrus client before bubbling this error up,
-            // so the next Apalis attempt sees fresh package metadata. We must
-            // not write `status='failed'` here — that would make the row read
-            // as terminal even though the upload is about to succeed on retry.
+            // EWrongVersion is transient: the upload backend can refresh
+            // cached Walrus package metadata before the next Apalis attempt.
+            // Do not write `status='failed'` here — that would make the row
+            // read as terminal even though the upload is about to succeed on
+            // retry.
             if is_walrus_package_version_mismatch(&msg) {
                 maybe_alert_walrus_package_upgrade_detected(
                     state,
@@ -1662,7 +1512,8 @@ mod tests {
 
     /// The exact production error string from the object-lock incident
     /// (testnet job 3d607892…). Used to pin the classifier against real output.
-    const PROD_OBJECT_LOCK_ERROR: &str = "walrus upload failed: Internal Error: walrus upload failed: \
+    const PROD_OBJECT_LOCK_ERROR: &str =
+        "walrus upload failed: Internal Error: walrus upload failed: \
 Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable). \
 Non-retriable errors: [Object (0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e, \
 SequenceNumber(884613305), o#B61aVqEgDskxru255FTdzua2RxbbnhDMFxmQ8SCxvj3n) already locked by a \
@@ -1705,12 +1556,12 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         ];
         for msg in cases {
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                !WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected transient for: {}",
                 msg
             );
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).aborts_retries(),
+                !WalletJobError::classify_wallet_error(msg).aborts_retries(),
                 "recoverable lock-at-version should stay retryable: {}",
                 msg
             );
@@ -1719,7 +1570,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn classify_prod_equivocation_as_object_locked_until_epoch() {
-        let classified = WalletJobError::classify_sidecar_error(PROD_OBJECT_LOCK_ERROR);
+        let classified = WalletJobError::classify_wallet_error(PROD_OBJECT_LOCK_ERROR);
         assert!(
             matches!(classified, WalletJobError::ObjectLockedUntilEpoch(_)),
             "prod equivocation error must classify as ObjectLockedUntilEpoch, got {}",
@@ -1763,7 +1614,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         ] {
             assert!(
                 matches!(
-                    WalletJobError::classify_sidecar_error(msg),
+                    WalletJobError::classify_wallet_error(msg),
                     WalletJobError::ObjectLockedUntilEpoch(_)
                 ),
                 "expected ObjectLockedUntilEpoch for: {}",
@@ -1780,13 +1631,13 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         // - generic invalid tx (no MoveAbort) → default Transient
         let invalid = "Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable)";
         assert!(matches!(
-            WalletJobError::classify_sidecar_error(invalid),
+            WalletJobError::classify_wallet_error(invalid),
             WalletJobError::Transient(_)
         ));
         // - generic non-retriable MoveAbort → Permanent (not a lock)
         let move_abort = "MoveAbort in 1st command, abort code: 3 — non-retriable";
         assert!(matches!(
-            WalletJobError::classify_sidecar_error(move_abort),
+            WalletJobError::classify_wallet_error(move_abort),
             WalletJobError::Permanent(_)
         ));
     }
@@ -1798,11 +1649,11 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         let balance = "Enoki dry run failed: MoveAbort(0x2::balance, split, 2)";
         let ewrong = "MoveAbort in 1st command, abort code: 1, in '0xabc::system::inner_mut'";
         assert!(matches!(
-            WalletJobError::classify_sidecar_error(balance),
+            WalletJobError::classify_wallet_error(balance),
             WalletJobError::Transient(_)
         ));
         assert!(matches!(
-            WalletJobError::classify_sidecar_error(ewrong),
+            WalletJobError::classify_wallet_error(ewrong),
             WalletJobError::Transient(_)
         ));
     }
@@ -1836,7 +1687,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             "Move abort at code 7",
         ] {
             assert!(
-                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected permanent for: {}",
                 msg
             );
@@ -1850,7 +1701,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             "move abort during balance split",
         ] {
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                !WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected transient for: {}",
                 msg
             );
@@ -1859,8 +1710,8 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn classify_walrus_version_mismatch_as_transient() {
-        // The sidecar refreshes the cached @mysten/walrus client on EWrongVersion;
-        // Apalis must retry against the refreshed client instead of marking Dead.
+        // The upload client can carry stale Walrus package metadata on
+        // EWrongVersion; Apalis must retry instead of marking Dead.
         for msg in [
             // JSON-RPC production format (common): only "abort code: 1", no symbolic name
             "walrus upload failed: MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut' (instruction 0)",
@@ -1870,7 +1721,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             "moveabort ewrongversion",
         ] {
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                !WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected transient for: {}",
                 msg
             );
@@ -1887,7 +1738,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             "MoveAbort(MoveLocation { module: 0x3::foo }, 1)",
         ] {
             assert!(
-                WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected permanent for: {}",
                 msg
             );
@@ -1896,7 +1747,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn walrus_version_mismatch_detector_pattern() {
-        // Mirrors the sidecar's isWalrusPackageVersionMismatch; keep both in sync.
+        // Keep this detector aligned with the wallet error classifier above.
         assert!(is_walrus_package_version_mismatch(
             "MoveAbort in 1st command, abort code: 1, in '0xc1b6::system::inner_mut'"
         ));
@@ -1922,14 +1773,14 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     #[test]
     fn classify_network_errors_as_transient() {
         for msg in [
-            "sidecar timeout",
+            "publisher timeout",
             "503 service unavailable",
             "ECONNRESET",
             "insufficient gas",
             "Enoki API error (400): {\"errors\":[{\"code\":\"expired\",\"message\":\"Sponsored transaction has expired\"}]}",
         ] {
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
+                !WalletJobError::classify_wallet_error(msg).is_permanent(),
                 "expected transient for: {}",
                 msg
             );

@@ -93,7 +93,6 @@ pids+=("$!")
 start_vsock_to_tcp "Sui RPC" "${SUI_RPC_URL:-}" "${SUI_PROXY_VSOCK_PORT:-}"
 start_vsock_to_tcp "Walrus publisher" "${WALRUS_PUBLISHER_URL:-}" "${WALRUS_PUBLISHER_PROXY_VSOCK_PORT:-}"
 start_vsock_to_tcp "Walrus aggregator" "${WALRUS_AGGREGATOR_URL:-}" "${WALRUS_AGGREGATOR_PROXY_VSOCK_PORT:-}"
-start_vsock_to_tcp "Walrus upload relay" "${WALRUS_UPLOAD_RELAY_URL:-}" "${WALRUS_UPLOAD_RELAY_PROXY_VSOCK_PORT:-}"
 start_vsock_to_tcp "OpenAI-compatible API" "${OPENAI_API_BASE:-}" "${OPENAI_PROXY_VSOCK_PORT:-}"
 
 if [[ -n "${DATABASE_URL:-}" && -n "${POSTGRES_PROXY_VSOCK_PORT:-}" ]]; then

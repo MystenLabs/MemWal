@@ -53,6 +53,38 @@ services:
           memory: 64m
           cpus: "0.1"
 
+  memwal-publisher:
+    build:
+      context: ../../infra/memwal-publisher
+    image: memwal-publisher:local
+    container_name: memwal-publisher
+    restart: unless-stopped
+    profiles:
+      - publisher
+    env_file:
+      - path: .env.walrus-publisher
+        required: false
+    ports:
+      - "127.0.0.1:${MEMWAL_PUBLISHER_PORT:-31416}:31416"
+      - "127.0.0.1:${WALRUS_PUBLISHER_METRICS_PORT:-27182}:27182"
+    volumes:
+      - memwal_publisher_wallets:/wallets
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:31416/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+        reservations:
+          memory: 256m
+          cpus: "0.25"
+
 volumes:
   memwal_pgdata:
   memwal_redis:
+  memwal_publisher_wallets:

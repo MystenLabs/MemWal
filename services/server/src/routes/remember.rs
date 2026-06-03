@@ -129,11 +129,11 @@ fn spawn_prepare_remember_job(
                 let embed_fut = state.embedder.embed(&embed_input);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
-                    &state.config.sidecar_url,
-                    state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
                     &state.config.package_id,
+                    &state.config.sui_rpc_url,
+                    &state.config.sui_network,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 let vector = vector_result?;
@@ -242,11 +242,11 @@ fn spawn_prepare_bulk_remember_job(
                             let embed_fut = state.embedder.embed(&embed_input);
                             let encrypt_fut = crate::storage::seal::seal_encrypt(
                                 &state.http_client,
-                                &state.config.sidecar_url,
-                                state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
                                 &state.config.package_id,
+                                &state.config.sui_rpc_url,
+                                &state.config.sui_network,
                             );
                             let (vector_result, encrypted_result) =
                                 tokio::join!(embed_fut, encrypt_fut);
@@ -879,7 +879,7 @@ pub async fn remember_bulk_status(
 /// Hybrid manual flow:
 /// - Client has already done: embed (OpenRouter) + SEAL encrypt locally
 /// - Client sends {encrypted_data (base64), vector}
-/// - Server uploads encrypted bytes to Walrus via upload-relay sidecar → gets blob_id
+/// - Server uploads encrypted bytes to Walrus via configured backend → gets blob_id
 /// - Server stores {blob_id, vector} in Vector DB
 pub async fn remember_manual(
     State(state): State<Arc<AppState>>,
@@ -1062,6 +1062,14 @@ mod tests {
             openai_api_key: Some("test-key".to_string()),
             openai_api_base,
             walrus_publisher_url: "http://localhost:9001".to_string(),
+            walrus_upload_backend: crate::types::WalrusUploadBackend::Publisher,
+            walrus_publisher_jwt_secret: None,
+            walrus_publisher_jwt_expiry_secs: 120,
+            walrus_publisher_send_object_to_owner: true,
+            walrus_publisher_deletable: true,
+            walrus_publisher_sets_memwal_metadata: false,
+            walrus_package_id: crate::types::default_walrus_package_id_for_network("mainnet")
+                .to_string(),
             walrus_aggregator_url: "http://localhost:9002".to_string(),
             walrus_storage_epochs: 3,
             walrus_aggregator_urls: vec!["http://localhost:9002".to_string()],
@@ -1071,8 +1079,8 @@ mod tests {
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
-            sidecar_url: "http://localhost:9003".to_string(),
-            sidecar_secret: None,
+            enoki_api_key: None,
+            enoki_network: "mainnet".to_string(),
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),

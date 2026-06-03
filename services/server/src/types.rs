@@ -29,11 +29,23 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Sidecar caps Walrus storage purchases to avoid accidental large spends.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 5;
+const DEFAULT_MAINNET_WALRUS_PACKAGE_ID: &str =
+    "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77";
+const DEFAULT_TESTNET_WALRUS_PACKAGE_ID: &str =
+    "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66";
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
     match network {
         "mainnet" => 3,
         _ => MAX_WALRUS_STORAGE_EPOCHS,
+    }
+}
+
+pub(crate) fn default_walrus_package_id_for_network(network: &str) -> &'static str {
+    if network == "testnet" {
+        DEFAULT_TESTNET_WALRUS_PACKAGE_ID
+    } else {
+        DEFAULT_MAINNET_WALRUS_PACKAGE_ID
     }
 }
 
@@ -50,6 +62,35 @@ pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
 
 /// Delay before racing a cold Walrus read against the next configured aggregator.
 pub const DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS: u64 = 150;
+
+/// Walrus upload implementation used by the Rust relayer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalrusUploadBackend {
+    /// Rust HTTP path calling a self-hosted Walrus publisher.
+    Publisher,
+}
+
+impl WalrusUploadBackend {
+    pub fn from_env_value(value: Option<String>) -> Self {
+        match value
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("publisher") | Some("http_publisher") | Some("http-publisher") => {
+                WalrusUploadBackend::Publisher
+            }
+            _ => WalrusUploadBackend::Publisher,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WalrusUploadBackend::Publisher => "publisher",
+        }
+    }
+}
 
 // ============================================================
 // App State (shared across routes + middleware)
@@ -182,6 +223,24 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub openai_api_base: String,
     pub walrus_publisher_url: String,
+    /// Upload backend. Defaults to the Rust HTTP publisher path. Deprecated
+    /// legacy values are mapped back to `Publisher`.
+    pub walrus_upload_backend: WalrusUploadBackend,
+    /// Shared secret for minting one-use JWTs accepted by authenticated
+    /// Walrus publishers. Required for a production mainnet publisher.
+    pub walrus_publisher_jwt_secret: Option<String>,
+    /// JWT lifetime for authenticated publisher uploads.
+    pub walrus_publisher_jwt_expiry_secs: u64,
+    /// Whether publisher uploads should transfer the resulting Blob object to
+    /// the memory owner through the publisher's `send_object_to` parameter.
+    pub walrus_publisher_send_object_to_owner: bool,
+    /// Whether publisher uploads request deletable Blob objects.
+    pub walrus_publisher_deletable: bool,
+    /// True when WALRUS_PUBLISHER_URL points at a MemWal-aware publisher that
+    /// sets on-chain metadata attributes before transferring Blob objects.
+    pub walrus_publisher_sets_memwal_metadata: bool,
+    /// Walrus package ID used for native on-chain Blob object discovery.
+    pub walrus_package_id: String,
     pub walrus_aggregator_url: String,
     /// Number of Walrus storage epochs requested for new uploads.
     pub walrus_storage_epochs: u32,
@@ -202,10 +261,10 @@ pub struct Config {
     pub sui_private_keys: Vec<String>,
     pub package_id: String,
     pub registry_id: String,
-    /// URL of the SEAL/Walrus TS sidecar HTTP server
-    pub sidecar_url: String,
-    /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
-    pub sidecar_secret: Option<String>,
+    /// Optional Enoki API key for sponsored transactions.
+    pub enoki_api_key: Option<String>,
+    /// Sui network name sent to Enoki sponsorship APIs.
+    pub enoki_network: String,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
@@ -228,7 +287,7 @@ impl Config {
             _ => "https://fullnode.mainnet.sui.io:443",
         };
         let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
-            .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:31416".to_string());
         let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
             .unwrap_or_else(|_| "https://aggregator.walrus-mainnet.walrus.space".to_string());
         let walrus_aggregator_urls = parse_walrus_aggregator_urls(
@@ -251,6 +310,23 @@ impl Config {
             openai_api_base: std::env::var("OPENAI_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             walrus_publisher_url,
+            walrus_upload_backend: WalrusUploadBackend::from_env_value(
+                std::env::var("WALRUS_UPLOAD_BACKEND").ok(),
+            ),
+            walrus_publisher_jwt_secret: std::env::var("WALRUS_PUBLISHER_JWT_SECRET").ok(),
+            walrus_publisher_jwt_expiry_secs: std::env::var("WALRUS_PUBLISHER_JWT_EXPIRY_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(120),
+            walrus_publisher_send_object_to_owner: env_bool_default(
+                "WALRUS_PUBLISHER_SEND_OBJECT_TO_OWNER",
+                true,
+            ),
+            walrus_publisher_deletable: env_bool_default("WALRUS_PUBLISHER_DELETABLE", true),
+            walrus_publisher_sets_memwal_metadata: env_bool("WALRUS_PUBLISHER_SETS_MEMWAL_METADATA"),
+            walrus_package_id: std::env::var("WALRUS_PACKAGE_ID")
+                .unwrap_or_else(|_| default_walrus_package_id_for_network(&network).to_string()),
             walrus_aggregator_url,
             walrus_storage_epochs: configured_walrus_storage_epochs(&network),
             walrus_aggregator_urls,
@@ -277,9 +353,8 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
-            sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            enoki_api_key: std::env::var("ENOKI_API_KEY").ok(),
+            enoki_network: std::env::var("ENOKI_NETWORK").unwrap_or(network),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
@@ -292,6 +367,10 @@ impl Config {
 }
 
 fn env_bool(name: &str) -> bool {
+    env_bool_default(name, false)
+}
+
+fn env_bool_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|v| {
             matches!(
@@ -299,7 +378,7 @@ fn env_bool(name: &str) -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(default)
 }
 
 fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
@@ -739,7 +818,8 @@ pub struct AnalyzeResponse {
 
 /// POST /api/remember/manual
 /// Client sends SEAL-encrypted data (base64) + pre-computed embedding vector.
-/// Server uploads to Walrus via sidecar, then stores the vector ↔ blobId mapping.
+/// Server uploads to Walrus via the configured upload backend, then stores the
+/// vector ↔ blobId mapping.
 #[derive(Debug, Deserialize)]
 pub struct RememberManualRequest {
     pub encrypted_data: String, // base64-encoded SEAL-encrypted bytes
@@ -917,7 +997,7 @@ pub struct ConfigResponse {
 // Sponsor Types
 // ============================================================
 
-/// POST /sponsor — validated request body forwarded to sidecar
+/// POST /sponsor — validated request body forwarded to Enoki.
 #[derive(Debug, Deserialize)]
 pub struct SponsorRequest {
     pub sender: String,
@@ -925,7 +1005,7 @@ pub struct SponsorRequest {
     pub transaction_block_kind_bytes: String,
 }
 
-/// POST /sponsor/execute — validated request body forwarded to sidecar.
+/// POST /sponsor/execute — validated request body forwarded to Enoki.
 /// `sender` is optional — when present it is validated and counted against
 /// the per-sender rate limit bucket (same axis as POST /sponsor).
 #[derive(Debug, Deserialize)]
@@ -1085,16 +1165,6 @@ impl AppError {
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
         }
     }
-}
-
-// ============================================================
-// Sidecar Types (shared by seal.rs + walrus.rs)
-// ============================================================
-
-/// Error response from the TS sidecar HTTP server
-#[derive(Debug, Deserialize)]
-pub struct SidecarError {
-    pub error: String,
 }
 
 // ============================================================
@@ -1343,6 +1413,26 @@ mod tests {
         assert_eq!(
             default_walrus_storage_epochs_for_network("testnet"),
             MAX_WALRUS_STORAGE_EPOCHS
+        );
+    }
+
+    #[test]
+    fn walrus_upload_backend_defaults_to_publisher() {
+        assert_eq!(
+            WalrusUploadBackend::from_env_value(None),
+            WalrusUploadBackend::Publisher
+        );
+        assert_eq!(
+            WalrusUploadBackend::from_env_value(Some("".to_string())),
+            WalrusUploadBackend::Publisher
+        );
+        assert_eq!(
+            WalrusUploadBackend::from_env_value(Some("unknown".to_string())),
+            WalrusUploadBackend::Publisher
+        );
+        assert_eq!(
+            WalrusUploadBackend::from_env_value(Some("legacy".to_string())),
+            WalrusUploadBackend::Publisher
         );
     }
 

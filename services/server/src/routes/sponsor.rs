@@ -1,12 +1,11 @@
-//! `/sponsor` + `/sponsor/execute` proxy handlers.
+//! `/sponsor` + `/sponsor/execute` handlers.
 //!
-//! Thin authenticated proxies that forward Enoki-sponsor requests to the
-//! internal sidecar, with input validation (Sui address / tx digest /
-//! signature size / base64) and per-sender rate limiting. Upstream error
-//! bodies are never echoed to the client — they're logged server-side and
-//! masked to a generic message (`mask_upstream`).
+//! Thin Enoki sponsorship handlers with input validation (Sui address / tx
+//! digest / signature size / base64) and per-sender rate limiting. Upstream
+//! error bodies are never echoed to the client — they're logged server-side
+//! and masked to a generic message (`mask_upstream`).
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::response::Response;
 use base64::Engine as _;
@@ -19,6 +18,7 @@ use crate::types::*;
 /// schemes are 65/97 bytes, zkLogin signatures are variable-size payloads.
 /// Upper bound to reject obviously oversized inputs before any work.
 const MAX_SPONSORED_SIGNATURE_BYTES: usize = 2048;
+const ENOKI_API_BASE_URL: &str = "https://api.enoki.mystenlabs.com/v1";
 
 fn mask_upstream(status: u16) -> (axum::http::StatusCode, &'static str) {
     match status {
@@ -76,7 +76,63 @@ fn validate_sponsored_signature_len(len: usize) -> bool {
     (65..=MAX_SPONSORED_SIGNATURE_BYTES).contains(&len)
 }
 
-/// POST /sponsor — proxy to sidecar POST /sponsor
+async fn call_enoki(
+    state: &AppState,
+    path: &str,
+    payload: serde_json::Value,
+    operation: &'static str,
+) -> Result<(reqwest::StatusCode, Bytes), AppError> {
+    let api_key = state.config.enoki_api_key.as_deref().ok_or_else(|| {
+        AppError::Internal("Enoki sponsorship is not configured (ENOKI_API_KEY missing)".into())
+    })?;
+    let url = format!("{}{}", ENOKI_API_BASE_URL, path);
+    let request = state
+        .http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .bearer_auth(api_key)
+        .json(&payload);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "enoki",
+            operation,
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Enoki {} request failed: {}", operation, e))
+    })?;
+    let status = response.status();
+    crate::observability::observe_external(
+        "enoki",
+        operation,
+        &status.as_u16().to_string(),
+        started.elapsed(),
+    );
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Enoki {} read failed: {}", operation, e)))?;
+    Ok((status, body))
+}
+
+fn enoki_data_body(body: &[u8], operation: &str) -> Result<Vec<u8>, AppError> {
+    let json: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse Enoki {} response: {}",
+            operation, e
+        ))
+    })?;
+    let data = json
+        .get("data")
+        .cloned()
+        .ok_or_else(|| AppError::Internal(format!("Enoki {} response missing data", operation)))?;
+    serde_json::to_vec(&data)
+        .map_err(|e| AppError::Internal(format!("Failed to encode Enoki {} data: {}", operation, e)))
+}
+
+/// POST /sponsor — create an Enoki-sponsored transaction.
 pub async fn sponsor_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -144,50 +200,23 @@ pub async fn sponsor_proxy(
         }
     }
 
-    // Re-serialise only validated fields before forwarding.
-    let forwarded = serde_json::json!({
+    let payload = serde_json::json!({
+        "network": state.config.enoki_network.clone(),
         "sender": req.sender,
         "transactionBlockKindBytes": req.transaction_block_kind_bytes,
     });
 
-    let url = format!("{}/sponsor", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-    let started = std::time::Instant::now();
-    let resp = req.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sidecar",
-            "sponsor",
-            "transport_error",
-            started.elapsed(),
-        );
-        crate::observability::record_sidecar_failure("sponsor", "transport_error");
-        AppError::Internal(format!("Sponsor proxy failed: {}", e))
-    })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external("sidecar", "sponsor", &status_label, started.elapsed());
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor proxy read failed: {}", e)))?;
+    let (upstream_status, resp_body) =
+        call_enoki(&state, "/transaction-blocks/sponsor", payload, "sponsor").await?;
 
     if upstream_status.is_success() {
+        let data = enoki_data_body(&resp_body, "sponsor")?;
         Ok(Response::builder()
             .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
             .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
+            .body(Body::from(data))
             .unwrap())
     } else {
-        crate::observability::record_sidecar_failure("sponsor", "http_error");
         tracing::error!(
             "sponsor upstream error {}: {}",
             upstream_status,
@@ -198,7 +227,7 @@ pub async fn sponsor_proxy(
     }
 }
 
-/// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
+/// POST /sponsor/execute — execute a signed sponsored transaction.
 pub async fn sponsor_execute_proxy(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -265,54 +294,32 @@ pub async fn sponsor_execute_proxy(
         }
     }
 
-    let forwarded = serde_json::json!({
+    let payload = serde_json::json!({
         "digest": req.digest,
         "signature": req.signature,
     });
 
-    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-    let started = std::time::Instant::now();
-    let resp = req.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sidecar",
-            "sponsor_execute",
-            "transport_error",
-            started.elapsed(),
-        );
-        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
-        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
-    })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sidecar",
+    let encoded_digest = percent_encoding::utf8_percent_encode(
+        &req.digest,
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let (upstream_status, resp_body) = call_enoki(
+        &state,
+        &format!("/transaction-blocks/sponsor/{}", encoded_digest),
+        payload,
         "sponsor_execute",
-        &status_label,
-        started.elapsed(),
-    );
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+    )
+    .await?;
 
     if upstream_status.is_success() {
+        let data = enoki_data_body(&resp_body, "sponsor_execute")?;
         Ok(Response::builder()
             .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
             .header("Content-Type", "application/json")
-            .body(Body::from(resp_body))
+            .body(Body::from(data))
             .unwrap())
     } else {
-        crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
         tracing::error!(
             "sponsor/execute upstream error {}: {}",
             upstream_status,

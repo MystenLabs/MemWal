@@ -145,18 +145,9 @@ In bridged mode, the package also:
 
 ### Streamable HTTP
 
-Use HTTP transport when the MCP host can connect directly to a remote MCP URL and attach headers.
-
-The typical endpoint is:
-
-```text
-https://relayer.memwal.ai/api/mcp
-```
-
-with request headers:
-
-- `Authorization: Bearer <delegatePrivateKey>`
-- `x-memwal-account-id: <accountId>`
+The current Rust relayer does not expose remote MCP HTTP routes. The supported
+path is the local stdio package, which calls the normal relayer API after
+loading saved credentials.
 
 This is a different surface from the local stdio package. The auth and session flow are not identical.
 

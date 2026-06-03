@@ -3,7 +3,6 @@ mod auth;
 mod compatibility;
 mod engine;
 mod jobs;
-mod mcp_proxy;
 mod observability;
 mod rate_limit;
 mod routes;
@@ -34,39 +33,12 @@ use jobs::{
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
 use types::{
-    AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
-    DEFAULT_EMBEDDING_CACHE_TTL_SECS,
+    AppState, Config, KeyPool, WalrusUploadBackend, DEFAULT_BLOB_CACHE_MAX_BYTES,
+    DEFAULT_BLOB_CACHE_TTL_SECS, DEFAULT_EMBEDDING_CACHE_TTL_SECS,
 };
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-
-fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
-    let Ok(raw) = std::env::var(name) else {
-        return fallback;
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return fallback;
-    }
-    let Ok(parsed) = raw.parse::<u64>() else {
-        tracing::warn!("ignoring invalid {}={}; using {}", name, raw, fallback);
-        return fallback;
-    };
-    if parsed < min {
-        tracing::warn!("ignoring too-small {}={}; using {}", name, parsed, fallback);
-        return fallback;
-    }
-    if parsed > max {
-        tracing::warn!("clamping {}={} to {}", name, parsed, max);
-        return max;
-    }
-    parsed
-}
-
-fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
-    parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
-}
 
 #[tokio::main]
 async fn main() {
@@ -109,114 +81,12 @@ async fn main() {
         tracing::warn!("⚠️  Unset RATE_LIMIT_DISABLED to restore protection.");
     }
 
-    // Start TS sidecar HTTP server (SEAL + Walrus operations)
-    let sidecar_url = config.sidecar_url.clone();
-    tracing::info!("  sidecar: starting at {}", sidecar_url);
-    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
-    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    let mcp_relayer_url = std::env::var("MEMWAL_RELAYER_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
-    let mut sidecar_child = tokio::process::Command::new("npx")
-        .args(["tsx", "sidecar-server.ts"])
-        .current_dir(&scripts_dir)
-        .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("Failed to start TS sidecar. Is Node.js installed?");
-
-    // Wait for sidecar to be ready (health check with retry)
-    // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    // Shared outbound HTTP client. Set a bounded timeout so Sui/OpenAI/Walrus
+    // requests do not pin workers indefinitely.
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
-    let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
-                }
-            }
-        }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
-        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
-    }
-
-    // Keep a cheap heartbeat in the Rust logs so operators can distinguish
-    // Enoki/Walrus failures from the sidecar process becoming unavailable.
-    // If the sidecar remains unhealthy, exit the relayer so Railway restarts
-    // the whole container and brings up a fresh sidecar process.
-    let sidecar_watch_interval_secs = parse_env_u64("SIDECAR_WATCHDOG_INTERVAL_SECS", 30, 5, 300);
-    let sidecar_watch_timeout_secs = parse_env_u64("SIDECAR_WATCHDOG_TIMEOUT_SECS", 2, 1, 30);
-    let sidecar_watch_max_failures = parse_env_u32("SIDECAR_WATCHDOG_MAX_FAILURES", 6, 1, 100);
-    tracing::info!(
-        "  sidecar watchdog: interval={}s timeout={}s max_failures={}",
-        sidecar_watch_interval_secs,
-        sidecar_watch_timeout_secs,
-        sidecar_watch_max_failures
-    );
-    let sidecar_watch_client = http_client.clone();
-    let sidecar_watch_url = health_url.clone();
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
-        let mut consecutive_failures = 0u32;
-        loop {
-            interval.tick().await;
-            match sidecar_watch_client
-                .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "  sidecar: health recovered after {} failed check(s)",
-                            consecutive_failures
-                        );
-                    }
-                    consecutive_failures = 0;
-                }
-                Ok(resp) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check failed status={} consecutive_failures={}",
-                        resp.status(),
-                        consecutive_failures
-                    );
-                }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check error consecutive_failures={} error={}",
-                        consecutive_failures,
-                        e
-                    );
-                }
-            }
-            if consecutive_failures >= sidecar_watch_max_failures {
-                tracing::error!(
-                    "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
-                    consecutive_failures
-                );
-                std::process::exit(1);
-            }
-        }
-    });
 
     // Initialize database (PostgreSQL + pgvector).
     // `Arc` so the MemoryEngine impl shares the same pool as the handlers.
@@ -262,6 +132,39 @@ async fn main() {
             .expect("Failed to initialize Walrus aggregator (invalid URL?)");
     }
     tracing::info!("  Walrus publisher: {}", config.walrus_publisher_url);
+    tracing::info!("  Walrus package: {}", config.walrus_package_id);
+    tracing::info!(
+        "  Walrus upload backend: {}",
+        config.walrus_upload_backend.as_str()
+    );
+    if config.walrus_upload_backend == WalrusUploadBackend::Publisher {
+        if config.walrus_publisher_jwt_secret.is_some() {
+            tracing::info!(
+                "  Walrus publisher auth: minting per-upload JWTs (exp={}s)",
+                config.walrus_publisher_jwt_expiry_secs
+            );
+        } else {
+            tracing::warn!(
+                "  Walrus publisher auth: WALRUS_PUBLISHER_JWT_SECRET is unset; only unauthenticated/local/testnet publishers will accept uploads"
+            );
+        }
+        if config.walrus_publisher_send_object_to_owner {
+            tracing::info!("  Walrus publisher ownership: send_object_to=memory owner");
+        } else {
+            tracing::warn!(
+                "  Walrus publisher ownership: send_object_to disabled; publisher wallet will own new Blob objects"
+            );
+        }
+        if config.walrus_publisher_sets_memwal_metadata {
+            tracing::info!(
+                "  Walrus publisher metadata: MemWal on-chain attrs enabled before transfer"
+            );
+        } else {
+            tracing::warn!(
+                "  Walrus publisher metadata: stock publisher upload does not set MemWal on-chain attrs; DB-backed recall works, on-chain metadata restore needs a custom publisher/metadata step"
+            );
+        }
+    }
     tracing::info!("  Walrus aggregator: {}", config.walrus_aggregator_url);
     if config.walrus_aggregator_urls.len() > 1 {
         tracing::info!(
@@ -596,31 +499,6 @@ async fn main() {
             rate_limit::sponsor_rate_limit_middleware,
         ));
 
-    // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
-    // No signed-request auth here: MCP clients ship a single Bearer at SSE
-    // open and the sidecar parses it as the Ed25519 delegate key. Body limit
-    // is generous on the POST route (JSON-RPC envelopes can carry analyze
-    // text up to a few hundred KiB) and irrelevant on the GET SSE route.
-    let mcp_routes = Router::new()
-        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
-        .route(
-            "/api/mcp/messages",
-            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        )
-        // Streamable HTTP transport (MCP 2025-06). Single URL that
-        // handles GET (open SSE), POST (JSON-RPC with optional SSE
-        // upgrade), and DELETE (close session). Lets users add the
-        // server via `claude mcp add --transport http memwal <URL>`
-        // without any package install.
-        .route(
-            "/api/mcp",
-            get(mcp_proxy::streamable_proxy)
-                .post(mcp_proxy::streamable_proxy)
-                .delete(mcp_proxy::streamable_proxy)
-                .options(mcp_proxy::streamable_proxy)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        );
-
     // Public routes
     // /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -644,8 +522,7 @@ async fn main() {
             "/metrics",
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
-        .merge(sponsor_routes)
-        .merge(mcp_routes);
+        .merge(sponsor_routes);
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
@@ -686,7 +563,7 @@ async fn main() {
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
                     // SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
-                    // MCP headers — caller's Walrus Memory account id + optional default namespace.
+                    // Optional client context headers.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
                 ])
@@ -716,7 +593,7 @@ async fn main() {
         config.port
     );
 
-    // Graceful shutdown: kill sidecar when server stops
+    // Graceful shutdown.
     let shutdown = async {
         tokio::signal::ctrl_c().await.ok();
         tracing::info!("shutting down...");
@@ -729,8 +606,4 @@ async fn main() {
     .with_graceful_shutdown(shutdown)
     .await
     .expect("Server failed");
-
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
 }

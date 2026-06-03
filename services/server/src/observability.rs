@@ -100,15 +100,6 @@ static EXTERNAL_REQUEST_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new
     .expect("register memwal_external_request_duration_seconds")
 });
 
-static SIDECAR_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    prometheus::register_int_counter_vec!(
-        "memwal_sidecar_failures_total",
-        "Sidecar failures seen by the Rust relayer.",
-        &["operation", "reason"]
-    )
-    .expect("register memwal_sidecar_failures_total")
-});
-
 static DB_QUERY_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     prometheus::register_histogram_vec!(
         HistogramOpts::new(
@@ -290,12 +281,6 @@ pub fn observe_external(
         .observe(elapsed.as_secs_f64());
 }
 
-pub fn record_sidecar_failure(operation: &'static str, reason: &'static str) {
-    SIDECAR_FAILURES_TOTAL
-        .with_label_values(&[operation, reason])
-        .inc();
-}
-
 pub fn observe_db(operation: &'static str, status: &'static str, elapsed: Duration) {
     DB_QUERY_DURATION_SECONDS
         .with_label_values(&[operation, status])
@@ -361,9 +346,6 @@ fn route_label(path: &str) -> String {
         "/api/restore" => "/api/restore".to_string(),
         "/api/forget" => "/api/forget".to_string(),
         "/api/stats" => "/api/stats".to_string(),
-        "/api/mcp/sse" => "/api/mcp/sse".to_string(),
-        "/api/mcp/messages" => "/api/mcp/messages".to_string(),
-        "/api/mcp" => "/api/mcp".to_string(),
         _ if path.starts_with("/api/remember/") => "/api/remember/{job_id}".to_string(),
         _ => "unknown".to_string(),
     }

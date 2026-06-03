@@ -8,10 +8,10 @@ Run against a live server:
     python tests/test_sponsor_rate_limit.py
 
 Server must be running on BASE_URL with Redis available.
-The sidecar does NOT need to be running for most tests —
-rate limit and validation are enforced before the sidecar is called.
+Enoki does not need to be reachable for most tests —
+rate limit and validation are enforced before Enoki is called.
 
-Tests that require a slow/mock sidecar are marked SKIP_NO_SIDECAR.
+Tests that require a slow/mock upstream are marked SKIP_NO_UPSTREAM.
 """
 
 import json
@@ -24,7 +24,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = os.environ.get("TEST_BASE_URL", "http://localhost:8000")
-SKIP_NO_SIDECAR = os.environ.get("WITH_SIDECAR", "0") == "1"
+SKIP_NO_UPSTREAM = os.environ.get("WITH_ENOKI_MOCK", "0") == "1"
 
 PASS = "\033[32m[PASS]\033[0m"
 FAIL = "\033[31m[FAIL]\033[0m"
@@ -443,12 +443,12 @@ def test_semaphore_503_when_at_capacity():
     """
     Plan criterion 3: 9 in-flight requests simultaneously → 9th returns 503.
 
-    Requires a slow sidecar (WITH_SIDECAR=1) to keep requests in-flight.
-    Without a sidecar, the handler completes too fast to saturate the semaphore.
-    Skipped unless WITH_SIDECAR=1.
+    Requires a slow upstream mock (WITH_ENOKI_MOCK=1) to keep requests in-flight.
+    Without a slow upstream, the handler completes too fast to saturate the semaphore.
+    Skipped unless WITH_ENOKI_MOCK=1.
     """
-    if not SKIP_NO_SIDECAR:
-        print(f"{SKIP} semaphore 503 test requires slow sidecar — set WITH_SIDECAR=1")
+    if not SKIP_NO_UPSTREAM:
+        print(f"{SKIP} semaphore 503 test requires slow upstream — set WITH_ENOKI_MOCK=1")
         return
 
     body = valid_sponsor_body()
@@ -474,10 +474,10 @@ def test_semaphore_503_when_at_capacity():
 def test_mask_upstream_enoki_429_returns_503_generic():
     """
     Enoki returns 429 with body containing API key → client receives 503 with generic message.
-    Requires a mock sidecar that returns 429. Skipped unless WITH_SIDECAR=1.
+    Requires a mock Enoki upstream that returns 429. Skipped unless WITH_ENOKI_MOCK=1.
     """
-    if not SKIP_NO_SIDECAR:
-        print(f"{SKIP} upstream masking test requires mock sidecar — set WITH_SIDECAR=1")
+    if not SKIP_NO_UPSTREAM:
+        print(f"{SKIP} upstream masking test requires mock Enoki — set WITH_ENOKI_MOCK=1")
         return
 
     body = valid_sponsor_body()
@@ -589,14 +589,14 @@ def run_all():
         ("shared bucket alternating → 429",         test_rate_limit_shared_bucket_alternating_endpoints),
         ("XFF last-entry rule",                     test_rate_limit_xff_uses_last_entry),
         ("different IPs independent",               test_rate_limit_different_ips_independent),
-        ("9 concurrent → 503 (needs sidecar)",      test_semaphore_503_when_at_capacity),
+        ("9 concurrent → 503 (needs upstream mock)", test_semaphore_503_when_at_capacity),
 
         # Phase 01 — Rate limiting (recovery & counting)
         ("window resets after expiry",              test_rate_limit_window_resets_via_redis),
         ("valid body counts against limit",         test_rate_limit_valid_body_counts_against_limit),
 
         # Phase 02 — Masking + CORS
-        ("upstream 429 masked (needs sidecar)",     test_mask_upstream_enoki_429_returns_503_generic),
+        ("upstream 429 masked (needs upstream mock)", test_mask_upstream_enoki_429_returns_503_generic),
         ("CORS disallowed origin blocked",          test_cors_disallowed_origin_no_header),
         ("CORS allowed origin passes",              test_cors_allowed_origin_gets_header),
     ]

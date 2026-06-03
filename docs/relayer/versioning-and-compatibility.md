@@ -16,11 +16,11 @@ The relayer package version follows SemVer, and the public API contract is expos
 
 Public surfaces include:
 
-- HTTP routes under `/api/*`, `/health`, `/version`, `/config`, `/sponsor`, and `/api/mcp*`
+- HTTP routes under `/api/*`, `/health`, `/version`, `/config`, and `/sponsor`
 - signed auth headers and the canonical signature format
 - JSON request/response field names and status-code semantics
 - runtime config and environment variables used by self-hosted relayers
-- MCP transport behavior and bearer credential expectations
+- MCP package behavior and bearer credential expectations
 
 ## Compatibility Matrix
 

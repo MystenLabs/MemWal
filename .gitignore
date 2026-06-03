@@ -26,6 +26,7 @@ pnpm-debug.log*
 .env.test
 */.env.test
 **/.env.test
+services/server/.env.walrus-publisher
 # Keep .env.example for documentation
 !.env.example
 
@@ -62,6 +63,9 @@ next-env.d.ts
 
 # Walrus CLI
 walrus.exe
+infra/memwal-publisher/target/
+infra/walrus-publisher/wallets/
+infra/memwal-publisher/wallets/
 
 # Benchmark outputs
 benchmark-*.json

@@ -61,6 +61,8 @@ The TypeScript apps talk to a managed relayer by default. You only need to run b
 
 Requires:
 - PostgreSQL with `pgvector` extension
+- Redis for global rate limits and ciphertext caching
+- Private MemWal publisher for Walrus uploads on mainnet
 - Sui RPC access
 - Walrus endpoints
 - Embedding provider credentials (OpenAI-compatible)
@@ -68,19 +70,23 @@ Requires:
 Quick start:
 
 ```bash
-# Start PostgreSQL with pgvector
-docker compose -f services/server/docker-compose.yml up -d postgres
-
 # Configure environment
 cp services/server/.env.example services/server/.env
+cp services/server/.env.walrus-publisher.example services/server/.env.walrus-publisher
 # Edit .env with your credentials
+# Edit .env.walrus-publisher with the same WALRUS_PUBLISHER_JWT_SECRET
+# and a funded publisher wallet
 
-# Install sidecar dependencies
-cd services/server/scripts && npm ci && cd ..
+# Start support services: PostgreSQL, Redis, and private Walrus publisher
+docker compose -f services/server/docker-compose.yml --profile publisher up -d postgres redis memwal-publisher
 
 # Run the relayer
 cargo run
 ```
+
+For the host-run relayer above, keep `WALRUS_PUBLISHER_URL=http://127.0.0.1:31416`.
+If the relayer runs as another container in the same compose/network, set
+`WALRUS_PUBLISHER_URL=http://memwal-publisher:31416`.
 
 For the full relayer setup guide, see [Self-Hosting](/relayer/self-hosting).
 
@@ -122,7 +128,7 @@ MemWal/
 | `pnpm install` fails | Wrong pnpm version | Use pnpm ≥ 9.12: `corepack enable && corepack prepare pnpm@9.12.3 --activate` |
 | Docs site won't start | Missing Mintlify | Run `pnpm install` from the root |
 | Relayer crashes on boot | Missing pgvector | Install the `pgvector` PostgreSQL extension |
-| Sidecar timeout | Missing sidecar deps | Run `cd services/server/scripts && npm ci` |
+| Publisher won't start | Missing `WALRUS_PUBLISHER_JWT_SECRET` or funded wallet | Fill `services/server/.env.walrus-publisher`; fund `PUBLISHER_SUI_PRIVATE_KEY` |
 
 ## See Also
 

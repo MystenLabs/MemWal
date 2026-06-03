@@ -164,15 +164,9 @@ The tool extracts each distinct fact and saves them as separate memories. Follow
 
 ## Direct HTTP setup
 
-If your MCP client supports remote servers with custom headers, you can connect directly to the hosted relayer instead of running `npx` locally.
-
-Use:
-
-- URL: `https://relayer.memwal.ai/api/mcp`
-- Header: `Authorization: Bearer <delegatePrivateKey>`
-- Header: `x-memwal-account-id: <accountId>`
-
-Those values come from `~/.memwal/credentials.json` after a successful login. See [Reference](/mcp/reference#streamable-http) for the full config shape and security notes.
+The current Rust relayer does not expose remote MCP HTTP routes. Use the local
+`npx -y @mysten-incubation/memwal-mcp` stdio package; it calls the normal
+relayer API after login.
 
 ## Switching environments
 
@@ -212,18 +206,15 @@ This deletes the local credentials file. The on-chain delegate key is **not** re
 
 <CardGroup cols={2}>
   <Card title="Reference" icon="book" href="/mcp/reference">
-    All six tools with parameters, CLI flags, and transport routes
+    All six tools with parameters and CLI flags
   </Card>
   <Card title="How It Works" icon="route" href="/mcp/how-it-works">
     Auth-required mode, local credentials, and bridge behavior
   </Card>
-  <Card title="Streamable HTTP transport" icon="globe" href="/mcp/reference#streamable-http">
-    Skip `npx` — point your client at the relayer URL directly
-  </Card>
   <Card title="Self-Hosting" icon="server" href="/mcp/reference#self-hosting">
-    Run your own relayer and route MCP traffic through it
+    Run your own relayer and use the local MCP package against it
   </Card>
   <Card title="Environment Variables" icon="gear" href="/reference/environment-variables">
-    Full list of relayer + sidecar settings (SEAL, Walrus, sessions)
+    Full list of relayer settings (SEAL, Walrus, publisher)
   </Card>
 </CardGroup>

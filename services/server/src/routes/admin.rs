@@ -11,6 +11,7 @@
 
 use axum::extract::State;
 use axum::{Extension, Json};
+use base64::Engine as _;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
@@ -231,7 +232,7 @@ pub async fn ask(
         .await
         .into_iter()
         // fetch_one returns Ok(None) for blobs that are gone / failed to
-        // decrypt; surface only the AppError (sidecar down, etc.).
+        // decrypt; surface only the AppError for caller-visible failures.
         .filter_map(|r| match r {
             Ok(Some(m)) => Some(Ok(m)),
             Ok(None) => None,
@@ -428,16 +429,7 @@ pub async fn restore(
         owner,
         namespace
     );
-    let on_chain_blobs = walrus::query_blobs_by_owner(
-        &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
-        owner,
-        Some(namespace),
-        Some(&state.config.package_id),
-        Some(limit),
-    )
-    .await?;
+    let on_chain_blobs = native_restore_on_chain_blobs(state.as_ref(), owner, namespace, limit).await?;
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
     let total = all_blob_ids.len();
 
@@ -567,8 +559,8 @@ pub async fn restore(
     let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
-            let sidecar_secret = state.config.sidecar_secret.clone();
+            let sui_rpc_url = state.config.sui_rpc_url.clone();
+            let sui_network = state.config.sui_network.clone();
             let credential = credential.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids
@@ -579,12 +571,12 @@ pub async fn restore(
             async move {
                 match seal::seal_decrypt(
                     http_client,
-                    &sidecar_url,
-                    sidecar_secret.as_deref(),
                     &encrypted_data,
                     &credential,
                     &package_id,
                     &account_id,
+                    &sui_rpc_url,
+                    &sui_network,
                 )
                 .await
                 {
@@ -686,6 +678,495 @@ pub async fn restore(
     }))
 }
 
+#[derive(Clone, Debug)]
+struct RawOnChainBlob {
+    object_id: String,
+    raw_blob_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RecentBlobCandidate {
+    object_id: String,
+}
+
+#[derive(Debug)]
+struct BlobMetadata {
+    namespace: String,
+    owner: String,
+    package_id: String,
+    agent_id: String,
+}
+
+async fn native_restore_on_chain_blobs(
+    state: &AppState,
+    owner: &str,
+    namespace: &str,
+    limit: usize,
+) -> Result<Vec<walrus::OnChainBlob>, AppError> {
+    let blob_type = format!("{}::blob::Blob", state.config.walrus_package_id);
+    let desired_matches = limit.clamp(1, 500);
+    let mut raw_blobs = if limit > 0 {
+        let candidates =
+            query_recent_blob_object_candidates(state, owner, &blob_type, desired_matches).await?;
+        let raw = fetch_raw_blob_objects(state, &candidates).await?;
+        tracing::info!(
+            "restore: found {}/{} recent Walrus blob candidates for owner={} target={}",
+            raw.len(),
+            candidates.len(),
+            owner,
+            desired_matches
+        );
+        raw
+    } else {
+        query_owned_blob_objects(state, owner, &blob_type).await?
+    };
+
+    // Newest transaction candidates are already ordered. Owned-object scans are
+    // not time ordered; keep deterministic object-id order for stable restore
+    // behavior.
+    if limit == 0 {
+        raw_blobs.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+    }
+
+    let package_filter = state.config.package_id.clone();
+    let metadata_tasks = raw_blobs.into_iter().map(|raw| {
+        let state = state;
+        let package_filter = package_filter.clone();
+        async move {
+            let metadata = fetch_blob_metadata(state, &raw.object_id)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::debug!(
+                        "restore: blob {} has no MemWal metadata or metadata fetch failed: {}",
+                        raw.object_id,
+                        err
+                    );
+                    BlobMetadata::default()
+                });
+            (raw, metadata, package_filter)
+        }
+    });
+
+    let mut blobs = Vec::new();
+    let mut stream = stream::iter(metadata_tasks).buffer_unordered(5);
+    while let Some((raw, metadata, package_filter)) = stream.next().await {
+        if !namespace.is_empty() && metadata.namespace != namespace {
+            continue;
+        }
+        if !package_filter.is_empty() && metadata.package_id != package_filter {
+            continue;
+        }
+        let Some(raw_blob_id) = raw.raw_blob_id.as_deref() else {
+            continue;
+        };
+        let Some(blob_id) = blob_id_from_raw(raw_blob_id) else {
+            tracing::warn!(
+                "restore: unable to convert raw blob_id for object {}",
+                raw.object_id
+            );
+            continue;
+        };
+        blobs.push(walrus::OnChainBlob {
+            blob_id,
+            object_id: raw.object_id,
+            namespace: metadata.namespace,
+            package_id: metadata.package_id,
+        });
+        if blobs.len() >= desired_matches {
+            break;
+        }
+    }
+
+    tracing::info!(
+        "restore: returning {} on-chain blobs for owner={} ns={}",
+        blobs.len(),
+        owner,
+        namespace
+    );
+    Ok(blobs)
+}
+
+impl Default for BlobMetadata {
+    fn default() -> Self {
+        Self {
+            namespace: "default".to_string(),
+            owner: String::new(),
+            package_id: String::new(),
+            agent_id: String::new(),
+        }
+    }
+}
+
+async fn query_owned_blob_objects(
+    state: &AppState,
+    owner: &str,
+    blob_type: &str,
+) -> Result<Vec<RawOnChainBlob>, AppError> {
+    let mut cursor = serde_json::Value::Null;
+    let mut raw = Vec::new();
+
+    loop {
+        let result = sui_rpc_call(
+            state,
+            "suix_getOwnedObjects",
+            serde_json::json!([
+                owner,
+                {
+                    "filter": { "StructType": blob_type },
+                    "options": { "showContent": true }
+                },
+                cursor,
+                50
+            ]),
+        )
+        .await?;
+
+        if let Some(data) = result.get("data").and_then(|v| v.as_array()) {
+            for obj in data {
+                if let Some(raw_obj) = raw_blob_from_object(obj) {
+                    raw.push(raw_obj);
+                }
+            }
+        }
+
+        let has_next = result
+            .get("hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !has_next {
+            break;
+        }
+        cursor = result.get("nextCursor").cloned().unwrap_or(serde_json::Value::Null);
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    tracing::info!(
+        "restore: found {} owned Walrus blob objects for owner={}",
+        raw.len(),
+        owner
+    );
+    Ok(raw)
+}
+
+async fn query_recent_blob_object_candidates(
+    state: &AppState,
+    owner: &str,
+    blob_type: &str,
+    desired_matches: usize,
+) -> Result<Vec<RecentBlobCandidate>, AppError> {
+    let candidate_cap = desired_matches.saturating_mul(5).clamp(1, 100);
+    let mut cursor = serde_json::Value::Null;
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    while candidates.len() < candidate_cap {
+        let result = sui_rpc_call(
+            state,
+            "suix_queryTransactionBlocks",
+            serde_json::json!([
+                {
+                    "filter": { "ToAddress": owner },
+                    "options": {
+                        "showObjectChanges": true,
+                        "showEffects": false,
+                        "showInput": false
+                    }
+                },
+                cursor,
+                50,
+                true
+            ]),
+        )
+        .await?;
+
+        let Some(txs) = result.get("data").and_then(|v| v.as_array()) else {
+            break;
+        };
+        if txs.is_empty() {
+            break;
+        }
+
+        for tx in txs {
+            let Some(changes) = tx.get("objectChanges").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for change in changes {
+                let change_type = change.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if !matches!(change_type, "transferred" | "created" | "mutated") {
+                    continue;
+                }
+                let object_type = change.get("objectType").and_then(|v| v.as_str());
+                if !object_type
+                    .map(|value| walrus_blob_type_matches(value, blob_type))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let belongs_to_owner = owner_matches_recipient(change.get("recipient"), owner)
+                    || owner_matches_recipient(change.get("owner"), owner);
+                if !belongs_to_owner {
+                    continue;
+                }
+                let Some(object_id) = change.get("objectId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if seen.insert(object_id.to_string()) {
+                    candidates.push(RecentBlobCandidate {
+                        object_id: object_id.to_string(),
+                    });
+                    if candidates.len() >= candidate_cap {
+                        break;
+                    }
+                }
+            }
+            if candidates.len() >= candidate_cap {
+                break;
+            }
+        }
+
+        let has_next = result
+            .get("hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !has_next {
+            break;
+        }
+        cursor = result.get("nextCursor").cloned().unwrap_or(serde_json::Value::Null);
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    Ok(candidates)
+}
+
+async fn fetch_raw_blob_objects(
+    state: &AppState,
+    candidates: &[RecentBlobCandidate],
+) -> Result<Vec<RawOnChainBlob>, AppError> {
+    let mut raw = Vec::new();
+    for chunk in candidates.chunks(50) {
+        let ids: Vec<&str> = chunk.iter().map(|candidate| candidate.object_id.as_str()).collect();
+        let result = sui_rpc_call(
+            state,
+            "sui_multiGetObjects",
+            serde_json::json!([
+                ids,
+                {
+                    "showContent": true,
+                    "showType": true
+                }
+            ]),
+        )
+        .await?;
+
+        if let Some(objects) = result.as_array() {
+            for obj in objects {
+                if let Some(raw_obj) = raw_blob_from_object(obj) {
+                    raw.push(raw_obj);
+                }
+            }
+        }
+    }
+    Ok(raw)
+}
+
+fn raw_blob_from_object(obj: &serde_json::Value) -> Option<RawOnChainBlob> {
+    let object_id = obj
+        .pointer("/data/objectId")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let content = obj.pointer("/data/content")?;
+    if content.get("dataType").and_then(|v| v.as_str()) != Some("moveObject") {
+        return None;
+    }
+    let fields = content.get("fields")?;
+    let raw_blob_id = json_scalar_to_string(
+        fields
+            .get("blob_id")
+            .or_else(|| fields.get("blobId"))
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    Some(RawOnChainBlob {
+        object_id,
+        raw_blob_id,
+    })
+}
+
+async fn fetch_blob_metadata(state: &AppState, object_id: &str) -> Result<BlobMetadata, AppError> {
+    let result = sui_rpc_call(
+        state,
+        "suix_getDynamicFieldObject",
+        serde_json::json!([
+            object_id,
+            {
+                "type": "vector<u8>",
+                "value": [109, 101, 116, 97, 100, 97, 116, 97]
+            }
+        ]),
+    )
+    .await?;
+
+    let mut metadata = BlobMetadata::default();
+    if let Some(contents) = result
+        .pointer("/data/content/fields/value/fields/metadata/fields/contents")
+        .and_then(|v| v.as_array())
+    {
+        for entry in contents {
+            let fields = entry.get("fields").unwrap_or(entry);
+            let key = fields.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let value = fields.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            match key {
+                "memwal_namespace" => metadata.namespace = value.to_string(),
+                "memwal_owner" => metadata.owner = value.to_string(),
+                "memwal_package_id" => metadata.package_id = value.to_string(),
+                "memwal_agent_id" => metadata.agent_id = value.to_string(),
+                _ => {}
+            }
+        }
+    }
+    Ok(metadata)
+}
+
+async fn sui_rpc_call(
+    state: &AppState,
+    method: &'static str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let request = state
+        .http_client
+        .post(&state.config.sui_rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            method,
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sui RPC {} request failed: {}", method, e))
+    })?;
+    let status = response.status();
+    crate::observability::observe_external(
+        "sui_rpc",
+        method,
+        &status.as_u16().to_string(),
+        started.elapsed(),
+    );
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "Sui RPC {} HTTP {}: {}",
+            method,
+            status.as_u16(),
+            body
+        )));
+    }
+    let value: serde_json::Value = response.json().await.map_err(|e| {
+        AppError::Internal(format!("Sui RPC {} JSON parse failed: {}", method, e))
+    })?;
+    if let Some(error) = value.get("error") {
+        return Err(AppError::Internal(format!(
+            "Sui RPC {} error: {}",
+            method, error
+        )));
+    }
+    value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| AppError::Internal(format!("Sui RPC {} missing result", method)))
+}
+
+fn blob_id_from_raw(raw_blob_id: &str) -> Option<String> {
+    let value = raw_blob_id.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.bytes().all(|b| b.is_ascii_digit()) && value.len() > 20 {
+        let bytes = decimal_to_32_le(value)?;
+        return Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
+    }
+    Some(value.to_string())
+}
+
+fn decimal_to_32_le(value: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    for digit in value.bytes() {
+        let mut carry = digit.checked_sub(b'0')? as u16;
+        if carry > 9 {
+            return None;
+        }
+        for byte in &mut bytes {
+            let next = (*byte as u16) * 10 + carry;
+            *byte = (next & 0xff) as u8;
+            carry = next >> 8;
+        }
+        if carry != 0 {
+            return None;
+        }
+    }
+    Some(bytes)
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn owner_matches_recipient(value: Option<&serde_json::Value>, owner: &str) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    if value.as_str() == Some(owner) {
+        return true;
+    }
+    for key in ["AddressOwner", "ObjectOwner", "SingleOwner", "owner"] {
+        if value.get(key).and_then(|v| v.as_str()) == Some(owner) {
+            return true;
+        }
+    }
+    false
+}
+
+fn walrus_blob_type_matches(object_type: &str, blob_type: &str) -> bool {
+    if object_type == blob_type {
+        return true;
+    }
+    let object_parts: Vec<_> = object_type.split("::").collect();
+    let blob_parts: Vec<_> = blob_type.split("::").collect();
+    object_parts.len() == 3
+        && blob_parts.len() == 3
+        && object_parts[1] == blob_parts[1]
+        && object_parts[2] == blob_parts[2]
+        && normalize_sui_address_for_type(object_parts[0])
+            == normalize_sui_address_for_type(blob_parts[0])
+}
+
+fn normalize_sui_address_for_type(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let stripped = lower.strip_prefix("0x").unwrap_or(&lower);
+    let trimmed = stripped.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0x0".to_string()
+    } else {
+        format!("0x{}", trimmed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::RecallResult;
@@ -718,6 +1199,26 @@ mod tests {
         assert!(context.contains("<memory id=\"blob123\""));
         assert!(context.contains("relevance=\"0.90\""));
         assert!(context.contains("User likes coffee</memory>"));
+    }
+
+    #[test]
+    fn restore_decimal_blob_id_conversion_uses_little_endian_bytes() {
+        let bytes = super::decimal_to_32_le("256").unwrap();
+        assert_eq!(bytes[0], 0);
+        assert_eq!(bytes[1], 1);
+        assert!(bytes[2..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn restore_walrus_blob_type_match_normalizes_package_prefix() {
+        assert!(super::walrus_blob_type_matches(
+            "0x00000000000000000000000000000000000000000000000000000000000000ab::blob::Blob",
+            "0xab::blob::Blob",
+        ));
+        assert!(!super::walrus_blob_type_matches(
+            "0xab::other::Blob",
+            "0xab::blob::Blob",
+        ));
     }
 
     #[test]

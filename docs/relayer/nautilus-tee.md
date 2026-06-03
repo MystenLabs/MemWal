@@ -32,10 +32,10 @@ or registered enclave identity.
 
 | Layer | Status |
 | --- | --- |
-| Relayer runtime | Uses the existing Rust relayer and TypeScript sidecar |
+| Relayer runtime | Uses the existing Rust relayer with native SEAL and private MemWal publisher |
 | TEE-oriented image | Provides a wrapper `Containerfile` and entrypoint checks |
 | Runtime config | Provides a manifest example and secret/env template |
-| Local smoke test | Verifies Docker image boot, sidecar readiness, `/health`, and `/metrics` |
+| Local smoke test | Verifies Docker image boot, `/health`, and `/metrics` |
 | Nautilus deployment | Requires your Nautilus CLI/platform to build and run the enclave image |
 | Attestation verification | Must be wired through your Nautilus/Sui verification path before clients rely on it |
 
@@ -47,9 +47,9 @@ flowchart LR
 
     subgraph TEE["TEE enclave / Nautilus runtime target"]
         Relayer["Rust relayer<br/>auth, embedding, search"]
-        Sidecar["TypeScript sidecar<br/>SEAL + Walrus SDK"]
     end
 
+    Publisher["Private MemWal publisher<br/>Walrus upload + metadata transfer"]
     AI["Embedding / LLM API"]
     Seal["SEAL key servers"]
     Walrus["Walrus<br/>SEAL encrypted blobs"]
@@ -61,25 +61,26 @@ flowchart LR
     Relayer --> AI
     Relayer --> Postgres
     Relayer --> Redis
-    Relayer --> Sidecar
-    Sidecar --> Seal
-    Sidecar --> Walrus
-    Sidecar --> Sui
+    Relayer --> Seal
+    Relayer --> Publisher
+    Publisher --> Walrus
+    Publisher --> Sui
+    Relayer --> Walrus
 ```
 
 Write path:
 
 1. Client sends plaintext to the TEE relayer.
 2. The relayer validates delegate-key auth and generates embeddings inside the enclave.
-3. The sidecar SEAL-encrypts the plaintext inside the enclave.
-4. The sidecar uploads only SEAL ciphertext to Walrus.
+3. The Rust relayer SEAL-encrypts the plaintext inside the enclave.
+4. The private MemWal publisher uploads only SEAL ciphertext to Walrus, writes MemWal metadata, and transfers the Blob object.
 5. PostgreSQL stores `owner`, `namespace`, `blob_id`, blob size, and pgvector embeddings.
 
 Recall path:
 
 1. Client sends a plaintext query to the TEE relayer.
 2. The relayer embeds the query and searches pgvector by `owner + namespace`.
-3. The sidecar downloads matching ciphertext blobs from Walrus and SEAL-decrypts inside the enclave.
+3. The relayer downloads matching ciphertext blobs from Walrus and SEAL-decrypts inside the enclave.
 4. The relayer returns plaintext matches to the authenticated client.
 
 ## Reference Template
@@ -147,12 +148,9 @@ These map directly to the existing self-hosted relayer config.
 | `SEAL_SERVER_CONFIGS` or `SEAL_KEY_SERVERS` | maybe | Optional SEAL override. Defaults use the Mysten testnet committee aggregator where available; use `SEAL_SERVER_CONFIGS` for custom committees |
 | `OPENAI_API_KEY` | yes | Embedding and LLM provider key |
 | `OPENAI_API_BASE` | no | OpenAI-compatible base URL |
-| `WALRUS_PUBLISHER_URL` | no | Walrus upload endpoint |
+| `WALRUS_PUBLISHER_URL` | no | Private MemWal publisher endpoint |
 | `WALRUS_AGGREGATOR_URL` | no | Walrus download endpoint |
-| `WALRUS_UPLOAD_RELAY_URL` | no | Upload relay override if required by the sidecar |
 | `PORT` | no | Relayer HTTP port; default `8000` |
-| `SIDECAR_URL` | no | Keep inside the enclave, usually `http://127.0.0.1:9000` |
-| `SIDECAR_AUTH_TOKEN` | yes | Shared secret for Rust-to-sidecar calls; sidecar refuses to start without it |
 | `LOG_FORMAT` | no | Set `json` for production logs |
 | `ALLOWED_ORIGINS` | no | Browser CORS allowlist |
 
@@ -168,7 +166,6 @@ The enclave must be allowed to reach:
 - Sui RPC
 - Walrus publisher
 - Walrus aggregator
-- Walrus upload relay, if configured
 - SEAL key servers or committee aggregators. On testnet, the built-in default is Mysten's initial committee aggregator. Mainnet uses the legacy independent key server default until an official committee aggregator is available.
 - OpenAI-compatible embedding and LLM provider
 
@@ -198,7 +195,7 @@ needs to perform the platform-specific steps for the Nautilus version in use:
 ## Secrets Handling
 
 - Inject secrets at runtime through Nautilus/CI secrets, not through Docker build args.
-- Keep `SERVER_SUI_PRIVATE_KEY`, `SERVER_SUI_PRIVATE_KEYS`, `SIDECAR_AUTH_TOKEN`, `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `ENOKI_API_KEY`, and SEAL API keys out of git.
+- Keep `SERVER_SUI_PRIVATE_KEY`, `SERVER_SUI_PRIVATE_KEYS`, `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `ENOKI_API_KEY`, and SEAL API keys out of git.
 - Restrict host access to the runtime env file and any Nautilus secret store.
 - Disable debug consoles and broad shell access on production enclave hosts.
 - Rotate the server wallet keys if the host-side secret delivery path is exposed.
@@ -253,8 +250,7 @@ TS
 
 Inspect logs for:
 
-- Rust relayer startup: sidecar readiness, PostgreSQL connection, Redis connection, Walrus endpoints, and `WalrusSealEngine`.
-- TypeScript sidecar startup and `/health`.
+- Rust relayer startup: PostgreSQL connection, Redis connection, Walrus endpoints, SEAL config, and `WalrusSealEngine`.
 - SEAL encrypt/decrypt errors.
 - Walrus upload/download errors.
 - Sui RPC or account-resolution errors.
@@ -268,8 +264,8 @@ database URLs.
 
 | Symptom | Likely Cause | Check |
 | --- | --- | --- |
-| `/health` fails | Relayer process, sidecar boot, or ingress issue | Enclave process logs and sidecar readiness logs |
-| `remember` stays running | Walrus upload, wallet signing, or job queue failure | `remember_jobs`, Apalis job rows, sidecar Walrus logs |
+| `/health` fails | Relayer process or ingress issue | Enclave process logs |
+| `remember` stays running | Walrus upload, publisher wallet signing, or job queue failure | `remember_jobs`, Apalis job rows, MemWal publisher logs |
 | `recall` returns empty after smoke write | Wrong namespace/account, pgvector issue, or upload job incomplete | Poll remember job, verify `owner + namespace`, check PostgreSQL migrations |
 | SEAL decrypt fails | Wrong server wallet, delegate auth, SEAL config, key server outage, or committee aggregator outage | `SEAL_SERVER_CONFIGS`, `SERVER_SUI_PRIVATE_KEY`, key server or aggregator reachability |
 | Embedding calls fail | AI endpoint blocked or invalid API key | `OPENAI_API_BASE`, `OPENAI_API_KEY`, outbound allowlist |
@@ -284,7 +280,7 @@ attested enclave identity is verified by clients, gateway policy, or onchain
 logic before the endpoint is trusted.
 
 - Plaintext exists inside the enclave while handling `remember`, `recall`, `analyze`, `ask`, and `restore`.
-- SEAL encryption begins inside the sidecar before Walrus upload. Walrus should only receive encrypted bytes.
+- SEAL encryption begins inside the Rust relayer; the MemWal publisher should only receive encrypted bytes for Walrus upload.
 - Treat the enclave as tamper-resistant, not magically tamper-proof. Attestation and measurement pinning are what let clients distinguish the intended TEE image from a normal host process.
 - PostgreSQL stores vectors and metadata, not production plaintext. Do not enable `BENCHMARK_MODE`.
 - External embedding and LLM providers may see plaintext unless you run those services inside the enclave or switch to a provider/trust model you accept.

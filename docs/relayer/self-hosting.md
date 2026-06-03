@@ -42,30 +42,38 @@ A self-hosted Walrus Memory backend has:
 
 | Component | Location | Description |
 |-----------|----------|-------------|
-| **Rust relayer** | `services/server` | Axum HTTP server — auth, routing, embedding, vector search |
-| **TypeScript sidecar** | `services/server/scripts` | SEAL encrypt/decrypt, Walrus upload, blob query (uses `@mysten/seal` and `@mysten/walrus`) |
+| **Rust relayer** | `services/server` | Axum HTTP server — auth, routing, embedding, native SEAL, vector search |
+| **MemWal publisher** | `infra/memwal-publisher` | Private Walrus publisher wrapper that uploads blobs, writes MemWal metadata, and transfers Blob objects |
 | **PostgreSQL + pgvector** | External | Vector storage, auth cache, indexer state |
+| **Redis** | External | Rate-limit coordination and ciphertext cache |
 | **Indexer** (recommended) | `services/indexer` | Polls Sui events, syncs account data into PostgreSQL |
 
-The Rust relayer starts the TypeScript sidecar as a child process on boot. They communicate over HTTP (`localhost:9000` by default). If the sidecar fails to start within 15 seconds, the relayer exits.
+The Rust relayer does not start a sidecar. SEAL encrypt/decrypt, Enoki sponsorship, and Walrus publisher calls all happen from Rust.
 
 ## Quick Start
 
-If you do not already have PostgreSQL + pgvector running, start it with:
+If you do not already have PostgreSQL + pgvector, Redis, and a private
+MemWal publisher running, start them with:
 
 ```bash
-docker compose -f services/server/docker-compose.yml up -d postgres
+cp services/server/.env.example services/server/.env
+cp services/server/.env.walrus-publisher.example services/server/.env.walrus-publisher
+# Edit .env with credentials, package IDs, and WALRUS_PUBLISHER_JWT_SECRET.
+# Edit .env.walrus-publisher with the same WALRUS_PUBLISHER_JWT_SECRET
+# and a funded publisher wallet.
+docker compose -f services/server/docker-compose.yml --profile publisher up -d postgres redis memwal-publisher
 ```
 
 Then run the relayer:
 
 ```bash
-cp services/server/.env.example services/server/.env
-cd services/server/scripts
-npm ci
-cd ..
+cd services/server
 cargo run
 ```
+
+For a relayer process running on the host, use
+`WALRUS_PUBLISHER_URL=http://127.0.0.1:31416`. For a relayer container in the
+same Docker network, use `WALRUS_PUBLISHER_URL=http://memwal-publisher:31416`.
 
 Then check:
 
@@ -81,7 +89,6 @@ curl http://localhost:8000/health
 - `MEMWAL_PACKAGE_ID`
 - `MEMWAL_REGISTRY_ID`
 - `SERVER_SUI_PRIVATE_KEY` or `SERVER_SUI_PRIVATE_KEYS`
-- `SIDECAR_AUTH_TOKEN` — shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it.
 
 ### Recommended
 
@@ -101,13 +108,12 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 ### Defaults
 
 - `PORT` defaults to `8000`
-- `SIDECAR_URL` defaults to `http://localhost:9000`
 - `SUI_NETWORK` defaults to `mainnet`
-- `SUI_RPC_URL`, Walrus endpoints, and `WALRUS_PACKAGE_ID` fall back to network defaults based on `SUI_NETWORK`
+- `SUI_RPC_URL`, `WALRUS_PACKAGE_ID`, Walrus aggregator, and SEAL key server defaults fall back based on `SUI_NETWORK`
+- `WALRUS_UPLOAD_BACKEND=publisher` sends upload jobs to the private MemWal publisher, which writes on-chain MemWal metadata before transferring Blob objects
 - `SEAL_SERVER_CONFIGS` and `SEAL_KEY_SERVERS` are optional overrides for encrypt/decrypt; prefer `SEAL_SERVER_CONFIGS` for custom committees
 - `WALRUS_AGGREGATOR_URLS` can add comma-separated proxy/aggregator candidates for cold-read tail racing after Redis cache misses
 - `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted Walrus Memory-written cold reads after accepting the consistency tradeoff
-- The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
 - `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 
 ### Server Keys
@@ -131,7 +137,7 @@ MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a
 MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
 ```
 
-If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the sidecar uses built-in defaults for the selected `SUI_NETWORK`. On `testnet`, the default remains Mysten's original independent key server pair so existing encrypted memories remain decryptable:
+If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the Rust relayer uses built-in defaults for the selected `SUI_NETWORK`. On `testnet`, the default remains Mysten's original independent key server pair so existing encrypted memories remain decryptable:
 
 ```env
 SEAL_KEY_SERVERS=0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75,0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8
@@ -176,7 +182,8 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 
 ## Operational Notes
 
-- The server starts the sidecar automatically on boot — if sidecar startup fails, the relayer will exit
+- The private MemWal publisher should run as its own service beside PostgreSQL and Redis, with a persistent wallet volume and a funded Sui/WAL publisher wallet
+- DB-backed recall and full onchain restore discovery run through the Rust relayer
 - DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension)
 - Connection pool: 10 max connections (relayer), 3 max connections (indexer)
 - `/health` is the basic service check, `/metrics` exposes Prometheus metrics, API routes live under `/api/*`
@@ -188,6 +195,8 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 
 - `services/server/Dockerfile` for the relayer
 - `services/indexer/Dockerfile` for the indexer
+- `services/server/docker-compose.yml` for local support services: PostgreSQL, Redis, and MemWal publisher
+- `infra/memwal-publisher/Dockerfile` for the private Walrus publisher wrapper
 
 ## Read Next
 

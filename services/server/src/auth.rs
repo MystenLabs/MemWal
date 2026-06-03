@@ -190,7 +190,7 @@ pub async fn verify_signature(
     //
     // NOTE (coordinator): this change must land in lockstep with the SDK
     // signing change in packages/sdk/src/{memwal,manual}.ts. If the Rust
-    // sidecar agent edits this function concurrently, reconcile so the
+    // If another agent edits this function concurrently, reconcile so the
     // canonical message below is the single source of truth.
     //
     // Canonical format:

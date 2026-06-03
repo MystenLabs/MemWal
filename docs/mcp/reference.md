@@ -180,44 +180,16 @@ Explicit `--relayer` and `--web-url` override the preset. You can also pass eith
 
 ## Transports
 
-Walrus Memory supports two MCP connection modes.
+Walrus Memory currently supports the local stdio MCP package.
 
 | Mode | Best for | Configured via |
 | --- | --- | --- |
 | **stdio package** | Clients that run local MCP commands (most clients today) | `npx -y @mysten-incubation/memwal-mcp` in the client config |
-| **Streamable HTTP** | Clients that support remote HTTP MCP servers | `url: "https://relayer.memwal.ai/api/mcp"` + auth headers |
 
 ### Streamable HTTP
 
-Use HTTP transport when your client supports remote MCP servers natively. Authentication is bearer-token + account ID per request:
-
-```json
-{
-  "mcpServers": {
-    "memwal": {
-      "url": "https://relayer.memwal.ai/api/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_DELEGATE_PRIVATE_KEY>",
-        "x-memwal-account-id": "<YOUR_ACCOUNT_ID>"
-      }
-    }
-  }
-}
-```
-
-The bearer token is the `delegatePrivateKey` from `~/.memwal/credentials.json`. The account ID is the `accountId` field in that same file. Run `npx -y @mysten-incubation/memwal-mcp login --prod` once to populate it.
-
-<Warning>
-The bearer token is a long-lived credential equivalent to an API key. **Never commit MCP configs with a real `Authorization` header to source control.** Treat it like any other secret.
-</Warning>
-
-For Claude Code, the equivalent registration command is:
-
-```bash
-claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
-```
-
-If your client cannot attach headers from the CLI, edit the generated MCP config file to add them manually.
+The current Rust relayer does not expose remote MCP HTTP routes. Use the local
+stdio package; a native Rust MCP endpoint can be added separately.
 
 ### When to prefer HTTP vs stdio
 
@@ -227,25 +199,11 @@ Prefer **stdio** when:
 - you want inline `memwal_login` UX
 - you do not want to paste long-lived bearer credentials into client config
 
-Prefer **Streamable HTTP** when:
-
-- the MCP host supports remote MCP servers and request headers cleanly
-- you are wiring a shared hosted endpoint instead of a local package
-- you intentionally want a config based on explicit bearer credentials
-
 ### Public routes
 
-The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
-
-| Route | Purpose |
-| --- | --- |
-| `GET /api/mcp/sse` | Legacy SSE session for the stdio bridge |
-| `POST /api/mcp/messages` | JSON-RPC messages for the legacy SSE transport |
-| `GET /api/mcp` | Streamable HTTP server-to-client stream |
-| `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
-| `DELETE /api/mcp` | Close a Streamable HTTP session |
-
-The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
+The current Rust relayer exposes normal Walrus Memory API routes, not MCP
+transport routes. The local package owns MCP transport handling and calls the
+relayer's standard memory API.
 
 ## Runtime safety notes
 
@@ -263,14 +221,9 @@ The saved file is not silently rewritten. To rotate the saved relayer permanentl
 
 ## Self-Hosting
 
-Self-hosted relayers expose the same public MCP routes as the hosted relayer. The most common operator-tunable settings:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `SIDECAR_URL` | `http://localhost:9000` | Loopback endpoint the Rust relayer uses to reach the sidecar |
-| `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP |
-| `MCP_MAX_SESSIONS_PER_IP` | `16` | Cap on concurrent sessions from one source IP |
-| `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute |
+Self-hosted relayers expose the same standard memory API as the hosted relayer.
+Point the local stdio package at your relayer with `--relayer` or the `--local`
+preset.
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
 

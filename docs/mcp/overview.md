@@ -45,7 +45,8 @@ The package is designed first for MCP hosts that run **local commands**:
 - Codex
 - Antigravity
 
-If your MCP host supports **remote Streamable HTTP** servers with custom headers, you can also skip the local package and point directly at the relayer. See [Reference](/mcp/reference#streamable-http).
+The current Rust relayer does not expose remote MCP HTTP routes; use the local
+stdio package until a native Rust MCP endpoint is added.
 
 ## Get started
 
@@ -57,7 +58,7 @@ If your MCP host supports **remote Streamable HTTP** servers with custom headers
     Auth-required mode, inline browser login, local credential storage, and the stdio bridge
   </Card>
   <Card title="Reference" icon="book" href="/mcp/reference">
-    All six tools, CLI flags, environment presets, transport routes, and self-hosting notes
+    All six tools, CLI flags, environment presets, and self-hosting notes
   </Card>
   <Card title="Changelog" icon="clock-rotate-left" href="/mcp/changelog">
     Release history for the `@mysten-incubation/memwal-mcp` package

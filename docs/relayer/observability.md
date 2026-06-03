@@ -2,7 +2,7 @@
 title: "Observability"
 ---
 
-Production relayers should emit structured logs, scrape Prometheus metrics, and send alerts for the external systems Walrus Memory depends on: PostgreSQL, Redis, Sui RPC, OpenAI-compatible embedding/LLM APIs, SEAL, Walrus, and the TypeScript sidecar.
+Production relayers should emit structured logs, scrape Prometheus metrics, and send alerts for the external systems Walrus Memory depends on: PostgreSQL, Redis, Sui RPC, OpenAI-compatible embedding/LLM APIs, SEAL, Walrus, and the MemWal publisher.
 
 ## Request Correlation
 
@@ -12,9 +12,9 @@ Every relayer request gets an `x-request-id`.
 - If the client sends only `x-correlation-id`, the relayer uses that value.
 - If neither is present, the relayer generates a UUID.
 - The response includes `x-request-id`.
-- Rust logs, internal error `traceId` values, outbound sidecar requests, and sidecar error responses use the same ID.
+- Rust logs, internal error `traceId` values, and outbound dependency requests use the same ID.
 
-Use this ID when searching logs across the Rust relayer and TypeScript sidecar.
+Use this ID when searching relayer and publisher logs.
 
 ## Logs
 
@@ -29,7 +29,7 @@ Useful fields include:
 
 | Field | Meaning |
 | --- | --- |
-| `request_id` | Request/correlation ID shared across relayer and sidecar |
+| `request_id` | Request/correlation ID shared across relayer logs |
 | `route` | Low-cardinality route label such as `/api/recall` |
 | `method` | HTTP method |
 | `status` | HTTP status code |
@@ -46,12 +46,6 @@ The Rust relayer exposes Prometheus metrics at:
 GET /metrics
 ```
 
-The TypeScript sidecar also exposes wallet-specific counters at:
-
-```text
-GET <SIDECAR_URL>/metrics/wallet
-```
-
 Core relayer metrics:
 
 | Metric | Labels | Notes |
@@ -62,8 +56,7 @@ Core relayer metrics:
 | `memwal_errors_total` | `kind`, `route` | Application error counts |
 | `memwal_rate_limit_denials_total` | `bucket`, `route` | Rate-limit denials |
 | `memwal_rate_limit_fallbacks_total` | `scope` | Redis fallback usage |
-| `memwal_external_request_duration_seconds` | `service`, `operation`, `status` | OpenAI, Sui RPC, SEAL sidecar, Walrus latency |
-| `memwal_sidecar_failures_total` | `operation`, `reason` | Sidecar transport and HTTP failures |
+| `memwal_external_request_duration_seconds` | `service`, `operation`, `status` | OpenAI, Sui RPC, SEAL, Enoki, publisher, and Walrus latency |
 | `memwal_db_query_duration_seconds` | `operation`, `status` | PostgreSQL and pgvector query latency |
 | `memwal_db_pool_connections` | `state` | PostgreSQL pool `open` and `idle` gauges |
 
@@ -86,9 +79,8 @@ Create panels for:
 - Error rate from `memwal_errors_total` and 5xx statuses.
 - Rate-limit denials by bucket.
 - External service p95 latency by `service` and `operation`.
-- Sidecar failures by operation.
+- MemWal publisher upload and metadata-transfer latency/errors.
 - PostgreSQL query latency and pool open/idle connections.
-- Sidecar wallet counters: `walletSubmittedTotal`, `walletLockErrorsTotal`, `walletPermanentFailuresTotal`.
 
 ## Recommended Alerts
 
@@ -97,30 +89,29 @@ Create panels for:
 | High 5xx rate | 5xx responses exceed 1% for 5 minutes |
 | Route latency regression | p95 `/api/recall` or `/api/remember` latency exceeds the normal SLO for 10 minutes |
 | Redis degraded | `memwal_rate_limit_fallbacks_total` increases in production |
-| Sidecar unhealthy | `memwal_sidecar_failures_total` increases for SEAL or Walrus operations |
 | OpenAI latency/errors | External `service="openai"` p95 latency or non-2xx status rate spikes |
-| Walrus download/upload failures | External `service="walrus"` or sidecar Walrus failures increase |
+| Publisher unhealthy | External `service="walrus_publisher"` transport errors or non-2xx statuses increase |
+| Walrus download/upload failures | External `service="walrus"` download failures increase, or the MemWal publisher reports upload/metadata failures |
 | Sui RPC failures | `service="sui_rpc"` transport errors or non-2xx statuses increase |
 | DB saturation | PostgreSQL pool open connections near configured max, or idle connections stay at 0 |
-| Wallet lock canary | Sidecar `walletLockErrorsTotal` is greater than 0 |
-| Permanent wallet failures | Sidecar `walletPermanentFailuresTotal` increases |
+| Wallet lock canary | Walrus object-lock alerts fire |
+| Permanent wallet failures | Walrus upload jobs hit permanent wallet errors |
 
 ## APM Integration
 
 Walrus Memory emits structured logs and Prometheus metrics in vendor-neutral formats. For Datadog, New Relic, Grafana Cloud, or OpenTelemetry Collector based setups:
 
 1. Scrape `/metrics` from the Rust relayer.
-2. Collect stdout/stderr logs from both the Rust process and sidecar.
+2. Collect stdout/stderr logs from the Rust process and MemWal publisher.
 3. Parse JSON logs when `LOG_FORMAT=json`.
 4. Treat `request_id` and `traceId` as the correlation key.
-5. Scrape or poll sidecar `/metrics/wallet` when the sidecar is reachable from the monitoring agent.
 
 If your APM supports custom spans, map `memwal_external_request_duration_seconds` operations to dependencies:
 
 - `openai / embeddings`
 - `openai / chat_completions`
 - `sui_rpc / sui_getObject`
-- `sidecar / seal_encrypt`
-- `sidecar / seal_decrypt_batch`
-- `sidecar / walrus_upload`
+- `seal / encrypt`
+- `seal / decrypt_batch`
+- `publisher / walrus_upload`
 - `walrus / download_blob`

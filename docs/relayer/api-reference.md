@@ -85,11 +85,11 @@ Stable relayer/API compatibility metadata. No authentication required.
 
 ### `POST /sponsor`
 
-Proxy to the SEAL/Walrus sidecar's `/sponsor` endpoint for sponsored transactions. No authentication required.
+Create an Enoki-sponsored transaction. No authentication required.
 
 ### `POST /sponsor/execute`
 
-Proxy to the sidecar's `/sponsor/execute` endpoint. No authentication required.
+Execute an Enoki-sponsored transaction. No authentication required.
 
 ## Protected Routes
 

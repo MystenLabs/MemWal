@@ -4,7 +4,7 @@ description: "Client-managed embeddings and local SEAL operations."
 ---
 
 Use when the client must handle embedding calls and local SEAL operations. The relayer still handles
-upload relay, vector registration, search, and restore.
+MemWal publisher upload, vector registration, search, and restore.
 
 This is the recommended path for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
 
@@ -14,7 +14,7 @@ This is the recommended path for Web3-native users who want to minimize trust in
 |-----------|----------------------|---------|
 | Embedding | Client calls OpenAI/compatible API | — |
 | SEAL encryption | Client encrypts locally | — |
-| Walrus upload | — | Server uploads via sidecar (server pays gas) |
+| Walrus upload | — | Server uploads via the MemWal publisher (server/publisher pays gas) |
 | Vector registration | — | Server stores `{blob_id, vector}` in PostgreSQL |
 | Recall search | — | Server searches vectors, returns `{blob_id, distance}` |
 | Walrus download | Client downloads from aggregator | — |
@@ -60,7 +60,7 @@ console.log(manual.isWalletMode);
 1. Client generates embedding via OpenAI-compatible API
 2. Client SEAL-encrypts the plaintext locally (no wallet signature needed)
 3. Client sends `{encrypted_data (base64), vector}` to the relayer
-4. Relayer uploads encrypted bytes to Walrus via upload-relay sidecar (server pays gas)
+4. Relayer uploads encrypted bytes to Walrus via the MemWal publisher (server/publisher pays gas)
 5. Relayer stores `{blob_id, vector, owner, namespace}` in PostgreSQL
 
 ## Recall flow (under the hood)
@@ -95,7 +95,7 @@ const manual = MemWalManual.create({
 - `suiNetwork` defaults to `mainnet`
 - `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
 - `sealKeyServers` remains supported as a legacy independent key server object ID override
-- Walrus publisher, aggregator, and upload relay defaults follow `suiNetwork`
+- Walrus publisher and aggregator defaults follow `suiNetwork`
 - `embeddingModel` defaults to `text-embedding-3-small` (or `openai/text-embedding-3-small` for OpenRouter)
 - `walrusEpochs` defaults to `50` (storage duration)
 - All `@mysten/*` peer dependencies are loaded dynamically — users who only use the default `MemWal` client don't need them installed

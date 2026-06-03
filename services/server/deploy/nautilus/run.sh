@@ -25,9 +25,6 @@ elif [ "${MEMWAL_RUNTIME_ENV_FILE:-}" != "" ]; then
 fi
 
 export PORT="${PORT:-8000}"
-export SIDECAR_PORT="${SIDECAR_PORT:-9000}"
-export SIDECAR_URL="${SIDECAR_URL:-http://127.0.0.1:9000}"
-export SIDECAR_SCRIPTS_DIR="${SIDECAR_SCRIPTS_DIR:-/app/scripts}"
 export LOG_FORMAT="${LOG_FORMAT:-json}"
 
 missing=""
@@ -48,7 +45,6 @@ need SUI_RPC_URL
 need WALRUS_PUBLISHER_URL
 need WALRUS_AGGREGATOR_URL
 need OPENAI_API_KEY
-need SIDECAR_AUTH_TOKEN
 
 if [ -z "${SERVER_SUI_PRIVATE_KEY:-}" ] && [ -z "${SERVER_SUI_PRIVATE_KEYS:-}" ]; then
     missing="${missing} SERVER_SUI_PRIVATE_KEY_or_SERVER_SUI_PRIVATE_KEYS"
@@ -67,7 +63,7 @@ case "${BENCHMARK_MODE:-false}" in
 esac
 
 if [ -z "${SEAL_SERVER_CONFIGS:-}" ] && [ -z "${SEAL_KEY_SERVERS:-}" ]; then
-    echo "warning: SEAL_SERVER_CONFIGS/SEAL_KEY_SERVERS not set; sidecar will use network defaults" >&2
+    echo "warning: SEAL_SERVER_CONFIGS/SEAL_KEY_SERVERS not set; relayer will use network defaults" >&2
 fi
 
 if [ "$#" -gt 0 ]; then

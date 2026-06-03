@@ -50,7 +50,7 @@ const PRE_EXTRACTION_CONTEXT_LIMIT: usize = 10;
 /// Set generously above measured p95 (embed ~150ms, search ~30ms warm /
 /// 500ms cold, fetch ~50ms warm) so a healthy server is unaffected, but
 /// tight enough to cap a stalled external dependency (OpenAI hiccup,
-/// pgvector cold-namespace tail, sidecar 5xx). On expiry the leg's
+/// pgvector cold-namespace tail, Walrus/SEAL failure). On expiry the leg's
 /// fallback path fires — context goes empty, analyze continues. Total
 /// pre-extraction worst case after timeouts: ~1.6s vs the observed
 /// 30s benchmark outlier under no-timeout.
@@ -224,7 +224,7 @@ pub async fn analyze(
                         // cleanup on 404 / decrypt failure. Dropped hits
                         // just shrink the context; the extractor still
                         // works with whatever survives. On total failure
-                        // (e.g. sidecar 5xx) or timeout, log and fall back.
+                        // (e.g. Walrus/SEAL error) or timeout, log and fall back.
                         match tokio::time::timeout(
                             std::time::Duration::from_millis(FETCH_TIMEOUT_MS),
                             state.engine.fetch_batch(owner, &hit_refs, &auth),
@@ -456,11 +456,11 @@ pub async fn analyze(
                 let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
-                    &state.config.sidecar_url,
-                    state.config.sidecar_secret.as_deref(),
                     fact.text.as_bytes(),
                     &owner,
                     &state.config.package_id,
+                    &state.config.sui_rpc_url,
+                    &state.config.sui_network,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 // carry `importance` through the prep tuple so

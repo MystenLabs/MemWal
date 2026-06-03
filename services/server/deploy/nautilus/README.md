@@ -35,14 +35,13 @@ make -C services/server/deploy/nautilus smoke RELAYER_URL=http://127.0.0.1:8000
 Deployment checklist:
 
 1. Copy `runtime.env.example` to a private env file, fill real values, and store it in Nautilus/CI secrets.
-2. Generate a strong `SIDECAR_AUTH_TOKEN`; both the Rust relayer and sidecar read the same env var.
-3. Build the wrapper image with `make -C services/server/deploy/nautilus build`.
-4. Copy `nautilus.toml.example` to your Nautilus manifest and replace package/object IDs.
-5. Allow outbound access only to the exact PostgreSQL, Redis, Sui, Walrus, SEAL, and AI endpoints you configure.
-6. Keep `BENCHMARK_MODE=false`; benchmark mode bypasses SEAL/Walrus persistence.
-7. Use your Nautilus toolchain/provider to build and deploy the enclave artifact.
-8. Pin and publish the Nautilus image measurement or attestation identity produced by that build.
-9. Require clients, gateway policy, or Move-side verification to check the expected identity before treating the endpoint as TEE-backed.
+2. Build the wrapper image with `make -C services/server/deploy/nautilus build`.
+3. Copy `nautilus.toml.example` to your Nautilus manifest and replace package/object IDs.
+4. Allow outbound access only to the exact PostgreSQL, Redis, Sui, Walrus, SEAL, publisher, and AI endpoints you configure.
+5. Keep `BENCHMARK_MODE=false`; benchmark mode bypasses SEAL/Walrus persistence.
+6. Use your Nautilus toolchain/provider to build and deploy the enclave artifact.
+7. Pin and publish the Nautilus image measurement or attestation identity produced by that build.
+8. Require clients, gateway policy, or Move-side verification to check the expected identity before treating the endpoint as TEE-backed.
 10. Run `/health` plus the remember/recall smoke test from the docs.
 
 Local Docker smoke tests prove the image and relayer entrypoint boot. They do

@@ -3,8 +3,10 @@ name: Benchmark Smoke
 on:
   pull_request:
     paths:
-      - 'services/server/scripts/**'
-      - '.github/workflows/benchmark-live.yml'
+      - 'services/server/src/**'
+      - 'services/server/Cargo.toml'
+      - 'services/server/Cargo.lock'
+      - 'infra/memwal-publisher/**'
       - '.github/workflows/benchmark-smoke.yml'
       - 'docs/relayer/benchmark-ci-setup.md'
   push:
@@ -13,8 +15,10 @@ on:
       - staging
       - dev
     paths:
-      - 'services/server/scripts/**'
-      - '.github/workflows/benchmark-live.yml'
+      - 'services/server/src/**'
+      - 'services/server/Cargo.toml'
+      - 'services/server/Cargo.lock'
+      - 'infra/memwal-publisher/**'
       - '.github/workflows/benchmark-smoke.yml'
       - 'docs/relayer/benchmark-ci-setup.md'
   workflow_dispatch:
@@ -23,7 +27,7 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
   smoke:
-    name: Compile & CLI Smoke
+    name: Rust Compile Smoke
     runs-on: ubuntu-latest
 
     steps:
@@ -42,27 +46,6 @@ jobs:
         working-directory: services/server
         run: cargo check
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: services/server/scripts/package-lock.json
-
-      - name: Install sidecar script dependencies
-        working-directory: services/server/scripts
-        run: npm ci
-
-      - name: Typecheck benchmark scripts
-        working-directory: services/server/scripts
-        run: |
-          ./node_modules/.bin/tsc --noEmit --skipLibCheck \
-            --target ES2022 \
-            --module NodeNext \
-            --moduleResolution NodeNext \
-            bench-recall-latency.ts
-
-      - name: Benchmark CLI help smoke
-        working-directory: services/server/scripts
-        run: |
-          ./node_modules/.bin/tsx bench-recall-latency.ts --help
+      - name: Cargo check publisher
+        working-directory: infra/memwal-publisher
+        run: cargo check

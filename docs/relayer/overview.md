@@ -8,16 +8,17 @@ The relayer is the backend that turns SDK calls into memory operations. Using a 
 
 - **Authenticates requests** by verifying Ed25519 signatures against onchain delegate keys, then resolving the owner and account context
 - **Generates embeddings** for text using an OpenAI-compatible API (default model: `text-embedding-3-small`, 1536 dimensions)
-- **Encrypts and decrypts** data through the SEAL sidecar, bound to the owner's address and the Walrus Memory package ID
-- **Uploads and downloads** encrypted blobs to Walrus, with the server wallet covering storage costs
+- **Encrypts and decrypts** data with native Rust SEAL support, bound to the owner's address and the Walrus Memory package ID
+- **Uploads** encrypted blobs through the private MemWal publisher, which writes MemWal metadata and transfers Blob objects
+- **Downloads** encrypted blobs from Walrus aggregators, with Redis ciphertext caching for hot reads
 - **Stores and searches vectors** in PostgreSQL (pgvector), scoped by memory space (`owner + namespace`)
 - **Orchestrates higher-level flows** like `analyze` (LLM-based fact extraction using `gpt-4o-mini`) and `ask` (memory-augmented Q&A)
-- **Restores memory spaces** by querying onchain blobs, decrypting, re-embedding, and re-indexing anything missing from the local database
+- **Restores memory spaces** by discovering onchain MemWal blobs with native Sui RPC, decrypting, re-embedding, and re-indexing missing rows
 - **Cleans up expired blobs** reactively — when Walrus returns 404 during recall, the relayer deletes the stale vector entries from the database
 
 ## Architecture
 
-The relayer is a Rust service (Axum) that manages a TypeScript sidecar process for SEAL and Walrus operations that require the `@mysten/seal` and `@mysten/walrus` SDKs.
+The relayer is a Rust service (Axum) that calls a private MemWal publisher for Walrus uploads and runs SEAL encrypt/decrypt natively.
 
 ```mermaid
 flowchart LR
@@ -28,12 +29,13 @@ flowchart LR
         direction LR
 
         Axum["Rust Relayer (Axum)<br>Auth + routes"]
-        Sidecar["TypeScript Sidecar<br>SEAL + Walrus"]
+        Publisher["Private MemWal Publisher<br>Walrus upload + metadata transfer"]
 
         %% container backend
         subgraph Stack
             direction TB
             DB["PostgreSQL + pgvector"]
+            Redis["Redis"]
             Sui["Sui RPC"]
             AI["Embedding / LLM API"]
         end
@@ -48,14 +50,16 @@ flowchart LR
 
     %% chỉ nối vào container (qua node đầu)
     Axum --> DB
+    Axum --> Redis
+    Axum --> Publisher
 
-    %% sidecar
-    Axum --> Sidecar
-    Sidecar --> Seal
-    Sidecar --> Walrus  
+    Axum --> Seal
+    Axum --> Walrus
+    Publisher --> Walrus
+    Publisher --> Sui
 ```
 
-The sidecar is started automatically when the Rust server boots and communicates over HTTP on `localhost:9000` (configurable via `SIDECAR_URL`). If the sidecar fails to start, the relayer exits immediately.
+No TypeScript sidecar is started by the relayer. The runtime services are the Rust relayer, PostgreSQL, Redis, and the self-hosted MemWal publisher.
 
 ## Key Pool
 

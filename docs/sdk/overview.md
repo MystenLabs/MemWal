@@ -22,7 +22,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 
 Use this when the client must handle embeddings and local SEAL operations.
 
-- relayer still handles upload relay, registration, search, and restore
+- relayer still handles MemWal publisher upload, registration, search, and restore
 
 ```ts
 import { MemWalManual } from "@mysten-incubation/memwal/manual";

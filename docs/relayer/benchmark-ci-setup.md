@@ -2,31 +2,20 @@
 
 This document records how to configure the relayer benchmark workflows.
 
-The live benchmark intentionally runs only the public relayer `/api/recall`
-path. Direct sidecar and Walrus upload benchmarks are out of scope because the
-hosted GitHub runner cannot reach the internal sidecar in the current Railway
-deployment.
+The benchmark smoke workflow now verifies the Rust relayer and MemWal publisher
+builds. The old TypeScript latency benchmark scripts were removed with the
+legacy runtime.
 
 ## Workflows
 
 - `.github/workflows/benchmark-smoke.yml`
-  - Runs on pull requests and pushes that touch benchmark scripts, benchmark workflows, or this setup doc.
+  - Runs on pull requests and pushes that touch the relayer, publisher, benchmark workflow, or this setup doc.
   - Runs `cargo check`.
-  - Typechecks `bench-recall-latency.ts`.
-  - Runs a `--help` smoke check for the recall benchmark CLI.
+  - Runs `cargo check` for `infra/memwal-publisher`.
   - Does not need secrets and does not call Sui, Walrus, SEAL, or OpenAI.
 
-- `.github/workflows/benchmark-live.yml`
-  - Runs automatically on pushes to `dev` and `staging`.
-  - Maps push benchmarks to `benchmark-dev` and `benchmark-staging`.
-  - Runs manually via `workflow_dispatch` on a selected branch/ref and target environment.
-  - Also runs weekly on Monday at 09:00 UTC against the default branch environment.
-  - Uses one GitHub Environment per target: `benchmark-dev` or
-    `benchmark-staging`.
-  - Runs `bench-recall-latency.ts` against `POST /api/remember` and `POST /api/recall`.
-  - Uses the `benchmark` namespace by default to isolate benchmark writes.
-  - Uploads `benchmark-results/memory-api.json` as a GitHub Actions artifact.
-  - Writes the benchmark markdown table into the Actions job summary.
+The former `.github/workflows/benchmark-live.yml` workflow was removed because
+it depended on the deleted TypeScript benchmark runner.
 
 ## Railway Relayer URLs
 
@@ -71,16 +60,5 @@ For each environment, set these Secrets:
 
 ## Manual Run
 
-Remember and recall against staging:
-
-```bash
-cd services/server/scripts
-
-./node_modules/.bin/tsx bench-recall-latency.ts \
-  --server-url https://relayer.staging.memwal.ai \
-  --account-id "$BENCH_ACCOUNT_ID" \
-  --delegate-key "$BENCH_DELEGATE_KEY" \
-  --namespace benchmark \
-  --remember-text "benchmark memory" \
-  --query "benchmark memory"
-```
+Use the Python quality benchmark harness under `services/server/benchmarks`
+for current manual benchmark runs.

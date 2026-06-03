@@ -282,7 +282,7 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
 
 MAX_REMEMBER_TEXT_BYTES = 1024 * 1024  # mirrors src/routes.rs constant
 # Largest plaintext we exercise in the e2e test. Smaller than the route
-# ceiling — bigger payloads work too (see scripts/bench-remember-sizes.ts)
+# ceiling — bigger payloads work too, but keep this smoke case small.
 # but at 1 MiB the summarize path fans out to 16 parallel LLM calls, which
 # multiplies any upstream flake into a per-request failure. 512 KiB still
 # exercises the chunked map-reduce path (8 chunks) without that risk.
@@ -350,9 +350,9 @@ def test_remember_size_large_accepted(
     """`LARGE_TEXT_BYTES` plaintext: must succeed end-to-end.
 
     Exercises the chunked map-reduce path (8 chunks at this size), the
-    auth body cap, the sidecar `/seal/encrypt` body limit, SEAL encrypt
+    auth body cap, the SEAL encrypt
     on the full plaintext, and the Walrus upload. If any of those caps is
-    too tight, this returns 400 (auth/route layer) or 500 (sidecar).
+    too tight, this returns 400 (auth/route layer) or 500 (SEAL/upload path).
     """
     text = ("The quick brown fox jumps over the lazy dog. " * (LARGE_TEXT_BYTES // 45 + 1))[:LARGE_TEXT_BYTES]
     assert len(text) == LARGE_TEXT_BYTES

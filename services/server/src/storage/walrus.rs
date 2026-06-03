@@ -1,9 +1,10 @@
-use crate::types::{AppError, SidecarError};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use crate::types::{AppError, Config, WalrusUploadBackend};
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::time::Duration;
+use jsonwebtoken::{encode, EncodingKey, Header};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
-const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(180);
+const WALRUS_PUBLISHER_TIMEOUT: Duration = Duration::from_secs(180);
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Result of a Walrus blob upload
@@ -18,18 +19,12 @@ pub struct UploadResult {
 #[derive(Debug)]
 pub enum UploadBlobError {
     App(AppError),
-    MetadataTransferFailed {
-        blob_id: String,
-        object_id: String,
-        message: String,
-    },
 }
 
 impl std::fmt::Display for UploadBlobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UploadBlobError::App(err) => write!(f, "{}", err),
-            UploadBlobError::MetadataTransferFailed { message, .. } => write!(f, "{}", message),
         }
     }
 }
@@ -46,7 +41,6 @@ impl From<UploadBlobError> for AppError {
     fn from(err: UploadBlobError) -> Self {
         match err {
             UploadBlobError::App(err) => err,
-            UploadBlobError::MetadataTransferFailed { message, .. } => AppError::Internal(message),
         }
     }
 }
@@ -68,86 +62,61 @@ pub struct OnChainBlob {
     pub package_id: String,
 }
 
-/// Response from sidecar query-blobs endpoint
-#[derive(Debug, serde::Deserialize)]
-struct QueryBlobsResponse {
-    blobs: Vec<OnChainBlob>,
-    total: usize,
-}
-
-/// Request/response types for sidecar HTTP API
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WalrusUploadRequest {
-    data: String,
-    key_index: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    job_id: Option<String>,
-    owner: String,
-    namespace: String,
-    package_id: String,
-    epochs: u64,
-    defer_transfer: bool,
-    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
-    agent_id: Option<String>,
+struct PublisherStoreResponse {
+    newly_created: Option<PublisherNewlyCreated>,
+    already_certified: Option<PublisherAlreadyCertified>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WalrusUploadResponse {
+struct PublisherNewlyCreated {
+    blob_object: PublisherBlobObject,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublisherBlobObject {
+    id: String,
     blob_id: String,
-    object_id: Option<String>,
-    #[serde(default)]
-    transfer_status: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WalrusUploadErrorResponse {
-    error: String,
-    blob_id: Option<String>,
-    object_id: Option<String>,
-    #[serde(default)]
-    transfer_status: Option<String>,
+struct PublisherAlreadyCertified {
+    blob_id: String,
 }
 
 #[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetMetadataBatchEntry {
-    pub blob_object_id: String,
-    pub namespace: String,
+struct PublisherJwtClaims<'a> {
+    iat: i64,
+    exp: i64,
+    jti: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_object_to: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memwal_owner: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memwal_namespace: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memwal_package_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memwal_agent_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    epochs: u32,
+    size: u64,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMetadataBatchRequest {
-    blobs: Vec<SetMetadataBatchEntry>,
-    owner: String,
-    package_id: String,
-    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
-    agent_id: Option<String>,
-    key_index: usize,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetMetadataBatchResponse {
-    transferred: usize,
-}
-
-/// Upload an encrypted blob to Walrus via the HTTP sidecar.
+/// Upload an encrypted blob to Walrus using the backend selected in Config.
 ///
-/// Calls the long-lived sidecar server at `POST /walrus/upload` which uses
-/// `@mysten/walrus` SDK with the multi-step writeBlobFlow.
-///
-/// The server wallet pays for gas + storage. After certify, the blob object
-/// is transferred to `owner_address`. Namespace + owner are stored as
-/// on-chain metadata attributes for discoverability.
+/// `WALRUS_UPLOAD_BACKEND=publisher` uses a self-hosted Walrus publisher over
+/// HTTP. Deprecated legacy backend values are mapped to the publisher path.
 #[allow(clippy::too_many_arguments)]
-pub async fn upload_blob(
+pub async fn upload_blob_for_config(
     client: &reqwest::Client,
-    sidecar_url: &str,
-    sidecar_secret: Option<&str>,
+    config: &Config,
     data: &[u8],
     epochs: u64,
     owner_address: &str,
@@ -157,299 +126,266 @@ pub async fn upload_blob(
     agent_id: Option<&str>,
     job_id: Option<&str>,
 ) -> Result<UploadResult, UploadBlobError> {
-    upload_blob_inner(
-        client,
-        sidecar_url,
-        sidecar_secret,
-        data,
-        epochs,
-        owner_address,
-        key_index,
-        namespace,
-        package_id,
-        agent_id,
-        job_id,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn upload_blob_inner(
-    client: &reqwest::Client,
-    sidecar_url: &str,
-    sidecar_secret: Option<&str>,
-    data: &[u8],
-    epochs: u64,
-    owner_address: &str,
-    key_index: usize,
-    namespace: &str,
-    package_id: &str,
-    agent_id: Option<&str>,
-    job_id: Option<&str>,
-    defer_transfer: bool,
-) -> Result<UploadResult, UploadBlobError> {
-    let url = format!("{}/walrus/upload", sidecar_url);
-    let data_b64 = BASE64.encode(data);
-
-    let mut req = client.post(&url).json(&WalrusUploadRequest {
-        data: data_b64,
-        key_index,
-        job_id: job_id.map(|s| s.to_string()),
-        owner: owner_address.to_string(),
-        namespace: namespace.to_string(),
-        package_id: package_id.to_string(),
-        epochs,
-        defer_transfer,
-        agent_id: agent_id.map(|s| s.to_string()),
-    });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
+    match config.walrus_upload_backend {
+        WalrusUploadBackend::Publisher => {
+            upload_blob_via_publisher(
+                client,
+                config,
+                data,
+                epochs,
+                owner_address,
+                key_index,
+                namespace,
+                package_id,
+                agent_id,
+                job_id,
+            )
+            .await
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_blob_via_publisher(
+    client: &reqwest::Client,
+    config: &Config,
+    data: &[u8],
+    epochs: u64,
+    owner_address: &str,
+    key_index: usize,
+    namespace: &str,
+    package_id: &str,
+    agent_id: Option<&str>,
+    job_id: Option<&str>,
+) -> Result<UploadResult, UploadBlobError> {
+    let url = build_publisher_store_url(
+        &config.walrus_publisher_url,
+        epochs,
+        config.walrus_publisher_deletable,
+        config
+            .walrus_publisher_send_object_to_owner
+            .then_some(owner_address),
+    )?;
+
+    let mut req = client
+        .put(url.clone())
+        .header("content-type", "application/octet-stream")
+        .body(data.to_vec());
+
+    if let Some(secret) = config.walrus_publisher_jwt_secret.as_deref() {
+        let token = mint_publisher_jwt(
+            secret,
+            config.walrus_publisher_jwt_expiry_secs,
+            epochs,
+            data.len() as u64,
+            config
+                .walrus_publisher_send_object_to_owner
+                .then_some(owner_address),
+            owner_address,
+            namespace,
+            package_id,
+            agent_id,
+            job_id,
+        )?;
+        req = req.bearer_auth(token);
+    }
+
     let req = crate::observability::apply_request_id_header(req);
     let started = std::time::Instant::now();
     let resp = req
-        .timeout(SIDECAR_WALRUS_TIMEOUT)
+        .timeout(WALRUS_PUBLISHER_TIMEOUT)
         .send()
         .await
         .map_err(|e| {
+            let status = if e.is_timeout() {
+                "timeout"
+            } else {
+                "transport_error"
+            };
             crate::observability::observe_external(
-                "sidecar",
-                "walrus_upload",
-                "transport_error",
+                "walrus_publisher",
+                "store_blob",
+                status,
                 started.elapsed(),
             );
-            crate::observability::record_sidecar_failure("walrus_upload", "transport_error");
             UploadBlobError::App(AppError::Internal(format!(
-                "Sidecar walrus/upload request failed: {}",
+                "Walrus publisher upload request failed: {}",
                 e
             )))
         })?;
-    let status_label = resp.status().as_u16().to_string();
+
+    let status = resp.status();
+    let status_label = status.as_u16().to_string();
     crate::observability::observe_external(
-        "sidecar",
-        "walrus_upload",
+        "walrus_publisher",
+        "store_blob",
         &status_label,
         started.elapsed(),
     );
 
-    if !resp.status().is_success() {
-        crate::observability::record_sidecar_failure("walrus_upload", "http_error");
-        let body = resp.text().await.unwrap_or_default();
-        if let Ok(err) = serde_json::from_str::<WalrusUploadErrorResponse>(&body) {
-            if err.transfer_status.as_deref() == Some("failed") {
-                if let (Some(blob_id), Some(object_id)) = (err.blob_id, err.object_id) {
-                    return Err(UploadBlobError::MetadataTransferFailed {
-                        blob_id,
-                        object_id,
-                        message: err.error,
-                    });
-                }
-            }
-            return Err(UploadBlobError::App(AppError::Internal(format!(
-                "walrus upload failed: {}",
-                err.error
-            ))));
-        }
-        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(UploadBlobError::App(AppError::Internal(format!(
-                "walrus upload failed: {}",
-                err.error
-            ))));
-        }
-        return Err(UploadBlobError::App(AppError::Internal(format!(
-            "walrus upload failed: {}",
-            body
-        ))));
-    }
-
-    let result: WalrusUploadResponse = resp.json().await.map_err(|e| {
+    let body = resp.text().await.map_err(|e| {
+        crate::observability::observe_external(
+            "walrus_publisher",
+            "store_blob",
+            "body_error",
+            started.elapsed(),
+        );
         UploadBlobError::App(AppError::Internal(format!(
-            "Failed to parse walrus/upload response: {}",
+            "Failed to read Walrus publisher upload response: {}",
             e
         )))
     })?;
-    if result.transfer_status.as_deref() == Some("failed") {
-        if let Some(object_id) = result.object_id.clone() {
-            return Err(UploadBlobError::MetadataTransferFailed {
-                blob_id: result.blob_id.clone(),
-                object_id,
-                message: "walrus upload completed but metadata/transfer failed".into(),
-            });
-        }
-        return Err(UploadBlobError::App(AppError::Internal(
-            "walrus upload completed but metadata/transfer failed".into(),
-        )));
+
+    if !status.is_success() {
+        return Err(UploadBlobError::App(AppError::Internal(format!(
+            "Walrus publisher upload failed with status {}: {}",
+            status, body
+        ))));
     }
-    if defer_transfer && result.object_id.is_none() {
-        return Err(UploadBlobError::App(AppError::Internal(
-            "walrus deferred upload returned no object_id".into(),
-        )));
-    }
+
+    let result = parse_publisher_upload_response(&body)?;
 
     tracing::info!(
-        "walrus upload via sidecar ok: blob_id={}, object_id={:?}, transfer_status={:?}, owner={}, ns={}",
+        "walrus upload via publisher ok: blob_id={}, object_id={:?}, owner={}, ns={}, key={}, package={}, agent_id={:?}, job_id={:?}",
         result.blob_id,
         result.object_id,
-        result.transfer_status,
         owner_address,
-        namespace
+        namespace,
+        key_index,
+        package_id,
+        agent_id,
+        job_id
     );
 
-    Ok(UploadResult {
-        blob_id: result.blob_id,
-        object_id: result.object_id,
+    Ok(result)
+}
+
+fn build_publisher_store_url(
+    publisher_url: &str,
+    epochs: u64,
+    deletable: bool,
+    send_object_to: Option<&str>,
+) -> Result<reqwest::Url, UploadBlobError> {
+    let base = format!("{}/v1/blobs", publisher_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&base).map_err(|e| {
+        UploadBlobError::App(AppError::Internal(format!(
+            "Invalid Walrus publisher URL: {}",
+            e
+        )))
+    })?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("epochs", &epochs.to_string());
+        if deletable {
+            query.append_pair("deletable", "true");
+        } else {
+            query.append_pair("permanent", "true");
+        }
+        if let Some(owner) = send_object_to {
+            query.append_pair("send_object_to", owner);
+        }
+    }
+    Ok(url)
+}
+
+fn mint_publisher_jwt(
+    secret: &str,
+    expiry_secs: u64,
+    epochs: u64,
+    size: u64,
+    send_object_to: Option<&str>,
+    memwal_owner: &str,
+    memwal_namespace: &str,
+    memwal_package_id: &str,
+    memwal_agent_id: Option<&str>,
+    job_id: Option<&str>,
+) -> Result<String, UploadBlobError> {
+    let epochs = u32::try_from(epochs).map_err(|_| {
+        UploadBlobError::App(AppError::Internal(format!(
+            "Walrus publisher JWT epochs value is too large: {}",
+            epochs
+        )))
+    })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| {
+            UploadBlobError::App(AppError::Internal(format!(
+                "System clock is before UNIX_EPOCH: {}",
+                e
+            )))
+        })?
+        .as_secs() as i64;
+    let expiry_secs = i64::try_from(expiry_secs).map_err(|_| {
+        UploadBlobError::App(AppError::Internal(format!(
+            "Walrus publisher JWT expiry is too large: {}",
+            expiry_secs
+        )))
+    })?;
+    let claims = PublisherJwtClaims {
+        iat: now,
+        exp: now + expiry_secs,
+        jti: Uuid::new_v4().to_string(),
+        send_object_to,
+        memwal_owner: Some(memwal_owner),
+        memwal_namespace: Some(memwal_namespace),
+        memwal_package_id: Some(memwal_package_id),
+        memwal_agent_id,
+        job_id,
+        epochs,
+        size,
+    };
+    let secret = publisher_jwt_secret_bytes(secret)?;
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(&secret),
+    )
+    .map_err(|e| {
+        UploadBlobError::App(AppError::Internal(format!(
+            "Failed to mint Walrus publisher JWT: {}",
+            e
+        )))
     })
 }
 
-pub async fn set_metadata_batch(
-    client: &reqwest::Client,
-    sidecar_url: &str,
-    sidecar_secret: Option<&str>,
-    key_index: usize,
-    owner_address: &str,
-    package_id: &str,
-    agent_id: Option<&str>,
-    blobs: Vec<SetMetadataBatchEntry>,
-) -> Result<usize, AppError> {
-    let url = format!("{}/walrus/set-metadata-batch", sidecar_url);
-    let mut req = client.post(&url).json(&SetMetadataBatchRequest {
-        blobs,
-        owner: owner_address.to_string(),
-        package_id: package_id.to_string(),
-        agent_id: agent_id.map(|s| s.to_string()),
-        key_index,
-    });
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-
-    let started = std::time::Instant::now();
-    let resp = req
-        .timeout(SIDECAR_WALRUS_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| {
-            crate::observability::observe_external(
-                "sidecar",
-                "walrus_set_metadata_batch",
-                "transport_error",
-                started.elapsed(),
-            );
-            crate::observability::record_sidecar_failure(
-                "walrus_set_metadata_batch",
-                "transport_error",
-            );
-            AppError::Internal(format!(
-                "Sidecar walrus/set-metadata-batch request failed: {}",
+fn publisher_jwt_secret_bytes(secret: &str) -> Result<Vec<u8>, UploadBlobError> {
+    let trimmed = secret.trim();
+    if let Some(hex_secret) = trimmed.strip_prefix("0x") {
+        return hex::decode(hex_secret).map_err(|e| {
+            UploadBlobError::App(AppError::Internal(format!(
+                "Invalid WALRUS_PUBLISHER_JWT_SECRET hex value: {}",
                 e
-            ))
-        })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sidecar",
-        "walrus_set_metadata_batch",
-        &status_label,
-        started.elapsed(),
-    );
-    if !resp.status().is_success() {
-        crate::observability::record_sidecar_failure("walrus_set_metadata_batch", "http_error");
-        let body = resp.text().await.unwrap_or_default();
-        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
-            return Err(AppError::Internal(format!(
-                "walrus set-metadata-batch failed: {}",
-                err.error
-            )));
-        }
-        return Err(AppError::Internal(format!(
-            "walrus set-metadata-batch failed: {}",
-            body
-        )));
+            )))
+        });
     }
-
-    let result: SetMetadataBatchResponse = resp.json().await.map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to parse walrus/set-metadata-batch response: {}",
-            e
-        ))
-    })?;
-    Ok(result.transferred)
+    Ok(trimmed.as_bytes().to_vec())
 }
 
-/// Query user's Walrus Blob objects from the Sui chain via sidecar.
-///
-/// This enables restore-from-zero: even if the local DB is empty,
-/// we can discover all blob_ids by querying the user's on-chain objects
-/// and reading the `memwal_namespace` metadata attribute.
-pub async fn query_blobs_by_owner(
-    client: &reqwest::Client,
-    sidecar_url: &str,
-    sidecar_secret: Option<&str>,
-    owner_address: &str,
-    namespace: Option<&str>,
-    package_id: Option<&str>,
-    limit: Option<usize>,
-) -> Result<Vec<OnChainBlob>, AppError> {
-    let url = format!("{}/walrus/query-blobs", sidecar_url);
-
-    let mut body = serde_json::json!({ "owner": owner_address });
-    if let Some(ns) = namespace {
-        body["namespace"] = serde_json::json!(ns);
-    }
-    if let Some(pkg) = package_id {
-        body["packageId"] = serde_json::json!(pkg);
-    }
-    if let Some(limit) = limit {
-        body["limit"] = serde_json::json!(limit);
-    }
-
-    let mut req = client.post(&url).json(&body);
-    if let Some(secret) = sidecar_secret {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-    let started = std::time::Instant::now();
-    let resp = req.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sidecar",
-            "walrus_query_blobs",
-            "transport_error",
-            started.elapsed(),
-        );
-        crate::observability::record_sidecar_failure("walrus_query_blobs", "transport_error");
-        AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
+fn parse_publisher_upload_response(body: &str) -> Result<UploadResult, UploadBlobError> {
+    let parsed: PublisherStoreResponse = serde_json::from_str(body).map_err(|e| {
+        UploadBlobError::App(AppError::Internal(format!(
+            "Failed to parse Walrus publisher upload response: {}",
+            e
+        )))
     })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sidecar",
-        "walrus_query_blobs",
-        &status_label,
-        started.elapsed(),
-    );
 
-    if !resp.status().is_success() {
-        crate::observability::record_sidecar_failure("walrus_query_blobs", "http_error");
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "walrus query-blobs failed: {}",
-            body
-        )));
+    if let Some(newly_created) = parsed.newly_created {
+        return Ok(UploadResult {
+            blob_id: newly_created.blob_object.blob_id,
+            object_id: Some(newly_created.blob_object.id),
+        });
     }
 
-    let result: QueryBlobsResponse = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse query-blobs response: {}", e)))?;
+    if let Some(already_certified) = parsed.already_certified {
+        return Ok(UploadResult {
+            blob_id: already_certified.blob_id,
+            object_id: None,
+        });
+    }
 
-    tracing::info!(
-        "walrus query-blobs ok: {} blobs for owner={}, ns={:?}",
-        result.total,
-        owner_address,
-        namespace
-    );
-
-    Ok(result.blobs)
+    Err(UploadBlobError::App(AppError::Internal(
+        "Walrus publisher response did not contain newlyCreated or alreadyCertified".into(),
+    )))
 }
 
 /// Download a blob from one or more Walrus aggregators.
@@ -688,7 +624,10 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::aggregate_download_errors;
+    use super::{
+        aggregate_download_errors, build_publisher_store_url, parse_publisher_upload_response,
+        publisher_jwt_secret_bytes,
+    };
     use crate::types::AppError;
 
     #[test]
@@ -727,5 +666,61 @@ mod tests {
             aggregate_download_errors("blob", &errors),
             AppError::Internal(_)
         ));
+    }
+
+    #[test]
+    fn publisher_store_url_includes_upload_constraints() {
+        let url =
+            build_publisher_store_url("https://publisher.example.com/", 3, true, Some("0xabc"))
+                .expect("valid publisher url");
+
+        assert_eq!(
+            url.as_str(),
+            "https://publisher.example.com/v1/blobs?epochs=3&deletable=true&send_object_to=0xabc"
+        );
+    }
+
+    #[test]
+    fn publisher_response_parses_newly_created() {
+        let response = r#"{
+            "newlyCreated": {
+                "blobObject": {
+                    "id": "0xobject",
+                    "blobId": "blob-id"
+                }
+            }
+        }"#;
+
+        let parsed = parse_publisher_upload_response(response).expect("publisher response");
+
+        assert_eq!(parsed.blob_id, "blob-id");
+        assert_eq!(parsed.object_id.as_deref(), Some("0xobject"));
+    }
+
+    #[test]
+    fn publisher_response_parses_already_certified() {
+        let response = r#"{
+            "alreadyCertified": {
+                "blobId": "blob-id",
+                "endEpoch": 35
+            }
+        }"#;
+
+        let parsed = parse_publisher_upload_response(response).expect("publisher response");
+
+        assert_eq!(parsed.blob_id, "blob-id");
+        assert!(parsed.object_id.is_none());
+    }
+
+    #[test]
+    fn publisher_jwt_secret_accepts_hex_and_raw() {
+        assert_eq!(
+            publisher_jwt_secret_bytes("0x68656c6c6f").expect("hex secret"),
+            b"hello"
+        );
+        assert_eq!(
+            publisher_jwt_secret_bytes("raw-secret").expect("raw secret"),
+            b"raw-secret"
+        );
     }
 }

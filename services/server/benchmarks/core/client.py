@@ -95,7 +95,7 @@ class MemWalClient:
 
     # Status codes considered transient and worth retrying.
     # 429: rate-limited — wait and retry.
-    # 502/503/504: gateway/upstream issues (sidecar restart, transient
+    # 502/503/504: gateway/upstream issues (publisher restart, transient
     #              network blip) — wait and retry.
     # 401 is intentionally NOT retried: it almost always means
     #     misconfigured auth (wrong account_id, expired delegate key).

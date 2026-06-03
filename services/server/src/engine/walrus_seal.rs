@@ -4,8 +4,8 @@
 //! inlined across `routes.rs` (`recall`, `ask`, `remember_manual`) and
 //! `jobs.rs` (the `RememberJob` / `BulkRememberJob` workers):
 //!
-//! - **store_blob**: pick a Sui key (round-robin pool) → `walrus::upload_blob`
-//!   the prepared ciphertext → `db.insert_vector`.
+//! - **store_blob**: upload the prepared ciphertext through the configured
+//!   Walrus backend → `db.insert_vector`.
 //! - **fetch_one**: Redis blob-cache lookup → on miss, `walrus::download_blob`
 //!   + cache write-back → `seal::seal_decrypt` → UTF-8. Reactive cleanup of
 //!   the index row (scoped to `owner`) on Walrus 404 / permanent decrypt
@@ -239,14 +239,12 @@ impl MemoryEngine for WalrusSealEngine {
             )
         })?;
 
-        // Upload the prepared ciphertext to Walrus via the relay sidecar
-        // (pool key pays gas). `defer_transfer = false` — the blob is
-        // transferred to `owner` immediately, same as the inlined
-        // `remember_manual` path.
-        let upload = walrus::upload_blob(
+        // Upload the prepared ciphertext to Walrus using the configured
+        // backend. The publisher backend performs MemWal metadata + transfer
+        // inside the private publisher service.
+        let upload = walrus::upload_blob_for_config(
             &self.http_client,
-            &self.config.sidecar_url,
-            self.config.sidecar_secret.as_deref(),
+            &self.config,
             bytes,
             self.config.walrus_storage_epochs as u64,
             owner,
@@ -310,15 +308,15 @@ impl MemoryEngine for WalrusSealEngine {
             None => return Ok(None),
         };
 
-        // Step 2: SEAL decrypt via sidecar.
+        // Step 2: SEAL decrypt with the native Rust SEAL path.
         let plaintext_bytes = match seal::seal_decrypt(
             &self.http_client,
-            &self.config.sidecar_url,
-            self.config.sidecar_secret.as_deref(),
             &ciphertext,
             &credential,
             &self.config.package_id,
             &auth.account_id,
+            &self.config.sui_rpc_url,
+            &self.config.sui_network,
         )
         .await
         {
@@ -425,12 +423,12 @@ impl MemoryEngine for WalrusSealEngine {
         for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
             match seal::seal_decrypt_batch(
                 &self.http_client,
-                &self.config.sidecar_url,
-                self.config.sidecar_secret.as_deref(),
                 chunk,
                 &credential,
                 &self.config.package_id,
                 &auth.account_id,
+                &self.config.sui_rpc_url,
+                &self.config.sui_network,
             )
             .await
             {

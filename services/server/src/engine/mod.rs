@@ -31,10 +31,10 @@
 //!   called directly from handlers. Search returns `(blob_id, distance)`;
 //!   handlers pass those into `fetch_one` / `fetch_batch` to materialise
 //!   the plaintext.
-//! - **On-chain metadata + transfer.** The Walrus upload-relay sidecar
-//!   handles blob registration; the per-wallet `set_metadata_batch` +
-//!   transfer choreography stays in `jobs.rs`. The engine's `store_blob`
-//!   only does the upload + the Postgres index row.
+//! - **On-chain metadata + transfer.** The configured Walrus upload backend
+//!   handles blob registration. With the publisher backend, the private
+//!   MemWal publisher writes metadata and transfers the Blob object before
+//!   returning. The engine's `store_blob` only does upload + Postgres index.
 //! - **Embedding generation, quota enforcement, auth** — handlers /
 //!   middleware, unchanged.
 

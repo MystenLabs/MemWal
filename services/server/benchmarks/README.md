@@ -2,7 +2,7 @@
 
 A Python harness that runs industry-standard memory benchmarks (LOCOMO, LongMemEval) against Walrus Memory and compares composite scoring presets against pure cosine similarity. Results are saved as JSON artifacts with per-query detail for inspection.
 
-> **Scope.** This is the **AI-quality** harness — it measures *memory-retrieval quality* (given a question, does the right memory come back). It is the complement to the **latency** benchmarks under `services/server/scripts/bench-*.ts`, which measure Walrus throughput / SEAL decrypt latency / sidecar concurrency. Different concerns, different tools.
+> **Scope.** This is the **AI-quality** harness — it measures *memory-retrieval quality* (given a question, does the right memory come back). It is separate from production latency benchmarking, which should now exercise the Rust relayer and MemWal publisher directly.
 >
 > It runs against the server in **`BENCHMARK_MODE=true`** (the `PlaintextEngine` path — memories stored as plaintext in Postgres, bypassing SEAL + Walrus). `analyze` in that mode ingests *synchronously* (the response carries the stored ids and `status: "done"`), matching the SDK's pre-async analyze contract this harness was written against. Running through the production path would burn Walrus testnet quota measuring something this benchmark isn't testing. `BENCHMARK_MODE` is off by default and **not for production use**.
 
@@ -138,7 +138,7 @@ benchmark mode the server panics on startup without `DATABASE_URL`,
 reachable `SUI_RPC_URL` to verify the delegate key on-chain (benchmark
 mode bypasses SEAL + Walrus storage, **not** auth). Copy the full
 `.env.example` and fill those in; the `SERVER_SUI_PRIVATE_KEY*` /
-`SIDECAR_*` / `WALRUS_*` keys are *not* needed in benchmark mode (the
+`WALRUS_*` keys are *not* needed in benchmark mode (the
 `PlaintextEngine` never touches SEAL or Walrus).
 
 Migrations apply **automatically on server startup** — they're embedded
