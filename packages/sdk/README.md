@@ -6,7 +6,7 @@ Walrus Memory SDK for storing encrypted AI memories on Walrus and retrieving the
 
 ## Documentation
 
-For full documentation, visit [docs.memwal.ai](https://docs.memwal.ai).
+For full documentation, visit [memory.walrus.xyz](https://memory.walrus.xyz).
 
 ## Install
 
@@ -28,7 +28,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
   accountId: process.env.MEMWAL_ACCOUNT_ID!,
-  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
   namespace: "demo",
 });
 
