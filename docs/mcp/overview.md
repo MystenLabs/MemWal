@@ -24,7 +24,7 @@ Walrus Memory exposes a **Model Context Protocol (MCP) server** so MCP-aware cli
     Memories saved from Cursor surface in Claude Desktop, Codex, and vice versa — not locked to any single client
   </Card>
   <Card title="Environment Presets" icon="server">
-    `--prod` / `--staging` / `--dev` / `--local` flags switch networks without editing client configs
+    `--prod` / `--staging` / `--local` flags switch networks without editing client configs
   </Card>
 </CardGroup>
 
@@ -65,7 +65,7 @@ If your MCP host supports **remote Streamable HTTP** servers with custom headers
   <Card title="Source Code" icon="github" href="https://github.com/MystenLabs/MemWal/tree/main/packages/mcp">
     Browse the `@mysten-incubation/memwal-mcp` package on GitHub
   </Card>
-  <Card title="Walrus Memory Dashboard" icon="window" href="https://memwal.ai">
+  <Card title="Walrus Memory Dashboard" icon="window" href="https://memory.walrus.xyz">
     Manage delegate keys, view storage, and revoke connected clients
   </Card>
 </CardGroup>

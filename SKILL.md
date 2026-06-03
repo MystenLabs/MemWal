@@ -76,8 +76,8 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus
 You need a **delegate key** (Ed25519 private key) and **account ID** (Walrus Memory account object ID on Sui).
 
 Generate them at:
-- Production: https://memwal.ai or https://memwal.wal.app
-- Staging: https://staging.memwal.ai
+- Production: https://memory.walrus.xyz
+- Staging: https://staging.memory.walrus.xyz
 
 ### 2. Initialize the SDK
 
@@ -87,7 +87,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
   accountId: process.env.MEMWAL_ACCOUNT_ID!,
-  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
   namespace: "my-app",
 });
 ```
@@ -427,15 +427,15 @@ const relevant = memories.results.filter((memory) => memory.distance < 0.7);
 |---|---|---|---|---|
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | Walrus Memory account object ID on Sui |
-| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 ### Managed Relayer Endpoints
 
 | Network | Relayer URL |
 |---|---|
-| **Production** (mainnet) | `https://relayer.memwal.ai` |
-| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
+| **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
+| **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
 
 ### Framework and Key Handling
 
@@ -467,7 +467,7 @@ export function getMemWal() {
   return MemWal.create({
     key: process.env.MEMWAL_PRIVATE_KEY!,
     accountId: process.env.MEMWAL_ACCOUNT_ID!,
-    serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+    serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
     namespace: "my-app",
   });
 }
@@ -493,7 +493,7 @@ import { withMemWal } from "@mysten-incubation/memwal/ai";
 const model = withMemWal(openai("gpt-4o"), {
   key: "<your-delegate-key>",
   accountId: "<your-account-id>",
-  serverUrl: "https://relayer.memwal.ai",
+  serverUrl: "https://relayer.memory.walrus.xyz",
   namespace: "chat",
   maxMemories: 5,
   autoSave: true,
@@ -536,7 +536,7 @@ Add to `~/.openclaw/openclaw.json`:
         "config": {
           "privateKey": "${MEMWAL_PRIVATE_KEY}",
           "accountId": "0x...",
-          "serverUrl": "https://relayer.memwal.ai"
+          "serverUrl": "https://relayer.memory.walrus.xyz"
         }
       }
     }
@@ -579,8 +579,8 @@ If you're writing user-facing copy, prefer "Walrus Memory". If you're writing an
 
 ## Links
 
-- **Docs**: https://docs.memwal.ai
+- **Docs**: https://memory.walrus.xyz
 - **SDK on npm**: https://www.npmjs.com/package/@mysten-incubation/memwal
 - **GitHub**: https://github.com/CommandOSSLabs/MemWal
-- **Dashboard**: https://memwal.ai
-- **llms.txt**: https://docs.memwal.ai/llms.txt
+- **Dashboard**: https://memory.walrus.xyz
+- **llms.txt**: https://docs.wal.app/walrus-memory/llms.txt
