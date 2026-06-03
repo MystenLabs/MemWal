@@ -120,7 +120,10 @@ export default function LandingPage() {
                         </button>
                     )}
                     <div onClick={handleWalletClick} className="wm-signin-wallet">
-                        <ConnectButton connectText="Connect wallet" />
+                        <ConnectButton
+                            connectText="Connect wallet"
+                            walletFilter={(wallet) => !isEnokiWallet(wallet)}
+                        />
                     </div>
                     <p className="wm-signin-tos">
                         By continuing, you agree to our <a href={config.termsOfServiceUrl} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.privacyPolicyUrl} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
