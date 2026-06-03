@@ -35,4 +35,4 @@ pub mod consolidator;
 
 pub use embedder::{Embedder, OpenAiEmbedder};
 pub use extractor::{Extractor, LlmExtractor};
-pub use ranker::{CompositeRanker, Ranker};
+pub use ranker::{rank_and_diversify, CompositeRanker, MmrConfig, Ranker};

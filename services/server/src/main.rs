@@ -375,6 +375,9 @@ async fn main() {
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
+    // Diversity reranker (MMR) config — off unless MMR_ENABLED is set.
+    // Logs its λ/pool_n when enabled (see MmrConfig::from_env).
+    let mmr_config = services::MmrConfig::from_env();
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
@@ -389,6 +392,7 @@ async fn main() {
         embedder,
         extractor,
         ranker,
+        mmr_config,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),

@@ -4,6 +4,11 @@ use sqlx::PgPool;
 
 use crate::types::{AppError, SearchHit};
 
+/// Raw row tuple returned by the `search_similar` query, in SELECT order:
+/// `(blob_id, distance, created_at, importance, embedding)`. Named to keep
+/// the `query_as` turbofish readable (clippy `type_complexity`).
+type SearchRow = (String, f64, chrono::DateTime<chrono::Utc>, f32, Vector);
+
 pub struct VectorDb {
     pool: PgPool,
 }
@@ -268,22 +273,31 @@ impl VectorDb {
         // without a second round-trip. Both NOT NULL (migration 001 for
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
+        //
+        // The raw `embedding` column is also selected so the diversity
+        // reranker (`crate::services::ranker::mmr_rerank`) can compute
+        // doc-to-doc cosine similarity without a second round-trip. It is
+        // ~6 KB/row (1536 × f32) of Postgres→server transfer that the
+        // default (MMR-off) path doesn't strictly need, but: (a) the HNSW
+        // search already loaded the row, (b) `limit` is capped at 100, and
+        // (c) the link is localhost↔DB inside the TEE — so the cost is
+        // sub-millisecond and not worth forking the query to avoid. The
+        // `Vector` decodes to `Vec<f32>` via `into()`.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
-            sqlx::query_as(
-                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
+        let result: Result<Vec<SearchRow>, AppError> = sqlx::query_as(
+            "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance, embedding
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
              LIMIT $4",
-            )
-            .bind(embedding)
-            .bind(owner)
-            .bind(namespace)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        )
+        .bind(embedding)
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),
@@ -293,12 +307,15 @@ impl VectorDb {
 
         let results = rows
             .into_iter()
-            .map(|(blob_id, distance, created_at, importance)| SearchHit {
-                blob_id,
-                distance,
-                created_at,
-                importance,
-            })
+            .map(
+                |(blob_id, distance, created_at, importance, embedding)| SearchHit {
+                    blob_id,
+                    distance,
+                    created_at,
+                    importance,
+                    embedding: embedding.to_vec(),
+                },
+            )
             .collect();
 
         Ok(results)

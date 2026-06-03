@@ -182,10 +182,25 @@ pub async fn recall(
     // Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
+
+    // When the MMR diversity reranker is on, fetch a *larger* candidate
+    // pool than the caller's `limit` so the reranker has lower-relevance-
+    // but-complementary facts available to rescue up into the visible
+    // window. The `LIMIT` lives in the SQL, so the pool size must be
+    // decided *here* (before the search) — MMR can't surface a row the DB
+    // never returned. When MMR is off, `search_limit == limit` and the
+    // search is byte-identical to before.
+    let mmr = &state.mmr_config;
+    let search_limit = if mmr.enabled {
+        limit.max(mmr.pool_n).min(100)
+    } else {
+        limit
+    };
+
     let t1 = std::time::Instant::now();
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(&query_vector, owner, namespace, search_limit)
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
     let hit_count = hits.len();
@@ -201,6 +216,19 @@ pub async fn recall(
             dropped_count: 0,
         }));
     }
+
+    // Full ordering pipeline on the candidate pool, BEFORE truncation and
+    // BEFORE the expensive Walrus/SEAL hydration: composite scoring first,
+    // then MMR diversity composition last (the correct layering — MMR is
+    // the final ordering stage so nothing pointwise scrambles its set
+    // composition; see `services::ranker::rank_and_diversify`). At default
+    // weights + MMR off this is a no-op and the next line just truncates
+    // the pgvector order to `limit`, byte-identical to before. When MMR is
+    // on, complementary facts a multi-hop query needs are pulled up so they
+    // survive the `limit` cut, and we only pay fetch/decrypt cost on the
+    // `limit` hits we'll actually return — not the whole pool.
+    let hits = crate::services::rank_and_diversify(hits, &weights, mmr, chrono::Utc::now());
+    let hits: Vec<SearchHit> = hits.into_iter().take(limit).collect();
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
     // download -> batched SEAL decrypt -> UTF-8, with reactive cleanup on
@@ -241,22 +269,32 @@ pub async fn recall(
         );
     }
 
-    // Composite re-rank. With default weights (semantic=1.0, recency=0.0)
-    // this is a no-op and preserves the pgvector cosine order exactly —
-    // pinned by the `default_weights_preserve_input_order` and
-    // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
-    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
-
-    let results: Vec<RecallResult> = ranked
+    // Ordering is already FINAL at this point — `rank_and_diversify` did
+    // composite scoring + MMR before truncation, and `fetch_batch`
+    // preserves the `hit_refs` order. So we do NOT re-rank here; a second
+    // pointwise pass would scramble MMR's set composition (the exact bug
+    // the layering refactor fixes). We only build the response, surfacing
+    // the composite score when the ranker is active (so its
+    // `#[serde(skip_serializing_if = "Option::is_none")]` keeps the wire
+    // shape byte-identical to today at default weights).
+    let now = chrono::Utc::now();
+    let ranker_active = weights.is_ranker_active();
+    let results: Vec<RecallResult> = hydrated
         .into_iter()
-        .map(|r| RecallResult {
-            blob_id: r.memory.blob_id,
-            text: r.memory.text,
-            distance: r.memory.distance,
-            // `score` is `Some` only when the ranker ran (recency > 0); the
-            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
-            // type omits the field from the wire when default-weighted.
-            score: r.score,
+        .map(|m| {
+            let score = if ranker_active {
+                Some(crate::services::ranker::CompositeRanker::score(
+                    &m, &weights, now,
+                ))
+            } else {
+                None
+            };
+            RecallResult {
+                blob_id: m.blob_id,
+                text: m.text,
+                distance: m.distance,
+                score,
+            }
         })
         .collect();
     let total = results.len();
@@ -277,7 +315,17 @@ pub async fn recall(
     // log line that combined the two stages into `fetch=Xms`. Benchmark
     // mode reports the entire Postgres-select fetch as `walrus_ms` and
     // leaves `seal_ms` at 0 — same shape, different mode.
+    //
+    // MMR breadcrumb (mmr_enabled / mmr_lambda / mmr_pool_n / search_limit)
+    // is on EVERY recall so a benchmark run can grep-assert the diversity
+    // reranker actually executed with the intended λ — without it, an
+    // MMR-off run is byte-identical to MMR-on at the response level and a
+    // silently-misconfigured experiment reads as a clean null.
     tracing::info!(
+        mmr_enabled = mmr.enabled,
+        mmr_lambda = mmr.lambda,
+        mmr_pool_n = mmr.pool_n,
+        search_limit = search_limit,
         "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms fetch={}ms total={}ms",
         total,
         owner,
@@ -346,6 +394,16 @@ pub async fn recall_manual(
         .db
         .search_similar(&body.vector, owner, namespace, limit)
         .await?;
+
+    // NOTE: the MMR diversity reranker is deliberately NOT applied on the
+    // manual path (yet). The benchmark harness drives the hydrating
+    // `/api/recall` path, so that's where we measure MMR first; and manual
+    // recall's contract is "client hydrates", so a server-side
+    // pool-enlargement + reorder is a behaviour change we want to validate
+    // on the main path before extending it here. This mirrors how the
+    // CompositeRanker rolled out to the hydrating paths first and reached
+    // manual recall only later. When MMR is off (the default), there is no
+    // asymmetry — both paths are pure cosine order.
 
     // Apply the shared CompositeRanker so manual ordering matches
     // `/api/recall` and `/api/ask`. `rank_search_hits` reuses the
@@ -435,6 +493,9 @@ mod tests {
             distance,
             created_at: t_now() - chrono::Duration::days(age_days),
             importance,
+            // These tests exercise the composite (pointwise) ranker only,
+            // which never reads the embedding — empty Vec is fine.
+            embedding: Vec::new(),
         }
     }
 

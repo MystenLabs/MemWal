@@ -274,8 +274,16 @@ def stage_eval(
     weights: ScoringWeights,
     config: dict,
     mode: str = "e2e",
+    label: str | None = None,
 ) -> RunArtifact:
-    """Run evaluation: recall with preset weights, then judge answers."""
+    """Run evaluation: recall with preset weights, then judge answers.
+
+    `label` overrides the artifact's on-disk name + `preset` field without
+    changing the scoring weights — so several eval passes over the same
+    ingested run-id (an MMR λ sweep) produce distinct artifacts. Defaults
+    to `preset_name`.
+    """
+    artifact_label = label or preset_name
     adapter_cls = BENCHMARKS[benchmark_name]
     adapter = adapter_cls()
     _, queries = adapter.load(DATASETS_DIR)
@@ -422,13 +430,26 @@ def stage_eval(
     # the rare case where `stage_eval` is invoked directly from tests.
     prompt_versions = config.get("_server_prompt_versions") or {}
 
+    # Capture the server-side MMR diversity-reranker condition this eval ran
+    # under, straight from the env the server was launched with, so the
+    # artifact is self-documenting (which λ produced these numbers) and a
+    # silently-misconfigured run can't be misread later. These are the
+    # SERVER's env — the harness and server share a shell in the sweep
+    # script — recorded verbatim (None if unset).
+    import os
+    mmr_condition = {
+        "MMR_ENABLED": os.environ.get("MMR_ENABLED"),
+        "MMR_LAMBDA": os.environ.get("MMR_LAMBDA"),
+        "MMR_POOL_N": os.environ.get("MMR_POOL_N"),
+    }
+
     # Build artifact
     artifact = RunArtifact(
         run_id=run_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
         git_commit=get_git_commit(),
         benchmark=benchmark_name,
-        preset=preset_name,
+        preset=artifact_label,
         prompt_versions=prompt_versions,
         config={
             "server_url": config.get("server", {}).get("url", ""),
@@ -438,6 +459,8 @@ def stage_eval(
             "mode": mode,
             "judge_model": config.get("judge", {}).get("model", ""),
             "answer_model": config.get("answer", {}).get("model", ""),
+            "preset_weights_source": preset_name,
+            "mmr_condition": mmr_condition,
         },
         metrics_overall=_dict_to_category_metrics(overall),
         metrics_by_category={cat: _dict_to_category_metrics(m) for cat, m in by_category.items()},
@@ -446,7 +469,7 @@ def stage_eval(
 
     # Save artifact
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    artifact_path = RESULTS_DIR / f"{run_id}-{benchmark_name}-{preset_name}.json"
+    artifact_path = RESULTS_DIR / f"{run_id}-{benchmark_name}-{artifact_label}.json"
     artifact_path.write_text(_serialize_artifact(artifact))
     print(f"Results saved to {artifact_path}")
 
@@ -581,6 +604,18 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--preset", required=True)
     ev.add_argument("--run-id", default=None)
     ev.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
+    # Override the artifact's preset-name component so several eval passes
+    # over the SAME ingested run-id (e.g. an MMR λ sweep where the only
+    # difference is server-side MMR config) write distinct artifacts instead
+    # of overwriting each other. The scoring weights still come from
+    # --preset; only the on-disk label changes. Used by the MMR sweep so
+    # report.py's group-by-preset doesn't collapse the sweep into one row.
+    ev.add_argument(
+        "--label",
+        default=None,
+        help="Artifact label override (default: the preset name). "
+        "Lets an MMR λ sweep tag each condition distinctly.",
+    )
 
     # compare
     cmp = sub.add_parser("compare", help="Compare multiple presets")
@@ -717,7 +752,10 @@ def main():
 
         elif args.command == "eval":
             weights = load_preset(args.preset)
-            stage_eval(args.benchmark, client, judge, run_id, args.preset, weights, config, args.mode)
+            stage_eval(
+                args.benchmark, client, judge, run_id, args.preset, weights,
+                config, args.mode, label=getattr(args, "label", None),
+            )
 
         elif args.command == "compare":
             preset_names = [p.strip() for p in args.presets.split(",")]

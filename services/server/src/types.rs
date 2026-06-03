@@ -85,6 +85,12 @@ pub struct AppState {
     /// when the request body sets `scoring_weights`; default weights
     /// preserve the pgvector cosine order exactly.
     pub ranker: Arc<dyn Ranker>,
+    /// Diversity-reranker config (MMR). Server-wide, env-driven, **off by
+    /// default** — when `enabled == false` the recall path skips the stage
+    /// and ordering is unchanged. Built once at startup via
+    /// [`crate::services::MmrConfig::from_env`]. `Copy`, so it's stored by
+    /// value rather than behind an `Arc`.
+    pub mmr_config: crate::services::MmrConfig,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -530,6 +536,18 @@ pub struct SearchHit {
     /// is non-zero. NOT NULL with default 0.5 so legacy rows degrade
     /// gracefully to the "standard" bucket.
     pub importance: f32,
+    /// Raw stored embedding (`vector_entries.embedding`, 1536-dim for
+    /// `text-embedding-3-small`). Selected by `search_similar` so the
+    /// diversity reranker ([`crate::services::ranker::mmr_rerank`]) can
+    /// compute doc-to-doc cosine similarity for the redundancy term
+    /// without re-embedding or a second DB round-trip. Empty `Vec` only
+    /// in unit-test fixtures that don't exercise MMR.
+    ///
+    /// `#[serde(skip)]`: `SearchHit` is an internal type and is never sent
+    /// over the wire today, but the skip is defensive — a 1536-float array
+    /// has no business in a JSON response or a debug-serialized log line.
+    #[serde(skip)]
+    pub embedding: Vec<f32>,
 }
 
 /// Composite-scoring weights for `/api/recall` and `/api/ask`. Optional on
