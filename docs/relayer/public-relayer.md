@@ -8,8 +8,8 @@ A managed relayer is a simpler experience for teams that want to get started wit
 
 | Network | Relayer URL |
 |---|---|
-| **Production** (mainnet) | `https://relayer.memwal.ai` |
-| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
+| **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
+| **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
 
 ## Minimal Config
 
@@ -19,7 +19,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
   accountId: "<your-memwal-account-id>",
-  serverUrl: "https://relayer.memwal.ai",
+  serverUrl: "https://relayer.memory.walrus.xyz",
   namespace: "demo",
 });
 ```

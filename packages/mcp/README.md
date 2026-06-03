@@ -118,7 +118,6 @@ function in `src/bridge.ts` if you want to assert it directly.
 
 ```sh
 memwal-mcp --prod
-memwal-mcp --dev
 memwal-mcp --staging
 memwal-mcp --local
 ```
@@ -134,7 +133,7 @@ You can also pass explicit URLs:
         "-y",
         "@mysten-incubation/memwal-mcp",
         "--relayer",
-        "https://relayer.dev.memwal.ai"
+        "https://relayer-staging.memory.walrus.xyz"
       ]
     }
   }

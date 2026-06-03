@@ -1,4 +1,4 @@
-"""Tests for the relayer environment presets (prod/dev/staging/local).
+"""Tests for the relayer environment presets (prod/staging/local).
 
 Pure config resolution — no network. Mirrors the precedence rule documented
 in the README: explicit non-default ``server_url`` > ``env`` > default.
@@ -17,9 +17,8 @@ ACCOUNT = "0x" + "ab" * 32
 @pytest.mark.parametrize(
     "env,expected",
     [
-        ("prod", "https://relayer.memwal.ai"),
-        ("dev", "https://relayer.dev.memwal.ai"),
-        ("staging", "https://relayer.staging.memwal.ai"),
+        ("prod", "https://relayer.memory.walrus.xyz"),
+        ("staging", "https://relayer-staging.memory.walrus.xyz"),
         ("local", "http://127.0.0.1:8000"),
     ],
 )
@@ -51,12 +50,12 @@ def test_unknown_env_raises():
 
 def test_create_threads_env_through_to_client():
     client = MemWal.create(key=KEY, account_id=ACCOUNT, env="staging")
-    assert client._server_url == "https://relayer.staging.memwal.ai"
+    assert client._server_url == "https://relayer-staging.memory.walrus.xyz"
 
 
 def test_sync_create_threads_env_through():
-    client = MemWalSync.create(key=KEY, account_id=ACCOUNT, env="dev")
-    assert client._inner._server_url == "https://relayer.dev.memwal.ai"
+    client = MemWalSync.create(key=KEY, account_id=ACCOUNT, env="prod")
+    assert client._inner._server_url == "https://relayer.memory.walrus.xyz"
 
 
 def test_explicit_default_url_with_env_still_takes_preset():
@@ -68,4 +67,4 @@ def test_explicit_default_url_with_env_still_takes_preset():
         server_url=DEFAULT_SERVER_URL,
         env="prod",
     )
-    assert cfg.server_url == "https://relayer.memwal.ai"
+    assert cfg.server_url == "https://relayer.memory.walrus.xyz"
