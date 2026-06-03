@@ -12,8 +12,8 @@ data they can trust.
 ## For AI Agents
 
 - **Single-file guide**: Read [`SKILL.md`](SKILL.md) for a complete integration reference (install, configure, API surface, troubleshooting)
-- **LLM-friendly docs**: [`llms.txt`](https://docs.memwal.ai/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
-- **Full context**: [`llms-full.txt`](https://docs.memwal.ai/llms-full.txt) — expanded version with inlined page content
+- **LLM-friendly docs**: [`llms.txt`](https://docs.wal.app/walrus-memory/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
+- **Full context**: [`llms-full.txt`](https://docs.wal.app/walrus-memory/llms-full.txt) — expanded version with inlined page content
 
 ## Install
 
@@ -47,7 +47,7 @@ await memwal.restore("demo");
 
 ## Documentation
 
-- Full docs at [docs.memwal.ai](https://docs.memwal.ai)
+- Full docs at [memory.walrus.xyz](https://memory.walrus.xyz)
 - Docs source of truth: `docs/`
 - Docs site entry points:
   - [What is Walrus Memory?](docs/getting-started/what-is-memwal.md)

@@ -46,7 +46,7 @@ const signinLogos = [
     { label: 'OpenGradient', src: marketingAsset('/walrus-trust-opengradient.svg'), w: 191 },
     { label: 'TALUS', src: marketingAsset('/walrus-trust-talus.svg'), w: 117 },
     { label: 'TATUM', src: marketingAsset('/walrus-trust-tatum.svg'), w: 128 },
-    { label: 'CONSO', src: marketingAsset('/walrus-trust-conso.png'), w: 136 },
+    { label: 'CONSO', src: marketingAsset('/walrus-trust-conso.svg'), w: 136 },
 ]
 
 export default function LandingPage() {

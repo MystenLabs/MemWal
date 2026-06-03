@@ -44,8 +44,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://memwal.ai"
-Documentation = "https://docs.memwal.ai"
+Homepage = "https://memory.walrus.xyz"
+Documentation = "https://memory.walrus.xyz"
 Repository = "https://github.com/MystenLabs/MemWal"
 
 [tool.hatch.build.targets.wheel]

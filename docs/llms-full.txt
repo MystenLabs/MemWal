@@ -33,8 +33,8 @@ pnpm add @mysten/sui @mysten/seal @mysten/walrus
 ### Prerequisites
 
 - Node.js v18+ or Bun v1+
-- A delegate key and account ID (generate at https://memwal.ai or https://memwal.wal.app)
-- A relayer URL (use `https://relayer.memwal.ai` for production or `https://relayer.staging.memwal.ai` for staging)
+- A delegate key and account ID (generate at https://memory.walrus.xyz)
+- A relayer URL (use `https://relayer.memory.walrus.xyz` for production or `https://relayer-staging.memory.walrus.xyz` for staging)
 
 ### First Memory
 
@@ -44,7 +44,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 const memwal = MemWal.create({
   key: "<your-ed25519-private-key>",
   accountId: "<your-memwal-account-id>",
-  serverUrl: "https://relayer.memwal.ai",
+  serverUrl: "https://relayer.memory.walrus.xyz",
   namespace: "demo",
 });
 
@@ -83,7 +83,7 @@ Config:
 |---|---|---|---|---|
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 ### `remember(text, namespace?): Promise<RememberAcceptedResult>`
@@ -216,7 +216,7 @@ import { withMemWal } from "@mysten-incubation/memwal/ai";
 const model = withMemWal(openai("gpt-4o"), {
   key: "<your-delegate-key>",
   accountId: "<your-account-id>",
-  serverUrl: "https://relayer.memwal.ai",
+  serverUrl: "https://relayer.memory.walrus.xyz",
   namespace: "chat",
   maxMemories: 5,
   autoSave: true,
@@ -293,7 +293,7 @@ Used by `MemWal.create(config)` and `withMemWal(model, options)`.
 |---|---|---|
 | `key` | yes | Delegate private key in hex |
 | `accountId` | yes | MemWalAccount object ID on Sui |
-| `serverUrl` | no | Relayer URL. Default: `https://relayer.memwal.ai` |
+| `serverUrl` | no | Relayer URL. Default: `https://relayer.memory.walrus.xyz` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
 
 ### MemWalManualConfig
@@ -318,8 +318,8 @@ Used by `MemWalManual.create(config)`.
 
 | Network | Relayer URL |
 |---|---|
-| **Production** (mainnet) | `https://relayer.memwal.ai` |
-| **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
+| **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
+| **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
 
 ---
 
@@ -393,7 +393,7 @@ Add to `~/.openclaw/openclaw.json`:
         "config": {
           "privateKey": "${MEMWAL_PRIVATE_KEY}",
           "accountId": "0x...",
-          "serverUrl": "https://relayer.memwal.ai"
+          "serverUrl": "https://relayer.memory.walrus.xyz"
         }
       }
     }
@@ -460,7 +460,7 @@ MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75
 
 ## Links
 
-- **Docs**: https://docs.memwal.ai
+- **Docs**: https://docs.wal.app/walrus-memory/getting-started/what-is-memwal
 - **SDK on npm**: https://www.npmjs.com/package/@mysten-incubation/memwal
 - **GitHub**: https://github.com/CommandOSSLabs/MemWal
-- **Dashboard**: https://memwal.ai
+- **Dashboard**: https://memory.walrus.xyz

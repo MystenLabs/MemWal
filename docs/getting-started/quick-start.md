@@ -101,8 +101,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
 
     | App | URL |
     | --- | --- |
-    | **Walrus Memory Playground** | [memwal.ai](https://memwal.ai) |
-    | **Walrus-hosted Playground** | [memwal.wal.app](https://memwal.wal.app) |
+    | **Walrus Memory Playground** | [memory.walrus.xyz](https://memory.walrus.xyz) |
 
     For the contract-based setup flow, see [Delegate Key Management](/contract/delegate-key-management) and [Walrus Memory smart contract](/contract/overview).
   </Step>
@@ -118,8 +117,8 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
 
     | Network | Relayer URL |
     | --- | --- |
-    | **Production** (mainnet) | `https://relayer.memwal.ai` |
-    | **Staging** (testnet) | `https://relayer.staging.memwal.ai` |
+    | **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
+    | **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
   </Step>
 
   <Step>
@@ -133,7 +132,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     const memwal = MemWal.create({
       key: "<your-ed25519-private-key>",
       accountId: "<your-memwal-account-id>",
-      serverUrl: "https://relayer.memwal.ai",
+      serverUrl: "https://relayer.memory.walrus.xyz",
       namespace: "my-app",
     });
     ```

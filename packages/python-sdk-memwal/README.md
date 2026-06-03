@@ -1,6 +1,6 @@
 # Walrus Memory Python SDK
 
-Python SDK for [Walrus Memory](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
+Python SDK for [Walrus Memory](https://memory.walrus.xyz) — Privacy-first AI memory with Ed25519 signing.
 
 All data processing (encryption, embedding, Walrus storage) happens server-side in a TEE. The SDK signs requests with your Ed25519 delegate key and sends text over HTTPS.
 
@@ -29,7 +29,7 @@ Set your environment variables first:
 ```bash
 export MEMWAL_PRIVATE_KEY="your-ed25519-delegate-private-key-hex"
 export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
-export MEMWAL_SERVER_URL="https://relayer.memwal.ai"
+export MEMWAL_SERVER_URL="https://relayer.memory.walrus.xyz"
 ```
 
 `MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
@@ -46,7 +46,7 @@ async def main():
     memwal = MemWal.create(
         key=os.environ["MEMWAL_PRIVATE_KEY"],
         account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-        server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+        server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
     )
 
     # Store a memory and wait until the background job is searchable
@@ -77,7 +77,7 @@ from memwal import MemWalSync, RecallParams
 client = MemWalSync.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
 )
 
 result = client.remember_and_wait("I'm allergic to peanuts")
@@ -115,8 +115,8 @@ memwal = MemWal.create(
 
 | `env` | Relayer URL |
 |-------|-------------|
-| `prod` | `https://relayer.memwal.ai` |
-| `staging` | `https://relayer.staging.memwal.ai` |
+| `prod` | `https://relayer.memory.walrus.xyz` |
+| `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
 Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
 over the default. An unknown preset raises `ValueError`. `env` is also accepted
@@ -137,7 +137,7 @@ smart_llm = with_memwal_langchain(
     llm,
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
     max_memories=5,
     min_relevance=0.3,
 )
@@ -158,7 +158,7 @@ smart_client = with_memwal_openai(
     client,
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
 )
 
 # Memories are automatically recalled and injected
