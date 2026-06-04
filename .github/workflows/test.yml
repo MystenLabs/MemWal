@@ -32,6 +32,34 @@ jobs:
       - name: Check compatibility contract
         run: node scripts/check-compatibility-contract.mjs
 
+  mcp-tests:
+    name: MCP / Integration (login handoff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # Builds the package (tsc) then runs the node:test integration suite:
+      # spawns the real stdio MCP with empty creds, writes credentials
+      # mid-process, and asserts memwal_recall is served against a mock relayer
+      # without a restart (auth-required -> bridge hot-handoff).
+      - name: MCP integration tests
+        run: pnpm --filter @mysten-incubation/memwal-mcp test
+
   chatbot-e2e:
     name: Chatbot / Playwright E2E
     runs-on: ubuntu-latest

@@ -45,6 +45,11 @@ jobs:
       - name: Build MCP package
         run: pnpm --filter @mysten-incubation/memwal-mcp build
 
+      # Gate every publish on the integration suite (auth-required -> bridge
+      # hot-handoff, login callback). Never ship the MCP package without it.
+      - name: Test MCP package
+        run: pnpm --filter @mysten-incubation/memwal-mcp test
+
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)
         if: github.ref == 'refs/heads/main'

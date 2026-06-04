@@ -21,7 +21,7 @@
         "build": "tsc",
         "dev": "tsc --watch",
         "typecheck": "tsc --noEmit",
-        "test": "npm run build && node --test \"test/**/*.test.mjs\"",
+        "test": "tsc && node --test \"test/**/*.test.mjs\"",
         "start": "node ./dist/bin/memwal-mcp.js"
     },
     "dependencies": {
