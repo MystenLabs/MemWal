@@ -9,6 +9,7 @@
  *               &delegateAddress=<0x-prefixed Sui address>
  *               &label=<URL-encoded label>
  *               &relayer=<URL-encoded relayer base URL>
+ *               &connectState=<64-hex CSRF token>  (legacy bridges: `state`)
  *
  * Flow:
  *   1. Render consent screen — show requested permissions + key fingerprint.
@@ -104,14 +105,22 @@ export default function ConnectMcp() {
     const publicKey = params.get('publicKey') ?? ''
     const delegateAddress = params.get('delegateAddress') ?? ''
     const label = params.get('label') ?? 'Walrus Memory MCP'
-    const relayer = params.get('relayer') ?? 'https://relayer.memwal.ai'
+    const relayer = params.get('relayer') ?? config.memwalServerUrl
     /**
      * Cryptographic state token from the MCP bridge. Must be echoed verbatim
      * in the callback POST — the bridge constant-time compares it to defeat
      * cross-origin CSRF (audit C2). Empty string if absent (older bridge);
      * the bridge will then reject our callback with 400.
+     *
+     * Read from `connectState` (current bridge) with a fallback to the legacy
+     * `state` param. The bridge renamed this param away from `state` because
+     * `state` is a reserved OAuth 2.0 response parameter: when this page starts
+     * Enoki/Google sign-in it reuses the current URL as the OAuth redirect_uri,
+     * and Google rejects any redirect_uri carrying a reserved param (WALM-86:
+     * "Access blocked: invalid_request — Invalid redirect_uri contains reserved
+     * response param state"). We still echo it back in the POST body as `state`.
      */
-    const state = params.get('state') ?? ''
+    const state = params.get('connectState') ?? params.get('state') ?? ''
 
     const [step, setStep] = useState<Step>('consent')
     const [errorMsg, setErrorMsg] = useState('')
@@ -228,6 +237,9 @@ export default function ConnectMcp() {
             setCallbackPayload(payload)
             setStep('callback')
             const delivered = await postCallback(payload)
+            // Flow done — drop the OAuth-resume breadcrumb so a later visit to
+            // `/` goes to the dashboard instead of looping back here.
+            sessionStorage.removeItem('memwal_mcp_connect')
             setStep('success')
             trackEvent('mcp_connect_complete', { callback_delivered: delivered })
         } catch (err) {
@@ -252,6 +264,20 @@ export default function ConnectMcp() {
         invalidRequestTrackedRef.current = true
         trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
     }, [paramsValid])
+
+    // Persist the connect request so it survives the Google OAuth redirect.
+    // Enoki's redirect_uri is pinned to the app root (App.tsx), so signing in
+    // with Google leaves this page and returns to `/` — losing the query
+    // string. App's PostAuthRedirect reads this back and re-opens
+    // /connect/mcp with the params restored. Keyed identically to the URL
+    // params (note `connectState`, not `state`). Cleared on success below.
+    useEffect(() => {
+        if (!paramsValid) return
+        sessionStorage.setItem(
+            'memwal_mcp_connect',
+            JSON.stringify({ port, publicKey, delegateAddress, label, relayer, connectState: state }),
+        )
+    }, [paramsValid, port, publicKey, delegateAddress, label, relayer, state])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
     useEffect(() => {

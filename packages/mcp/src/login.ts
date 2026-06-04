@@ -46,8 +46,8 @@ export interface LoginOptions {
 }
 
 const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: string } = {
-    webUrl: process.env.MEMWAL_WEB_URL ?? "https://memwal.ai",
-    relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+    webUrl: process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz",
+    relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
     label: process.env.MEMWAL_CLIENT_LABEL ?? "Walrus Memory MCP",
     timeoutMs: 5 * 60_000,
     openBrowser: true,
@@ -100,7 +100,7 @@ function stateEquals(a: string, b: string): boolean {
 }
 
 /**
- * Strip trailing slashes so `https://memwal.ai/` and `https://memwal.ai`
+ * Strip trailing slashes so `https://memory.walrus.xyz/` and `https://memory.walrus.xyz`
  * compare equal. The `Origin` request header never carries a trailing slash.
  */
 function normalizeOrigin(url: string): string {
@@ -191,7 +191,15 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         `&delegateAddress=${encodeURIComponent(keypair.suiAddress)}` +
         `&label=${encodeURIComponent(cfg.label)}` +
         `&relayer=${encodeURIComponent(cfg.relayerUrl)}` +
-        `&state=${stateToken}`;
+        // NOTE: the query param is named `connectState`, NOT `state`. `state`
+        // is a reserved OAuth 2.0 response parameter — when the consent page
+        // kicks off Enoki/Google sign-in it reuses the current page URL as the
+        // OAuth `redirect_uri`, and Google rejects any redirect_uri that
+        // carries a reserved param (`Access blocked: invalid_request — Invalid
+        // redirect_uri contains reserved response param state`). See WALM-86.
+        // The callback POST *body* field stays `state` (localhost POST, never
+        // part of a redirect_uri, so no collision there).
+        `&connectState=${stateToken}`;
 
     note(`Opening browser to authorize this MCP client...`);
     note(`If your browser doesn't open, visit: ${connectUrl}`);

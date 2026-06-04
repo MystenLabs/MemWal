@@ -1222,6 +1222,33 @@ h1, h2, h3 {
   user-select: all;
 }
 
+.secret-value-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+.secret-value-input::placeholder {
+  color: inherit;
+  opacity: 1;
+}
+
+.secret-value-input:focus {
+  outline: 1px solid rgba(232, 255, 117, 0.55);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
 .key-display .key-actions {
   display: flex;
   gap: 8px;

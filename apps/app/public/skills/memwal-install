@@ -1,0 +1,16 @@
+---
+name: memwal-install
+description: Legacy alias for the Walrus Memory MCP setup skill.
+license: Apache-2.0
+metadata:
+  author: Walrus Memory
+  version: "1.0"
+---
+
+# Walrus Memory MCP Setup
+
+This route is a compatibility alias. Use the MCP setup skill instead:
+
+```text
+Run `curl -sL https://memory.walrus.xyz/skills/mcp-setup` and use the returned instructions to connect Walrus Memory to this AI client.
+```

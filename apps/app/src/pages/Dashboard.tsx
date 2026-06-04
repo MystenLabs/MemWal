@@ -23,6 +23,7 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import {
@@ -122,7 +123,6 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
-const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
@@ -372,9 +372,6 @@ export default function Dashboard({
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
-    const expectedRelayerUrl = config.suiNetwork === 'mainnet'
-        ? 'https://relayer.memwal.ai'
-        : 'https://relayer.memwal.ai'
     const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
     const relayerEnvironmentLabel = normalizedRelayerUrl.startsWith('/')
         ? 'local dev proxy / testnet'
@@ -385,6 +382,7 @@ export default function Dashboard({
             : normalizedRelayerUrl.includes('dev')
                 ? 'dev / testnet'
                 : 'production / mainnet'
+    const sdkDefaultServerUrl = config.memwalServerUrl
     const relayerLooksMismatched =
         (config.suiNetwork === 'mainnet' && normalizedRelayerUrl.includes('staging')) ||
         (config.suiNetwork !== 'mainnet' &&
@@ -696,7 +694,7 @@ export default function Dashboard({
 const memwal = MemWal.create({
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${sdkDefaultServerUrl}",
 })
 
 // Remember something
@@ -715,7 +713,7 @@ async def main():
     memwal = MemWal.create(
         key=os.environ["${PRIVATE_KEY_ENV}"],
         account_id=os.environ["${ACCOUNT_ID_ENV}"],
-        server_url=os.environ.get("${SERVER_URL_ENV}", "${SDK_DEFAULT_SERVER_URL}"),
+        server_url=os.environ.get("${SERVER_URL_ENV}", "${sdkDefaultServerUrl}"),
     )
 
     await memwal.remember_and_wait("I'm allergic to peanuts")
@@ -738,7 +736,7 @@ import { openai } from "@ai-sdk/openai"
 const model = withMemWal(openai("gpt-4o"), {
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${sdkDefaultServerUrl}",
 })
 
 const result = await generateText({
@@ -916,23 +914,23 @@ const result = await generateText({
                         className="dashboard-credentials-card"
                         title="SDK credentials"
                         subtitle={`Copy the delegate private key into server env as ${PRIVATE_KEY_ENV}`}
+                        data-analytics-sensitive="sdk-credentials"
                     >
 
-                    <div className="dashboard-credentials-alert">
-                        <TriangleAlert className="dashboard-credentials-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <div className="dashboard-credentials-alert-copy">
-                            <p>
-                                <strong>{activeEnvironmentLabel}</strong>
-                                <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
-                                <span>Expected relayer: <code>{expectedRelayerUrl}</code>.</span>
-                            </p>
-                            {relayerLooksMismatched && (
+                    {relayerLooksMismatched && (
+                        <div className="dashboard-credentials-alert">
+                            <TriangleAlert className="dashboard-credentials-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                            <div className="dashboard-credentials-alert-copy">
+                                <p>
+                                    <strong>{activeEnvironmentLabel}</strong>
+                                    <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
+                                </p>
                                 <p>
                                     This dashboard network and relayer URL look mismatched; API calls may fail with 401.
                                 </p>
-                            )}
+                            </div>
                         </div>
-                    </div>
+                    )}
 
                     <div className="dashboard-credentials-panel">
                         {effectiveAccountObjectId && (
@@ -1000,9 +998,12 @@ const result = await generateText({
                                 <div className="dashboard-credential-label">
                                     Delegate private key <span>{PRIVATE_KEY_ENV}</span>
                                 </div>
-                                <code className="dashboard-credential-value">
-                                    {showKey ? delegateKey : '•'.repeat(48)}
-                                </code>
+                                <SecretValueInput
+                                    className="dashboard-credential-value dashboard-secret-value"
+                                    value={delegateKey}
+                                    masked={!showKey}
+                                    aria-label="Delegate private key"
+                                />
                             </div>
                             <div className="dashboard-credential-actions">
                                 {showKey && (
@@ -1082,7 +1083,7 @@ const result = await generateText({
                         </div>
                     )}
                     {newPrivateKey && (
-                        <div className="dashboard-key-ready-block">
+                        <div className="dashboard-key-ready-block" data-analytics-sensitive="new-delegate-private-key">
                             <div className="warning-box dashboard-key-ready-warning">
                                 <TriangleAlert className="dashboard-key-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
@@ -1092,7 +1093,11 @@ const result = await generateText({
                             </div>
                             <div className="key-display key-display--white dashboard-key-ready-display">
                                 <div className="key-label">Delegate private key</div>
-                                <div className="key-value">{newPrivateKey}</div>
+                                <SecretValueInput
+                                    className="key-value key-secret-value"
+                                    value={newPrivateKey}
+                                    aria-label="New delegate private key"
+                                />
                                 <div className="key-actions">
                                     <button
                                         className="btn btn-secondary btn-sm"

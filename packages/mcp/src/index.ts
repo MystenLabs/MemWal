@@ -33,9 +33,9 @@ interface ParsedArgs {
 /** Per-environment URL shortcuts. `--dev`/`--staging`/`--local` set both
  *  relayer + web in one flag. Explicit `--relayer` / `--web-url` override. */
 const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
-    prod: { relayer: "https://relayer.memwal.ai", web: "https://memwal.ai" },
+    prod: { relayer: "https://relayer.memory.walrus.xyz", web: "https://memory.walrus.xyz" },
     dev: { relayer: "https://relayer.dev.memwal.ai", web: "https://dev.memwal.ai" },
-    staging: { relayer: "https://relayer.staging.memwal.ai", web: "https://staging.memwal.ai" },
+    staging: { relayer: "https://relayer-staging.memory.walrus.xyz", web: "https://staging.memory.walrus.xyz" },
     local: { relayer: "http://127.0.0.1:8000", web: "http://localhost:5173" },
 };
 
@@ -114,9 +114,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
     // Resolve URLs: CLI > env > default.
     const relayerUrl =
-        args.relayerUrl ?? process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai";
+        args.relayerUrl ?? process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz";
     const webUrl =
-        args.webUrl ?? process.env.MEMWAL_WEB_URL ?? "https://memwal.ai";
+        args.webUrl ?? process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz";
     // Label is the on-chain delegate-key name shown in the dashboard. We
     // default to a generic value at registration time — the bridge updates
     // it to the actual client's `clientInfo.name` ("Cursor", "Claude",
@@ -176,7 +176,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             // Pass the resolved URLs through so `memwal_login` (called as a
             // tool from the MCP client) opens the correct dashboard. Before
             // this fix `--dev` was silently dropped here and the flow always
-            // routed to prod (https://memwal.ai).
+            // routed to prod (https://memory.walrus.xyz).
             await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
             return;
         }
@@ -236,11 +236,11 @@ function printHelp(): void {
         "",
         "Options:",
         "  --relayer <url>                  Override the relayer base URL.",
-        "                                   Default: https://relayer.memwal.ai",
+        "                                   Default: https://relayer.memory.walrus.xyz",
         "                                   (or saved value from credentials).",
         "  --web-url <url>                  Override the dashboard URL the",
         "                                   browser opens during login.",
-        "                                   Default: https://memwal.ai",
+        "                                   Default: https://memory.walrus.xyz",
         "  --label <text>                   Friendly delegate-key label",
         "                                   registered on-chain. Default:",
         '                                   "Walrus Memory MCP"',
