@@ -96,6 +96,73 @@ def generate_run_id() -> str:
 
 
 # ============================================================
+# Server-side reranker execution gate
+# ============================================================
+#
+# The cross-encoder reranker (server-side, RERANK_ENABLED) gracefully
+# degrades to composite order on any error — so a flaky/throttled rerank
+# arm produces byte-identical harness output to "rerank ran, no lift". A
+# J delta is only interpretable when we can PROVE rerank executed on ~every
+# recall. The server already emits a Prometheus counter per rerank call; we
+# scrape /metrics before+after the eval and assert the success rate.
+
+
+def _scrape_rerank_metric(server_url: str) -> dict[str, int]:
+    """Read the rerank execution counters from the server's /metrics.
+
+    Returns {"<status>": count} keyed by HTTP status (e.g. "200", "429",
+    "transport_error"), summed over all latency buckets via the `_count`
+    series `memwal_external_request_duration_seconds_count{operation="rerank"}`.
+    Empty dict on any failure (treated as "no data" by the caller).
+    """
+    import urllib.request
+    import re
+
+    out: dict[str, int] = {}
+    try:
+        with urllib.request.urlopen(f"{server_url}/metrics", timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("rerank-metric scrape failed (%s) — execution gate inactive", e)
+        return out
+    # memwal_external_request_duration_seconds_count{operation="rerank",service="openrouter",status="200"} 8
+    pat = re.compile(
+        r'memwal_external_request_duration_seconds_count\{[^}]*operation="rerank"[^}]*status="([^"]+)"[^}]*\}\s+([0-9]+)'
+    )
+    for status, count in pat.findall(body):
+        out[status] = out.get(status, 0) + int(count)
+    return out
+
+
+def _rerank_gate(before: dict[str, int], after: dict[str, int], eligible_queries: int) -> dict:
+    """Compute the rerank execution delta + a pass/fail verdict.
+
+    `eligible_queries` = number of recalls that had >1 candidate (the only
+    ones that invoke rerank) × eval_runs. We can't know the per-query
+    candidate count here, so the caller passes total recalls as an upper
+    bound; the gate reports the rate and flags anything below ~99%.
+    """
+    def delta(d_after, d_before):
+        keys = set(d_after) | set(d_before)
+        return {k: d_after.get(k, 0) - d_before.get(k, 0) for k in keys}
+
+    d = delta(after, before)
+    ok = d.get("200", 0)
+    bad = sum(v for k, v in d.items() if k != "200")
+    total = ok + bad
+    rate = (ok / eligible_queries) if eligible_queries else 0.0
+    verdict = "pass" if (total > 0 and bad == 0 and rate >= 0.99) else "FLAG"
+    return {
+        "rerank_calls_200": ok,
+        "rerank_calls_non200": bad,
+        "rerank_non200_breakdown": {k: v for k, v in d.items() if k != "200" and v},
+        "eligible_recalls": eligible_queries,
+        "execution_rate": round(rate, 4),
+        "verdict": verdict,
+    }
+
+
+# ============================================================
 # Pipeline stages
 # ============================================================
 
@@ -274,8 +341,16 @@ def stage_eval(
     weights: ScoringWeights,
     config: dict,
     mode: str = "e2e",
+    label: str | None = None,
 ) -> RunArtifact:
-    """Run evaluation: recall with preset weights, then judge answers."""
+    """Run evaluation: recall with preset weights, then judge answers.
+
+    `label` overrides the artifact's on-disk name + `preset` field without
+    changing the scoring weights — so several eval passes over the same
+    ingested run-id (e.g. a rerank-off vs rerank-on A/B, or a λ sweep)
+    produce distinct, non-colliding artifacts. Defaults to `preset_name`.
+    """
+    artifact_label = label or preset_name
     adapter_cls = BENCHMARKS[benchmark_name]
     adapter = adapter_cls()
     _, queries = adapter.load(DATASETS_DIR)
@@ -395,16 +470,47 @@ def stage_eval(
     all_query_results: list[QueryResult] = []
     per_query_metrics: list[dict] = []
 
+    # Scrape the server's rerank execution counter BEFORE the eval so we can
+    # measure exactly how many rerank calls this eval drove (and whether any
+    # failed → silent composite-order fallback). See `_rerank_gate`.
+    server_url = config.get("server", {}).get("url", "")
+    rerank_before = _scrape_rerank_metric(server_url) if server_url else {}
+
     # Parallel execution — each query is fully independent.
     # HTTP client (httpx) and OpenAI client are thread-safe for concurrent calls.
     with ThreadPoolExecutor(max_workers=eval_concurrency) as pool:
         futures = [pool.submit(process_query, q) for q in queries]
-        for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Eval ({preset_name})"):
+        for fut in tqdm(as_completed(futures), total=len(futures), desc=f"Eval ({artifact_label})"):
             result = fut.result()
             if result is None:
                 continue
             all_query_results.append(result)
             per_query_metrics.append(result.retrieval_metrics)
+
+    # Rerank execution gate: did the cross-encoder actually run on ~every
+    # recall? `eligible` = number of recalls this eval drove. Recall (and
+    # therefore rerank) runs ONCE per query — the `eval_runs` loop wraps only
+    # the answer+judge step (rerank is deterministic, so it's not redone), so
+    # eligible == len(queries), NOT × eval_runs. A J delta is only
+    # interpretable when verdict == "pass" (execution rate ~100%, zero
+    # non-200). When rerank is OFF server-side, the delta is 0 and the gate
+    # reports rate 0 / verdict FLAG — correct + ignorable for the off arm.
+    rerank_after = _scrape_rerank_metric(server_url) if server_url else {}
+    rerank_gate = _rerank_gate(rerank_before, rerank_after, len(queries))
+    logger.info(
+        "rerank execution gate: %s (rate=%.3f, 200=%d, non200=%d)",
+        rerank_gate["verdict"],
+        rerank_gate["execution_rate"],
+        rerank_gate["rerank_calls_200"],
+        rerank_gate["rerank_calls_non200"],
+    )
+    if rerank_gate["rerank_calls_non200"] > 0:
+        logger.warning(
+            "rerank had %d non-200 calls %s — some recalls silently fell back to "
+            "composite order; this arm's J delta is CONFOUNDED.",
+            rerank_gate["rerank_calls_non200"],
+            rerank_gate["rerank_non200_breakdown"],
+        )
 
     # Aggregate metrics (defensive: never let aggregation failure lose the raw data)
     try:
@@ -428,7 +534,7 @@ def stage_eval(
         timestamp=datetime.now(timezone.utc).isoformat(),
         git_commit=get_git_commit(),
         benchmark=benchmark_name,
-        preset=preset_name,
+        preset=artifact_label,
         prompt_versions=prompt_versions,
         config={
             "server_url": config.get("server", {}).get("url", ""),
@@ -438,6 +544,14 @@ def stage_eval(
             "mode": mode,
             "judge_model": config.get("judge", {}).get("model", ""),
             "answer_model": config.get("answer", {}).get("model", ""),
+            "preset_weights_source": preset_name,
+            # Server-side reranker execution record — the make-or-break for a
+            # readable rerank A/B. `verdict` == "pass" means rerank ran on
+            # ~100% of recalls with zero failures, so this arm's J is a clean
+            # rerank-on number; "FLAG" means either rerank was off (off arm,
+            # expected) or some calls silently fell back (confounded — do not
+            # trust the on-arm delta).
+            "rerank_execution": rerank_gate,
         },
         metrics_overall=_dict_to_category_metrics(overall),
         metrics_by_category={cat: _dict_to_category_metrics(m) for cat, m in by_category.items()},
@@ -446,7 +560,7 @@ def stage_eval(
 
     # Save artifact
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    artifact_path = RESULTS_DIR / f"{run_id}-{benchmark_name}-{preset_name}.json"
+    artifact_path = RESULTS_DIR / f"{run_id}-{benchmark_name}-{artifact_label}.json"
     artifact_path.write_text(_serialize_artifact(artifact))
     print(f"Results saved to {artifact_path}")
 
@@ -581,6 +695,14 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--preset", required=True)
     ev.add_argument("--run-id", default=None)
     ev.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
+    # Override the artifact's label (filename + `preset` field) without
+    # changing scoring weights — lets a rerank-off vs rerank-on A/B over the
+    # same ingested run-id write distinct, non-colliding artifacts.
+    ev.add_argument(
+        "--label",
+        default=None,
+        help="Artifact label override (default: preset name). Tags an A/B arm.",
+    )
 
     # compare
     cmp = sub.add_parser("compare", help="Compare multiple presets")
@@ -717,7 +839,10 @@ def main():
 
         elif args.command == "eval":
             weights = load_preset(args.preset)
-            stage_eval(args.benchmark, client, judge, run_id, args.preset, weights, config, args.mode)
+            stage_eval(
+                args.benchmark, client, judge, run_id, args.preset, weights,
+                config, args.mode, label=getattr(args, "label", None),
+            )
 
         elif args.command == "compare":
             preset_names = [p.strip() for p in args.presets.split(",")]

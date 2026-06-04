@@ -182,10 +182,26 @@ pub async fn recall(
     // Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
+
+    // When the cross-encoder reranker is on, retrieve a *wider* candidate
+    // pool than the caller's `limit` so the reranker has lower-cosine-but-
+    // more-relevant facts to promote into the visible window. The pool is
+    // what gets hydrated (Walrus fetch + SEAL decrypt) — so widening costs
+    // proportionally more decrypt work in production; in BENCHMARK_MODE the
+    // PlaintextEngine reads the text from Postgres, so the cost is just a
+    // bigger DB read. When rerank is off, `search_limit == limit` and the
+    // search + hydration are byte-identical to before.
+    let rerank_cfg = &state.rerank_config;
+    let search_limit = if rerank_cfg.enabled {
+        limit.max(rerank_cfg.pool_n).min(100)
+    } else {
+        limit
+    };
+
     let t1 = std::time::Instant::now();
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(&query_vector, owner, namespace, search_limit)
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
     let hit_count = hits.len();
@@ -247,8 +263,57 @@ pub async fn recall(
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
     let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
 
+    // Cross-encoder rerank (final ordering stage). Off by default ⇒ this
+    // block is skipped entirely and ordering is the composite order above.
+    // When on, the reranker re-scores each (query, candidate-text) pair
+    // jointly and we reorder `ranked` by relevance descending. This is the
+    // *last* ordering stage — nothing pointwise runs after it. It runs here,
+    // AFTER hydration, because the cross-encoder needs the decrypted text
+    // (unlike a bi-encoder, it can't score on the embedding alone). On any
+    // reranker error the recall does NOT fail: we log and keep the composite
+    // order (graceful degradation — a flaky rerank vendor must not take down
+    // recall).
+    let mut ranked = ranked;
+    let mut rerank_ms: u128 = 0;
+    if rerank_cfg.enabled && ranked.len() > 1 {
+        let tr = std::time::Instant::now();
+        let docs: Vec<String> = ranked.iter().map(|r| r.memory.text.clone()).collect();
+        // On Ok: reorder by the relevance permutation and surface the
+        // (finite) cross-encoder score onto each moved hit. On Err: GRACEFUL
+        // DEGRADATION — a flaky rerank vendor must not take down recall, so
+        // we pass an empty order, which `apply_rerank_order` resolves to the
+        // unchanged composite order. Either way the result is a lossless
+        // permutation (no hit dropped or duplicated). Reorder logic is
+        // unit-tested in `services::reranker` tests.
+        let order = match state.reranker.rerank(&body.query, &docs).await {
+            Ok(order) => order,
+            Err(e) => {
+                tracing::warn!(
+                    owner = %owner,
+                    error = %e,
+                    "recall: reranker failed — falling back to composite order"
+                );
+                Vec::new()
+            }
+        };
+        ranked = crate::services::reranker::apply_rerank_order(ranked, &order, |hit, score| {
+            // Only surface a finite score — a permutation-missed index
+            // carries NEG_INFINITY (append sentinel), which would serialize
+            // as JSON null and pollute artifact score analysis.
+            if score.is_finite() {
+                hit.score = Some(score);
+            }
+        });
+        rerank_ms = tr.elapsed().as_millis();
+    }
+
+    // Narrow the (possibly reranked) candidate pool back to the caller's
+    // `limit`. When rerank is off, `ranked.len() == limit` already and this
+    // is a no-op; when on, this is the "retrieve wide → rerank → narrow"
+    // truncation that lets a promoted fact survive into the visible window.
     let results: Vec<RecallResult> = ranked
         .into_iter()
+        .take(limit)
         .map(|r| RecallResult {
             blob_id: r.memory.blob_id,
             text: r.memory.text,
@@ -277,7 +342,15 @@ pub async fn recall(
     // log line that combined the two stages into `fetch=Xms`. Benchmark
     // mode reports the entire Postgres-select fetch as `walrus_ms` and
     // leaves `seal_ms` at 0 — same shape, different mode.
+    //
+    // Rerank breadcrumb (rerank_enabled / rerank_ms / search_limit) is on
+    // EVERY recall so a benchmark run can grep-assert the cross-encoder
+    // actually executed and see its read-path latency cost — without it, a
+    // misconfigured (silently-off) experiment reads as a clean null.
     tracing::info!(
+        rerank_enabled = rerank_cfg.enabled,
+        rerank_ms = rerank_ms,
+        search_limit = search_limit,
         "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms fetch={}ms total={}ms",
         total,
         owner,

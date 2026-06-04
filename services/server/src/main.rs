@@ -31,7 +31,10 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
+use services::{
+    CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, OpenRouterReranker, Ranker,
+    RerankConfig, Reranker,
+};
 use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
@@ -375,6 +378,15 @@ async fn main() {
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
+    // Cross-encoder reranker — off unless RERANK_ENABLED is set. Reuses the
+    // same OpenRouter key/base as the embedder. Logs its model/pool_n when
+    // enabled (see RerankConfig::from_env).
+    let rerank_config = RerankConfig::from_env();
+    let reranker: Arc<dyn Reranker> = Arc::new(OpenRouterReranker::new(
+        http_client.clone(),
+        Arc::clone(&config),
+        rerank_config.model.clone(),
+    ));
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
@@ -389,6 +401,8 @@ async fn main() {
         embedder,
         extractor,
         ranker,
+        reranker,
+        rerank_config,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),

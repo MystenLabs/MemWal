@@ -85,6 +85,15 @@ pub struct AppState {
     /// when the request body sets `scoring_weights`; default weights
     /// preserve the pgvector cosine order exactly.
     pub ranker: Arc<dyn Ranker>,
+    /// Cross-encoder reranker — re-scores (query, candidate-text) pairs
+    /// jointly via OpenRouter's `/rerank` endpoint. Runs as the final
+    /// ordering stage on `/api/recall` AFTER hydration (it needs the
+    /// decrypted text). Off by default; gated by [`crate::services::RerankConfig`].
+    pub reranker: Arc<dyn crate::services::Reranker>,
+    /// Cross-encoder reranker config (server-wide, env-driven, **off by
+    /// default**). Built once at startup via
+    /// [`crate::services::RerankConfig::from_env`].
+    pub rerank_config: crate::services::RerankConfig,
     /// Redis multiplexed connection for rate limiting
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
@@ -502,13 +511,19 @@ pub struct RecallResult {
     pub blob_id: String,
     pub text: String,
     pub distance: f64,
-    /// Composite score used for ranking. Present only when the ranker
-    /// actually ran (i.e. when `scoring_weights` was supplied with
-    /// `recency > 0` so the ranker didn't short-circuit). `None` when
-    /// the response is in default pgvector-cosine order — in that case
-    /// the score is just `1.0 - distance` and we don't bother surfacing
+    /// Score used for ranking, present only when a ranking stage actually
+    /// ran. Its meaning depends on which stage produced the order:
+    /// - **composite ranker** (when `scoring_weights` set `recency`/
+    ///   `importance` non-zero): the blended composite score.
+    /// - **cross-encoder reranker** (when `RERANK_ENABLED`): the model's
+    ///   relevance score — a model-specific scale, only the *ordering* is
+    ///   meaningful, NOT comparable to composite scores or across models.
+    ///
+    /// `None` when neither stage ran (default pgvector-cosine order); in
+    /// that case the implied score is `1.0 - distance` and we don't surface
     /// a derived field. `#[serde(skip_serializing_if)]` keeps the wire
-    /// shape byte-identical to today for default-weights requests.
+    /// shape byte-identical to today for default-weights, rerank-off
+    /// requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
 }
