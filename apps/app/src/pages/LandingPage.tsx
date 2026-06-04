@@ -15,8 +15,7 @@ import {
     useWallets,
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
-import { Check, Copy } from 'lucide-react'
-import { useRef, useEffect, useCallback, useState } from 'react'
+import { useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { config } from '../config'
 import { trackEvent } from '../utils/analytics'
@@ -26,7 +25,6 @@ type AuthMethod = 'enoki' | 'wallet' | null
 const AUTH_METHOD_KEY = 'memwal_auth_method'
 const MARKETING_ASSET_VERSION = 'walm61-20260529c'
 const marketingAsset = (path: string) => `${path}?v=${MARKETING_ASSET_VERSION}`
-const DEFAULT_INSTALL_ORIGIN = 'https://memory.walrus.xyz'
 
 function persistAuthMethod(method: AuthMethod) {
     if (method) {
@@ -40,23 +38,6 @@ function getPersistedAuthMethod(): AuthMethod {
     const val = sessionStorage.getItem(AUTH_METHOD_KEY)
     if (val === 'enoki' || val === 'wallet') return val
     return null
-}
-
-async function writeTextToClipboard(text: string) {
-    if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text)
-        return
-    }
-
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.setAttribute('readonly', '')
-    textarea.style.position = 'fixed'
-    textarea.style.left = '-9999px'
-    document.body.appendChild(textarea)
-    textarea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textarea)
 }
 
 const signinLogos = [
@@ -85,15 +66,6 @@ export default function LandingPage() {
 
     const walletClickedRef = useRef(false)
     const signInTrackedRef = useRef(false)
-    const copyResetRef = useRef<number | null>(null)
-    const [installPromptCopied, setInstallPromptCopied] = useState(false)
-
-    const installOrigin =
-        typeof window === 'undefined'
-            ? DEFAULT_INSTALL_ORIGIN
-            : window.location.origin
-    const installPromptUrl = `${installOrigin}/skills/memwal-install`
-    const installPrompt = `Run \`curl -sL ${installPromptUrl}\` and use the returned instructions to install Walrus Memory in this project.`
 
     const updateAuthMethod = useCallback((method: AuthMethod) => {
         persistAuthMethod(method)
@@ -127,30 +99,6 @@ export default function LandingPage() {
         updateAuthMethod('wallet')
         trackEvent('sign_in_start', { auth_method: 'wallet', location: 'sign_in' })
     }
-
-    const handleInstallPromptCopy = async () => {
-        await writeTextToClipboard(installPrompt)
-        setInstallPromptCopied(true)
-        trackEvent('copy_action', {
-            label: 'project-install-prompt',
-            location: 'landing',
-        })
-        if (copyResetRef.current !== null) {
-            window.clearTimeout(copyResetRef.current)
-        }
-        copyResetRef.current = window.setTimeout(() => {
-            setInstallPromptCopied(false)
-            copyResetRef.current = null
-        }, 1800)
-    }
-
-    useEffect(() => {
-        return () => {
-            if (copyResetRef.current !== null) {
-                window.clearTimeout(copyResetRef.current)
-            }
-        }
-    }, [])
 
     return (
         <div className="wm-page">
@@ -191,32 +139,6 @@ export default function LandingPage() {
                     </div>
                 </div>
             </div>
-            <section className="wm-install-prompt" aria-labelledby="wm-install-prompt-title">
-                <div className="wm-install-prompt-inner">
-                    <div className="wm-install-prompt-copy">
-                        <p className="wm-install-prompt-eyebrow">// WALRUS MEMORY INSTALL</p>
-                        <h2 id="wm-install-prompt-title">Paste this into your AI client.</h2>
-                        <p>
-                            One short prompt tells Claude Desktop, ChatGPT Desktop, Cursor, Codex, and other AI clients with project access how to wire Walrus Memory into your project.
-                        </p>
-                    </div>
-                    <div className="wm-install-prompt-panel">
-                        <div className="wm-install-prompt-panel-head">
-                            <span>install-prompt</span>
-                            <button
-                                type="button"
-                                className="wm-install-prompt-copy-button"
-                                onClick={handleInstallPromptCopy}
-                                aria-label={installPromptCopied ? 'Install prompt copied' : 'Copy install prompt'}
-                            >
-                                {installPromptCopied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}
-                                {installPromptCopied ? 'Copied' : 'Copy prompt'}
-                            </button>
-                        </div>
-                        <pre className="wm-install-prompt-code"><code>$ {installPrompt}</code></pre>
-                    </div>
-                </div>
-            </section>
         </div>
     )
 }

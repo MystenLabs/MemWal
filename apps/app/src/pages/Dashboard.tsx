@@ -23,6 +23,7 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import {
@@ -748,12 +749,6 @@ const result = await generateText({
     const docsHref = config.docsUrl || 'https://docs.memwal.ai'
     const githubHref = 'https://github.com/MystenLabs/memwal'
     const discordHref = 'https://discord.gg/walrusprotocol'
-    const appOrigin =
-        typeof window === 'undefined'
-            ? 'https://memory.walrus.xyz'
-            : window.location.origin
-    const projectInstallPromptUrl = `${appOrigin}/skills/memwal-install`
-    const projectInstallPrompt = `Run \`curl -sL ${projectInstallPromptUrl}\` and use the returned instructions to install Walrus Memory in this project.`
     const installCommand = pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
@@ -913,31 +908,13 @@ const result = await generateText({
                 </div>
 
 
-                {/* Project install prompt */}
-                <Card
-                    className="dashboard-quickstart-card dashboard-project-install-card"
-                    title="Install Walrus Memory"
-                    subtitle="Copy one prompt into Claude Desktop, ChatGPT Desktop, Cursor, Codex, or another AI client with project access"
-                >
-                    <div className="dashboard-quickstart-codewrap">
-                        <button
-                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
-                            onClick={() => copyToClipboard(projectInstallPrompt, 'project-install-prompt')}
-                            aria-label="Copy project install prompt"
-                        >
-                            <Copy size={14} />
-                            <span className="dashboard-quickstart-copy-label">{copied === 'project-install-prompt' ? 'done' : 'copy'}</span>
-                        </button>
-                        <pre className="demo-code-block dashboard-project-install-code"><code>$ {projectInstallPrompt}</code></pre>
-                    </div>
-                </Card>
-
                 {/* Current Delegate Key */}
                 {delegateKey && (
                     <Card
                         className="dashboard-credentials-card"
                         title="SDK credentials"
                         subtitle={`Copy the delegate private key into server env as ${PRIVATE_KEY_ENV}`}
+                        data-analytics-sensitive="sdk-credentials"
                     >
 
                     {relayerLooksMismatched && (
@@ -1021,9 +998,12 @@ const result = await generateText({
                                 <div className="dashboard-credential-label">
                                     Delegate private key <span>{PRIVATE_KEY_ENV}</span>
                                 </div>
-                                <code className="dashboard-credential-value">
-                                    {showKey ? delegateKey : '•'.repeat(48)}
-                                </code>
+                                <SecretValueInput
+                                    className="dashboard-credential-value dashboard-secret-value"
+                                    value={delegateKey}
+                                    masked={!showKey}
+                                    aria-label="Delegate private key"
+                                />
                             </div>
                             <div className="dashboard-credential-actions">
                                 {showKey && (
@@ -1103,7 +1083,7 @@ const result = await generateText({
                         </div>
                     )}
                     {newPrivateKey && (
-                        <div className="dashboard-key-ready-block">
+                        <div className="dashboard-key-ready-block" data-analytics-sensitive="new-delegate-private-key">
                             <div className="warning-box dashboard-key-ready-warning">
                                 <TriangleAlert className="dashboard-key-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
@@ -1113,7 +1093,11 @@ const result = await generateText({
                             </div>
                             <div className="key-display key-display--white dashboard-key-ready-display">
                                 <div className="key-label">Delegate private key</div>
-                                <div className="key-value">{newPrivateKey}</div>
+                                <SecretValueInput
+                                    className="key-value key-secret-value"
+                                    value={newPrivateKey}
+                                    aria-label="New delegate private key"
+                                />
                                 <div className="key-actions">
                                     <button
                                         className="btn btn-secondary btn-sm"
