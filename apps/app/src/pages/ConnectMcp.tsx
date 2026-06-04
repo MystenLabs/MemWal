@@ -39,7 +39,9 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { getMoveFields, type DynamicFieldObjectFields, type RegistryObjectFields } from '../utils/suiFields'
-import memwalLogo from '../assets/memwal-logo.svg'
+
+// Walrus Memory wordmark (public asset, same one the dashboard nav uses).
+const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
 type Step =
     | 'consent'
@@ -294,7 +296,7 @@ export default function ConnectMcp() {
             <nav className="lp-nav">
                 <div className="lp-nav-inner">
                     <Link to="/" className="lp-nav-brand" style={mcpNavBrandStyle}>
-                        <img src={memwalLogo} alt="Walrus Memory" height="28" />
+                        <img src={WALRUS_MEMORY_LOGO} alt="Walrus Memory" height="40" style={mcpNavLogoStyle} />
                         <span style={mcpNavTitleStyle}>Connect MCP client</span>
                     </Link>
                 </div>
@@ -507,20 +509,32 @@ function SuccessCard({
 
 const mcpNavBrandStyle: React.CSSProperties = {
     gap: 12,
+    alignItems: 'center',
+}
+
+const mcpNavLogoStyle: React.CSSProperties = {
+    display: 'block',
+    width: 'auto',
 }
 
 const mcpNavTitleStyle: React.CSSProperties = {
-    fontSize: '1rem',
-    fontWeight: 700,
-    color: '#000',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.8rem',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    color: 'var(--text-muted, #505566)',
     lineHeight: 1,
-    transform: 'translateY(8px)',
+    paddingLeft: 12,
+    marginLeft: 4,
+    borderLeft: '1px solid rgba(0,0,0,0.18)',
 }
 
 const pageStyle: React.CSSProperties = {
     minHeight: '100vh',
-    background: '#FAF8F5', // same as --color-tusk used by .card / body
-    color: '#1a1a1a',
+    background: 'var(--color-tusk, #FAF8F5)',
+    color: 'var(--text-primary, #1a1a1a)',
+    fontFamily: 'var(--font-sans)',
 }
 
 const mainStyle: React.CSSProperties = {
@@ -577,19 +591,22 @@ const subtleStyle: React.CSSProperties = {
     fontSize: 14,
 }
 
+// Mirrors the dashboard's .btn-primary (neo-brutalism): black fill, yellow
+// label, violet drop-shadow — so the MCP consent page matches Walrus Memory.
 const primaryButton: React.CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
     padding: '12px 26px',
-    background: '#E8FF75',
-    color: '#000',
+    background: '#000000',
+    color: '#E8FF75',
     borderRadius: 12,
-    border: '2px solid #000',
+    border: '2px solid #000000',
+    fontFamily: 'var(--font-sans)',
     fontSize: '0.94rem',
     fontWeight: 700,
     cursor: 'pointer',
     textDecoration: 'none',
-    boxShadow: '3px 3px 0 #000',
+    boxShadow: '3px 3px 0 #CAB1FF',
 }
