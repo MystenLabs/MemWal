@@ -122,7 +122,6 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
-const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
@@ -372,9 +371,9 @@ export default function Dashboard({
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
-    const expectedRelayerUrl = config.suiNetwork === 'mainnet'
-        ? 'https://relayer.memwal.ai'
-        : 'https://relayer.memwal.ai'
+    const expectedRelayerLabel = config.suiNetwork === 'mainnet'
+        ? 'a production / mainnet relayer'
+        : 'a staging or dev / testnet relayer'
     const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
     const relayerEnvironmentLabel = normalizedRelayerUrl.startsWith('/')
         ? 'local dev proxy / testnet'
@@ -690,13 +689,23 @@ export default function Dashboard({
     // in DOM / copyable snippets. Use a static placeholder instead.
     const PRIVATE_KEY_PLACEHOLDER = '<YOUR_PRIVATE_KEY>'
     const ACCOUNT_ID_PLACEHOLDER = '<YOUR_ACCOUNT_ID>'
+    const SERVER_URL_PLACEHOLDER = '<YOUR_MEMWAL_SERVER_URL>'
+    // Target the relayer this dashboard is configured for so copy-pasted
+    // snippets hit the same environment the user is on. A local dev proxy
+    // (relative path) or localhost is not a usable endpoint in someone else's
+    // project, so fall back to a placeholder rather than emitting it.
+    const snippetServerUrl =
+        /^https?:\/\//i.test(config.memwalServerUrl) &&
+        !/localhost|127\.0\.0\.1/i.test(config.memwalServerUrl)
+            ? config.memwalServerUrl
+            : SERVER_URL_PLACEHOLDER
 
     const sdkTypeScriptSnippet = `import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${snippetServerUrl}",
 })
 
 // Remember something
@@ -715,7 +724,7 @@ async def main():
     memwal = MemWal.create(
         key=os.environ["${PRIVATE_KEY_ENV}"],
         account_id=os.environ["${ACCOUNT_ID_ENV}"],
-        server_url=os.environ.get("${SERVER_URL_ENV}", "${SDK_DEFAULT_SERVER_URL}"),
+        server_url=os.environ.get("${SERVER_URL_ENV}", "${snippetServerUrl}"),
     )
 
     await memwal.remember_and_wait("I'm allergic to peanuts")
@@ -738,7 +747,7 @@ import { openai } from "@ai-sdk/openai"
 const model = withMemWal(openai("gpt-4o"), {
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${snippetServerUrl}",
 })
 
 const result = await generateText({
@@ -924,7 +933,7 @@ const result = await generateText({
                             <p>
                                 <strong>{activeEnvironmentLabel}</strong>
                                 <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
-                                <span>Expected relayer: <code>{expectedRelayerUrl}</code>.</span>
+                                <span>Expected: {expectedRelayerLabel}.</span>
                             </p>
                             {relayerLooksMismatched && (
                                 <p>
