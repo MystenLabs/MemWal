@@ -9671,6 +9671,49 @@ h1, h2, h3 {
   }
 }
 
+.dash-page .dashboard-project-install-code {
+  min-height: 96px !important;
+  padding: 24px 78px 24px 32px !important;
+  display: flex;
+  align-items: center;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dash-page .dashboard-project-install-card {
+  min-height: 0;
+  padding-bottom: 32px;
+}
+
+.dash-page .dashboard-project-install-card .card-header {
+  margin-bottom: 24px;
+}
+
+.dash-page .dashboard-project-install-card .dashboard-quickstart-copy {
+  top: 50%;
+  right: 20px;
+  transform: translateY(-50%);
+}
+
+.dash-page .dashboard-project-install-card .dashboard-quickstart-copy:hover:not(:disabled) {
+  transform: translateY(-50%);
+}
+
+@media (max-width: 860px) {
+  .dash-page .dashboard-project-install-code {
+    min-height: 112px !important;
+    padding: 22px 62px 22px 22px !important;
+  }
+
+  .dash-page .dashboard-project-install-card .card-header {
+    margin-bottom: 20px !important;
+  }
+
+  .dash-page .dashboard-project-install-card .dashboard-quickstart-copy {
+    right: 14px;
+  }
+}
+
 /* ── Sign-in screen (Figma 2556:112) ───────────────────────── */
 .wm-signin {
   position: fixed;
@@ -9956,6 +9999,169 @@ h1, h2, h3 {
 
   .wm-signin-trusted {
     display: none;
+  }
+}
+
+.wm-install-prompt {
+  position: relative;
+  z-index: 1;
+  background:
+    radial-gradient(90% 120% at 16% 8%, rgba(152, 239, 228, 0.16) 0%, rgba(152, 239, 228, 0) 52%),
+    linear-gradient(180deg, #050608 0%, #0b1114 100%);
+  color: #faf8f5;
+  padding: clamp(64px, 7vw, 112px) 0;
+  font-family: var(--font-sans);
+}
+
+.wm-install-prompt-inner {
+  width: min(1160px, calc(100% - 48px));
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(420px, 1.2fr);
+  gap: clamp(28px, 5vw, 72px);
+  align-items: center;
+}
+
+.wm-install-prompt-copy {
+  min-width: 0;
+}
+
+.wm-install-prompt-eyebrow {
+  margin: 0 0 16px;
+  color: #98efe4;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.wm-install-prompt-copy h2 {
+  margin: 0;
+  max-width: 520px;
+  color: #faf8f5;
+  font-size: clamp(42px, 5vw, 72px);
+  font-weight: 500;
+  line-height: 0.94;
+  letter-spacing: 0;
+}
+
+.wm-install-prompt-copy p:last-child {
+  margin: 22px 0 0;
+  max-width: 520px;
+  color: #b8bbbe;
+  font-size: clamp(17px, 1.5vw, 21px);
+  font-weight: 400;
+  line-height: 1.38;
+}
+
+.wm-install-prompt-panel {
+  min-width: 0;
+  border: 1px solid rgba(250, 248, 245, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(250, 248, 245, 0.08) 0%, rgba(250, 248, 245, 0.035) 100%),
+    rgba(0, 0, 0, 0.44);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.36);
+  overflow: hidden;
+}
+
+.wm-install-prompt-panel-head {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px 14px 22px;
+  border-bottom: 1px solid rgba(250, 248, 245, 0.12);
+}
+
+.wm-install-prompt-panel-head span {
+  color: #8f9294;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.wm-install-prompt-copy-button {
+  min-height: 40px;
+  min-width: 132px;
+  padding: 0 16px;
+  border: 1px solid rgba(152, 239, 228, 0.5);
+  border-radius: 999px;
+  background: rgba(152, 239, 228, 0.13);
+  color: #faf8f5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.wm-install-prompt-copy-button:hover {
+  border-color: #98efe4;
+  background: rgba(152, 239, 228, 0.2);
+  transform: translateY(-1px);
+}
+
+.wm-install-prompt-copy-button svg {
+  flex: 0 0 auto;
+}
+
+.wm-install-prompt-code {
+  margin: 0;
+  min-height: 150px;
+  padding: 28px;
+  color: #faf8f5;
+  font-family: var(--font-mono);
+  font-size: clamp(15px, 1.25vw, 18px);
+  font-weight: 500;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wm-install-prompt-code code {
+  font-family: inherit;
+  color: inherit;
+}
+
+@media (max-width: 900px) {
+  .wm-install-prompt {
+    padding: 56px 0 72px;
+  }
+
+  .wm-install-prompt-inner {
+    width: calc(100% - 40px);
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+
+  .wm-install-prompt-copy h2 {
+    font-size: clamp(38px, 11vw, 56px);
+  }
+
+  .wm-install-prompt-panel-head {
+    min-height: auto;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 18px;
+  }
+
+  .wm-install-prompt-copy-button {
+    width: 100%;
+  }
+
+  .wm-install-prompt-code {
+    min-height: 160px;
+    padding: 22px 18px;
   }
 }
 

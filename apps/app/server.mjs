@@ -11,6 +11,7 @@ const port = Number(process.env.PORT || 4173)
 const host = process.env.HOST || '0.0.0.0'
 
 const contentTypes = new Map([
+  ['', 'text/plain; charset=utf-8'],
   ['.css', 'text/css; charset=utf-8'],
   ['.gif', 'image/gif'],
   ['.html', 'text/html; charset=utf-8'],

@@ -15,7 +15,8 @@ import {
     useWallets,
 } from '@mysten/dapp-kit'
 import { isEnokiWallet, type EnokiWallet, type AuthProvider } from '@mysten/enoki'
-import { useRef, useEffect, useCallback } from 'react'
+import { Check, Copy } from 'lucide-react'
+import { useRef, useEffect, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { config } from '../config'
 import { trackEvent } from '../utils/analytics'
@@ -25,6 +26,7 @@ type AuthMethod = 'enoki' | 'wallet' | null
 const AUTH_METHOD_KEY = 'memwal_auth_method'
 const MARKETING_ASSET_VERSION = 'walm61-20260529c'
 const marketingAsset = (path: string) => `${path}?v=${MARKETING_ASSET_VERSION}`
+const DEFAULT_INSTALL_ORIGIN = 'https://memory.walrus.xyz'
 
 function persistAuthMethod(method: AuthMethod) {
     if (method) {
@@ -38,6 +40,23 @@ function getPersistedAuthMethod(): AuthMethod {
     const val = sessionStorage.getItem(AUTH_METHOD_KEY)
     if (val === 'enoki' || val === 'wallet') return val
     return null
+}
+
+async function writeTextToClipboard(text: string) {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        return
+    }
+
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.left = '-9999px'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
 }
 
 const signinLogos = [
@@ -66,6 +85,15 @@ export default function LandingPage() {
 
     const walletClickedRef = useRef(false)
     const signInTrackedRef = useRef(false)
+    const copyResetRef = useRef<number | null>(null)
+    const [installPromptCopied, setInstallPromptCopied] = useState(false)
+
+    const installOrigin =
+        typeof window === 'undefined'
+            ? DEFAULT_INSTALL_ORIGIN
+            : window.location.origin
+    const installPromptUrl = `${installOrigin}/skills/memwal-install`
+    const installPrompt = `Run \`curl -sL ${installPromptUrl}\` and use the returned instructions to install Walrus Memory in this project.`
 
     const updateAuthMethod = useCallback((method: AuthMethod) => {
         persistAuthMethod(method)
@@ -100,45 +128,95 @@ export default function LandingPage() {
         trackEvent('sign_in_start', { auth_method: 'wallet', location: 'sign_in' })
     }
 
+    const handleInstallPromptCopy = async () => {
+        await writeTextToClipboard(installPrompt)
+        setInstallPromptCopied(true)
+        trackEvent('copy_action', {
+            label: 'project-install-prompt',
+            location: 'landing',
+        })
+        if (copyResetRef.current !== null) {
+            window.clearTimeout(copyResetRef.current)
+        }
+        copyResetRef.current = window.setTimeout(() => {
+            setInstallPromptCopied(false)
+            copyResetRef.current = null
+        }, 1800)
+    }
+
+    useEffect(() => {
+        return () => {
+            if (copyResetRef.current !== null) {
+                window.clearTimeout(copyResetRef.current)
+            }
+        }
+    }, [])
+
     return (
         <div className="wm-page">
-        <div className="wm-signin wm-signin--page" role="main" aria-label="Sign in">
-            <img className="wm-signin-aurora" src={marketingAsset('/walrus-signin-bg.png')} alt="" aria-hidden="true" />
-            <div className="wm-signin-inner">
-                <div className="wm-signin-card">
-                    <img className="wm-signin-logo" src={marketingAsset('/walrus-memory-logo.svg')} alt="Walrus Memory" />
-                    <p className="wm-signin-sub">Sign in to start building with portable memory across apps and workflows.</p>
-                    {hasEnokiConfig && googleWallet && (
-                        <button className="wm-signin-google" onClick={handleEnokiConnect}>
-                            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
-                                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
-                                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-                            </svg>
-                            Continue with Google
-                        </button>
-                    )}
-                    <div onClick={handleWalletClick} className="wm-signin-wallet">
-                        <ConnectButton
-                            connectText="Connect wallet"
-                            walletFilter={(wallet) => !isEnokiWallet(wallet)}
-                        />
+            <div className="wm-signin wm-signin--page" role="main" aria-label="Sign in">
+                <img className="wm-signin-aurora" src={marketingAsset('/walrus-signin-bg.png')} alt="" aria-hidden="true" />
+                <div className="wm-signin-inner">
+                    <div className="wm-signin-card">
+                        <img className="wm-signin-logo" src={marketingAsset('/walrus-memory-logo.svg')} alt="Walrus Memory" />
+                        <p className="wm-signin-sub">Sign in to start building with portable memory across apps and workflows.</p>
+                        {hasEnokiConfig && googleWallet && (
+                            <button className="wm-signin-google" onClick={handleEnokiConnect}>
+                                <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                                </svg>
+                                Continue with Google
+                            </button>
+                        )}
+                        <div onClick={handleWalletClick} className="wm-signin-wallet">
+                            <ConnectButton
+                                connectText="Connect wallet"
+                                walletFilter={(wallet) => !isEnokiWallet(wallet)}
+                            />
+                        </div>
+                        <p className="wm-signin-tos">
+                            By continuing, you agree to our <a href={config.termsOfServiceUrl} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.privacyPolicyUrl} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+                        </p>
                     </div>
-                    <p className="wm-signin-tos">
-                        By continuing, you agree to our <a href={config.termsOfServiceUrl} target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href={config.privacyPolicyUrl} target="_blank" rel="noopener noreferrer">Privacy Policy</a>
-                    </p>
-                </div>
-                <div className="wm-signin-trusted" aria-hidden="true">
-                    <h2>Trusted by teams<br />building <span>reliable</span><br />AI systems</h2>
-                    <div className="wm-signin-logos">
-                        {signinLogos.map((logo) => (
-                            <img key={logo.label} src={logo.src} alt={logo.label} style={{ width: `${logo.w}px` }} />
-                        ))}
+                    <div className="wm-signin-trusted" aria-hidden="true">
+                        <h2>Trusted by teams<br />building <span>reliable</span><br />AI systems</h2>
+                        <div className="wm-signin-logos">
+                            {signinLogos.map((logo) => (
+                                <img key={logo.label} src={logo.src} alt={logo.label} style={{ width: `${logo.w}px` }} />
+                            ))}
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
+            <section className="wm-install-prompt" aria-labelledby="wm-install-prompt-title">
+                <div className="wm-install-prompt-inner">
+                    <div className="wm-install-prompt-copy">
+                        <p className="wm-install-prompt-eyebrow">// WALRUS MEMORY INSTALL</p>
+                        <h2 id="wm-install-prompt-title">Paste this into your AI client.</h2>
+                        <p>
+                            One short prompt tells Claude Desktop, ChatGPT Desktop, Cursor, Codex, and other AI clients with project access how to wire Walrus Memory into your project.
+                        </p>
+                    </div>
+                    <div className="wm-install-prompt-panel">
+                        <div className="wm-install-prompt-panel-head">
+                            <span>install-prompt</span>
+                            <button
+                                type="button"
+                                className="wm-install-prompt-copy-button"
+                                onClick={handleInstallPromptCopy}
+                                aria-label={installPromptCopied ? 'Install prompt copied' : 'Copy install prompt'}
+                            >
+                                {installPromptCopied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}
+                                {installPromptCopied ? 'Copied' : 'Copy prompt'}
+                            </button>
+                        </div>
+                        <pre className="wm-install-prompt-code"><code>$ {installPrompt}</code></pre>
+                    </div>
+                </div>
+            </section>
         </div>
     )
 }

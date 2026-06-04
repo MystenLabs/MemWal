@@ -1,0 +1,109 @@
+Install Walrus Memory in this project.
+
+You are operating inside a user's existing code project. Do not configure this AI client's MCP settings, and do not install `@mysten-incubation/memwal-mcp` unless the user explicitly asks for an AI-client MCP integration. The goal is to wire Walrus Memory into the app/repo itself.
+
+Goal:
+- Add the Walrus Memory SDK to the current project.
+- Keep credentials server-side in environment variables.
+- Add the smallest useful integration for the project's existing stack.
+- Run the project's normal checks and explain exactly how the user can verify memory works.
+
+First inspect the project:
+- Detect the package manager and framework (`package.json`, lockfiles, `pyproject.toml`, `requirements.txt`, app/router structure, API routes, AI provider usage).
+- Prefer TypeScript/JavaScript instructions when a `package.json` exists.
+- Prefer Python instructions when the project is Python-only.
+- If the project already uses the Vercel AI SDK, LangChain, OpenAI SDK, or an agent framework, integrate Walrus Memory at the nearest existing model/tool boundary instead of creating an unrelated demo.
+
+Install packages:
+- npm: `npm install @mysten-incubation/memwal`
+- pnpm: `pnpm add @mysten-incubation/memwal`
+- yarn: `yarn add @mysten-incubation/memwal`
+- bun: `bun add @mysten-incubation/memwal`
+- Python: `pip install memwal`
+
+Optional packages:
+- For Vercel AI SDK middleware, add `ai` if the project does not already have it.
+- For Python OpenAI integrations, use `pip install memwal[openai]`.
+- For Python LangChain integrations, use `pip install memwal[langchain]`.
+- For the TypeScript manual client flow only, add `@mysten/sui @mysten/seal @mysten/walrus`.
+
+Environment variables:
+- Add placeholders to the project's env example file if one exists.
+- Do not commit real secrets.
+- Use these names unless the project has an established config convention:
+
+MEMWAL_PRIVATE_KEY=
+MEMWAL_ACCOUNT_ID=
+MEMWAL_SERVER_URL=https://relayer.memory.walrus.xyz
+MEMWAL_NAMESPACE=default
+
+Tell the user to get `MEMWAL_PRIVATE_KEY` and `MEMWAL_ACCOUNT_ID` from the Walrus Memory dashboard: https://memory.walrus.xyz/dashboard
+
+Recommended TypeScript helper:
+
+```ts
+import { MemWal } from "@mysten-incubation/memwal";
+
+export function createMemWal(namespace = process.env.MEMWAL_NAMESPACE ?? "default") {
+  const key = process.env.MEMWAL_PRIVATE_KEY;
+  const accountId = process.env.MEMWAL_ACCOUNT_ID;
+
+  if (!key || !accountId) {
+    throw new Error("Walrus Memory is not configured. Set MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID.");
+  }
+
+  return MemWal.create({
+    key,
+    accountId,
+    serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
+    namespace,
+  });
+}
+```
+
+Recommended Vercel AI SDK integration:
+
+```ts
+import { withMemWal } from "@mysten-incubation/memwal/ai";
+
+const modelWithMemory = withMemWal(model, {
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
+  namespace: process.env.MEMWAL_NAMESPACE ?? "default",
+  autoSave: true,
+});
+```
+
+Recommended Python helper:
+
+```py
+import os
+from typing import Optional
+from memwal import MemWal
+
+def create_memwal(namespace: Optional[str] = None):
+    return MemWal.create(
+        key=os.environ["MEMWAL_PRIVATE_KEY"],
+        account_id=os.environ["MEMWAL_ACCOUNT_ID"],
+        server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
+        namespace=namespace or os.environ.get("MEMWAL_NAMESPACE", "default"),
+    )
+```
+
+Wire it into the project:
+- For chat/agent apps, recall relevant memory before generation and save or analyze useful user facts after user messages.
+- For API routes, keep Walrus Memory calls on the server side.
+- For UI-only apps, add a server route/action first rather than exposing the private key to the browser.
+- For non-AI apps, add explicit `remember` and `recall` helpers around the workflow the user names.
+
+Verification:
+- Add or update a small smoke test, script, API route, or README snippet that remembers a test fact and recalls it.
+- Run the project's typecheck, tests, lint, or build commands that are already present.
+- If checks cannot run because credentials are missing, verify compilation and document the exact env vars the user must set.
+
+Finish by reporting:
+- Files changed.
+- Packages installed.
+- Env vars the user must set.
+- The command or app flow to verify Walrus Memory in this project.

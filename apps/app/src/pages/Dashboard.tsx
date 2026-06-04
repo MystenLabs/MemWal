@@ -748,6 +748,12 @@ const result = await generateText({
     const docsHref = config.docsUrl || 'https://docs.memwal.ai'
     const githubHref = 'https://github.com/MystenLabs/memwal'
     const discordHref = 'https://discord.gg/walrusprotocol'
+    const appOrigin =
+        typeof window === 'undefined'
+            ? 'https://memory.walrus.xyz'
+            : window.location.origin
+    const projectInstallPromptUrl = `${appOrigin}/skills/memwal-install`
+    const projectInstallPrompt = `Run \`curl -sL ${projectInstallPromptUrl}\` and use the returned instructions to install Walrus Memory in this project.`
     const installCommand = pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
@@ -906,6 +912,25 @@ const result = await generateText({
                     </a>
                 </div>
 
+
+                {/* Project install prompt */}
+                <Card
+                    className="dashboard-quickstart-card dashboard-project-install-card"
+                    title="Install Walrus Memory"
+                    subtitle="Copy one prompt into Claude Desktop, ChatGPT Desktop, Cursor, Codex, or another AI client with project access"
+                >
+                    <div className="dashboard-quickstart-codewrap">
+                        <button
+                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
+                            onClick={() => copyToClipboard(projectInstallPrompt, 'project-install-prompt')}
+                            aria-label="Copy project install prompt"
+                        >
+                            <Copy size={14} />
+                            <span className="dashboard-quickstart-copy-label">{copied === 'project-install-prompt' ? 'done' : 'copy'}</span>
+                        </button>
+                        <pre className="demo-code-block dashboard-project-install-code"><code>$ {projectInstallPrompt}</code></pre>
+                    </div>
+                </Card>
 
                 {/* Current Delegate Key */}
                 {delegateKey && (
