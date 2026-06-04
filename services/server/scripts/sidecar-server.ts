@@ -21,6 +21,7 @@ import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
+import { getEnokiRetryDelayMs } from "./enoki-retry.js";
 import {
     isWalrusBlobObjectMissingFromEffects,
     isWalrusObjectLockEquivocation,
@@ -177,6 +178,24 @@ const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
     const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";
 })();
+const ENOKI_TRANSIENT_MAX_ATTEMPTS = parsePositiveIntEnv(
+    "ENOKI_TRANSIENT_MAX_ATTEMPTS",
+    2,
+    1,
+    5,
+);
+const ENOKI_TRANSIENT_BASE_DELAY_MS = parsePositiveIntEnv(
+    "ENOKI_TRANSIENT_BASE_DELAY_MS",
+    5_000,
+    100,
+    60_000,
+);
+const ENOKI_TRANSIENT_MAX_DELAY_MS = parsePositiveIntEnv(
+    "ENOKI_TRANSIENT_MAX_DELAY_MS",
+    30_000,
+    1_000,
+    120_000,
+);
 const WALRUS_CLIENT_MAX_AGE_MS = (() => {
     const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
@@ -561,6 +580,7 @@ function sidecarStateSnapshot(): Record<string, unknown> {
         enokiNetwork,
         enokiEnabled: !!enokiApiKey,
         fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+        enokiTransientMaxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
     };
 }
 
@@ -605,28 +625,68 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
         throw new Error("ENOKI_API_KEY is not configured");
     }
 
-    const resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${enokiApiKey}`,
-        },
-        body: JSON.stringify(payload),
-    });
+    for (let attempt = 1; ; attempt += 1) {
+        let resp: Response;
+        try {
+            resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${enokiApiKey}`,
+                },
+                body: JSON.stringify(payload),
+            });
+        } catch (err) {
+            const retryDelayMs = getEnokiRetryDelayMs({
+                attempt,
+                maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
+                baseDelayMs: ENOKI_TRANSIENT_BASE_DELAY_MS,
+                maxDelayMs: ENOKI_TRANSIENT_MAX_DELAY_MS,
+                transportError: true,
+            });
+            if (retryDelayMs === null) throw err;
+            console.warn(`[enoki] transport_retry ${JSON.stringify({
+                path: redactEnokiPath(path),
+                network: enokiNetwork,
+                attempt,
+                maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
+                retryDelayMs,
+                error: errorMessage(err),
+            })}`);
+            await sleep(retryDelayMs);
+            continue;
+        }
 
-    const text = await resp.text();
-    if (!resp.ok) {
-        console.error(`[enoki] api_error ${JSON.stringify({
-            path: redactEnokiPath(path),
-            status: resp.status,
-            network: enokiNetwork,
-            ...summarizeEnokiError(text),
-        })}`);
-        throw new Error(`Enoki API error (${resp.status}): ${text}`);
+        const text = await resp.text();
+        if (!resp.ok) {
+            const retryDelayMs = getEnokiRetryDelayMs({
+                attempt,
+                maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
+                baseDelayMs: ENOKI_TRANSIENT_BASE_DELAY_MS,
+                maxDelayMs: ENOKI_TRANSIENT_MAX_DELAY_MS,
+                status: resp.status,
+                retryAfter: resp.headers.get("retry-after"),
+                body: text,
+            });
+            console.error(`[enoki] api_error ${JSON.stringify({
+                path: redactEnokiPath(path),
+                status: resp.status,
+                network: enokiNetwork,
+                attempt,
+                maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
+                retryDelayMs,
+                ...summarizeEnokiError(text),
+            })}`);
+            if (retryDelayMs !== null) {
+                await sleep(retryDelayMs);
+                continue;
+            }
+            throw new Error(`Enoki API error (${resp.status}): ${text}`);
+        }
+
+        const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
+        return parsed.data;
     }
-
-    const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
-    return parsed.data;
 }
 
 function isSponsoredTransactionExpired(err: unknown): boolean {
