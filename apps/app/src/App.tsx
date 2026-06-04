@@ -181,7 +181,18 @@ function RegisterEnokiWallets() {
     const { unregister } = registerEnokiWallets({
       apiKey: config.enokiApiKey,
       providers: {
-        google: { clientId: config.googleClientId },
+        google: {
+          clientId: config.googleClientId,
+          // Pin the Google OAuth redirect_uri to the app origin root — a URL
+          // already registered for this client (the dashboard sign-in uses it,
+          // which is why dashboard Google login works). Enoki otherwise defaults
+          // to window.location.href, so signing in from
+          // /connect/mcp?...&connectState=... would send a redirect_uri with a
+          // non-registered path + query → Google rejects it (redirect_uri_mismatch).
+          // The /connect/mcp params survive the round-trip via sessionStorage
+          // (ConnectMcp persists them; PostAuthRedirect restores them). WALM-86.
+          redirectUrl: `${window.location.origin}/`,
+        },
       },
       client,
       network,
@@ -205,6 +216,28 @@ function RoutePending() {
   )
 }
 
+/** sessionStorage key holding an in-flight /connect/mcp request, so the flow
+ *  can resume after the Google OAuth redirect bounces through the app root.
+ *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
+const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
+
+/** Lands here after a successful sign-in (the OAuth redirect_uri is the app
+ *  root). If a /connect/mcp flow was interrupted by that redirect, resume it
+ *  by restoring the saved query string; otherwise go to the dashboard. */
+function PostAuthRedirect() {
+  const pending = sessionStorage.getItem(MCP_CONNECT_STORAGE_KEY)
+  if (pending) {
+    // Consume once — prevents a redirect loop on later visits to `/`.
+    sessionStorage.removeItem(MCP_CONNECT_STORAGE_KEY)
+    try {
+      const params = JSON.parse(pending) as Record<string, string>
+      const qs = new URLSearchParams(params).toString()
+      if (qs) return <Navigate to={`/connect/mcp?${qs}`} replace />
+    } catch { /* fall through to dashboard */ }
+  }
+  return <Navigate to="/dashboard" replace />
+}
+
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
@@ -220,7 +253,7 @@ function AppContent() {
     <Routes>
       <Route path="/" element={
         authPending ? <RoutePending /> :
-        currentAccount ? <Navigate to="/dashboard" replace /> : <LandingPage />
+        currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
       <Route path="/setup" element={requireAccount(

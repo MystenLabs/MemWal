@@ -153,7 +153,8 @@ function readStdinLines(onLine: (line: string) => void): Promise<void> {
 
 /** Config passed in by the entry point (`index.ts`) so the login flow uses
  * the same web/relayer URLs as the rest of the CLI (e.g. `--dev` →
- * dashboard at `https://dev.memwal.ai`, not the prod default). */
+ * dashboard at `https://dev.memwal.ai`, not the prod default at
+ * `https://memory.walrus.xyz`). */
 export interface AuthRequiredConfig {
     relayerUrl: string;
     webUrl: string;
@@ -211,7 +212,7 @@ async function handleLoginToolCall(
         // Fire loginFlow but DO NOT await — it runs in the background.
         // openBrowser: false because (a) child-process spawning a browser is
         // unreliable across MCP clients, and (b) macOS `open <url>` often
-        // foregrounds an existing memwal.ai tab instead of navigating to
+        // foregrounds an existing memory.walrus.xyz tab instead of navigating to
         // the full /connect/mcp?... URL — so user lands on the homepage,
         // not the consent screen. The agent surfaces the clickable URL
         // from the tool result instead.

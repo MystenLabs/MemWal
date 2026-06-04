@@ -274,7 +274,7 @@ pub async fn messages_proxy(
 /// and DELETE (close session). The MailGate / Linear / Figma MCP servers
 /// all use this newer transport — clients just configure a single URL:
 ///
-///     claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
+///     claude mcp add --transport http memwal https://relayer.memory.walrus.xyz/api/mcp
 ///
 /// We proxy verbatim to the sidecar's `/mcp` endpoint (whose SDK
 /// `StreamableHTTPServerTransport` does all the protocol heavy-lifting).
