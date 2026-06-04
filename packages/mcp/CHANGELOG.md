@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.4
+
+### Fixed
+
+- Accept the browser sign-in callback on `127.0.0.1` when the dashboard is served over HTTPS. The local login listener now answers Chrome's Private Network Access preflight (`Access-Control-Allow-Private-Network`), so the on-chain registration no longer succeeds while the callback is silently blocked.
+- Pick up credentials without a second restart. After `memwal_login` writes `~/.memwal/credentials.json`, the next memory tool call hands off to the bridge in the same process instead of reporting "not signed in" until the client is restarted.
+
 ## 0.0.3
 
 ### Changed
