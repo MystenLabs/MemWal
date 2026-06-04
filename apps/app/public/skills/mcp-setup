@@ -1,5 +1,5 @@
 ---
-name: memwal-install
+name: mcp-setup
 description: Legacy alias for the Walrus Memory setup skill.
 license: Apache-2.0
 metadata:

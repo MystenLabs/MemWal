@@ -1,0 +1,343 @@
+---
+name: setup
+description: >-
+  Set up Walrus Memory for normal users in AI clients such as Claude Desktop,
+  Cursor, Codex, Claude Code, ChatGPT, Antigravity, or another agent interface.
+  Covers local MCP clients, remote MCP clients, wallet sign-in, restart, and
+  verification.
+license: Apache-2.0
+metadata:
+  author: Walrus Memory
+  version: "1.0"
+  requires: Node.js 20+ for local stdio clients; a Sui-compatible wallet
+---
+
+# Walrus Memory - One-Prompt Setup
+
+## Purpose
+
+Set up Walrus Memory for a normal user inside their AI client. This flow is
+for Claude Desktop, Cursor, Codex, Claude Code, ChatGPT, Antigravity, and other
+agent interfaces that can use MCP or remote MCP-style tools.
+
+When invoked through a one-click install prompt:
+
+```text
+Run `curl -sL https://memory.walrus.xyz/skills/setup` and use the
+returned instructions to connect Walrus Memory to this AI client.
+```
+
+Fetch this file, choose the right setup mode for the user's AI client, configure
+Walrus Memory, sign in with their Sui wallet, restart the client when needed,
+and verify memory works.
+
+## Scope
+
+Do this:
+
+- connect Walrus Memory MCP to the user's AI client
+- help the user sign in through `memwal_login` or the MCP package login command
+- verify `memwal_remember` and `memwal_recall`
+
+Do not do this in this flow:
+
+- configure MCP only because a code project exists
+- install the Walrus Memory SDK or edit app source code
+
+If the user explicitly asks for SDK or app-code integration, stop and say this
+one-prompt setup is for using Walrus Memory inside an AI client. Point them to
+the SDK docs or ask whether they want a separate developer integration.
+
+## Rules
+
+1. Treat MCP client setup as the primary goal.
+2. Ask which AI client to configure if the user did not name one.
+3. Detect whether this AI client can execute local shell commands and edit
+   local user config files on the user's machine.
+4. If this AI client cannot access the user's local terminal or filesystem
+   (common in Claude Desktop and other desktop chats), do not pretend setup is
+   automatic. Give the exact command/config for the user to run or paste
+   manually, then wait for them to report the result.
+5. If local shell/file access is available, show the command or config file
+   before changing user-level MCP config.
+6. Merge config into existing `mcpServers`; do not remove other MCP servers.
+7. Never commit or print real delegate private keys from
+   `~/.memwal/credentials.json`.
+8. Prefer local stdio MCP for clients that support `command + args`.
+9. Use remote Streamable HTTP only when the client clearly supports remote MCP
+   servers with custom headers.
+10. ChatGPT custom MCP apps use a remote MCP flow. Do not invent a local `npx`
+   ChatGPT Desktop config.
+11. After config changes, tell the user to fully quit and reopen the AI client.
+12. Stop at the first failure and report the exact blocker.
+
+## Execution modes
+
+### Guided mode
+
+Use guided mode when the AI client cannot directly run terminal commands or
+write local files on the user's machine. This is common for Claude Desktop,
+ChatGPT, and other desktop/web chat clients.
+
+In guided mode:
+
+- tell the user which config file to open
+- show the exact JSON/TOML block to paste
+- show the exact terminal command to run, if needed
+- ask the user to confirm what happened before continuing
+- do not say that you installed or configured anything yourself
+
+### Agentic mode
+
+Use agentic mode only when this session has explicit local shell and filesystem
+access on the user's machine.
+
+In agentic mode:
+
+- inspect existing config before editing it
+- preserve other MCP servers
+- show a short summary of the edit
+- still ask the user to restart the AI client manually
+
+## Step 1 - Check Node.js
+
+First decide whether you are in guided mode or agentic mode.
+
+For local stdio clients, Node.js must be checked on the user's machine. In
+guided mode, ask the user to run:
+
+```bash
+node -v
+```
+
+In agentic mode, run it yourself. Walrus Memory MCP requires Node.js 20 or
+newer. If Node.js is missing or older than 20, tell the user to install Node.js
+20+ from https://nodejs.org/ and stop.
+
+The user also needs a Sui-compatible wallet available in the browser for login.
+
+## Step 2 - Pick the client
+
+If the user did not name a client, ask:
+
+```text
+Which AI client should I connect to Walrus Memory: Claude Desktop, Cursor,
+Codex, Claude Code, ChatGPT, or another MCP client?
+```
+
+Use local stdio config for:
+
+- Claude Desktop
+- Cursor
+- Codex
+- Claude Code
+- Antigravity or another local-command MCP host
+
+Use remote MCP guidance for:
+
+- ChatGPT custom MCP apps
+- clients that do not support local `command + args`
+
+## Step 3 - Configure local stdio MCP
+
+Use this MCP server command:
+
+```bash
+npx -y @mysten-incubation/memwal-mcp
+```
+
+### Cursor
+
+Edit `~/.cursor/mcp.json` and merge:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp"]
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Edit:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Merge:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp"]
+    }
+  }
+}
+```
+
+### Codex
+
+Edit `~/.codex/config.toml` and append:
+
+```toml
+[mcp_servers.memwal]
+command = "npx"
+args = ["-y", "@mysten-incubation/memwal-mcp"]
+```
+
+### Claude Code
+
+Run:
+
+```bash
+claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
+```
+
+Verify:
+
+```bash
+claude mcp list
+```
+
+### Other local MCP clients
+
+Add:
+
+- name: `memwal`
+- command: `npx`
+- args: `["-y", "@mysten-incubation/memwal-mcp"]`
+
+## Step 4 - Sign in
+
+Prefer inline login after the client is configured and restarted:
+
+```text
+Use memwal_login to sign me in to Walrus Memory.
+```
+
+The tool opens a browser flow. The user connects their Sui wallet and approves
+the delegate key. Credentials are saved locally at:
+
+```text
+~/.memwal/credentials.json
+```
+
+If inline login is not available yet, run manual login in a real terminal:
+
+```bash
+npx -y @mysten-incubation/memwal-mcp login --prod
+```
+
+## Step 5 - Restart the client
+
+Fully quit and reopen the AI client. On macOS, use `Cmd+Q`; closing the window
+is not enough. The first start may take 5-10 seconds while `npx` fetches the
+package.
+
+## Step 6 - Verify tools
+
+Ask the AI client:
+
+```text
+What MCP tools do you have available?
+```
+
+Expected Walrus Memory tools:
+
+- `memwal_remember`
+- `memwal_recall`
+- `memwal_analyze`
+- `memwal_restore`
+- `memwal_login`
+- `memwal_logout`
+
+If only `memwal_login` works, credentials are missing. Run `memwal_login` or
+the manual login command again.
+
+## Step 7 - Verify memory
+
+Ask:
+
+```text
+Use memwal_remember to save: "My favorite programming language is Rust and I drink black coffee in the mornings."
+```
+
+Wait a few seconds, then ask:
+
+```text
+Use memwal_recall to search for: "what is my favorite language?"
+```
+
+The client should retrieve the saved Rust memory.
+
+## ChatGPT
+
+ChatGPT custom MCP apps use remote MCP servers, not a local `npx` stdio config.
+
+If the user's ChatGPT account supports custom MCP apps / developer mode:
+
+1. Confirm they can create a custom MCP app in ChatGPT settings.
+2. Use this remote MCP endpoint:
+
+```text
+https://relayer.memory.walrus.xyz/api/mcp
+```
+
+3. Authenticate with headers:
+
+```text
+Authorization: Bearer <delegatePrivateKey>
+x-memwal-account-id: <accountId>
+```
+
+The values come from `~/.memwal/credentials.json` after a successful
+`memwal-mcp login --prod`.
+
+If ChatGPT cannot attach the required headers or the user's plan/workspace does
+not allow custom MCP apps, explain the blocker and offer Claude Desktop,
+Cursor, Codex, or Claude Code as the local MCP path.
+
+## Remote MCP / Streamable HTTP
+
+Use this only when a client supports remote MCP servers with custom headers:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "url": "https://relayer.memory.walrus.xyz/api/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_DELEGATE_PRIVATE_KEY>",
+        "x-memwal-account-id": "<YOUR_ACCOUNT_ID>"
+      }
+    }
+  }
+}
+```
+
+Treat the bearer token like an API key. Do not save it in a repo file.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `node: command not found` | Install Node.js 20+ from https://nodejs.org/. |
+| `npx` fails | Confirm Node/npm is installed and internet access works. |
+| No Walrus Memory tools after restart | Check the MCP config path and fully restart the client. |
+| Only `memwal_login` works | Credentials are missing. Run `memwal_login` or `npx -y @mysten-incubation/memwal-mcp login --prod`. |
+| Memory tools return 401 | The delegate key may be stale or revoked. Run `npx -y @mysten-incubation/memwal-mcp login --prod` again. |
+| User wants to sign out | Run `npx -y @mysten-incubation/memwal-mcp --logout`. This removes local credentials but does not revoke the on-chain delegate key. |
+
+Finish by reporting:
+
+- AI client configured
+- config file changed or command run
+- whether login succeeded
+- whether `memwal_remember` / `memwal_recall` passed
+- any restart or follow-up the user still needs
