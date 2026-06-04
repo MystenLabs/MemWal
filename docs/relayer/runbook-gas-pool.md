@@ -2,7 +2,7 @@
 title: "Gas Pool Maintenance Runbook"
 ---
 
-When to use this: a **gas-pool alert** fires (the "SUI gas pool maintenance"
+When to use this: a **gas-pool alert** fires (the SUI gas pool maintenance
 alert), or relayer logs show wallet jobs aborting with
 `classification=gas_pool_exhausted` or Enoki `dry_run_failed` plus
 `0x2::balance::split` (ENotEnough, abort code 2).
@@ -18,7 +18,7 @@ with `ENotEnough`.
 The relayer now classifies this as `GasPoolExhausted` and **aborts the job
 immediately** instead of retrying across the whole pool (which would just
 re-fail on the next equally-starved wallet and burn the attempt budget). The
-fix is operational: consolidate and/or top up SUI on the pool wallets.
+fix is operational: consolidate or top up SUI on the pool wallets, or both.
 
 > WAL balance is unrelated. This is specifically about **SUI** gas coins.
 
@@ -53,6 +53,8 @@ Red flags:
 
 ## Fix
 
+There are two operational fixes, depending on the diagnosis.
+
 ### Consolidate (merge fragmented coins)
 
 Merge all SUI coins on a wallet into one (gas budgeting picks the largest coin):
@@ -63,7 +65,7 @@ sui client switch --address <POOL_ADDRESS>
 sui client merge-coin --primary-coin <BIGGEST_COIN_ID> --coin-to-merge <COIN_ID> [--coin-to-merge <COIN_ID> ...]
 ```
 
-For many coins, a PTB or `sui client pay-all-sui` to self consolidates in one tx:
+For many coins, a PTB or `sui client pay-all-sui` to self consolidates in one transaction:
 
 ```bash
 sui client pay-all-sui --input-coins <COIN_ID_1> <COIN_ID_2> ... --recipient <POOL_ADDRESS> --gas-budget 5000000
@@ -71,7 +73,7 @@ sui client pay-all-sui --input-coins <COIN_ID_1> <COIN_ID_2> ... --recipient <PO
 
 ### Top up
 
-Send SUI to the starved pool wallet(s) so the largest coin comfortably exceeds
+Send SUI to the starved pool wallets so the largest coin comfortably exceeds
 the sponsored budget with headroom.
 
 ## Verify
@@ -83,6 +85,6 @@ through `WALRUS_GAS_POOL_ALERT_DEDUP_SECS`).
 
 ## Prevention (follow-up)
 
-A preflight pool-health check (min total SUI, min largest-coin size, max coin
-count) before Walrus upload is tracked as a follow-up in WALM-88. It would catch
+A preflight pool-health check (minimum total SUI, minimum largest-coin size,
+maximum coin count) before Walrus upload is tracked as a follow-up in WALM-88. It would catch
 fragmentation before a job fails rather than after.
