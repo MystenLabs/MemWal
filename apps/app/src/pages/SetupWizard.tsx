@@ -17,6 +17,7 @@ import {
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
+import { SecretValueInput } from '../components/SecretValueInput'
 import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
@@ -512,11 +513,15 @@ export default function SetupWizard() {
                                 </p>
                             </div>
 
-                            <div className="setup-key-panel">
+                            <div className="setup-key-panel" data-analytics-sensitive="setup-delegate-private-key">
                                 <div className="setup-key-row">
                                     <div className="setup-key-main">
                                         <div className="setup-key-label">Private key <span>keep secret</span></div>
-                                        <code className="setup-key-value">{privateKeyHex}</code>
+                                        <SecretValueInput
+                                            className="setup-key-value setup-secret-value"
+                                            value={privateKeyHex}
+                                            aria-label="Private key"
+                                        />
                                     </div>
                                     <div className="setup-key-actions">
                                         <button

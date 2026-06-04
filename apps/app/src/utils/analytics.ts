@@ -36,6 +36,15 @@ declare global {
 const GA_SCRIPT_ID = 'memwal-ga4-script'
 const GTM_SCRIPT_ID = 'memwal-gtm-script'
 const POSTHOG_SCRIPT_ID = 'memwal-posthog-script'
+const SENSITIVE_ANALYTICS_SELECTOR = '[data-analytics-sensitive], [data-analytics-redact]'
+const MAX_ANALYTICS_STRING_LENGTH = 160
+const SENSITIVE_PARAM_NAME_RE = /(?:private|secret|password|token|authorization|credential)/i
+const SENSITIVE_VALUE_PATTERNS = [
+    /\b(?:MEMWAL_PRIVATE_KEY|private key|delegate private key|password|secret|api key|bearer token)\b/i,
+    /(?:^|[^0-9a-f])(?:0x)?[0-9a-f]{64}(?:[^0-9a-f]|$)/i,
+    /\bsuiprivkey1[0-9a-z]+\b/i,
+    /\bBearer\s+[A-Za-z0-9._~+/=-]+\b/i,
+] as const
 const POSTHOG_STUB_METHODS = [
     'capture',
     'register',
@@ -65,6 +74,7 @@ const POSTHOG_STUB_METHODS = [
 
 let googleAnalyticsInitialized = false
 let posthogInitialized = false
+let sensitiveClickGuardInstalled = false
 
 function normalizeAllowedHost(allowedHost: string): string {
     const normalizedHost = allowedHost.trim().toLowerCase()
@@ -114,6 +124,23 @@ function analyticsEnabled(): boolean {
     return googleTagsEnabled() || posthogEnabled()
 }
 
+function redactStringForAnalytics(key: string, value: string): string {
+    const normalized = value.replace(/\s+/g, ' ').trim()
+    if (!normalized) return ''
+    if (SENSITIVE_PARAM_NAME_RE.test(key)) return '[redacted]'
+    if (SENSITIVE_VALUE_PATTERNS.some(pattern => pattern.test(normalized))) return '[redacted]'
+    if (normalized.length > MAX_ANALYTICS_STRING_LENGTH) {
+        return `${normalized.slice(0, MAX_ANALYTICS_STRING_LENGTH)}...`
+    }
+
+    return normalized
+}
+
+function sanitizeAnalyticsValue(key: string, value: AnalyticsValue): AnalyticsValue {
+    if (typeof value === 'string') return redactStringForAnalytics(key, value)
+    return value
+}
+
 function withDefaultParams(params: AnalyticsParams = {}): Record<string, AnalyticsValue> {
     const next: Record<string, AnalyticsValue> = {
         app: 'memwal_web_app',
@@ -122,14 +149,33 @@ function withDefaultParams(params: AnalyticsParams = {}): Record<string, Analyti
 
     for (const [key, value] of Object.entries(params)) {
         if (value === null || value === undefined) continue
-        next[key] = value
+        next[key] = sanitizeAnalyticsValue(key, value)
     }
 
     return next
 }
 
+function eventTargetsSensitiveElement(event: Event): boolean {
+    const target = event.target
+    if (target instanceof Element && target.closest(SENSITIVE_ANALYTICS_SELECTOR)) return true
+
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : []
+    return path.some(item => item instanceof Element && item.matches(SENSITIVE_ANALYTICS_SELECTOR))
+}
+
+function installSensitiveClickGuard() {
+    if (sensitiveClickGuardInstalled || typeof document === 'undefined') return
+
+    document.addEventListener('click', (event) => {
+        if (!eventTargetsSensitiveElement(event)) return
+        event.stopImmediatePropagation()
+    })
+    sensitiveClickGuardInstalled = true
+}
+
 function initGoogleAnalytics() {
     if (!googleTagsEnabled() || googleAnalyticsInitialized) return
+    installSensitiveClickGuard()
 
     window.dataLayer = window.dataLayer ?? []
 
