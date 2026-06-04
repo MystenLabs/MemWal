@@ -237,6 +237,9 @@ export default function ConnectMcp() {
             setCallbackPayload(payload)
             setStep('callback')
             const delivered = await postCallback(payload)
+            // Flow done — drop the OAuth-resume breadcrumb so a later visit to
+            // `/` goes to the dashboard instead of looping back here.
+            sessionStorage.removeItem('memwal_mcp_connect')
             setStep('success')
             trackEvent('mcp_connect_complete', { callback_delivered: delivered })
         } catch (err) {
@@ -261,6 +264,20 @@ export default function ConnectMcp() {
         invalidRequestTrackedRef.current = true
         trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
     }, [paramsValid])
+
+    // Persist the connect request so it survives the Google OAuth redirect.
+    // Enoki's redirect_uri is pinned to the app root (App.tsx), so signing in
+    // with Google leaves this page and returns to `/` — losing the query
+    // string. App's PostAuthRedirect reads this back and re-opens
+    // /connect/mcp with the params restored. Keyed identically to the URL
+    // params (note `connectState`, not `state`). Cleared on success below.
+    useEffect(() => {
+        if (!paramsValid) return
+        sessionStorage.setItem(
+            'memwal_mcp_connect',
+            JSON.stringify({ port, publicKey, delegateAddress, label, relayer, connectState: state }),
+        )
+    }, [paramsValid, port, publicKey, delegateAddress, label, relayer, state])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
     useEffect(() => {
