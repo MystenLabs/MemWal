@@ -1,14 +1,16 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.3
+
+### Changed
+
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
+
 ## 0.0.2
 
 ### Added
 
 - Added relayer compatibility metadata checks before opening the MCP bridge.
-
-### Changed
-
-- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ## 0.0.1
 
