@@ -177,7 +177,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             // tool from the MCP client) opens the correct dashboard. Before
             // this fix `--dev` was silently dropped here and the flow always
             // routed to prod (https://memory.walrus.xyz).
-            await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
+            const handoff = await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
+            if (handoff) {
+                // The user completed `memwal_login` in this SAME session: the
+                // auth-required server detected the freshly-written credentials
+                // and handed off here without a client restart. Pick up the
+                // bridge and replay the request(s) it already read off stdin.
+                // This is what removes the historical "second reboot".
+                log.info("creds.hot_handoff_to_bridge", {
+                    accountId: handoff.creds.accountId,
+                });
+                await runBridge(
+                    handoff.creds,
+                    { relayerUrl, webUrl, label, namespace },
+                    handoff.pendingLines,
+                );
+            }
             return;
         }
         // TTY = manual invocation. Block on the browser flow as before.

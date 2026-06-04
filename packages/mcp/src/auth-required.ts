@@ -21,6 +21,7 @@
  * MCP spec 2025-06 — see ENG-1750. The two paths cover different surfaces
  * and coexist.
  */
+import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
 import { loginFlow } from "./login.js";
 
@@ -131,24 +132,6 @@ const LOGIN_INSTRUCTION = [
 
 function writeStdoutMessage(msg: RpcMessage): void {
     process.stdout.write(JSON.stringify(msg) + "\n");
-}
-
-function readStdinLines(onLine: (line: string) => void): Promise<void> {
-    return new Promise((resolve) => {
-        let buf = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk: string) => {
-            buf += chunk;
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) >= 0) {
-                const line = buf.slice(0, nl).replace(/\r$/, "");
-                buf = buf.slice(nl + 1);
-                if (line.length > 0) onLine(line);
-            }
-        });
-        process.stdin.on("end", () => resolve());
-        process.stdin.on("close", () => resolve());
-    });
 }
 
 /** Config passed in by the entry point (`index.ts`) so the login flow uses
@@ -302,107 +285,208 @@ async function handleLoginToolCall(
     };
 }
 
+/** Returned by {@link runAuthRequiredServer} when the user signs in mid-session
+ * (via `memwal_login`) and the request should now be served by the real bridge
+ * instead — WITHOUT a client restart. */
+export interface AuthHandoff {
+    creds: MemWalCredentials;
+    /** Lines the auth-required reader already pulled off stdin that the bridge
+     * must process first: the tool call that triggered the handoff, plus
+     * anything buffered behind it. */
+    pendingLines: string[];
+}
+
 /**
- * Run the auth-required stdio MCP server. Returns when stdin closes.
+ * Dispatch one JSON-RPC line in auth-required mode.
+ *
+ * Returns the freshly-loaded credentials when `memwal_login` has written them
+ * since spawn and the request should be handed to the bridge for real
+ * servicing. Returns null when the line was fully handled locally (initialize,
+ * stub tools/list, login tool call, or the not-signed-in nudge).
+ */
+function handleAuthLine(
+    line: string,
+    config: AuthRequiredConfig,
+): { creds: MemWalCredentials } | null {
+    let req: RpcMessage;
+    try {
+        req = JSON.parse(line) as RpcMessage;
+    } catch {
+        return null;
+    }
+
+    // Notifications don't need a response.
+    if (req.id == null && typeof req.method === "string") {
+        return null;
+    }
+
+    const id = req.id ?? null;
+    const method = req.method;
+
+    if (method === "initialize") {
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            id,
+            result: {
+                protocolVersion: "2024-11-05",
+                capabilities: { tools: { listChanged: false } },
+                serverInfo: { name: "memwal", version: "0.0.1" },
+            },
+        });
+        return null;
+    }
+
+    if (method === "tools/list") {
+        // Signed in since spawn? Hand off so the client gets the real upstream
+        // tool list (with memwal_login/memwal_logout spliced in) from the bridge.
+        const creds = loadCreds();
+        if (creds) return { creds };
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            id,
+            result: { tools: TOOL_DEFINITIONS },
+        });
+        return null;
+    }
+
+    if (method === "tools/call") {
+        const params = (req.params ?? {}) as {
+            name?: string;
+            arguments?: unknown;
+            _meta?: { progressToken?: unknown };
+        };
+        const toolName = params.name;
+        const progressToken = params._meta?.progressToken;
+
+        if (toolName === "memwal_login") {
+            // Returns near-instantly with the click-able URL. The listener
+            // stays alive in the background — see handleLoginToolCall for the
+            // rationale on not blocking.
+            void handleLoginToolCall(config, progressToken).then((result) => {
+                writeStdoutMessage({
+                    jsonrpc: "2.0",
+                    id,
+                    result: {
+                        content: [{ type: "text", text: result.text }],
+                        isError: result.isError,
+                    },
+                });
+            });
+            return null;
+        }
+
+        // Any other memory tool. If `memwal_login` has since written
+        // credentials, hand off to the bridge so THIS call is served for real —
+        // no client restart (the historical "second reboot"). Otherwise nudge
+        // the agent to sign in first.
+        const creds = loadCreds();
+        if (creds) return { creds };
+
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            id,
+            result: {
+                content: [{ type: "text", text: LOGIN_INSTRUCTION }],
+                isError: true,
+            },
+        });
+        return null;
+    }
+
+    // Anything else — return Method not found per JSON-RPC.
+    writeStdoutMessage({
+        jsonrpc: "2.0",
+        id,
+        error: {
+            code: -32601,
+            message: `Method not found: ${method ?? "(missing)"}`,
+        },
+    });
+    return null;
+}
+
+/**
+ * Run the auth-required stdio MCP server.
+ *
+ * Resolves with an {@link AuthHandoff} the moment `memwal_login` completes and
+ * the next memory tool call (or tools/list) arrives — so the caller can pick up
+ * the real bridge IN THE SAME PROCESS, eliminating the second client restart.
+ * Resolves with `undefined` if stdin closes before any sign-in.
+ *
+ * We manage the stdin listeners directly (rather than via the shared
+ * `readStdinLines`) so we can DETACH cleanly at handoff: the bridge attaches its
+ * own reader next, and two concurrent `data` listeners would double-process
+ * every line. `pause()` keeps any bytes that arrive during the switch buffered
+ * until the bridge's reader resumes the stream.
  *
  * The `config` parameter carries the same `relayerUrl` / `webUrl` / `label`
  * that the rest of the CLI resolved (e.g. `--dev` → dev URLs). Without it,
- * `memwal_login` would fall back to prod defaults and open the wrong
- * dashboard.
+ * `memwal_login` would fall back to prod defaults and open the wrong dashboard.
  */
-export async function runAuthRequiredServer(config: AuthRequiredConfig): Promise<void> {
+export async function runAuthRequiredServer(
+    config: AuthRequiredConfig,
+): Promise<AuthHandoff | void> {
     log.info("auth_required_server.started", {
         webUrl: config.webUrl,
         relayerUrl: config.relayerUrl,
     });
 
-    await readStdinLines((line) => {
-        let req: RpcMessage;
-        try {
-            req = JSON.parse(line) as RpcMessage;
-        } catch {
-            return;
-        }
+    return await new Promise<AuthHandoff | void>((resolve) => {
+        let buf = "";
+        let settled = false;
 
-        // Notifications don't need a response.
-        if (req.id == null && typeof req.method === "string") {
-            return;
-        }
+        const detach = (): void => {
+            process.stdin.removeListener("data", onData);
+            process.stdin.removeListener("end", onEnd);
+            process.stdin.removeListener("close", onEnd);
+        };
 
-        const id = req.id ?? null;
-        const method = req.method;
+        const onData = (chunk: string): void => {
+            buf += chunk;
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+                const rawLine = buf.slice(0, nl).replace(/\r$/, "");
+                buf = buf.slice(nl + 1);
+                if (rawLine.length === 0) continue;
 
-        if (method === "initialize") {
-            writeStdoutMessage({
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    protocolVersion: "2024-11-05",
-                    capabilities: { tools: { listChanged: false } },
-                    serverInfo: { name: "memwal", version: "0.0.1" },
-                },
-            });
-            return;
-        }
+                const handoff = handleAuthLine(rawLine, config);
+                if (!handoff) continue;
 
-        if (method === "tools/list") {
-            writeStdoutMessage({
-                jsonrpc: "2.0",
-                id,
-                result: { tools: TOOL_DEFINITIONS },
-            });
-            return;
-        }
+                // Fresh credentials detected mid-session. Stop consuming stdin
+                // and hand the bridge everything we've read but not forwarded:
+                // the triggering line first, then anything buffered behind it.
+                settled = true;
+                detach();
+                process.stdin.pause();
 
-        if (method === "tools/call") {
-            const params = (req.params ?? {}) as {
-                name?: string;
-                arguments?: unknown;
-                _meta?: { progressToken?: unknown };
-            };
-            const toolName = params.name;
-            const progressToken = params._meta?.progressToken;
+                const pendingLines: string[] = [rawLine];
+                let n2: number;
+                while ((n2 = buf.indexOf("\n")) >= 0) {
+                    const l = buf.slice(0, n2).replace(/\r$/, "");
+                    buf = buf.slice(n2 + 1);
+                    if (l.length > 0) pendingLines.push(l);
+                }
 
-            if (toolName === "memwal_login") {
-                // Returns near-instantly with the click-able URL. The
-                // listener stays alive in the background — see
-                // handleLoginToolCall for the rationale on not blocking.
-                void handleLoginToolCall(config, progressToken).then((result) => {
-                    writeStdoutMessage({
-                        jsonrpc: "2.0",
-                        id,
-                        result: {
-                            content: [{ type: "text", text: result.text }],
-                            isError: result.isError,
-                        },
-                    });
+                log.info("auth_required_server.handoff_to_bridge", {
+                    accountId: handoff.creds.accountId,
+                    pendingLines: pendingLines.length,
                 });
+                resolve({ creds: handoff.creds, pendingLines });
                 return;
             }
+        };
 
-            // Any other tool — fall through to the generic LOGIN_INSTRUCTION
-            // error so the agent knows it must call memwal_login first.
-            writeStdoutMessage({
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    content: [{ type: "text", text: LOGIN_INSTRUCTION }],
-                    isError: true,
-                },
-            });
-            return;
-        }
+        const onEnd = (): void => {
+            if (settled) return;
+            settled = true;
+            detach();
+            log.info("auth_required_server.closed", {});
+            resolve(undefined);
+        };
 
-        // Anything else — return Method not found per JSON-RPC.
-        writeStdoutMessage({
-            jsonrpc: "2.0",
-            id,
-            error: {
-                code: -32601,
-                message: `Method not found: ${method ?? "(missing)"}`,
-            },
-        });
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", onData);
+        process.stdin.on("end", onEnd);
+        process.stdin.on("close", onEnd);
     });
-
-    log.info("auth_required_server.closed", {});
 }
