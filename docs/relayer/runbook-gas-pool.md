@@ -1,24 +1,26 @@
-# Runbook — relayer SUI gas pool maintenance
+---
+title: "Gas Pool Maintenance Runbook"
+---
 
-When to use this: a **gas-pool alert** fires ("MemWal Walrus upload blocked — SUI
-gas pool maintenance"), or relayer logs show wallet jobs aborting with
-`classification=gas_pool_exhausted` / Enoki `dry_run_failed` + `0x2::balance::split`
-(ENotEnough, abort code 2).
+When to use this: a **gas-pool alert** fires (the "SUI gas pool maintenance"
+alert), or relayer logs show wallet jobs aborting with
+`classification=gas_pool_exhausted` or Enoki `dry_run_failed` plus
+`0x2::balance::split` (ENotEnough, abort code 2).
 
 ## What it means
 
 The relayer sponsors Walrus register transactions through Enoki. Enoki's dry-run
 splits a SUI gas coin on the selected pool wallet to cover the sponsored budget.
-If that wallet has **no single SUI coin large enough** — i.e. its gas is
-fragmented into many small coins, or it is low on SUI — Sui aborts in
-`0x2::balance::split` with `ENotEnough`.
+When that wallet has **no single SUI coin large enough** (its gas is fragmented
+into many small coins, or it is low on SUI), Sui aborts in `0x2::balance::split`
+with `ENotEnough`.
 
 The relayer now classifies this as `GasPoolExhausted` and **aborts the job
 immediately** instead of retrying across the whole pool (which would just
 re-fail on the next equally-starved wallet and burn the attempt budget). The
 fix is operational: consolidate and/or top up SUI on the pool wallets.
 
-> WAL balance is unrelated — this is specifically about **SUI** gas coins.
+> WAL balance is unrelated. This is specifically about **SUI** gas coins.
 
 ## Pool wallets
 
@@ -39,15 +41,15 @@ Check total SUI, the **largest single coin**, and fragmentation (coin count):
 # All SUI coins for an address, largest first:
 sui client gas <POOL_ADDRESS>
 
-# Or via RPC (balance + coin count):
+# Or through RPC (balance + coin count):
 curl -s https://fullnode.mainnet.sui.io:443 -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"suix_getBalance","params":["<POOL_ADDRESS>","0x2::sui::SUI"]}'
 ```
 
 Red flags:
-- **Largest coin** smaller than the sponsored budget (fragmentation) → consolidate.
-- **Total SUI** low → top up.
-- Many tiny coins → consolidate.
+- **Largest coin** smaller than the sponsored budget (fragmentation): consolidate.
+- **Total SUI** low: top up.
+- Many tiny coins: consolidate.
 
 ## Fix
 
@@ -61,7 +63,7 @@ sui client switch --address <POOL_ADDRESS>
 sui client merge-coin --primary-coin <BIGGEST_COIN_ID> --coin-to-merge <COIN_ID> [--coin-to-merge <COIN_ID> ...]
 ```
 
-For many coins, a PTB / `sui client pay-all-sui` to self consolidates in one tx:
+For many coins, a PTB or `sui client pay-all-sui` to self consolidates in one tx:
 
 ```bash
 sui client pay-all-sui --input-coins <COIN_ID_1> <COIN_ID_2> ... --recipient <POOL_ADDRESS> --gas-budget 5000000
@@ -74,13 +76,13 @@ the sponsored budget with headroom.
 
 ## Verify
 
-Re-run the diagnose step — each pool wallet should have one (or few) large SUI
+Re-run the diagnose step. Each pool wallet should have one (or few) large SUI
 coins. Re-trigger a failed upload (or wait for the next job); the gas-pool alert
-should not re-fire (alert dedup is per network, default 600s window — tunable via
-`WALRUS_GAS_POOL_ALERT_DEDUP_SECS`).
+should not re-fire (alert dedup is per network, default 600s window, tunable
+through `WALRUS_GAS_POOL_ALERT_DEDUP_SECS`).
 
 ## Prevention (follow-up)
 
 A preflight pool-health check (min total SUI, min largest-coin size, max coin
-count) before Walrus upload is tracked as follow-up in WALM-88 — it would catch
+count) before Walrus upload is tracked as a follow-up in WALM-88. It would catch
 fragmentation before a job fails rather than after.
