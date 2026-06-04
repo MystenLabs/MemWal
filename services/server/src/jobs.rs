@@ -535,7 +535,28 @@ pub(crate) async fn execute_wallet_job(
                     )),
                 },
                 Err(err) => {
+                    // Same gas-pool escalation as the upload path: a
+                    // balance::split failure stays retriable until the pool is
+                    // exhausted, then aborts. Dispatch the dedicated ops alert
+                    // here too so a gas-pool failure on the metadata-transfer
+                    // recovery path isn't silently marked failed.
+                    let err = escalate_if_gas_pool_exhausted(
+                        err,
+                        attempt_info.current,
+                        attempt_info.max,
+                        state.key_pool.len(),
+                    );
                     let msg = err.to_string();
+                    maybe_alert_walrus_gas_pool_exhausted(
+                        state,
+                        &err,
+                        remember_job_id.as_deref(),
+                        Some(&owner),
+                        Some(&namespace),
+                        enqueued_wallet_index,
+                        &msg,
+                    )
+                    .await;
                     update_remember_job_after_wallet_error(
                         state,
                         remember_job_id.as_deref(),
@@ -875,7 +896,15 @@ async fn execute_upload_and_transfer(
         }
         Err(UploadBlobError::App(e)) => {
             let msg = format!("walrus upload failed: {}", e);
-            let classified = WalletJobError::classify_sidecar_error(&msg);
+            // A balance::split gas-budget failure stays retriable (rotates onto
+            // another pool wallet) until every candidate wallet has failed it,
+            // then escalates to an aborting GasPoolExhausted (+ ops alert below).
+            let classified = escalate_if_gas_pool_exhausted(
+                WalletJobError::classify_sidecar_error(&msg),
+                attempt_info.current,
+                attempt_info.max,
+                state.key_pool.len(),
+            );
             maybe_alert_walrus_package_upgrade_detected(
                 state,
                 remember_job_id.as_deref(),
@@ -1096,6 +1125,37 @@ async fn maybe_alert_walrus_object_locked(
     }
 }
 
+/// Attempts after which repeated gas-budget (`balance::split` ENotEnough)
+/// failures are treated as pool-level exhaustion rather than a single starved
+/// wallet. Upload retries rotate round-robin across the pool, so once the
+/// attempt count reaches the pool size (capped by the max attempt budget) every
+/// candidate wallet has been tried. At least 1, so a single-wallet pool
+/// escalates immediately (nothing else to rotate onto).
+fn gas_pool_exhaustion_threshold(pool_size: usize, max_attempts: usize) -> usize {
+    pool_size.min(max_attempts).max(1)
+}
+
+/// Escalate a retriable gas-budget failure to an aborting `GasPoolExhausted`
+/// once every candidate pool wallet has failed the same way. Below the
+/// threshold the error stays `Transient` so Apalis rotates onto another wallet —
+/// a single starved wallet must not fail an upload a healthy wallet could serve.
+/// Non-gas-budget errors pass through unchanged.
+fn escalate_if_gas_pool_exhausted(
+    classified: WalletJobError,
+    attempt: usize,
+    max_attempts: usize,
+    pool_size: usize,
+) -> WalletJobError {
+    if let WalletJobError::Transient(ref msg) = classified {
+        if WalletJobError::is_gas_pool_budget_error(msg)
+            && attempt >= gas_pool_exhaustion_threshold(pool_size, max_attempts)
+        {
+            return WalletJobError::GasPoolExhausted(msg.clone());
+        }
+    }
+    classified
+}
+
 /// Fire the distinct gas-pool maintenance alert when a wallet job fails with
 /// `GasPoolExhausted` (Enoki dry-run `balance::split` ENotEnough). Kept separate
 /// from the "exhausted retries" alert: this case aborts immediately, so the
@@ -1244,25 +1304,33 @@ impl WalletJobError {
         )
     }
 
+    /// True if `msg` is an Enoki sponsored dry-run gas-budget failure: an abort
+    /// in `0x2::balance::split` (ENotEnough). A single occurrence only proves the
+    /// *selected* pool wallet is gas-starved, not the whole pool — escalation to
+    /// `GasPoolExhausted` is gated on pool-level confirmation by the caller.
+    pub fn is_gas_pool_budget_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        (lower.contains("moveabort") || lower.contains("move abort"))
+            && lower.contains("balance")
+            && lower.contains("split")
+    }
+
     /// Heuristic classification from the sidecar's error string. The sidecar
     /// surfaces Sui execution errors verbatim (Move abort codes, lock errors).
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
-        // (abort code 2) when the pool wallet's selected SUI gas coin cannot be
-        // split to cover the sponsored budget — i.e. the relayer's SUI gas coins
-        // are fragmented or too small. This is a gas-pool maintenance issue, not
-        // a transient: retrying just rotates to the next equally-starved pool
-        // wallet and burns the whole attempt budget. Abort and surface a
-        // dedicated gas-pool alert pointing ops to consolidate/top-up SUI gas.
-        // (balance::split's only abort is ENotEnough, so the balance+split anchor
-        // is sufficient to identify it.)
-        if (lower.contains("moveabort") || lower.contains("move abort"))
-            && lower.contains("balance")
-            && lower.contains("split")
-        {
-            return WalletJobError::GasPoolExhausted(msg.to_string());
+        // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
+        // split to cover the sponsored budget (its SUI is fragmented or too low).
+        // A single failure only proves THAT wallet is gas-starved, not the whole
+        // pool, so classify Transient: Apalis rotates onto another pool wallet on
+        // retry rather than failing an upload a healthy wallet could serve. The
+        // wallet-job error arm escalates to an aborting GasPoolExhausted (+ ops
+        // alert) only once every candidate wallet has failed the same way — see
+        // escalate_if_gas_pool_exhausted.
+        if Self::is_gas_pool_budget_error(msg) {
+            return WalletJobError::Transient(msg.to_string());
         }
         // Walrus on-chain package upgrade — the cached @mysten/walrus client
         // carries stale package metadata until refreshed. The sidecar already
@@ -1727,7 +1795,8 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, is_walrus_package_version_mismatch,
+        classify_wallet_remember_handoff_failure, escalate_if_gas_pool_exhausted,
+        gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch,
         mark_remember_job_failed, parse_locked_object_info, wallet_job_request, WalletJob,
         WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
@@ -1865,14 +1934,15 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn equivocation_does_not_regress_recoverable_classes() {
-        // EWrongVersion must still be Transient (recoverable). balance::split
-        // ENotEnough is a gas-pool maintenance abort, not an object lock — it
-        // must classify as GasPoolExhausted, not swept into the object-lock path.
+        // EWrongVersion and a lone balance::split ENotEnough must both stay
+        // Transient (recoverable) — neither is swept into the object-lock abort
+        // path. balance::split only escalates to GasPoolExhausted at the pool
+        // level (see gas_pool_* tests below), not on a single occurrence.
         let balance = "Enoki dry run failed: MoveAbort(0x2::balance, split, 2)";
         let ewrong = "MoveAbort in 1st command, abort code: 1, in '0xabc::system::inner_mut'";
         assert!(matches!(
             WalletJobError::classify_sidecar_error(balance),
-            WalletJobError::GasPoolExhausted(_)
+            WalletJobError::Transient(_)
         ));
         assert!(matches!(
             WalletJobError::classify_sidecar_error(ewrong),
@@ -1916,24 +1986,68 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         }
     }
 
+    const BALANCE_SPLIT_ERR: &str = "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}";
+
     #[test]
-    fn classify_balance_split_move_abort_as_gas_pool_exhausted() {
-        // Enoki dry-run balance::split ENotEnough → gas-pool maintenance abort:
-        // classified GasPoolExhausted, aborts retries (so it does not burn the
-        // whole wallet pool), and is not Permanent (succeeds after gas top-up).
-        for msg in [
-            "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
-            "move abort during balance split",
-        ] {
+    fn classify_balance_split_is_retriable_transient_by_default() {
+        // A single balance::split ENotEnough is Transient (retriable) so Apalis
+        // rotates onto another pool wallet — it must NOT abort on its own.
+        for msg in [BALANCE_SPLIT_ERR, "move abort during balance split"] {
             let classified = WalletJobError::classify_sidecar_error(msg);
             assert!(
-                matches!(classified, WalletJobError::GasPoolExhausted(_)),
-                "expected gas_pool_exhausted for: {}",
+                matches!(classified, WalletJobError::Transient(_)),
+                "expected transient for: {}",
                 msg
             );
-            assert!(classified.aborts_retries(), "must abort retries: {}", msg);
-            assert!(!classified.is_permanent(), "must not be permanent: {}", msg);
+            assert!(!classified.aborts_retries(), "must retry: {}", msg);
+            assert!(WalletJobError::is_gas_pool_budget_error(msg));
         }
+    }
+
+    #[test]
+    fn gas_pool_threshold_tracks_pool_then_caps_at_max_attempts() {
+        assert_eq!(gas_pool_exhaustion_threshold(1, 5), 1); // single wallet → escalate immediately
+        assert_eq!(gas_pool_exhaustion_threshold(2, 5), 2); // try both wallets first
+        assert_eq!(gas_pool_exhaustion_threshold(10, 5), 5); // capped by max attempts
+        assert_eq!(gas_pool_exhaustion_threshold(0, 5), 1); // never 0
+    }
+
+    #[test]
+    fn gas_pool_one_bad_wallet_keeps_retrying_onto_healthy_wallet() {
+        // pool of 2: the first wallet's balance::split must stay retriable so the
+        // job rotates onto the second (healthy) wallet instead of failing.
+        let classified = WalletJobError::classify_sidecar_error(BALANCE_SPLIT_ERR);
+        let after = escalate_if_gas_pool_exhausted(classified, /*attempt*/ 1, /*max*/ 5, /*pool*/ 2);
+        assert!(
+            matches!(after, WalletJobError::Transient(_)) && !after.aborts_retries(),
+            "single bad wallet must keep retrying, got {:?}",
+            after
+        );
+    }
+
+    #[test]
+    fn gas_pool_all_wallets_failed_escalates_and_aborts() {
+        // pool of 2, both wallets hit balance::split → at attempt 2 we have tried
+        // every candidate wallet → escalate to an aborting GasPoolExhausted.
+        let classified = WalletJobError::classify_sidecar_error(BALANCE_SPLIT_ERR);
+        let after = escalate_if_gas_pool_exhausted(classified, /*attempt*/ 2, /*max*/ 5, /*pool*/ 2);
+        assert!(
+            matches!(after, WalletJobError::GasPoolExhausted(_)),
+            "exhausted pool must escalate, got {:?}",
+            after
+        );
+        assert!(after.aborts_retries());
+        assert!(!after.is_permanent());
+        assert_eq!(after.kind(), "gas_pool_exhausted");
+    }
+
+    #[test]
+    fn escalation_ignores_non_gas_budget_transient() {
+        // A generic transient (e.g. timeout) must never be escalated to the
+        // gas-pool abort path, even past the threshold.
+        let other = WalletJobError::Transient("network timeout".into());
+        let after = escalate_if_gas_pool_exhausted(other, 5, 5, 2);
+        assert!(matches!(after, WalletJobError::Transient(_)));
     }
 
     #[test]
