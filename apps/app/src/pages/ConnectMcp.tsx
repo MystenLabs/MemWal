@@ -9,6 +9,7 @@
  *               &delegateAddress=<0x-prefixed Sui address>
  *               &label=<URL-encoded label>
  *               &relayer=<URL-encoded relayer base URL>
+ *               &connectState=<64-hex CSRF token>  (legacy bridges: `state`)
  *
  * Flow:
  *   1. Render consent screen — show requested permissions + key fingerprint.
@@ -110,8 +111,16 @@ export default function ConnectMcp() {
      * in the callback POST — the bridge constant-time compares it to defeat
      * cross-origin CSRF (audit C2). Empty string if absent (older bridge);
      * the bridge will then reject our callback with 400.
+     *
+     * Read from `connectState` (current bridge) with a fallback to the legacy
+     * `state` param. The bridge renamed this param away from `state` because
+     * `state` is a reserved OAuth 2.0 response parameter: when this page starts
+     * Enoki/Google sign-in it reuses the current URL as the OAuth redirect_uri,
+     * and Google rejects any redirect_uri carrying a reserved param (WALM-86:
+     * "Access blocked: invalid_request — Invalid redirect_uri contains reserved
+     * response param state"). We still echo it back in the POST body as `state`.
      */
-    const state = params.get('state') ?? ''
+    const state = params.get('connectState') ?? params.get('state') ?? ''
 
     const [step, setStep] = useState<Step>('consent')
     const [errorMsg, setErrorMsg] = useState('')
