@@ -1,6 +1,6 @@
-import type { CSSProperties, ReactNode } from 'react'
+import type { CSSProperties, HTMLAttributes, ReactNode } from 'react'
 
-interface CardProps {
+interface CardProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
     /** Extra class(es) appended to the base `card` class (e.g. `dashboard-keys-card`, `demo-step`). */
     className?: string
     style?: CSSProperties
@@ -29,6 +29,7 @@ export function Card({
     leading,
     leadingRowClassName,
     children,
+    ...props
 }: CardProps) {
     const titleGroup = title != null || subtitle != null ? (
         <div>
@@ -47,7 +48,7 @@ export function Card({
     const hasHeader = title != null || subtitle != null || action != null || leading != null
 
     return (
-        <div className={className ? `card ${className}` : 'card'} style={style}>
+        <div {...props} className={className ? `card ${className}` : 'card'} style={style}>
             {hasHeader && (
                 <div className="card-header">
                     {headerLeft}

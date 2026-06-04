@@ -177,9 +177,7 @@ export default function Playground() {
 
     const address = currentAccount?.address || ''
     const serverUrl = config.memwalServerUrl
-    const keyPreview = delegateKey
-        ? `${delegateKey.slice(0, 8)}...${delegateKey.slice(-8)}`
-        : '...'
+    const keyStatus = delegateKey ? 'configured' : 'missing'
 
     // Wallet signing hooks (for full client-side mode)
     const { mutateAsync: signAndExecuteTransaction } = useSponsoredTransaction()
@@ -676,7 +674,7 @@ export default function Playground() {
                         server: <span className="demo-tag-value demo-tag-value--server">{serverUrl}</span>
                     </div>
                     <div className="demo-server-tag">
-                        key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
+                        key: <span className="demo-tag-value demo-tag-value--key">{keyStatus}</span>
                     </div>
                     <div className="demo-server-tag">
                         SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten-incubation/memwal</span>
@@ -701,7 +699,7 @@ export default function Playground() {
                     code={`import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
-  key: "${keyPreview}",
+  key: delegateKeyHex,
   accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${serverUrl}",
   namespace: "${namespace || 'default'}",
