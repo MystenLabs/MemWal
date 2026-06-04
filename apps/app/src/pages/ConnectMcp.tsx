@@ -104,7 +104,7 @@ export default function ConnectMcp() {
     const publicKey = params.get('publicKey') ?? ''
     const delegateAddress = params.get('delegateAddress') ?? ''
     const label = params.get('label') ?? 'Walrus Memory MCP'
-    const relayer = params.get('relayer') ?? 'https://relayer.memwal.ai'
+    const relayer = params.get('relayer') ?? config.memwalServerUrl
     /**
      * Cryptographic state token from the MCP bridge. Must be echoed verbatim
      * in the callback POST — the bridge constant-time compares it to defeat

@@ -122,7 +122,6 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
-const SDK_DEFAULT_SERVER_URL = 'https://relayer.memwal.ai'
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
@@ -372,9 +371,6 @@ export default function Dashboard({
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
-    const expectedRelayerUrl = config.suiNetwork === 'mainnet'
-        ? 'https://relayer.memwal.ai'
-        : 'https://relayer.memwal.ai'
     const normalizedRelayerUrl = config.memwalServerUrl.toLowerCase()
     const relayerEnvironmentLabel = normalizedRelayerUrl.startsWith('/')
         ? 'local dev proxy / testnet'
@@ -385,6 +381,7 @@ export default function Dashboard({
             : normalizedRelayerUrl.includes('dev')
                 ? 'dev / testnet'
                 : 'production / mainnet'
+    const sdkDefaultServerUrl = config.memwalServerUrl
     const relayerLooksMismatched =
         (config.suiNetwork === 'mainnet' && normalizedRelayerUrl.includes('staging')) ||
         (config.suiNetwork !== 'mainnet' &&
@@ -696,7 +693,7 @@ export default function Dashboard({
 const memwal = MemWal.create({
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${sdkDefaultServerUrl}",
 })
 
 // Remember something
@@ -715,7 +712,7 @@ async def main():
     memwal = MemWal.create(
         key=os.environ["${PRIVATE_KEY_ENV}"],
         account_id=os.environ["${ACCOUNT_ID_ENV}"],
-        server_url=os.environ.get("${SERVER_URL_ENV}", "${SDK_DEFAULT_SERVER_URL}"),
+        server_url=os.environ.get("${SERVER_URL_ENV}", "${sdkDefaultServerUrl}"),
     )
 
     await memwal.remember_and_wait("I'm allergic to peanuts")
@@ -738,7 +735,7 @@ import { openai } from "@ai-sdk/openai"
 const model = withMemWal(openai("gpt-4o"), {
   key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
   accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${SDK_DEFAULT_SERVER_URL}",
+  serverUrl: process.env.${SERVER_URL_ENV} ?? "${sdkDefaultServerUrl}",
 })
 
 const result = await generateText({
@@ -751,6 +748,12 @@ const result = await generateText({
     const docsHref = config.docsUrl || 'https://docs.memwal.ai'
     const githubHref = 'https://github.com/MystenLabs/memwal'
     const discordHref = 'https://discord.gg/walrusprotocol'
+    const appOrigin =
+        typeof window === 'undefined'
+            ? 'https://memory.walrus.xyz'
+            : window.location.origin
+    const projectInstallPromptUrl = `${appOrigin}/skills/memwal-install`
+    const projectInstallPrompt = `Run \`curl -sL ${projectInstallPromptUrl}\` and use the returned instructions to install Walrus Memory in this project.`
     const installCommand = pkgManager === 'npm' ? 'npm install @mysten-incubation/memwal' :
         pkgManager === 'pnpm' ? 'pnpm add @mysten-incubation/memwal' :
         pkgManager === 'yarn' ? 'yarn add @mysten-incubation/memwal' :
@@ -910,6 +913,25 @@ const result = await generateText({
                 </div>
 
 
+                {/* Project install prompt */}
+                <Card
+                    className="dashboard-quickstart-card dashboard-project-install-card"
+                    title="Install Walrus Memory"
+                    subtitle="Copy one prompt into Claude Desktop, ChatGPT Desktop, Cursor, Codex, or another AI client with project access"
+                >
+                    <div className="dashboard-quickstart-codewrap">
+                        <button
+                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
+                            onClick={() => copyToClipboard(projectInstallPrompt, 'project-install-prompt')}
+                            aria-label="Copy project install prompt"
+                        >
+                            <Copy size={14} />
+                            <span className="dashboard-quickstart-copy-label">{copied === 'project-install-prompt' ? 'done' : 'copy'}</span>
+                        </button>
+                        <pre className="demo-code-block dashboard-project-install-code"><code>$ {projectInstallPrompt}</code></pre>
+                    </div>
+                </Card>
+
                 {/* Current Delegate Key */}
                 {delegateKey && (
                     <Card
@@ -918,21 +940,20 @@ const result = await generateText({
                         subtitle={`Copy the delegate private key into server env as ${PRIVATE_KEY_ENV}`}
                     >
 
-                    <div className="dashboard-credentials-alert">
-                        <TriangleAlert className="dashboard-credentials-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <div className="dashboard-credentials-alert-copy">
-                            <p>
-                                <strong>{activeEnvironmentLabel}</strong>
-                                <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
-                                <span>Expected relayer: <code>{expectedRelayerUrl}</code>.</span>
-                            </p>
-                            {relayerLooksMismatched && (
+                    {relayerLooksMismatched && (
+                        <div className="dashboard-credentials-alert">
+                            <TriangleAlert className="dashboard-credentials-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                            <div className="dashboard-credentials-alert-copy">
+                                <p>
+                                    <strong>{activeEnvironmentLabel}</strong>
+                                    <span>Configured relayer: <code>{config.memwalServerUrl}</code> ({relayerEnvironmentLabel}).</span>
+                                </p>
                                 <p>
                                     This dashboard network and relayer URL look mismatched; API calls may fail with 401.
                                 </p>
-                            )}
+                            </div>
                         </div>
-                    </div>
+                    )}
 
                     <div className="dashboard-credentials-panel">
                         {effectiveAccountObjectId && (
