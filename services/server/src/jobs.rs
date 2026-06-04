@@ -20,8 +20,8 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
-    SIDECAR_WALRUS_DEP_VERSION, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
-    WalrusUploadExhaustedAlert,
+    SIDECAR_WALRUS_DEP_VERSION, WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert,
+    WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
@@ -893,6 +893,16 @@ async fn execute_upload_and_transfer(
                 &msg,
             )
             .await;
+            maybe_alert_walrus_gas_pool_exhausted(
+                state,
+                &classified,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                wallet_index,
+                &msg,
+            )
+            .await;
             maybe_alert_walrus_upload_exhausted(
                 state,
                 &classified,
@@ -1086,6 +1096,42 @@ async fn maybe_alert_walrus_object_locked(
     }
 }
 
+/// Fire the distinct gas-pool maintenance alert when a wallet job fails with
+/// `GasPoolExhausted` (Enoki dry-run `balance::split` ENotEnough). Kept separate
+/// from the "exhausted retries" alert: this case aborts immediately, so the
+/// on-call message must name the real cause — fragmented/insufficient SUI gas on
+/// the pool wallets — and point ops at gas-coin consolidation/top-up.
+async fn maybe_alert_walrus_gas_pool_exhausted(
+    state: &AppState,
+    error: &WalletJobError,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    wallet_index: usize,
+    msg: &str,
+) {
+    if !matches!(error, WalletJobError::GasPoolExhausted(_)) {
+        return;
+    }
+
+    let alert = WalrusGasPoolExhaustedAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        wallet_index,
+        configured_wallets: state.key_pool.len(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state.alerts.notify_walrus_gas_pool_exhausted(alert).await {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for Walrus gas-pool exhaustion: {}",
+            err
+        );
+    }
+}
+
 async fn maybe_alert_walrus_upload_exhausted(
     state: &AppState,
     error: &WalletJobError,
@@ -1131,8 +1177,10 @@ async fn maybe_alert_walrus_upload_exhausted(
 /// don't burn retry budget on inputs that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
-/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure), except
-///   `balance::split` stale-state failures that can recover after sidecar refresh
+/// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - Enoki dry-run `0x2::balance::split` ENotEnough → `GasPoolExhausted`
+///   (abort: pool SUI gas coins are fragmented/insufficient; retrying rotates
+///   to the next starved wallet — needs ops gas consolidation/top-up)
 /// - `ObjectLockedAtVersion(_)` → `Transient` (retry can rebuild with a fresh
 ///   wallet assignment)
 /// - owned-object lock / equivocation ("already locked by a different
@@ -1156,6 +1204,15 @@ pub enum WalletJobError {
     /// Apalis aborts so we surface a distinct object-lock alert rather than a
     /// misleading "wallet retries exhausted" one.
     ObjectLockedUntilEpoch(String),
+    /// An Enoki sponsored dry-run aborted in `0x2::balance::split` with
+    /// ENotEnough (abort code 2): the pool wallet's SUI gas coins are
+    /// fragmented or too small to cover the sponsored budget. Retrying rotates
+    /// to the next pool wallet and re-fails the same way, burning the attempt
+    /// budget without progress. NOT `Permanent`: it succeeds again once ops
+    /// consolidates / tops up SUI gas on the pool wallets. Apalis aborts so we
+    /// surface a distinct gas-pool maintenance alert rather than a misleading
+    /// "wallet retries exhausted" one.
+    GasPoolExhausted(String),
 }
 
 impl WalletJobError {
@@ -1164,6 +1221,7 @@ impl WalletJobError {
             WalletJobError::Transient(_) => "transient",
             WalletJobError::Permanent(_) => "permanent",
             WalletJobError::ObjectLockedUntilEpoch(_) => "object_locked_until_epoch",
+            WalletJobError::GasPoolExhausted(_) => "gas_pool_exhausted",
         }
     }
 
@@ -1180,7 +1238,9 @@ impl WalletJobError {
     pub fn aborts_retries(&self) -> bool {
         matches!(
             self,
-            WalletJobError::Permanent(_) | WalletJobError::ObjectLockedUntilEpoch(_)
+            WalletJobError::Permanent(_)
+                | WalletJobError::ObjectLockedUntilEpoch(_)
+                | WalletJobError::GasPoolExhausted(_)
         )
     }
 
@@ -1189,11 +1249,20 @@ impl WalletJobError {
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
+        // (abort code 2) when the pool wallet's selected SUI gas coin cannot be
+        // split to cover the sponsored budget — i.e. the relayer's SUI gas coins
+        // are fragmented or too small. This is a gas-pool maintenance issue, not
+        // a transient: retrying just rotates to the next equally-starved pool
+        // wallet and burns the whole attempt budget. Abort and surface a
+        // dedicated gas-pool alert pointing ops to consolidate/top-up SUI gas.
+        // (balance::split's only abort is ENotEnough, so the balance+split anchor
+        // is sufficient to identify it.)
         if (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
             && lower.contains("split")
         {
-            return WalletJobError::Transient(msg.to_string());
+            return WalletJobError::GasPoolExhausted(msg.to_string());
         }
         // Walrus on-chain package upgrade — the cached @mysten/walrus client
         // carries stale package metadata until refreshed. The sidecar already
@@ -1250,9 +1319,9 @@ impl WalletJobError {
         let error = io::Error::other(self.to_string());
         match self {
             WalletJobError::Transient(_) => Error::Failed(Arc::new(Box::new(error))),
-            WalletJobError::Permanent(_) | WalletJobError::ObjectLockedUntilEpoch(_) => {
-                Error::Abort(Arc::new(Box::new(error)))
-            }
+            WalletJobError::Permanent(_)
+            | WalletJobError::ObjectLockedUntilEpoch(_)
+            | WalletJobError::GasPoolExhausted(_) => Error::Abort(Arc::new(Box::new(error))),
         }
     }
 }
@@ -1264,6 +1333,9 @@ impl std::fmt::Display for WalletJobError {
             WalletJobError::Permanent(msg) => write!(f, "wallet job error (permanent): {}", msg),
             WalletJobError::ObjectLockedUntilEpoch(msg) => {
                 write!(f, "wallet job error (object locked until epoch): {}", msg)
+            }
+            WalletJobError::GasPoolExhausted(msg) => {
+                write!(f, "wallet job error (gas pool exhausted): {}", msg)
             }
         }
     }
@@ -1793,13 +1865,14 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn equivocation_does_not_regress_recoverable_classes() {
-        // balance::split and EWrongVersion must still be Transient (recoverable),
-        // not swept into the new abort path.
+        // EWrongVersion must still be Transient (recoverable). balance::split
+        // ENotEnough is a gas-pool maintenance abort, not an object lock — it
+        // must classify as GasPoolExhausted, not swept into the object-lock path.
         let balance = "Enoki dry run failed: MoveAbort(0x2::balance, split, 2)";
         let ewrong = "MoveAbort in 1st command, abort code: 1, in '0xabc::system::inner_mut'";
         assert!(matches!(
             WalletJobError::classify_sidecar_error(balance),
-            WalletJobError::Transient(_)
+            WalletJobError::GasPoolExhausted(_)
         ));
         assert!(matches!(
             WalletJobError::classify_sidecar_error(ewrong),
@@ -1844,16 +1917,22 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     #[test]
-    fn classify_balance_split_move_abort_as_transient() {
+    fn classify_balance_split_move_abort_as_gas_pool_exhausted() {
+        // Enoki dry-run balance::split ENotEnough → gas-pool maintenance abort:
+        // classified GasPoolExhausted, aborts retries (so it does not burn the
+        // whole wallet pool), and is not Permanent (succeeds after gas top-up).
         for msg in [
             "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}",
             "move abort during balance split",
         ] {
+            let classified = WalletJobError::classify_sidecar_error(msg);
             assert!(
-                !WalletJobError::classify_sidecar_error(msg).is_permanent(),
-                "expected transient for: {}",
+                matches!(classified, WalletJobError::GasPoolExhausted(_)),
+                "expected gas_pool_exhausted for: {}",
                 msg
             );
+            assert!(classified.aborts_retries(), "must abort retries: {}", msg);
+            assert!(!classified.is_permanent(), "must not be permanent: {}", msg);
         }
     }
 
