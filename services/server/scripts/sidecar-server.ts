@@ -21,7 +21,7 @@ import { SealClient, SessionKey, EncryptedObject } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
-import { getEnokiRetryDelayMs } from "./enoki-retry.js";
+import { getEnokiRetryDelayMs, isSponsoredTransactionInvalidatedMessage } from "./enoki-retry.js";
 import {
     isWalrusBlobObjectMissingFromEffects,
     isWalrusObjectLockEquivocation,
@@ -81,12 +81,31 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
 );
 
 const MAX_WALRUS_EPOCHS = 5;
+const NETWORK_DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "mainnet" ? 3 : MAX_WALRUS_EPOCHS;
 const DEFAULT_WALRUS_EPOCHS = (() => {
-    const parsed = Number.parseInt(process.env.WALRUS_STORAGE_EPOCHS || "", 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-        return Math.min(parsed, MAX_WALRUS_EPOCHS);
+    const raw = process.env.WALRUS_STORAGE_EPOCHS?.trim();
+    if (!raw) {
+        return NETWORK_DEFAULT_WALRUS_EPOCHS;
     }
-    return SUI_NETWORK === "mainnet" ? 3 : MAX_WALRUS_EPOCHS;
+
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_WALRUS_EPOCHS) {
+        return parsed;
+    }
+
+    if (Number.isFinite(parsed) && parsed > MAX_WALRUS_EPOCHS) {
+        console.warn(
+            `[sidecar] WALRUS_STORAGE_EPOCHS=${raw} exceeds max ${MAX_WALRUS_EPOCHS}; ` +
+            `using network default ${NETWORK_DEFAULT_WALRUS_EPOCHS}`,
+        );
+    } else {
+        console.warn(
+            `[sidecar] ignoring invalid WALRUS_STORAGE_EPOCHS=${raw}; ` +
+            `using network default ${NETWORK_DEFAULT_WALRUS_EPOCHS}`,
+        );
+    }
+
+    return NETWORK_DEFAULT_WALRUS_EPOCHS;
 })();
 const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
 
@@ -316,7 +335,7 @@ const WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS = parsePositiveIntEnv(
     1_000,
     180_000,
 );
-const WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000] as const;
+const WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 40_000] as const;
 const walrusUploadGlobalLimiter = new AsyncSemaphore(WALRUS_UPLOAD_MAX_CONCURRENCY);
 const walrusUploadWalletLimiters = new Map<number, AsyncSemaphore>();
 
@@ -626,7 +645,7 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     }
 
     for (let attempt = 1; ; attempt += 1) {
-        let resp: Response;
+        let resp: globalThis.Response;
         try {
             resp = await fetch(`${ENOKI_API_BASE_URL}${path}`, {
                 method: "POST",
@@ -689,12 +708,6 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     }
 }
 
-function isSponsoredTransactionExpired(err: unknown): boolean {
-    const msg = errorMessage(err);
-    return /sponsored transaction has expired/i.test(msg)
-        || /"code"\s*:\s*"expired"/i.test(msg);
-}
-
 async function executeSponsoredTransactionOnce(
     tx: Transaction,
     signer: Ed25519Keypair,
@@ -747,8 +760,8 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
     try {
         return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
     } catch (err: any) {
-        if (isSponsoredTransactionExpired(err)) {
-            console.warn(`[enoki-sponsor] sponsored tx expired; retrying sponsor/execute once: ${err?.message || err}`);
+        if (isSponsoredTransactionInvalidatedMessage(errorMessage(err))) {
+            console.warn(`[enoki-sponsor] sponsored tx invalidated; retrying sponsor/execute once: ${err?.message || err}`);
             try {
                 return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
             } catch (retryErr: any) {

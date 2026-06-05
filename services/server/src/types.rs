@@ -43,7 +43,17 @@ pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
         .ok()
         .and_then(|raw| raw.trim().parse::<u32>().ok())
     {
-        Some(epochs) if epochs > 0 => epochs.min(MAX_WALRUS_STORAGE_EPOCHS),
+        Some(epochs) if epochs > 0 && epochs <= MAX_WALRUS_STORAGE_EPOCHS => epochs,
+        Some(epochs) if epochs > MAX_WALRUS_STORAGE_EPOCHS => {
+            tracing::warn!(
+                "WALRUS_STORAGE_EPOCHS={} exceeds max {}; using default {} for {}",
+                epochs,
+                MAX_WALRUS_STORAGE_EPOCHS,
+                default,
+                network,
+            );
+            default
+        }
         _ => default,
     }
 }
@@ -1104,6 +1114,28 @@ pub struct SidecarError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_walrus_storage_epochs_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
+        let _guard = WALRUS_STORAGE_EPOCHS_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("WALRUS_STORAGE_EPOCHS").ok();
+
+        match value {
+            Some(value) => std::env::set_var("WALRUS_STORAGE_EPOCHS", value),
+            None => std::env::remove_var("WALRUS_STORAGE_EPOCHS"),
+        }
+
+        let result = test();
+
+        match previous {
+            Some(value) => std::env::set_var("WALRUS_STORAGE_EPOCHS", value),
+            None => std::env::remove_var("WALRUS_STORAGE_EPOCHS"),
+        }
+
+        result
+    }
 
     // ── AuthInfo Debug redacts delegate_key ───────────────────────
 
@@ -1344,6 +1376,24 @@ mod tests {
             default_walrus_storage_epochs_for_network("testnet"),
             MAX_WALRUS_STORAGE_EPOCHS
         );
+    }
+
+    #[test]
+    fn configured_walrus_storage_epochs_uses_valid_env_value() {
+        with_walrus_storage_epochs_env(Some("4"), || {
+            assert_eq!(configured_walrus_storage_epochs("mainnet"), 4);
+        });
+    }
+
+    #[test]
+    fn configured_walrus_storage_epochs_falls_back_when_env_exceeds_cap() {
+        with_walrus_storage_epochs_env(Some("15"), || {
+            assert_eq!(configured_walrus_storage_epochs("mainnet"), 3);
+            assert_eq!(
+                configured_walrus_storage_epochs("testnet"),
+                MAX_WALRUS_STORAGE_EPOCHS
+            );
+        });
     }
 
     // ── AppError Display implementations ────────────────────────────────
