@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::time::Duration;
 
-const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(180);
+const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(300);
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Result of a Walrus blob upload
