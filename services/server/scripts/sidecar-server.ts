@@ -80,8 +80,9 @@ const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         : "https://upload-relay.mainnet.walrus.space"
 );
 
-const MAX_WALRUS_EPOCHS = 5;
-const NETWORK_DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "mainnet" ? 3 : MAX_WALRUS_EPOCHS;
+const MAX_WALRUS_EPOCHS = 15;
+const DEFAULT_TESTNET_WALRUS_EPOCHS = 5;
+const NETWORK_DEFAULT_WALRUS_EPOCHS = SUI_NETWORK === "mainnet" ? 3 : DEFAULT_TESTNET_WALRUS_EPOCHS;
 const DEFAULT_WALRUS_EPOCHS = (() => {
     const raw = process.env.WALRUS_STORAGE_EPOCHS?.trim();
     if (!raw) {

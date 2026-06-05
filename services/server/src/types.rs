@@ -27,13 +27,14 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
-/// Sidecar caps Walrus storage purchases to avoid accidental large spends.
-pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 5;
+/// Upper bound for explicit Walrus storage purchases.
+pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
+pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
     match network {
         "mainnet" => 3,
-        _ => MAX_WALRUS_STORAGE_EPOCHS,
+        _ => DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS,
     }
 }
 
@@ -1374,7 +1375,7 @@ mod tests {
         assert_eq!(default_walrus_storage_epochs_for_network("mainnet"), 3);
         assert_eq!(
             default_walrus_storage_epochs_for_network("testnet"),
-            MAX_WALRUS_STORAGE_EPOCHS
+            DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS
         );
     }
 
@@ -1386,13 +1387,18 @@ mod tests {
     }
 
     #[test]
-    fn configured_walrus_storage_epochs_falls_back_when_env_exceeds_cap() {
+    fn configured_walrus_storage_epochs_honors_explicit_fifteen() {
         with_walrus_storage_epochs_env(Some("15"), || {
+            assert_eq!(configured_walrus_storage_epochs("mainnet"), 15);
+            assert_eq!(configured_walrus_storage_epochs("testnet"), 15);
+        });
+    }
+
+    #[test]
+    fn configured_walrus_storage_epochs_falls_back_when_env_exceeds_cap() {
+        with_walrus_storage_epochs_env(Some("16"), || {
             assert_eq!(configured_walrus_storage_epochs("mainnet"), 3);
-            assert_eq!(
-                configured_walrus_storage_epochs("testnet"),
-                MAX_WALRUS_STORAGE_EPOCHS
-            );
+            assert_eq!(configured_walrus_storage_epochs("testnet"), 5);
         });
     }
 
