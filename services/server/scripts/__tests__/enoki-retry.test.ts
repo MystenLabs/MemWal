@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
     getEnokiRetryDelayMs,
+    isSponsoredTransactionInvalidatedMessage,
     isTransientEnokiStatus,
     parseRetryAfterMs,
     parseTryAgainBodyDelayMs,
@@ -73,4 +74,25 @@ test("retries transport errors with exponential fallback", () => {
         attempt: 1,
         transportError: true,
     }), 5_000);
+});
+
+test("detects invalidated sponsored transaction responses", () => {
+    assert.equal(
+        isSponsoredTransactionInvalidatedMessage(
+            'Enoki API error (400): {"errors":[{"code":"expired","message":"Sponsored transaction has expired"}]}',
+        ),
+        true,
+    );
+    assert.equal(
+        isSponsoredTransactionInvalidatedMessage(
+            'Enoki API error (404): {"errors":[{"code":"not_found","message":"Sponsored transaction not found"}]}',
+        ),
+        true,
+    );
+    assert.equal(
+        isSponsoredTransactionInvalidatedMessage(
+            'Enoki API error (400): {"errors":[{"code":"dry_run_failed"}]}',
+        ),
+        false,
+    );
 });

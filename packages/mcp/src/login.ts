@@ -234,6 +234,18 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             res.setHeader("access-control-allow-headers", "content-type");
             res.setHeader("vary", "origin");
             if (req.method === "OPTIONS") {
+                // Chrome Private Network Access (PNA): a request from a public
+                // HTTPS page (memory.walrus.xyz) to a private/loopback address
+                // (127.0.0.1) sends `Access-Control-Request-Private-Network: true`
+                // on the preflight and REQUIRES the response to echo
+                // `Access-Control-Allow-Private-Network: true` — otherwise the
+                // browser blocks the real POST and our `fetch` throws, so the
+                // callback never lands here (the on-chain tx still succeeds, but
+                // creds can't be saved locally). Only grant it for the preflight
+                // that actually asks for it.
+                if (req.headers["access-control-request-private-network"] === "true") {
+                    res.setHeader("access-control-allow-private-network", "true");
+                }
                 res.writeHead(204);
                 res.end();
                 return;

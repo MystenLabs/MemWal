@@ -438,7 +438,16 @@ function handleLocalLogout(): { text: string; isError: boolean } {
  * file directly. They appear in `tools/list` by splicing them into the
  * relayer's response on the way back to the client.
  */
-export async function runBridge(creds: MemWalCredentials, config: BridgeConfig): Promise<void> {
+export async function runBridge(
+    creds: MemWalCredentials,
+    config: BridgeConfig,
+    /** Requests the auth-required server already read off stdin before it
+     * detected fresh credentials and handed control here (e.g. the
+     * `memwal_recall` that triggered the hot-handoff). Replayed once the SSE
+     * stream is up so they're served for real instead of being lost in the
+     * mode switch — this is what removes the historical "second restart". */
+    pendingLines: string[] = [],
+): Promise<void> {
     note(`Connecting to ${creds.relayerUrl}...`);
     log.info("bridge.connecting", {
         relayer: creds.relayerUrl,
@@ -561,7 +570,7 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
     // Client → server: forward stdin lines as POST messages. On 404 (the
     // relayer doesn't know our sessionId — happens right after a reconnect
     // if the message races the new handshake), trigger another reconnect.
-    const clientPump = readStdinLines((line) => {
+    const handleClientLine = (line: string): void => {
         void (async () => {
             try {
                 const msg = JSON.parse(line) as RpcMessage;
@@ -630,7 +639,18 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
                 log.warn("bridge.stdin_parse_failed", { line: line.slice(0, 120) });
             }
         })();
-    }).then(() => {
+    };
+
+    // Replay anything the auth-required server handed off (the tool call that
+    // triggered the hot-handoff, plus anything buffered behind it) now that the
+    // SSE stream is connected. Without this the triggering request is dropped in
+    // the mode switch and the user has to retry / restart.
+    if (pendingLines.length > 0) {
+        log.info("bridge.replaying_handoff", { count: pendingLines.length });
+        for (const line of pendingLines) handleClientLine(line);
+    }
+
+    const clientPump = readStdinLines(handleClientLine).then(() => {
         stdinClosed = true;
         sse.abort();
     });
