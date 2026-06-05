@@ -47,6 +47,14 @@ export function parseTryAgainBodyDelayMs(body: string | undefined): number | nul
     return Math.round(amount * multiplier);
 }
 
+export function isSponsoredTransactionInvalidatedMessage(message: string | undefined): boolean {
+    if (!message) return false;
+    return /sponsored transaction has expired/i.test(message)
+        || /"code"\s*:\s*"expired"/i.test(message)
+        || /sponsored transaction not found/i.test(message)
+        || /"code"\s*:\s*"not_found"/i.test(message);
+}
+
 export function getEnokiRetryDelayMs(input: EnokiRetryInput): number | null {
     if (input.attempt >= input.maxAttempts) return null;
 

@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.4
+
+### Fixed
+
+- Accept HTTPS dashboard sign-in callbacks to the local `127.0.0.1` MCP listener.
+- Reload credentials after `memwal_login` so memory tools work without restarting the MCP client.
+
 ## 0.0.3
 
 ### Changed
