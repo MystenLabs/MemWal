@@ -1,5 +1,7 @@
 ---
-title: "Gas Pool Maintenance Runbook"
+title: Gas Pool Maintenance Runbook
+description: How to diagnose and fix Enoki gas-pool failures on relayer pool wallets by consolidating or topping up SUI gas coins.
+keywords: [relayer, gas pool, Enoki, SUI, sponsored transaction, runbook]
 ---
 
 When to use this: a **gas-pool alert** fires (the SUI gas pool maintenance
