@@ -41,6 +41,10 @@ prometheus = "0.13"
 # HTTP client (for Sui RPC onchain verification)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
+# Prometheus remote_write push to OpenObserve (snappy-compressed protobuf)
+prost = "0.13"
+snap = "1"
+
 # Async utilities
 futures = "0.3"
 async-trait = "0.1"

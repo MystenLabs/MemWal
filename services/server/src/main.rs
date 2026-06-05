@@ -4,6 +4,7 @@ mod compatibility;
 mod engine;
 mod jobs;
 mod mcp_proxy;
+mod metrics_remote_write;
 mod observability;
 mod rate_limit;
 mod routes;
@@ -377,6 +378,10 @@ async fn main() {
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
+
+    // Push Prometheus metrics to OpenObserve via remote_write (opt-in via
+    // ZO_REMOTE_WRITE_URL; no-op when unset).
+    metrics_remote_write::spawn(http_client.clone());
 
     // Shared application state
     let state = Arc::new(AppState {
