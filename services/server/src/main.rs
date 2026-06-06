@@ -31,7 +31,10 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
+use services::{
+    CompositeRanker, Embedder, Extractor, HydeConfig, HydeGenerator, LlmExtractor, OpenAiEmbedder,
+    OpenRouterHyde, Ranker,
+};
 use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
@@ -371,6 +374,14 @@ async fn main() {
         http_client.clone(),
         Arc::clone(&config),
     ));
+    // HyDE query-enhancement generator — off unless HYDE_ENABLED is set.
+    // Reuses the same OpenRouter key/base as the embedder + extractor.
+    let hyde_config = HydeConfig::from_env();
+    let hyde: Arc<dyn HydeGenerator> = Arc::new(OpenRouterHyde::new(
+        http_client.clone(),
+        Arc::clone(&config),
+        hyde_config.model.clone(),
+    ));
     let extractor: Arc<dyn Extractor> =
         Arc::new(LlmExtractor::new(http_client.clone(), Arc::clone(&config)));
     // CompositeRanker is stateless — one shared instance is fine.
@@ -387,6 +398,8 @@ async fn main() {
         alerts,
         engine,
         embedder,
+        hyde,
+        hyde_config,
         extractor,
         ranker,
         redis,

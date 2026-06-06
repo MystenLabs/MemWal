@@ -88,6 +88,14 @@ pub struct AppState {
     /// a deterministic mock fallback when no API key). Used by `analyze`,
     /// `remember` (per fact / summary), and `recall` (the query embedding).
     pub embedder: Arc<dyn Embedder>,
+    /// HyDE query-enhancement generator. When `hyde_config.enabled`, the
+    /// recall path generates a hypothetical answer for the query and embeds
+    /// THAT instead of the raw query (closer in embedding space to the stored
+    /// declarative facts). Degrades gracefully to the original query.
+    pub hyde: Arc<dyn crate::services::HydeGenerator>,
+    /// HyDE config (server-wide, env-driven, **off by default**). Built once
+    /// at startup via [`crate::services::HydeConfig::from_env`].
+    pub hyde_config: crate::services::HydeConfig,
     /// LLM fact-extraction service — `LlmExtractor` (gpt-4o-mini). Used by
     /// `analyze`.
     pub extractor: Arc<dyn Extractor>,

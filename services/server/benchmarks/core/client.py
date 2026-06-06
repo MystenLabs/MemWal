@@ -150,6 +150,16 @@ class MemWalClient:
         resp.raise_for_status()
         return resp.json()
 
+    def metrics(self) -> str:
+        """GET /metrics — Prometheus text exposition, no auth required.
+
+        Used by the HyDE execution gate to count per-status hyde-call outcomes
+        before/after an eval. Returns the raw text body.
+        """
+        resp = self._http.get(f"{self.server_url}/metrics")
+        resp.raise_for_status()
+        return resp.text
+
     def analyze(
         self,
         text: str,

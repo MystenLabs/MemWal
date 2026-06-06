@@ -19,41 +19,78 @@ use crate::types::*;
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
 
-fn recall_embedding_cache_key(config: &Config, query: &str) -> String {
+fn recall_embedding_cache_key(config: &AppState, query: &str) -> String {
     use crate::services::embedder::EMBEDDING_MODEL;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(config.openai_api_base.as_bytes());
+    hasher.update(config.config.openai_api_base.as_bytes());
     hasher.update(b"\0");
     hasher.update(EMBEDDING_MODEL.as_bytes());
     hasher.update(b"\0");
     hasher.update(query.as_bytes());
+    // Mark whether HyDE is active so a HyDE-on embedding (of the hypothetical
+    // answer) and a HyDE-off embedding (of the raw query) for the SAME query
+    // text don't collide on the same cache key. The cache stays keyed on the
+    // ORIGINAL query (not the hypothetical) because HyDE is deterministic
+    // (temp 0) — a pure function of the query — so a repeated query skips
+    // both the HyDE call AND the embed.
+    hasher.update(b"\0");
+    if config.hyde_config.enabled {
+        hasher.update(b"hyde:");
+        hasher.update(config.hyde_config.model.as_bytes());
+    }
     format!("memwal:embedding:v1:{:x}", hasher.finalize())
 }
 
 /// Embed a recall query, with a Redis cache keyed on
-/// api_base + model + query. Cache miss / disabled (ttl 0) falls through
-/// to `state.embedder.embed`. Cache errors are best-effort (logged, ignored).
+/// api_base + model + query (+ HyDE marker). Returns the embedding plus the
+/// HyDE generation latency (0 when HyDE is off or the cache hit, so no
+/// hypothetical was generated).
+///
+/// **HyDE (query enhancement):** when `state.hyde_config.enabled`, instead of
+/// embedding the raw query we first generate a hypothetical *answer* via one
+/// LLM call and embed THAT — a fact-shaped text that's embedding-closer to the
+/// stored declarative facts (see `services::hyde`). The cache stays keyed on
+/// the ORIGINAL query (HyDE is deterministic at temp 0, so the hypothetical is
+/// a pure function of the query), so a cache hit skips both the HyDE call and
+/// the embed. HyDE degrades gracefully — on any generation failure it returns
+/// the original query, so recall always proceeds.
 async fn generate_recall_embedding_cached(
     state: &AppState,
     query: &str,
-) -> Result<Vec<f32>, AppError> {
+) -> Result<(Vec<f32>, u128), AppError> {
     let ttl_secs = state.embedding_cache_ttl.as_secs();
-    if ttl_secs == 0 {
-        return state.embedder.embed(query).await;
+
+    // Helper: produce the text we actually embed — the HyDE hypothetical when
+    // enabled, else the raw query — and the time HyDE took (0 when off).
+    async fn embed_text(state: &AppState, query: &str) -> (String, u128) {
+        if state.hyde_config.enabled {
+            let t = std::time::Instant::now();
+            let hypothetical = state.hyde.hypothesize(query).await;
+            (hypothetical, t.elapsed().as_millis())
+        } else {
+            (query.to_string(), 0)
+        }
     }
 
-    let cache_key = recall_embedding_cache_key(&state.config, query);
+    if ttl_secs == 0 {
+        let (text, hyde_ms) = embed_text(state, query).await;
+        return Ok((state.embedder.embed(&text).await?, hyde_ms));
+    }
+
+    let cache_key = recall_embedding_cache_key(state, query);
     let mut redis = state.redis.clone();
     match redis.get::<_, Option<String>>(&cache_key).await {
         Ok(Some(payload)) => match serde_json::from_str::<Vec<f32>>(&payload) {
-            Ok(vector) => return Ok(vector),
+            // Cache hit — no HyDE call needed (hyde_ms = 0).
+            Ok(vector) => return Ok((vector, 0)),
             Err(e) => tracing::warn!("embedding cache decode failed: {}", e),
         },
         Ok(None) => {}
         Err(e) => tracing::warn!("embedding cache get failed: {}", e),
     }
 
-    let vector = state.embedder.embed(query).await?;
+    let (text, hyde_ms) = embed_text(state, query).await;
+    let vector = state.embedder.embed(&text).await?;
     match serde_json::to_string(&vector) {
         Ok(payload) => {
             let result: redis::RedisResult<()> = redis.set_ex(&cache_key, payload, ttl_secs).await;
@@ -64,7 +101,7 @@ async fn generate_recall_embedding_cached(
         Err(e) => tracing::warn!("embedding cache encode failed: {}", e),
     }
 
-    Ok(vector)
+    Ok((vector, hyde_ms))
 }
 
 // ============================================================
@@ -176,7 +213,7 @@ pub async fn recall(
     );
 
     let t0 = std::time::Instant::now();
-    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let (query_vector, hyde_ms) = generate_recall_embedding_cached(&state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
     // Cap limit to prevent unbounded DB scans / memory use.
@@ -277,7 +314,16 @@ pub async fn recall(
     // log line that combined the two stages into `fetch=Xms`. Benchmark
     // mode reports the entire Postgres-select fetch as `walrus_ms` and
     // leaves `seal_ms` at 0 — same shape, different mode.
+    //
+    // HyDE breadcrumb (hyde_enabled / hyde_ms) on EVERY recall so a benchmark
+    // run can grep-assert HyDE actually executed and see its read-path cost.
+    // hyde_ms = 0 means HyDE was off OR the embedding cache hit (no
+    // hypothetical generated); hyde_ms > 0 proves a hypothetical was generated
+    // this request. A high "HyDE generation failed" warn rate indicates silent
+    // fallback to the raw query and should be checked before trusting a run.
     tracing::info!(
+        hyde_enabled = state.hyde_config.enabled,
+        hyde_ms = hyde_ms,
         "recall complete: {} results for owner={} embed={}ms vsearch={}ms walrus={}ms seal={}ms fetch={}ms total={}ms",
         total,
         owner,

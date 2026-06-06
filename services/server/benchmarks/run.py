@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -43,6 +44,7 @@ from core.metrics import (
     aggregate_metrics, aggregate_by_category,
 )
 from core.report import generate_comparison_table, generate_report
+from core.hyde_gate import scrape_hyde_counts, evaluate_gate
 from benchmarks import BENCHMARKS
 
 logger = logging.getLogger(__name__)
@@ -395,6 +397,16 @@ def stage_eval(
     all_query_results: list[QueryResult] = []
     per_query_metrics: list[dict] = []
 
+    # HyDE execution gate — scrape /metrics before the eval so we can measure
+    # how many hyde calls actually ran (and how many were healthy) during this
+    # eval. No-op when HyDE is off. Defensive: a scrape failure must never
+    # abort the run, so on error we record empty counts (gate reads as off).
+    try:
+        hyde_before = scrape_hyde_counts(client.metrics())
+    except Exception as e:
+        logger.warning("HyDE gate: pre-eval /metrics scrape failed (%s); gate disabled for this run", e)
+        hyde_before = None
+
     # Parallel execution — each query is fully independent.
     # HTTP client (httpx) and OpenAI client are thread-safe for concurrent calls.
     with ThreadPoolExecutor(max_workers=eval_concurrency) as pool:
@@ -405,6 +417,29 @@ def stage_eval(
                 continue
             all_query_results.append(result)
             per_query_metrics.append(result.retrieval_metrics)
+
+    # HyDE execution gate — scrape again, compute the delta, and warn loudly if
+    # the healthy share is below threshold (a confounded arm: too many silent
+    # fallbacks to attribute a clean result). Stamped into the artifact config.
+    hyde_gate = None
+    if hyde_before is not None:
+        try:
+            hyde_gate = evaluate_gate(hyde_before, scrape_hyde_counts(client.metrics()))
+            if hyde_gate.enabled:
+                print(
+                    f"HyDE gate: {hyde_gate.total_calls} calls, "
+                    f"{hyde_gate.success_share * 100:.1f}% healthy "
+                    f"(by status: {hyde_gate.by_status})"
+                )
+                if not hyde_gate.passed:
+                    print(
+                        f"  WARNING: healthy share {hyde_gate.success_share * 100:.1f}% "
+                        f"< {hyde_gate.threshold * 100:.0f}% threshold — too many silent "
+                        "fallbacks to the raw query. This arm is CONFOUNDED; a real lift "
+                        "may read as noise. Investigate OpenRouter rate-limiting and re-run."
+                    )
+        except Exception as e:
+            logger.warning("HyDE gate: post-eval evaluation failed (%s); gate result omitted", e)
 
     # Aggregate metrics (defensive: never let aggregation failure lose the raw data)
     try:
@@ -438,6 +473,8 @@ def stage_eval(
             "mode": mode,
             "judge_model": config.get("judge", {}).get("model", ""),
             "answer_model": config.get("answer", {}).get("model", ""),
+            "answer_prompt_variant": config.get("_answer_prompt_variant", "baseline"),
+            "hyde_gate": hyde_gate.to_dict() if hyde_gate is not None else None,
         },
         metrics_overall=_dict_to_category_metrics(overall),
         metrics_by_category={cat: _dict_to_category_metrics(m) for cat, m in by_category.items()},
@@ -701,12 +738,18 @@ def main():
 
     judge_cfg = config.get("judge", {})
     answer_cfg = config.get("answer", {})
+    # Answer-prompt A/B: frozen judge, selectable answer prompt. Default baseline.
+    answer_prompt_variant = os.environ.get("ANSWER_PROMPT_VARIANT", "baseline")
     judge = LLMJudge(
         judge_model=judge_cfg.get("model", "gpt-4o"),
         answer_model=answer_cfg.get("model", "gpt-4o-mini"),
         api_key=judge_cfg.get("api_key", ""),
         api_base=judge_cfg.get("api_base", "https://api.openai.com/v1"),
+        answer_prompt_variant=answer_prompt_variant,
     )
+    print(f"  answer-prompt variant: {judge.answer_prompt_variant}")
+    # Stash for the artifact config (distinguishes the A/B arms).
+    config["_answer_prompt_variant"] = judge.answer_prompt_variant
 
     run_id = getattr(args, "run_id", None) or generate_run_id()
     print(f"Run ID: {run_id}")

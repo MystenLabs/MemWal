@@ -25,6 +25,7 @@
 
 pub mod embedder;
 pub mod extractor;
+pub mod hyde;
 pub mod llm_chat;
 pub mod ranker;
 
@@ -35,4 +36,5 @@ pub mod consolidator;
 
 pub use embedder::{Embedder, OpenAiEmbedder};
 pub use extractor::{Extractor, LlmExtractor};
+pub use hyde::{HydeConfig, HydeGenerator, OpenRouterHyde};
 pub use ranker::{CompositeRanker, Ranker};
