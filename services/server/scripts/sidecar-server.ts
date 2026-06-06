@@ -11,7 +11,7 @@
  *   GET  /health         → { status: "ok" }
  */
 
-import express, { Request, Response, NextFunction } from "express";
+import express, { Request, Response as ExpressResponse, NextFunction } from "express";
 import { timingSafeEqual, randomUUID } from "crypto";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
@@ -23,6 +23,8 @@ import { mountMcpRoutes, shutdownMcpSessions } from "./mcp/index.js";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "./seal-config.js";
 import { getEnokiRetryDelayMs } from "./enoki-retry.js";
 import {
+    classifyEnokiSponsoredTransactionInvalidation,
+    isEnokiSponsoredTransactionExpired,
     isWalrusBlobObjectMissingFromEffects,
     isWalrusObjectLockEquivocation,
     isWalrusPackageVersionMismatch,
@@ -194,6 +196,24 @@ const ENOKI_TRANSIENT_MAX_DELAY_MS = parsePositiveIntEnv(
     "ENOKI_TRANSIENT_MAX_DELAY_MS",
     30_000,
     1_000,
+    120_000,
+);
+const ENOKI_INVALIDATED_MAX_ATTEMPTS = parsePositiveIntEnv(
+    "ENOKI_INVALIDATED_MAX_ATTEMPTS",
+    4,
+    1,
+    10,
+);
+const ENOKI_INVALIDATED_BASE_DELAY_MS = parsePositiveIntEnv(
+    "ENOKI_INVALIDATED_BASE_DELAY_MS",
+    1_000,
+    100,
+    60_000,
+);
+const ENOKI_INVALIDATED_MAX_DELAY_MS = parsePositiveIntEnv(
+    "ENOKI_INVALIDATED_MAX_DELAY_MS",
+    8_000,
+    100,
     120_000,
 );
 const WALRUS_CLIENT_MAX_AGE_MS = (() => {
@@ -448,7 +468,7 @@ function formattedError(err: unknown): string {
 }
 
 function sendSealFailure(
-    res: Response,
+    res: ExpressResponse,
     operation: string,
     phase: string,
     err: unknown,
@@ -581,6 +601,7 @@ function sidecarStateSnapshot(): Record<string, unknown> {
         enokiEnabled: !!enokiApiKey,
         fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
         enokiTransientMaxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
+        enokiInvalidatedMaxAttempts: ENOKI_INVALIDATED_MAX_ATTEMPTS,
     };
 }
 
@@ -690,9 +711,7 @@ async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
 }
 
 function isSponsoredTransactionExpired(err: unknown): boolean {
-    const msg = errorMessage(err);
-    return /sponsored transaction has expired/i.test(msg)
-        || /"code"\s*:\s*"expired"/i.test(msg);
+    return isEnokiSponsoredTransactionExpired(errorMessage(err));
 }
 
 async function executeSponsoredTransactionOnce(
@@ -773,6 +792,48 @@ async function executeWithEnokiSponsor(tx: Transaction, signer: Ed25519Keypair, 
             transaction: tx,
         });
         return direct.digest;
+    }
+}
+
+function getEnokiInvalidatedRetryDelayMs(attempt: number): number | null {
+    if (attempt >= ENOKI_INVALIDATED_MAX_ATTEMPTS) {
+        return null;
+    }
+
+    const delay = ENOKI_INVALIDATED_BASE_DELAY_MS * 2 ** (attempt - 1);
+    return Math.min(delay, ENOKI_INVALIDATED_MAX_DELAY_MS);
+}
+
+async function submitRebuildableWalletTransaction(
+    phaseName: string,
+    buildTransaction: () => Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+    logContext: Record<string, unknown> = {},
+): Promise<string> {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            return await submitWalletTransaction(buildTransaction(), signer, allowedAddresses);
+        } catch (err: unknown) {
+            const message = errorMessage(err);
+            const reason = classifyEnokiSponsoredTransactionInvalidation(message);
+            const retryDelayMs = getEnokiInvalidatedRetryDelayMs(attempt);
+            if (!reason || retryDelayMs === null) {
+                throw err;
+            }
+
+            console.warn(`[enoki-sponsor] rebuildable_retry ${JSON.stringify({
+                phase: phaseName,
+                ...logContext,
+                attempt,
+                nextAttempt: attempt + 1,
+                maxAttempts: ENOKI_INVALIDATED_MAX_ATTEMPTS,
+                retryDelayMs,
+                reason,
+                message: truncateForLog(message),
+            })}`);
+            await sleep(retryDelayMs);
+        }
     }
 }
 
@@ -871,7 +932,7 @@ function sidecarLog(
     }
 }
 
-app.use((req: RequestWithId, res: Response, next: NextFunction) => {
+app.use((req: RequestWithId, res: ExpressResponse, next: NextFunction) => {
     const requestId = sanitizeRequestId(req.headers["x-request-id"])
         ?? sanitizeRequestId(req.headers["x-correlation-id"])
         ?? randomUUID();
@@ -882,7 +943,7 @@ app.use((req: RequestWithId, res: Response, next: NextFunction) => {
 
 // CORS — sidecar is called only by the co-located Rust server, never by browsers.
 // Remove all CORS headers so no cross-origin access is granted.
-app.use((_req: Request, res: Response, next: NextFunction) => {
+app.use((_req: Request, res: ExpressResponse, next: NextFunction) => {
     res.removeHeader("Access-Control-Allow-Origin");
     res.removeHeader("Access-Control-Allow-Methods");
     res.removeHeader("Access-Control-Allow-Headers");
@@ -893,7 +954,7 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 });
 
 // Health check — placed before auth middleware so it is always reachable.
-app.get("/health", (_req: Request, res: Response) => {
+app.get("/health", (_req: Request, res: ExpressResponse) => {
     res.json({
         status: "ok",
         uptimeMs: Date.now() - sidecarStartedAtMs,
@@ -927,7 +988,7 @@ mountMcpRoutes(app, {
 //
 // Values are integer counters that monotonically increase; clients compute
 // deltas.
-app.get("/metrics/wallet", (_req: Request, res: Response) => {
+app.get("/metrics/wallet", (_req: Request, res: ExpressResponse) => {
     res.json({
         ...sidecarMetrics,
         enokiEnabled: !!enokiApiKey,
@@ -944,7 +1005,7 @@ if (!SIDECAR_AUTH_TOKEN) {
     process.exit(1);
 }
 
-app.use((req: Request, res: Response, next: NextFunction) => {
+app.use((req: Request, res: ExpressResponse, next: NextFunction) => {
     const token = req.headers.authorization?.replace("Bearer ", "");
     const secretBuf = Buffer.from(SIDECAR_AUTH_TOKEN!);
     const providedBuf = Buffer.from(typeof token === "string" ? token : "");
@@ -1293,69 +1354,80 @@ async function setMetadataAndTransferBlobs(
     owner: string,
     packageId?: string,
     agentId?: string,
+    retryLogContext: Record<string, unknown> = {},
 ): Promise<string> {
     if (blobs.length === 0) {
         throw new Error("No blobs to transfer");
     }
 
     const signerAddress = signer.toSuiAddress();
-    const metaTx = new Transaction();
-    const blobArgs = [];
+    const buildMetadataTransferTx = () => {
+        const metaTx = new Transaction();
+        const blobArgs = [];
 
-    for (const blob of blobs) {
-        const blobArg = metaTx.object(blob.blobObjectId);
-        blobArgs.push(blobArg);
+        for (const blob of blobs) {
+            const blobArg = metaTx.object(blob.blobObjectId);
+            blobArgs.push(blobArg);
 
-        metaTx.moveCall({
-            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-            arguments: [
-                blobArg,
-                metaTx.pure.string("memwal_namespace"),
-                metaTx.pure.string(blob.namespace || "default"),
-            ],
-            typeArguments: [],
-        });
-
-        metaTx.moveCall({
-            target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
-            arguments: [
-                blobArg,
-                metaTx.pure.string("memwal_owner"),
-                metaTx.pure.string(owner),
-            ],
-            typeArguments: [],
-        });
-
-        if (packageId) {
             metaTx.moveCall({
                 target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
                 arguments: [
                     blobArg,
-                    metaTx.pure.string("memwal_package_id"),
-                    metaTx.pure.string(packageId),
+                    metaTx.pure.string("memwal_namespace"),
+                    metaTx.pure.string(blob.namespace || "default"),
                 ],
                 typeArguments: [],
             });
-        }
 
-        if (agentId) {
             metaTx.moveCall({
                 target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
                 arguments: [
                     blobArg,
-                    metaTx.pure.string("memwal_agent_id"),
-                    metaTx.pure.string(agentId),
+                    metaTx.pure.string("memwal_owner"),
+                    metaTx.pure.string(owner),
                 ],
                 typeArguments: [],
             });
-        }
-    }
 
-    metaTx.transferObjects(blobArgs, owner);
-    const digest = await submitWalletTransaction(
-        metaTx,
+            if (packageId) {
+                metaTx.moveCall({
+                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_package_id"),
+                        metaTx.pure.string(packageId),
+                    ],
+                    typeArguments: [],
+                });
+            }
+
+            if (agentId) {
+                metaTx.moveCall({
+                    target: `${WALRUS_PACKAGE_ID}::blob::insert_or_update_metadata_pair`,
+                    arguments: [
+                        blobArg,
+                        metaTx.pure.string("memwal_agent_id"),
+                        metaTx.pure.string(agentId),
+                    ],
+                    typeArguments: [],
+                });
+            }
+        }
+
+        metaTx.transferObjects(blobArgs, owner);
+        return metaTx;
+    };
+
+    const digest = await submitRebuildableWalletTransaction(
+        "metadata_transfer",
+        buildMetadataTransferTx,
         signer,
         dedupeAddresses([signerAddress, owner]),
+        {
+            ...retryLogContext,
+            blobCount: blobs.length,
+            owner: shortAddress(owner),
+        },
     );
     await suiClient.waitForTransaction({ digest });
     return digest;
@@ -1540,10 +1612,15 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
         );
 
         phase = "certify_build";
-        const certifyTx = flow.certify();
         const certifyDigest = await timedPhase(
             "certify_sponsor",
-            () => submitWalletTransaction(certifyTx, signer),
+            () => submitRebuildableWalletTransaction(
+                "certify_sponsor",
+                () => flow.certify(),
+                signer,
+                undefined,
+                { traceId, jobId: jobIdForLog, keyIndex: keySlot },
+            ),
             (digest) => ({ digest }),
         );
         await timedPhase(
@@ -1567,6 +1644,7 @@ app.post("/walrus/upload", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), as
                         owner,
                         packageId,
                         agentId,
+                        { traceId, jobId: jobIdForLog, keyIndex: keySlot },
                     ),
                     (digest) => ({ digest, blobObjectId }),
                 );
