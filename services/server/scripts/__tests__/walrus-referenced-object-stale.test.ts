@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isWalrusReferencedObjectStale } from "../walrus-error-detection.js";
+import {
+    classifyEnokiSponsoredTransactionInvalidation,
+    isEnokiSponsoredTransactionExpired,
+    isWalrusReferencedObjectStale,
+} from "../walrus-error-detection.js";
 
 test("detects Enoki dry-run referenced object stale at explicit version", () => {
     const message =
@@ -28,4 +32,32 @@ test("does not match unrelated dry-run or object errors", () => {
     assert.equal(isWalrusReferencedObjectStale("Could not find the referenced object 0xabc"), false);
     assert.equal(isWalrusReferencedObjectStale("connection refused"), false);
     assert.equal(isWalrusReferencedObjectStale(""), false);
+});
+
+test("detects Enoki sponsored transaction expiration", () => {
+    const message =
+        "Enoki API error (400): {\"errors\":[{\"code\":\"expired\"," +
+        "\"message\":\"Sponsored transaction has expired\"}]}";
+
+    assert.equal(isEnokiSponsoredTransactionExpired(message), true);
+    assert.equal(classifyEnokiSponsoredTransactionInvalidation(message), "expired");
+});
+
+test("classifies Enoki object visibility lag as rebuildable invalidation", () => {
+    const message =
+        "Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\"," +
+        "\"message\":\"Error checking transaction input objects: Could not find the " +
+        "referenced object 0x78043f83bf219f750d65e454d6b72a4142e6abf2b7e88a641175fb523bc5c1ca " +
+        "at version None\"}]}";
+
+    assert.equal(classifyEnokiSponsoredTransactionInvalidation(message), "referenced_object_stale");
+});
+
+test("does not classify unrelated Enoki 400 errors as rebuildable", () => {
+    const message =
+        "Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\"," +
+        "\"message\":\"MoveAbort in balance::split\"}]}";
+
+    assert.equal(isEnokiSponsoredTransactionExpired(message), false);
+    assert.equal(classifyEnokiSponsoredTransactionInvalidation(message), null);
 });
