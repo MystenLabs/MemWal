@@ -1,22 +1,40 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderName, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
+use opentelemetry::{
+    global,
+    propagation::{Extractor, Injector},
+    trace::TracerProvider as _,
+    KeyValue,
+};
+use opentelemetry_sdk::{
+    logs::SdkLoggerProvider, propagation::TraceContextPropagator, trace::SdkTracerProvider,
+    Resource,
+};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::Instrument;
-use tracing_subscriber::EnvFilter;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::types::AppState;
 
 const X_REQUEST_ID: &str = "x-request-id";
 const X_CORRELATION_ID: &str = "x-correlation-id";
+const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+const OTLP_HEADERS_ENV: &str = "OTEL_EXPORTER_OTLP_HEADERS";
+const OTLP_TRACES_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
+const OTLP_LOGS_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+const OTEL_SERVICE_NAME_ENV: &str = "OTEL_SERVICE_NAME";
+const DEFAULT_OTEL_SERVICE_NAME: &str = "memwal-relayer";
 
 #[derive(Clone, Debug)]
 pub struct RequestContext {
@@ -26,6 +44,32 @@ pub struct RequestContext {
 
 tokio::task_local! {
     static REQUEST_CONTEXT: RequestContext;
+}
+
+pub struct TelemetryGuard {
+    tracer_provider: Option<SdkTracerProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
+}
+
+impl TelemetryGuard {
+    pub fn shutdown(self) {
+        if let Some(tracer_provider) = self.tracer_provider {
+            if let Err(err) = tracer_provider.shutdown() {
+                eprintln!("failed to shut down OpenTelemetry tracer provider: {err:?}");
+            }
+        }
+        if let Some(logger_provider) = self.logger_provider {
+            if let Err(err) = logger_provider.shutdown() {
+                eprintln!("failed to shut down OpenTelemetry logger provider: {err:?}");
+            }
+        }
+    }
+}
+
+struct OtlpTelemetry {
+    tracer_provider: SdkTracerProvider,
+    logger_provider: SdkLoggerProvider,
+    endpoint: String,
 }
 
 static HTTP_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
@@ -132,26 +176,186 @@ static DB_POOL: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .expect("register memwal_db_pool_connections")
 });
 
-pub fn init_tracing() {
+pub fn init_tracing() -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "memwal_server=info,tower_http=info".into());
     let json_logs = std::env::var("LOG_FORMAT")
         .map(|value| value.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
 
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    let otlp = match build_otlp_telemetry() {
+        Ok(otlp) => otlp,
+        Err(err) => {
+            eprintln!("OpenTelemetry disabled: {err}");
+            None
+        }
+    };
+
     if json_logs {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .init();
+        match otlp {
+            Some(otlp) => {
+                let tracer = otlp.tracer_provider.tracer(otel_service_name());
+                let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                let log_layer =
+                    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                        &otlp.logger_provider,
+                    );
+
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .flatten_event(true)
+                            .with_current_span(true),
+                    )
+                    .with(trace_layer)
+                    .with(log_layer)
+                    .init();
+
+                tracing::info!(endpoint = %otlp.endpoint, "OpenTelemetry OTLP export enabled");
+                TelemetryGuard {
+                    tracer_provider: Some(otlp.tracer_provider),
+                    logger_provider: Some(otlp.logger_provider),
+                }
+            }
+            None => {
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .flatten_event(true)
+                            .with_current_span(true),
+                    )
+                    .init();
+                TelemetryGuard {
+                    tracer_provider: None,
+                    logger_provider: None,
+                }
+            }
+        }
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_target(true)
-            .init();
+        match otlp {
+            Some(otlp) => {
+                let tracer = otlp.tracer_provider.tracer(otel_service_name());
+                let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                let log_layer =
+                    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                        &otlp.logger_provider,
+                    );
+
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer().with_target(true))
+                    .with(trace_layer)
+                    .with(log_layer)
+                    .init();
+
+                tracing::info!(endpoint = %otlp.endpoint, "OpenTelemetry OTLP export enabled");
+                TelemetryGuard {
+                    tracer_provider: Some(otlp.tracer_provider),
+                    logger_provider: Some(otlp.logger_provider),
+                }
+            }
+            None => {
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer().with_target(true))
+                    .init();
+                TelemetryGuard {
+                    tracer_provider: None,
+                    logger_provider: None,
+                }
+            }
+        }
     }
+}
+
+fn build_otlp_telemetry() -> Result<Option<OtlpTelemetry>, String> {
+    use opentelemetry_otlp::{WithExportConfig as _, WithHttpConfig as _};
+
+    let Some(base_endpoint) = env_non_empty(OTLP_ENDPOINT_ENV) else {
+        return Ok(None);
+    };
+    let headers = parse_otlp_headers(env_non_empty(OTLP_HEADERS_ENV).as_deref());
+    let traces_endpoint = signal_endpoint(&base_endpoint, OTLP_TRACES_ENDPOINT_ENV, "/v1/traces");
+    let logs_endpoint = signal_endpoint(&base_endpoint, OTLP_LOGS_ENDPOINT_ENV, "/v1/logs");
+
+    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(traces_endpoint)
+        .with_headers(headers.clone())
+        .build()
+        .map_err(|err| format!("build OTLP trace exporter: {err}"))?;
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_resource(otel_resource())
+        .with_batch_exporter(span_exporter)
+        .build();
+    global::set_tracer_provider(tracer_provider.clone());
+
+    let log_exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_endpoint(logs_endpoint)
+        .with_headers(headers)
+        .build()
+        .map_err(|err| format!("build OTLP log exporter: {err}"))?;
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_resource(otel_resource())
+        .with_batch_exporter(log_exporter)
+        .build();
+
+    Ok(Some(OtlpTelemetry {
+        tracer_provider,
+        logger_provider,
+        endpoint: base_endpoint,
+    }))
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn otel_service_name() -> String {
+    std::env::var(OTEL_SERVICE_NAME_ENV).unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
+}
+
+fn parse_otlp_headers(raw: Option<&str>) -> HashMap<String, String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn signal_endpoint(base: &str, signal_env: &str, suffix: &str) -> String {
+    env_non_empty(signal_env).unwrap_or_else(|| format!("{}{}", base.trim_end_matches('/'), suffix))
+}
+
+fn otel_resource() -> Resource {
+    let mut attributes = vec![
+        KeyValue::new("service.name", otel_service_name()),
+        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+    ];
+    if let Some(environment) = env_non_empty("RAILWAY_ENVIRONMENT_NAME")
+        .or_else(|| env_non_empty("DEPLOYMENT_ENVIRONMENT"))
+        .or_else(|| env_non_empty("NODE_ENV"))
+    {
+        attributes.push(KeyValue::new("deployment.environment.name", environment));
+    }
+    Resource::builder_empty()
+        .with_attributes(attributes)
+        .build()
 }
 
 pub async fn request_context_middleware(mut request: Request, next: Next) -> Response {
@@ -159,7 +363,11 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
     let route = route_label(request.uri().path());
     let method = request.method().as_str().to_string();
     let path = request.uri().path().to_string();
+    let span_name = format!("{method} {route}");
     let started = Instant::now();
+    let parent_context = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
 
     request.extensions_mut().insert(RequestContext {
         request_id: request_id.clone(),
@@ -173,11 +381,18 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
 
     let span = tracing::info_span!(
         "http.request",
+        "otel.name" = %span_name,
+        "otel.kind" = "server",
         request_id = %request_id,
-        method = %method,
-        route = %route,
-        path = %path,
+        "http.request.method" = %method,
+        "http.route" = %route,
+        "url.path" = %path,
+        "http.response.status_code" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
+        status = tracing::field::Empty,
+        latency_ms = tracing::field::Empty,
     );
+    let _ = span.set_parent(parent_context);
     HTTP_REQUESTS_IN_FLIGHT.inc();
 
     let context = RequestContext {
@@ -187,9 +402,16 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
 
     REQUEST_CONTEXT
         .scope(context, async move {
-            let mut response = next.run(request).instrument(span).await;
+            let request_span = span.clone();
+            let mut response = next.run(request).instrument(request_span).await;
             let status = response.status();
             let elapsed = started.elapsed();
+            span.record("status", status.as_u16());
+            span.record("http.response.status_code", status.as_u16());
+            if status.is_server_error() {
+                span.record("otel.status_code", "error");
+            }
+            span.record("latency_ms", elapsed.as_millis() as u64);
 
             if let Ok(value) = HeaderValue::from_str(&request_id) {
                 response
@@ -257,9 +479,42 @@ pub fn request_id_header_name() -> HeaderName {
 }
 
 pub fn apply_request_id_header(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    match current_request_id() {
+    let req = match current_request_id() {
         Some(request_id) => req.header(X_REQUEST_ID, request_id),
         None => req,
+    };
+    apply_trace_context(req)
+}
+
+fn apply_trace_context(mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let mut headers = Vec::new();
+    let context = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut HeaderInjector(&mut headers));
+    });
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    req
+}
+
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(HeaderName::as_str).collect()
+    }
+}
+
+struct HeaderInjector<'a>(&'a mut Vec<(String, String)>);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.push((key.to_string(), value));
     }
 }
 
@@ -371,7 +626,7 @@ fn route_label(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_request_id, route_label};
+    use super::{is_safe_request_id, parse_otlp_headers, route_label, signal_endpoint};
 
     #[test]
     fn request_id_validation_rejects_header_injection() {
@@ -386,5 +641,33 @@ mod tests {
         assert_eq!(route_label("/api/remember/abc"), "/api/remember/{job_id}");
         assert_eq!(route_label("/api/recall"), "/api/recall");
         assert_eq!(route_label("/unexpected"), "unknown");
+    }
+
+    #[test]
+    fn otlp_headers_follow_key_value_comma_format() {
+        let headers = parse_otlp_headers(Some("Authorization=Basic abc, x-scope-orgid = memwal"));
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Basic abc")
+        );
+        assert_eq!(
+            headers.get("x-scope-orgid").map(String::as_str),
+            Some("memwal")
+        );
+    }
+
+    #[test]
+    fn otlp_signal_endpoint_appends_suffix_to_base_endpoint() {
+        std::env::remove_var("MEMWAL_TEST_OTLP_ENDPOINT");
+
+        assert_eq!(
+            signal_endpoint(
+                "http://openobserve:5080/api/default/",
+                "MEMWAL_TEST_OTLP_ENDPOINT",
+                "/v1/logs",
+            ),
+            "http://openobserve:5080/api/default/v1/logs"
+        );
     }
 }

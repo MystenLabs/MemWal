@@ -5,9 +5,9 @@
 
 # ── Stage 1: Build Rust binary ──────────────────────────────
 # pinned by digest for reproducible, supply-chain-safe builds.
-# Tag: rust:1.85-bookworm  |  arch: linux/amd64  |  pinned: 2026-04-16
-# To refresh: docker inspect --format='{{index .RepoDigests 0}}' rust:1.85-bookworm
-FROM rust:1.85-bookworm@sha256:bf7d87666c4da6eace19e06d21bc4859c6e2a5c97a21ac273b0e082112753cf0 AS builder
+# Tag: rust:1.88-bookworm  |  arch: linux/amd64  |  pinned: 2026-06-08
+# To refresh: docker inspect --format='{{index .RepoDigests 0}}' rust:1.88-bookworm
+FROM rust:1.88-bookworm@sha256:4727898c104ecd2e22d780925832502faee9fe4e70581b8572af081370b315a0 AS builder
 
 WORKDIR /app
 
