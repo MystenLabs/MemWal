@@ -293,6 +293,7 @@ fn build_otlp_telemetry() -> Result<Option<OtlpTelemetry>, String> {
         .with_resource(otel_resource())
         .with_batch_exporter(span_exporter)
         .build();
+    global::set_tracer_provider(tracer_provider.clone());
 
     let log_exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()
@@ -362,6 +363,7 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
     let route = route_label(request.uri().path());
     let method = request.method().as_str().to_string();
     let path = request.uri().path().to_string();
+    let span_name = format!("{method} {route}");
     let started = Instant::now();
     let parent_context = global::get_text_map_propagator(|propagator| {
         propagator.extract(&HeaderExtractor(request.headers()))
@@ -379,10 +381,14 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
 
     let span = tracing::info_span!(
         "http.request",
+        "otel.name" = %span_name,
+        "otel.kind" = "server",
         request_id = %request_id,
-        method = %method,
-        route = %route,
-        path = %path,
+        "http.request.method" = %method,
+        "http.route" = %route,
+        "url.path" = %path,
+        "http.response.status_code" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
         status = tracing::field::Empty,
         latency_ms = tracing::field::Empty,
     );
@@ -401,6 +407,10 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
             let status = response.status();
             let elapsed = started.elapsed();
             span.record("status", status.as_u16());
+            span.record("http.response.status_code", status.as_u16());
+            if status.is_server_error() {
+                span.record("otel.status_code", "error");
+            }
             span.record("latency_ms", elapsed.as_millis() as u64);
 
             if let Ok(value) = HeaderValue::from_str(&request_id) {
