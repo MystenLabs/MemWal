@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, ChevronRight, Rss, X } from 'lucide-react'
 
 type StatusKind = 'operational' | 'degraded' | 'outage' | 'monitoring' | 'unknown'
 type LoadState = 'loading' | 'ready' | 'error'
-type HistoryTab = 'incidents' | 'uptime'
+type PageRoute = 'current' | 'history' | 'uptime'
 
 interface HealthPayload {
   status?: string
@@ -16,17 +16,6 @@ interface HealthPayload {
     python?: string
     mcp?: string
   }
-  featureFlags?: Record<string, boolean>
-  build?: {
-    commit?: string
-    buildTimestamp?: string
-  }
-}
-
-interface DependencyStatus {
-  name: string
-  status: StatusKind
-  url: string
 }
 
 interface HistoryBucket {
@@ -73,15 +62,12 @@ interface StatusSnapshot {
     ready: boolean
     error: string | null
   }
-  dependencies: DependencyStatus[]
 }
 
 interface ComponentRow {
   name: string
-  description: string
   status: StatusKind
   uptimeLabel: string
-  meta: string
   history: HistoryBucket[]
 }
 
@@ -109,22 +95,16 @@ const BAR_COUNT = 90
 
 const statusLabel: Record<StatusKind, string> = {
   operational: 'Operational',
-  degraded: 'Degraded',
-  outage: 'Unavailable',
+  degraded: 'Degraded Performance',
+  outage: 'Major Outage',
   monitoring: 'Monitoring',
   unknown: 'No Data',
 }
 
-function formatDateTime(value: string | null) {
-  if (!value) return 'Not checked yet'
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  }).format(new Date(value))
+function pathToRoute(pathname: string): PageRoute {
+  if (pathname.startsWith('/uptime')) return 'uptime'
+  if (pathname.startsWith('/history')) return 'history'
+  return 'current'
 }
 
 function formatIncidentDate(value: Date) {
@@ -199,15 +179,92 @@ function emptyHistoryBuckets(status: StatusKind = 'unknown') {
   }))
 }
 
-function buildIncidentDays(history: StatusHistory | null | undefined): IncidentDay[] {
+function normalizeBuckets(history: StatusHistory | null | undefined, latestStatus: StatusKind) {
+  if (!history?.buckets?.length) return emptyHistoryBuckets(latestStatus)
+
+  const buckets = history.buckets.slice(-BAR_COUNT)
+  if (buckets.length < BAR_COUNT) {
+    return [
+      ...emptyHistoryBuckets().slice(0, BAR_COUNT - buckets.length),
+      ...buckets,
+    ]
+  }
+
+  return buckets
+}
+
+function formatUptime(history: StatusHistory | null | undefined) {
+  if (!history?.enabled || !history.totalChecks || history.uptimePct === null) return 'history unavailable'
+  const decimals = history.uptimePct === 100 ? 1 : 2
+  return `${history.uptimePct.toFixed(decimals)} % uptime`
+}
+
+function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): ComponentRow[] {
+  const relayerStatus = getOverallStatus(snapshot, loadState)
+  const health = snapshot?.relayer.health
+  const history = snapshot?.history
+  const relayerHistory = normalizeBuckets(history, relayerStatus)
+  const serviceHistory = normalizeBuckets(history, loadState === 'error' ? 'degraded' : 'operational')
+  const externalHistory = emptyHistoryBuckets('monitoring')
+  const hasCompatibility = Boolean(
+    health?.relayerVersion &&
+    health?.apiVersion &&
+    health?.minSupportedSdk,
+  )
+  const compatibilityStatus: StatusKind = relayerStatus === 'operational'
+    ? hasCompatibility ? 'operational' : 'degraded'
+    : relayerStatus
+  const uptimeLabel = formatUptime(history)
+
+  return [
+    {
+      name: 'Walrus Memory Status Service',
+      status: loadState === 'error' ? 'degraded' : 'operational',
+      uptimeLabel,
+      history: serviceHistory,
+    },
+    {
+      name: 'Walrus Memory Relayer',
+      status: relayerStatus,
+      uptimeLabel,
+      history: relayerHistory,
+    },
+    {
+      name: 'SDK Compatibility Metadata',
+      status: compatibilityStatus,
+      uptimeLabel,
+      history: relayerHistory,
+    },
+    {
+      name: 'Memory API Pipeline',
+      status: relayerStatus === 'operational' ? 'operational' : relayerStatus,
+      uptimeLabel,
+      history: relayerHistory,
+    },
+    {
+      name: 'Sui Network',
+      status: 'monitoring',
+      uptimeLabel: 'external',
+      history: externalHistory,
+    },
+    {
+      name: 'Walrus Storage',
+      status: 'monitoring',
+      uptimeLabel: 'external',
+      history: externalHistory,
+    },
+  ]
+}
+
+function buildIncidentDays(history: StatusHistory | null | undefined, count = 10): IncidentDay[] {
   const buckets = history?.buckets?.length ? history.buckets : emptyHistoryBuckets()
 
-  return buckets.slice(-7).reverse().map((bucket, index) => {
+  return buckets.slice(-count).reverse().map((bucket, index) => {
     const date = bucket.date ? parseDateKey(bucket.date) : addUtcDays(startOfUtcDay(new Date()), -index)
     const isToday = index === 0
     const status = bucket.outage > 0 ? 'outage' : bucket.degraded > 0 ? 'degraded' : 'none'
     const message = status === 'outage'
-      ? 'Relayer health checks reported an outage.'
+      ? 'Relayer health checks reported a major outage.'
       : status === 'degraded'
         ? 'Relayer health checks reported degraded performance.'
         : isToday
@@ -266,108 +323,73 @@ function calendarRangeLabel(months: CalendarMonth[]) {
   return `${months[0].label} to ${months[months.length - 1].label}`
 }
 
-function normalizeBuckets(history: StatusHistory | null | undefined, latestStatus: StatusKind) {
-  if (!history?.buckets?.length) return emptyHistoryBuckets(latestStatus)
-
-  const buckets = history.buckets.slice(-BAR_COUNT)
-  if (buckets.length < BAR_COUNT) {
-    return [
-      ...emptyHistoryBuckets().slice(0, BAR_COUNT - buckets.length),
-      ...buckets,
-    ]
-  }
-
-  return buckets
-}
-
-function formatUptime(history: StatusHistory | null | undefined, fallback = 'collecting data') {
-  if (!history?.enabled) return 'history unavailable'
-  if (!history.totalChecks || history.uptimePct === null) return fallback
-  const decimals = history.uptimePct === 100 ? 1 : 2
-  return `${history.uptimePct.toFixed(decimals)}% uptime`
-}
-
-function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): ComponentRow[] {
-  const relayerStatus = getOverallStatus(snapshot, loadState)
-  const health = snapshot?.relayer.health
-  const history = snapshot?.history
-  const relayerHistory = normalizeBuckets(history, relayerStatus)
-  const serviceHistory = normalizeBuckets(history, loadState === 'error' ? 'degraded' : 'operational')
-  const externalHistory = emptyHistoryBuckets('monitoring')
-  const hasCompatibility = Boolean(
-    health?.relayerVersion &&
-    health?.apiVersion &&
-    health?.minSupportedSdk,
-  )
-  const compatibilityStatus: StatusKind = relayerStatus === 'operational'
-    ? hasCompatibility ? 'operational' : 'degraded'
-    : relayerStatus
-  const uptimeLabel = formatUptime(history)
-
-  return [
-    {
-      name: 'Walrus Memory Status Service',
-      description: 'Public status frontend and same-origin probe API',
-      status: loadState === 'error' ? 'degraded' : 'operational',
-      uptimeLabel,
-      meta: snapshot?.service.runtime ? `${snapshot.service.runtime} runtime` : 'browser loaded',
-      history: serviceHistory,
-    },
-    {
-      name: 'Walrus Memory Relayer',
-      description: 'Server-side health probe against the public relayer',
-      status: relayerStatus,
-      uptimeLabel,
-      meta: snapshot?.relayer.latencyMs ? `${snapshot.relayer.latencyMs} ms latency` : 'awaiting check',
-      history: relayerHistory,
-    },
-    {
-      name: 'SDK Compatibility Metadata',
-      description: 'Relayer version, API version, feature flags, and supported clients',
-      status: compatibilityStatus,
-      uptimeLabel,
-      meta: health?.relayerVersion ? `relayer ${health.relayerVersion}` : 'from /health',
-      history: relayerHistory,
-    },
-    {
-      name: 'Memory API Pipeline',
-      description: 'Remember, recall, analyze, restore, and MCP routes',
-      status: relayerStatus === 'operational' ? 'operational' : relayerStatus,
-      uptimeLabel,
-      meta: health?.mode ? `${health.mode} mode` : 'relayer-backed',
-      history: relayerHistory,
-    },
-    {
-      name: 'Sui Network',
-      description: 'Validators and public RPC dependency',
-      status: 'monitoring',
-      uptimeLabel: 'external',
-      meta: 'tracked outside this service',
-      history: externalHistory,
-    },
-    {
-      name: 'Walrus Storage',
-      description: 'Blob publishing, aggregation, and retrieval dependency',
-      status: 'monitoring',
-      uptimeLabel: 'external',
-      meta: 'tracked outside this service',
-      history: externalHistory,
-    },
-  ]
-}
-
 function StatusPill({ status }: { status: StatusKind }) {
   return <span className={`status-pill status-pill--${status}`}>{statusLabel[status]}</span>
+}
+
+function Header({
+  subscribeOpen,
+  onSubscribeToggle,
+  onSubscribeClose,
+  onNavigate,
+}: {
+  subscribeOpen: boolean
+  onSubscribeToggle: () => void
+  onSubscribeClose: () => void
+  onNavigate: (href: string) => void
+}) {
+  return (
+    <header className="page-header">
+      <a
+        className="brand-mark"
+        href="/"
+        aria-label="Walrus Memory Status"
+        onClick={(event) => {
+          event.preventDefault()
+          onNavigate('/')
+        }}
+      >
+        <img src="/memwal-icon.svg" alt="" aria-hidden="true" />
+        <span>Walrus Memory</span>
+      </a>
+
+      <div className="updates-dropdown-container">
+        <button
+          type="button"
+          className="subscribe-cta"
+          aria-expanded={subscribeOpen}
+          aria-haspopup="dialog"
+          onClick={onSubscribeToggle}
+        >
+          Subscribe to Updates
+        </button>
+
+        {subscribeOpen && (
+          <div className="updates-dropdown" role="dialog" aria-label="Subscribe to updates">
+            <div className="updates-dropdown__nav" role="tablist" aria-label="Subscribe to updates">
+              <span className="updates-dropdown__tab" role="tab" aria-selected="true">
+                <Rss size={18} aria-hidden="true" />
+              </span>
+              <button type="button" className="updates-dropdown__close" onClick={onSubscribeClose} aria-label="Close subscribe form">
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="updates-dropdown__body">
+              Get the <a href="/history.atom" target="_blank" rel="noreferrer">Atom Feed</a> or{' '}
+              <a href="/history.rss" target="_blank" rel="noreferrer">RSS Feed</a>.
+            </div>
+          </div>
+        )}
+      </div>
+    </header>
+  )
 }
 
 function ComponentStatusRow({ row }: { row: ComponentRow }) {
   return (
     <article className="component-row">
       <div className="component-row__header">
-        <div className="component-row__copy">
-          <h2>{row.name}</h2>
-          <p>{row.description}</p>
-        </div>
+        <h2>{row.name}</h2>
         <StatusPill status={row.status} />
       </div>
 
@@ -387,26 +409,66 @@ function ComponentStatusRow({ row }: { row: ComponentRow }) {
         <span>{row.uptimeLabel}</span>
         <span>Today</span>
       </div>
-      <p className="component-row__meta">{row.meta}</p>
     </article>
   )
 }
 
-function IncidentHistory({ history }: { history: StatusHistory | null | undefined }) {
-  const incidentDays = buildIncidentDays(history)
+function IncidentHistory({
+  history,
+  count,
+}: {
+  history: StatusHistory | null | undefined
+  count: number
+}) {
+  const incidentDays = buildIncidentDays(history, count)
 
   return (
     <section className="incident-history" aria-label="Past incidents">
-      <h2>Past Incidents</h2>
+      <h1>Past Incidents</h1>
       <div className="incident-history__list">
         {incidentDays.map((day) => (
           <article key={day.date} className={`incident-day incident-day--${day.status}`}>
-            <h3>{day.label}</h3>
+            <h2>{day.label}</h2>
             <p>{day.message}</p>
           </article>
         ))}
       </div>
     </section>
+  )
+}
+
+function HistoryTabs({
+  route,
+  onNavigate,
+}: {
+  route: PageRoute
+  onNavigate: (href: string) => void
+}) {
+  return (
+    <nav className="history-tabs" aria-label="Historical status tabs">
+      <a
+        className={route === 'history' ? 'history-tab history-tab--active' : 'history-tab'}
+        href="/history"
+        aria-current={route === 'history' ? 'page' : undefined}
+        onClick={(event) => {
+          event.preventDefault()
+          onNavigate('/history')
+        }}
+      >
+        Incidents
+      </a>
+      <a
+        className={route === 'uptime' ? 'history-tab history-tab--active' : 'history-tab'}
+        href="/uptime"
+        aria-current={route === 'uptime' ? 'page' : undefined}
+        onClick={(event) => {
+          event.preventDefault()
+          onNavigate('/uptime')
+        }}
+      >
+        Uptime
+      </a>
+    </nav>
   )
 }
 
@@ -449,7 +511,7 @@ function UptimeCalendar({
             onClick={() => onCalendarPageChange(calendarPage + 3)}
             aria-label="Previous uptime range"
           >
-            <ChevronLeft size={24} aria-hidden="true" />
+            <ChevronLeft size={26} aria-hidden="true" />
           </button>
           <strong>{calendarRangeLabel(months)}</strong>
           <button
@@ -458,7 +520,7 @@ function UptimeCalendar({
             disabled={calendarPage === 0}
             aria-label="Next uptime range"
           >
-            <ChevronRight size={24} aria-hidden="true" />
+            <ChevronRight size={26} aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -467,7 +529,7 @@ function UptimeCalendar({
         {months.map((month) => (
           <article key={month.key} className="month-panel">
             <div className="month-panel__header">
-              <h3>{month.label}</h3>
+              <h2>{month.label}</h2>
               <span>{month.uptimeLabel}</span>
             </div>
             <div className="calendar-grid" aria-label={`${month.label} uptime`}>
@@ -489,6 +551,32 @@ function UptimeCalendar({
   )
 }
 
+function StatusFooter({
+  route,
+  onNavigate,
+}: {
+  route: PageRoute
+  onNavigate: (href: string) => void
+}) {
+  const href = route === 'current' ? '/history' : '/'
+  const label = route === 'current' ? 'Incident History' : 'Current Status'
+
+  return (
+    <footer className="status-footer">
+      <a
+        href={href}
+        onClick={(event) => {
+          event.preventDefault()
+          onNavigate(href)
+        }}
+      >
+        <span aria-hidden="true">←</span> {label}
+      </a>
+      <span>Powered by Walrus Memory</span>
+    </footer>
+  )
+}
+
 async function loadSnapshot(signal: AbortSignal) {
   const response = await fetch('/api/status', {
     method: 'GET',
@@ -505,18 +593,25 @@ async function loadSnapshot(signal: AbortSignal) {
 }
 
 export default function App() {
+  const [route, setRoute] = useState<PageRoute>(() => pathToRoute(window.location.pathname))
   const [snapshot, setSnapshot] = useState<StatusSnapshot | null>(null)
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState<string | null>(null)
-  const [manualRefreshes, setManualRefreshes] = useState(0)
-  const [activeHistoryTab, setActiveHistoryTab] = useState<HistoryTab>('incidents')
   const [selectedComponentName, setSelectedComponentName] = useState('Walrus Memory Relayer')
   const [calendarPage, setCalendarPage] = useState(0)
+  const [subscribeOpen, setSubscribeOpen] = useState(false)
 
-  const refresh = useCallback(async (source: 'initial' | 'auto' | 'manual') => {
+  const navigate = useCallback((href: string) => {
+    window.history.pushState(null, '', href)
+    setRoute(pathToRoute(href))
+    setSubscribeOpen(false)
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [])
+
+  const refresh = useCallback(async () => {
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => controller.abort(), 10_000)
-    if (source !== 'auto') setLoadState((current) => (current === 'ready' ? current : 'loading'))
+    setLoadState((current) => (current === 'ready' ? current : 'loading'))
 
     try {
       const nextSnapshot = await loadSnapshot(controller.signal)
@@ -533,9 +628,15 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    void refresh('initial')
+    const onPopState = () => setRoute(pathToRoute(window.location.pathname))
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  useEffect(() => {
+    void refresh()
     const intervalId = window.setInterval(() => {
-      void refresh('auto')
+      void refresh()
     }, REFRESH_INTERVAL_MS)
 
     return () => window.clearInterval(intervalId)
@@ -544,127 +645,74 @@ export default function App() {
   const overallStatus = getOverallStatus(snapshot, loadState)
   const rows = useMemo(() => buildRows(snapshot, loadState), [snapshot, loadState])
   const uptimeRows = useMemo(() => rows.filter((row) => row.status !== 'monitoring'), [rows])
-  const dependencies = snapshot?.dependencies ?? []
-  const activeFeatureFlags = Object.entries(snapshot?.relayer.health?.featureFlags ?? {})
-    .filter(([, enabled]) => enabled)
-  const checkedAt = snapshot?.relayer.checkedAt ?? null
-  const endpoint = snapshot?.relayer.url ?? 'Loading'
-  const relayerVersion = snapshot?.relayer.health?.relayerVersion ??
-    snapshot?.relayer.health?.version ??
-    'Unknown'
-  const buildCommit = snapshot?.relayer.health?.build?.commit?.slice(0, 12) ?? 'Not reported'
   const historyDays = snapshot?.history.days ?? BAR_COUNT
-  const historyLabel = snapshot?.history.enabled
-    ? snapshot.history.totalChecks > 0
-      ? 'View historical uptime.'
-      : 'Collecting historical uptime.'
-    : 'History storage unavailable.'
 
   return (
-    <div className="status-page">
+    <div className={`status-page status-page--${route}`}>
       <main className="status-shell">
-        <header className="page-header">
-          <a className="brand-mark" href="/" aria-label="Walrus Memory Status">
-            <img src="/memwal-icon.svg" alt="" aria-hidden="true" />
-            <span>Walrus Memory</span>
-          </a>
+        <Header
+          subscribeOpen={subscribeOpen}
+          onSubscribeToggle={() => setSubscribeOpen((open) => !open)}
+          onSubscribeClose={() => setSubscribeOpen(false)}
+          onNavigate={navigate}
+        />
 
-          <button
-            type="button"
-            className="refresh-cta"
-            onClick={() => {
-              setManualRefreshes((count) => count + 1)
-              void refresh('manual')
-            }}
-            disabled={loadState === 'loading'}
-          >
-            <RefreshCw
-              size={18}
-              aria-hidden="true"
-              className={loadState === 'loading' ? 'status-spin' : undefined}
-            />
-            {loadState === 'loading' ? 'Checking' : 'Refresh Status'}
-          </button>
-        </header>
+        {route === 'current' && (
+          <>
+            <section className={`summary-banner summary-banner--${overallStatus}`} aria-live="polite">
+              <h1>{getStatusTitle(overallStatus)}</h1>
+            </section>
 
-        <section className={`summary-banner summary-banner--${overallStatus}`} aria-live="polite">
-          <h1>{getStatusTitle(overallStatus)}</h1>
-        </section>
+            {(error || snapshot?.relayer.error || snapshot?.database?.error) && (
+              <section className="status-alert" role="alert">
+                <AlertTriangle size={20} aria-hidden="true" />
+                <div>
+                  <strong>
+                    {error
+                      ? 'Status service error'
+                      : snapshot?.relayer.error
+                        ? 'Relayer health check error'
+                        : 'History storage error'}
+                  </strong>
+                  <span>{error ?? snapshot?.relayer.error ?? snapshot?.database?.error}</span>
+                </div>
+              </section>
+            )}
 
-        <section className="snapshot-note" aria-label="Current status snapshot">
-          <div>
-            <strong>Last checked</strong>
-            <span>{formatDateTime(checkedAt)}</span>
-          </div>
-          <div>
-            <strong>Relayer</strong>
-            <span>{relayerVersion}</span>
-          </div>
-          <div>
-            <strong>Endpoint</strong>
-            <span>{endpoint}</span>
-          </div>
-        </section>
+            <section className="component-section" aria-label="Service components">
+              <div className="component-section__intro">
+                <p>Uptime over the past {historyDays} days.</p>
+                <a
+                  href="/uptime"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    navigate('/uptime')
+                  }}
+                >
+                  View historical uptime.
+                </a>
+              </div>
+              <div className="component-list">
+                {rows.map((row) => (
+                  <ComponentStatusRow key={row.name} row={row} />
+                ))}
+              </div>
+            </section>
 
-        {(error || snapshot?.relayer.error || snapshot?.database?.error) && (
-          <section className="status-alert" role="alert">
-            <AlertTriangle size={20} aria-hidden="true" />
-            <div>
-              <strong>
-                {error
-                  ? 'Status service error'
-                  : snapshot?.relayer.error
-                    ? 'Relayer health check error'
-                    : 'History storage error'}
-              </strong>
-              <span>{error ?? snapshot?.relayer.error ?? snapshot?.database?.error}</span>
-            </div>
-          </section>
+            <IncidentHistory history={snapshot?.history} count={10} />
+          </>
         )}
 
-        <section className="component-section" aria-label="Service components">
-          <div className="component-section__intro">
-            <p>Uptime over the past {historyDays} days.</p>
-            <button
-              type="button"
-              className="history-link"
-              onClick={() => setActiveHistoryTab('uptime')}
-            >
-              {historyLabel}
-            </button>
-          </div>
-          <div className="component-list">
-            {rows.map((row) => (
-              <ComponentStatusRow key={row.name} row={row} />
-            ))}
-          </div>
-        </section>
+        {route === 'history' && (
+          <>
+            <HistoryTabs route={route} onNavigate={navigate} />
+            <IncidentHistory history={snapshot?.history} count={30} />
+          </>
+        )}
 
-        <section className="history-section" aria-label="Historical status">
-          <div className="history-tabs" role="tablist" aria-label="Historical status tabs">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeHistoryTab === 'incidents'}
-              className={activeHistoryTab === 'incidents' ? 'history-tab history-tab--active' : 'history-tab'}
-              onClick={() => setActiveHistoryTab('incidents')}
-            >
-              Incidents
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeHistoryTab === 'uptime'}
-              className={activeHistoryTab === 'uptime' ? 'history-tab history-tab--active' : 'history-tab'}
-              onClick={() => setActiveHistoryTab('uptime')}
-            >
-              Uptime
-            </button>
-          </div>
-
-          {activeHistoryTab === 'incidents' ? (
-            <IncidentHistory history={snapshot?.history} />
-          ) : (
+        {route === 'uptime' && (
+          <>
+            <HistoryTabs route={route} onNavigate={navigate} />
             <UptimeCalendar
               rows={uptimeRows}
               selectedName={selectedComponentName}
@@ -672,76 +720,10 @@ export default function App() {
               onSelectComponent={setSelectedComponentName}
               onCalendarPageChange={setCalendarPage}
             />
-          )}
-        </section>
+          </>
+        )}
 
-        <section className="detail-section" aria-label="Status details">
-          <article>
-            <h2>Relayer Details</h2>
-            <dl>
-              <div>
-                <dt>HTTP status</dt>
-                <dd>{snapshot?.relayer.httpStatus ? `HTTP ${snapshot.relayer.httpStatus}` : 'Pending'}</dd>
-              </div>
-              <div>
-                <dt>Latency</dt>
-                <dd>{snapshot?.relayer.latencyMs ? `${snapshot.relayer.latencyMs} ms` : 'Pending'}</dd>
-              </div>
-              <div>
-                <dt>Mode</dt>
-                <dd>{snapshot?.relayer.health?.mode ?? 'Unknown'}</dd>
-              </div>
-              <div>
-                <dt>Build</dt>
-                <dd>{buildCommit}</dd>
-              </div>
-            </dl>
-          </article>
-
-          <article>
-            <h2>Supported Clients</h2>
-            <dl>
-              <div>
-                <dt>TypeScript SDK</dt>
-                <dd>{snapshot?.relayer.health?.minSupportedSdk?.typescript ?? 'Unknown'}</dd>
-              </div>
-              <div>
-                <dt>Python SDK</dt>
-                <dd>{snapshot?.relayer.health?.minSupportedSdk?.python ?? 'Unknown'}</dd>
-              </div>
-              <div>
-                <dt>MCP package</dt>
-                <dd>{snapshot?.relayer.health?.minSupportedSdk?.mcp ?? 'Unknown'}</dd>
-              </div>
-            </dl>
-            <div className="feature-flags">
-              {activeFeatureFlags.length ? (
-                activeFeatureFlags.slice(0, 6).map(([flag]) => (
-                  <span key={flag}>{flag}</span>
-                ))
-              ) : (
-                <span>No feature flags reported</span>
-              )}
-            </div>
-          </article>
-        </section>
-
-        <section className="dependency-section" aria-label="External dependencies">
-          <h2>External Dependencies</h2>
-          <div>
-            {dependencies.map((dependency) => (
-              <a key={dependency.name} href={dependency.url} target="_blank" rel="noopener noreferrer">
-                <span>{dependency.name}</span>
-                <ExternalLink size={16} aria-hidden="true" />
-              </a>
-            ))}
-          </div>
-        </section>
-
-        <footer className="page-footer">
-          <span>Auto-refresh every {REFRESH_INTERVAL_MS / 1000}s</span>
-          <span>Manual refreshes {manualRefreshes}</span>
-        </footer>
+        <StatusFooter route={route} onNavigate={navigate} />
       </main>
     </div>
   )

@@ -122,6 +122,14 @@ function sendText(res, statusCode, body, cacheControl = 'no-store') {
   res.end(body)
 }
 
+function sendXml(res, statusCode, body, contentType) {
+  res.writeHead(statusCode, {
+    ...noStoreHeaders(`${contentType}; charset=utf-8`),
+    'Content-Length': Buffer.byteLength(body),
+  })
+  res.end(body)
+}
+
 function cacheControlFor(pathname, servingIndex) {
   if (servingIndex) return 'no-store'
   if (pathname.startsWith('/assets/')) return 'public, max-age=31536000, immutable'
@@ -146,6 +154,27 @@ function isRecord(value) {
 function truncateError(message) {
   if (!message) return 'Health check failed'
   return message.length > 500 ? `${message.slice(0, 500)}...` : message
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+}
+
+function publicBaseUrl(req) {
+  const configured = (process.env.STATUS_PUBLIC_URL || '').trim().replace(/\/+$/, '')
+  if (configured) return configured
+
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${port}`
+  const firstHost = String(hostHeader).split(',')[0].trim()
+  const fallbackProto = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(firstHost) ? 'http' : 'https'
+  const proto = req.headers['x-forwarded-proto'] || fallbackProto
+  const firstProto = String(proto).split(',')[0].trim()
+  return `${firstProto}://${firstHost}`
 }
 
 function getSql() {
@@ -530,6 +559,81 @@ async function statusPayload() {
   }
 }
 
+function feedEntries(snapshot, baseUrl) {
+  const entries = [
+    {
+      id: `${baseUrl}/`,
+      title: snapshot.relayer.status === 'operational'
+        ? 'All Systems Operational'
+        : `Walrus Memory Relayer ${snapshot.relayer.status}`,
+      updated: snapshot.relayer.checkedAt || snapshot.generatedAt,
+      summary: snapshot.relayer.error || `Relayer status is ${snapshot.relayer.status}.`,
+      link: `${baseUrl}/`,
+    },
+  ]
+
+  for (const bucket of snapshot.history?.buckets ?? []) {
+    if (bucket.status !== 'outage' && bucket.status !== 'degraded') continue
+    entries.push({
+      id: `${baseUrl}/history#${bucket.date}`,
+      title: bucket.status === 'outage'
+        ? `Major outage on ${bucket.date}`
+        : `Degraded performance on ${bucket.date}`,
+      updated: `${bucket.date}T00:00:00.000Z`,
+      summary: bucket.status === 'outage'
+        ? `${bucket.outage} outage check${bucket.outage === 1 ? '' : 's'} recorded.`
+        : `${bucket.degraded} degraded check${bucket.degraded === 1 ? '' : 's'} recorded.`,
+      link: `${baseUrl}/history`,
+    })
+  }
+
+  return entries.slice(0, 20)
+}
+
+function atomFeed(snapshot, baseUrl) {
+  const updated = snapshot.generatedAt
+  const entries = feedEntries(snapshot, baseUrl).map((entry) => `
+    <entry>
+      <id>${escapeXml(entry.id)}</id>
+      <title>${escapeXml(entry.title)}</title>
+      <updated>${escapeXml(entry.updated)}</updated>
+      <link href="${escapeXml(entry.link)}" />
+      <summary>${escapeXml(entry.summary)}</summary>
+    </entry>`).join('')
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>${escapeXml(baseUrl)}/history.atom</id>
+  <title>Walrus Memory Status History</title>
+  <updated>${escapeXml(updated)}</updated>
+  <link href="${escapeXml(baseUrl)}/history.atom" rel="self" />
+  <link href="${escapeXml(baseUrl)}/" />
+  ${entries}
+</feed>`
+}
+
+function rssFeed(snapshot, baseUrl) {
+  const entries = feedEntries(snapshot, baseUrl).map((entry) => `
+      <item>
+        <guid>${escapeXml(entry.id)}</guid>
+        <title>${escapeXml(entry.title)}</title>
+        <link>${escapeXml(entry.link)}</link>
+        <pubDate>${escapeXml(new Date(entry.updated).toUTCString())}</pubDate>
+        <description>${escapeXml(entry.summary)}</description>
+      </item>`).join('')
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Walrus Memory Status History</title>
+    <link>${escapeXml(baseUrl)}/</link>
+    <description>Real-time and historical status updates for Walrus Memory.</description>
+    <lastBuildDate>${escapeXml(new Date(snapshot.generatedAt).toUTCString())}</lastBuildDate>
+    ${entries}
+  </channel>
+</rss>`
+}
+
 async function serveFile(req, res, filePath, pathname, servingIndex = false) {
   const fileStat = await stat(filePath)
   if (!fileStat.isFile()) return false
@@ -631,6 +735,22 @@ const server = createServer(async (req, res) => {
         service: { name: 'Walrus Memory Status', status: 'degraded' },
         error: 'Status service failed to build payload',
       })
+    }
+    return
+  }
+
+  if (pathname === '/history.atom' || pathname === '/history.rss') {
+    try {
+      const snapshot = await statusPayload()
+      const baseUrl = publicBaseUrl(req)
+      if (pathname === '/history.atom') {
+        sendXml(res, 200, atomFeed(snapshot, baseUrl), 'application/atom+xml')
+      } else {
+        sendXml(res, 200, rssFeed(snapshot, baseUrl), 'application/rss+xml')
+      }
+    } catch (error) {
+      console.error('[status-service] failed to build history feed', error)
+      sendText(res, 500, 'Status feed failed to build')
     }
     return
   }
