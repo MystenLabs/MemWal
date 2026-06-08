@@ -24,6 +24,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
+use sqlx::postgres::PgPoolOptions;
 
 use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
@@ -40,6 +41,7 @@ use types::{
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_APALIS_STARTUP_TIMEOUT_SECS: u64 = 45;
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
@@ -66,6 +68,101 @@ fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
 
 fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
     parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
+}
+
+async fn init_apalis_pool(
+    database_url: &str,
+    startup_timeout: std::time::Duration,
+) -> Result<sqlx::PgPool, String> {
+    let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
+    let lock_timeout_ms = (startup_timeout.as_millis() / 3).clamp(1_000, 30_000);
+    let lock_timeout = format!("{}ms", lock_timeout_ms);
+
+    tracing::info!(
+        "  Apalis: connecting to PostgreSQL (startup_timeout={}s)",
+        startup_timeout.as_secs()
+    );
+    let pool_future = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(startup_timeout)
+        .after_connect(move |conn, _meta| {
+            let statement_timeout = statement_timeout.clone();
+            let lock_timeout = lock_timeout.clone();
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT set_config('statement_timeout', $1, false), \
+                            set_config('lock_timeout', $2, false), \
+                            set_config('idle_in_transaction_session_timeout', $1, false)",
+                )
+                .bind(statement_timeout)
+                .bind(lock_timeout)
+                .execute(conn)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect(database_url);
+
+    let pool = match tokio::time::timeout(startup_timeout, pool_future).await {
+        Ok(Ok(pool)) => pool,
+        Ok(Err(err)) => return Err(format!("connect to PostgreSQL for Apalis: {err}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}s connecting to PostgreSQL for Apalis",
+                startup_timeout.as_secs()
+            ))
+        }
+    };
+    tracing::info!("  Apalis: PostgreSQL connected");
+
+    let schema_ready = match tokio::time::timeout(startup_timeout, apalis_schema_ready(&pool)).await
+    {
+        Ok(Ok(ready)) => ready,
+        Ok(Err(err)) => return Err(format!("check Apalis schema readiness: {err}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}s checking Apalis schema readiness",
+                startup_timeout.as_secs()
+            ))
+        }
+    };
+    if schema_ready {
+        tracing::info!("  Apalis: PostgreSQL schema already current");
+        return Ok(pool);
+    }
+
+    tracing::info!("  Apalis: running PostgreSQL migrations");
+    match tokio::time::timeout(startup_timeout, PostgresStorage::<()>::setup(&pool)).await {
+        Ok(Ok(())) => {
+            tracing::info!("  Apalis: PostgreSQL migrations applied");
+            Ok(pool)
+        }
+        Ok(Err(err)) => Err(format!("run Apalis PostgreSQL migrations: {err}")),
+        Err(_) => Err(format!(
+            "timed out after {}s running Apalis PostgreSQL migrations",
+            startup_timeout.as_secs()
+        )),
+    }
+}
+
+async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'apalis'
+              AND table_name = 'jobs'
+              AND column_name = 'priority'
+        ) AND EXISTS (
+            SELECT 1
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'apalis'
+              AND p.proname = 'get_jobs'
+        )",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 #[tokio::main]
@@ -226,15 +323,18 @@ async fn main() {
             .expect("Failed to connect to PostgreSQL"),
     );
 
-    // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
-    // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
-    let apalis_pool = sqlx::PgPool::connect(&config.database_url)
-        .await
-        .expect("Failed to connect to PostgreSQL for Apalis");
-    // setup() is defined only on PostgresStorage<()> — creates schema tables.
-    PostgresStorage::<()>::setup(&apalis_pool)
-        .await
-        .expect("Apalis postgres migration failed");
+    let apalis_startup_timeout_secs = parse_env_u64(
+        "APALIS_STARTUP_TIMEOUT_SECS",
+        DEFAULT_APALIS_STARTUP_TIMEOUT_SECS,
+        5,
+        300,
+    );
+    let apalis_pool = init_apalis_pool(
+        &config.database_url,
+        std::time::Duration::from_secs(apalis_startup_timeout_secs),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("Failed to initialize Apalis job queue: {err}"));
     let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
     let remember_job_storage: PostgresStorage<RememberJob> =
         PostgresStorage::new(apalis_pool.clone());
