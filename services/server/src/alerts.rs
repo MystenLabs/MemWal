@@ -10,6 +10,8 @@ const WALRUS_UPGRADE_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_PACKAGE_UPGRADE_ALERT_
 const WALRUS_UPGRADE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 const WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS";
 const WALRUS_OBJECT_LOCK_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
+const WALRUS_GAS_POOL_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_GAS_POOL_ALERT_DEDUP_SECS";
+const WALRUS_GAS_POOL_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 
 /// Mirrors the `@mysten/walrus` dep version in
 /// `services/server/scripts/package.json`. Bump this constant in lockstep
@@ -73,6 +75,11 @@ pub struct AlertManager {
     /// every concurrent job touching it raises the same error, so one
     /// notification per (network, object) is enough until the window elapses.
     walrus_object_lock_dedup: AlertDedup,
+    /// Suppresses Walrus gas-pool alert spam. A gas-pool starvation is
+    /// pool-wide, so every concurrent upload job raises the same
+    /// `balance::split` ENotEnough — one notification per network is enough
+    /// until ops tops up gas or the window elapses.
+    walrus_gas_pool_dedup: AlertDedup,
 }
 
 impl AlertManager {
@@ -90,6 +97,10 @@ impl AlertManager {
             walrus_object_lock_dedup: AlertDedup::new(dedup_window_from_env(
                 WALRUS_OBJECT_LOCK_ALERT_DEDUP_SECS_ENV,
                 WALRUS_OBJECT_LOCK_ALERT_DEDUP_DEFAULT,
+            )),
+            walrus_gas_pool_dedup: AlertDedup::new(dedup_window_from_env(
+                WALRUS_GAS_POOL_ALERT_DEDUP_SECS_ENV,
+                WALRUS_GAS_POOL_ALERT_DEDUP_DEFAULT,
             )),
         }
     }
@@ -148,6 +159,23 @@ impl AlertManager {
             return Ok(());
         }
         let payload = SlackPayload::for_walrus_object_locked(&alert);
+        slack.send_payload(&payload).await
+    }
+
+    pub async fn notify_walrus_gas_pool_exhausted(
+        &self,
+        alert: WalrusGasPoolExhaustedAlert,
+    ) -> Result<(), AlertError> {
+        let Some(slack) = &self.slack else {
+            return Ok(());
+        };
+        // Gas-pool starvation is pool-wide: dedup per network so a burst of
+        // concurrent jobs collapses to one ops notification per window.
+        let key = (alert.sui_network.clone(), "gas_pool".to_string());
+        if self.walrus_gas_pool_dedup.should_suppress(key) {
+            return Ok(());
+        }
+        let payload = SlackPayload::for_walrus_gas_pool_exhausted(&alert);
         slack.send_payload(&payload).await
     }
 }
@@ -255,6 +283,23 @@ pub struct WalrusObjectLockedAlert {
     pub locked_object_id: Option<String>,
     pub locked_object_version: Option<String>,
     pub locking_transaction_digest: Option<String>,
+    pub error: String,
+}
+
+/// Fired when a wallet job aborts because an Enoki sponsored dry-run failed in
+/// `0x2::balance::split` with ENotEnough — the relayer pool wallets' SUI gas
+/// coins are fragmented or too small to cover the sponsored budget. Distinct
+/// from the "exhausted retries" alert: this aborts immediately rather than
+/// burning the whole pool, and the on-call message must point ops at SUI gas
+/// coin consolidation/top-up rather than implying an app bug.
+#[derive(Debug)]
+pub struct WalrusGasPoolExhaustedAlert {
+    pub remember_job_id: Option<String>,
+    pub owner: Option<String>,
+    pub namespace: Option<String>,
+    pub sui_network: String,
+    pub wallet_index: usize,
+    pub configured_wallets: usize,
     pub error: String,
 }
 
@@ -427,6 +472,55 @@ impl SlackPayload {
                 },
                 SlackBlock::Section {
                     text: mrkdwn(summary),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(details),
+                },
+            ],
+        }
+    }
+
+    fn for_walrus_gas_pool_exhausted(alert: &WalrusGasPoolExhaustedAlert) -> Self {
+        let title = "MemWal Walrus upload blocked — SUI gas pool maintenance".to_string();
+        let summary = format!(
+            "Walrus upload aborted on {}: Enoki sponsored dry-run failed in \
+             `0x2::balance::split` (ENotEnough). The relayer pool wallets' SUI \
+             gas coins are fragmented or too small to cover the sponsored budget. \
+             Not retried — retrying just rotates to the next starved pool wallet.",
+            alert.sui_network,
+        );
+        let action = "*Action (ops):* consolidate/merge SUI gas coins on the \
+             relayer pool wallets and top up SUI if low. See the gas-pool runbook."
+            .to_string();
+        let job = alert.remember_job_id.as_deref().unwrap_or("-");
+        let owner = alert
+            .owner
+            .as_deref()
+            .map(short_address)
+            .unwrap_or_else(|| "-".to_string());
+        let namespace = alert.namespace.as_deref().unwrap_or("-");
+        let details = format!(
+            "*Network:* `{}`\n*Pool wallet:* `{}` of `{}`\n*Job:* `{}`\n*Owner:* `{}`\n*Namespace:* `{}`\n*Error:* ```{}```",
+            alert.sui_network,
+            alert.wallet_index,
+            alert.configured_wallets,
+            job,
+            owner,
+            namespace,
+            truncate(&alert.error, MAX_SLACK_ERROR_LEN),
+        );
+
+        Self {
+            text: summary.clone(),
+            blocks: vec![
+                SlackBlock::Header {
+                    text: plain_text(title),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(summary),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(action),
                 },
                 SlackBlock::Section {
                     text: mrkdwn(details),
@@ -678,5 +772,29 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("unparsed"));
         assert!(json.contains("mainnet"));
+    }
+
+    #[test]
+    fn walrus_gas_pool_payload_points_ops_to_gas_consolidation_not_exhausted_copy() {
+        let payload = SlackPayload::for_walrus_gas_pool_exhausted(&WalrusGasPoolExhaustedAlert {
+            remember_job_id: Some("591c13bc".into()),
+            owner: Some(
+                "0x51667727aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa04bca2".into(),
+            ),
+            namespace: Some("people".into()),
+            sui_network: "mainnet".into(),
+            wallet_index: 4,
+            configured_wallets: 5,
+            error: "Dry run failed: MoveAbort(0x2::balance::split, 2)".into(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        // Points ops at gas-coin maintenance, not the misleading exhausted copy.
+        assert!(json.to_lowercase().contains("gas"));
+        assert!(json.contains("consolidate") || json.contains("top up"));
+        assert!(!json.to_lowercase().contains("exhausted retries"));
+        assert!(json.contains("balance::split") || json.contains("balance"));
+        assert!(json.contains("mainnet"));
+        assert!(json.contains("people"));
     }
 }
