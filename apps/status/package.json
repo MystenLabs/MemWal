@@ -1,0 +1,27 @@
+{
+  "name": "@memwal/status",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm run build && node server.mjs",
+    "dev:client": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "node server.mjs",
+    "start": "node server.mjs",
+    "serve:dist": "node server.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}
