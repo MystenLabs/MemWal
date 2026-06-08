@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import postgres from 'postgres'
 
 const appDir = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(appDir, 'dist')
@@ -13,6 +14,16 @@ const host = process.env.HOST || '0.0.0.0'
 const DEFAULT_RELAYER_URL = 'https://relayer.memory.walrus.xyz'
 const DEFAULT_HEALTH_PATH = '/health'
 const DEFAULT_TIMEOUT_MS = 8000
+const DEFAULT_POLL_INTERVAL_MS = 60_000
+const DEFAULT_HISTORY_DAYS = 90
+const HISTORY_TARGET = 'relayer'
+
+let sql = null
+let databaseReady = false
+let databaseError = null
+let databaseInitPromise = null
+let pollInFlight = null
+let pollTimer = null
 
 const contentTypes = new Map([
   ['', 'text/plain; charset=utf-8'],
@@ -33,10 +44,30 @@ const contentTypes = new Map([
 
 const fileLikeRequestPattern = /\/[^/?#]+\.[^/?#]+$/
 
-function getTimeoutMs() {
-  const value = Number(process.env.STATUS_REQUEST_TIMEOUT_MS || DEFAULT_TIMEOUT_MS)
-  if (!Number.isFinite(value) || value < 1000 || value > 30000) return DEFAULT_TIMEOUT_MS
+function readNumberEnv(name, fallback, minimum, maximum) {
+  const value = Number(process.env[name] || fallback)
+  if (!Number.isFinite(value) || value < minimum || value > maximum) return fallback
   return Math.round(value)
+}
+
+function getTimeoutMs() {
+  return readNumberEnv('STATUS_REQUEST_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, 1000, 30000)
+}
+
+function getPollIntervalMs() {
+  return readNumberEnv('STATUS_POLL_INTERVAL_MS', DEFAULT_POLL_INTERVAL_MS, 10000, 3600000)
+}
+
+function getHistoryDays() {
+  return readNumberEnv('STATUS_HISTORY_DAYS', DEFAULT_HISTORY_DAYS, 1, 365)
+}
+
+function databaseUrl() {
+  return (process.env.DATABASE_URL || process.env.STATUS_DATABASE_URL || '').trim()
+}
+
+function isDatabaseConfigured() {
+  return Boolean(databaseUrl())
 }
 
 function relayerBaseUrl() {
@@ -117,6 +148,66 @@ function truncateError(message) {
   return message.length > 500 ? `${message.slice(0, 500)}...` : message
 }
 
+function getSql() {
+  if (!sql) {
+    sql = postgres(databaseUrl(), {
+      max: 2,
+      idle_timeout: 20,
+      connect_timeout: Math.ceil(getTimeoutMs() / 1000),
+    })
+  }
+
+  return sql
+}
+
+async function initializeDatabase() {
+  if (!isDatabaseConfigured()) {
+    databaseReady = false
+    databaseError = null
+    return false
+  }
+
+  try {
+    const db = getSql()
+    await db`
+      CREATE TABLE IF NOT EXISTS status_checks (
+        id BIGSERIAL PRIMARY KEY,
+        checked_at TIMESTAMPTZ NOT NULL,
+        target TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('operational', 'degraded', 'outage')),
+        http_status INTEGER,
+        latency_ms INTEGER,
+        error TEXT,
+        payload JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `
+    await db`
+      CREATE INDEX IF NOT EXISTS status_checks_target_checked_at_idx
+      ON status_checks (target, checked_at DESC)
+    `
+    databaseReady = true
+    databaseError = null
+    return true
+  } catch (error) {
+    databaseReady = false
+    databaseError = truncateError(error?.message || String(error))
+    console.error('[status-service] database initialization failed', error)
+    return false
+  }
+}
+
+async function ensureDatabaseReady() {
+  if (!isDatabaseConfigured()) return false
+  if (databaseReady) return true
+  if (!databaseInitPromise) {
+    databaseInitPromise = initializeDatabase().finally(() => {
+      databaseInitPromise = null
+    })
+  }
+  return databaseInitPromise
+}
+
 async function probeRelayer() {
   const checkedAt = new Date().toISOString()
   const url = resolveHealthUrl()
@@ -177,16 +268,253 @@ async function probeRelayer() {
   }
 }
 
-async function statusPayload() {
+async function insertCheck(relayer) {
+  if (!(await ensureDatabaseReady())) return false
+
+  try {
+    const db = getSql()
+    await db`
+      INSERT INTO status_checks (
+        checked_at,
+        target,
+        status,
+        http_status,
+        latency_ms,
+        error,
+        payload
+      )
+      VALUES (
+        ${new Date(relayer.checkedAt)},
+        ${HISTORY_TARGET},
+        ${relayer.status},
+        ${relayer.httpStatus},
+        ${relayer.latencyMs},
+        ${relayer.error},
+        ${JSON.stringify(relayer.health ?? null)}::jsonb
+      )
+    `
+    databaseReady = true
+    databaseError = null
+    return true
+  } catch (error) {
+    databaseReady = false
+    databaseError = truncateError(error?.message || String(error))
+    console.error('[status-service] failed to insert status check', error)
+    return false
+  }
+}
+
+async function probeAndStore() {
   const relayer = await probeRelayer()
+  await insertCheck(relayer)
+  return relayer
+}
+
+async function runPollCycle() {
+  if (!pollInFlight) {
+    pollInFlight = probeAndStore().finally(() => {
+      pollInFlight = null
+    })
+  }
+
+  return pollInFlight
+}
+
+function rowToRelayer(row) {
+  return {
+    name: 'Public relayer API',
+    status: row.status,
+    url: resolveHealthUrl(),
+    httpStatus: row.http_status,
+    latencyMs: row.latency_ms,
+    checkedAt: new Date(row.checked_at).toISOString(),
+    health: normalizePayload(row.payload),
+    error: row.error,
+  }
+}
+
+async function readLatestCheck() {
+  if (!(await ensureDatabaseReady())) return null
+
+  const rows = await getSql()`
+    SELECT checked_at, status, http_status, latency_ms, error, payload
+    FROM status_checks
+    WHERE target = ${HISTORY_TARGET}
+    ORDER BY checked_at DESC
+    LIMIT 1
+  `
+
+  return rows[0] ? rowToRelayer(rows[0]) : null
+}
+
+function utcDateKey(date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date)
+  next.setUTCDate(next.getUTCDate() + days)
+  return next
+}
+
+function startOfUtcDay(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+}
+
+function bucketStatus(bucket) {
+  if (!bucket.total) return 'unknown'
+  if (bucket.outage > 0) return 'outage'
+  if (bucket.degraded > 0) return 'degraded'
+  return 'operational'
+}
+
+function normalizePayload(payload) {
+  if (isRecord(payload)) return payload
+  if (typeof payload !== 'string' || !payload) return null
+
+  try {
+    const parsed = JSON.parse(payload)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function makeEmptyHistory(enabled, reason = null) {
+  const days = getHistoryDays()
+  const today = startOfUtcDay(new Date())
+  const firstDay = addUtcDays(today, -(days - 1))
+  const buckets = Array.from({ length: days }, (_, index) => ({
+    date: utcDateKey(addUtcDays(firstDay, index)),
+    status: 'unknown',
+    total: 0,
+    ok: 0,
+    degraded: 0,
+    outage: 0,
+  }))
+
+  return {
+    enabled,
+    source: enabled ? 'postgres' : 'live',
+    days,
+    target: HISTORY_TARGET,
+    totalChecks: 0,
+    uptimePct: null,
+    unavailableReason: reason,
+    buckets,
+  }
+}
+
+async function readHistory() {
+  const days = getHistoryDays()
+  if (!(await ensureDatabaseReady())) {
+    return makeEmptyHistory(false, databaseError)
+  }
+
+  try {
+    const rows = await getSql()`
+      SELECT
+        (date_trunc('day', checked_at AT TIME ZONE 'UTC'))::date AS day,
+        count(*)::int AS total,
+        count(*) FILTER (WHERE status = 'operational')::int AS ok,
+        count(*) FILTER (WHERE status = 'degraded')::int AS degraded,
+        count(*) FILTER (WHERE status = 'outage')::int AS outage
+      FROM status_checks
+      WHERE target = ${HISTORY_TARGET}
+        AND checked_at >= now() - (${days}::int * interval '1 day')
+      GROUP BY 1
+      ORDER BY 1
+    `
+
+    const byDay = new Map(rows.map((row) => {
+      const day = row.day instanceof Date ? utcDateKey(row.day) : String(row.day).slice(0, 10)
+      return [day, {
+        total: Number(row.total || 0),
+        ok: Number(row.ok || 0),
+        degraded: Number(row.degraded || 0),
+        outage: Number(row.outage || 0),
+      }]
+    }))
+
+    const today = startOfUtcDay(new Date())
+    const firstDay = addUtcDays(today, -(days - 1))
+    let totalChecks = 0
+    let upChecks = 0
+
+    const buckets = Array.from({ length: days }, (_, index) => {
+      const date = utcDateKey(addUtcDays(firstDay, index))
+      const row = byDay.get(date) ?? {
+        total: 0,
+        ok: 0,
+        degraded: 0,
+        outage: 0,
+      }
+      totalChecks += row.total
+      upChecks += row.ok + row.degraded
+
+      return {
+        date,
+        status: bucketStatus(row),
+        total: row.total,
+        ok: row.ok,
+        degraded: row.degraded,
+        outage: row.outage,
+      }
+    })
+
+    return {
+      enabled: true,
+      source: 'postgres',
+      days,
+      target: HISTORY_TARGET,
+      totalChecks,
+      uptimePct: totalChecks > 0 ? Number(((upChecks / totalChecks) * 100).toFixed(2)) : null,
+      unavailableReason: null,
+      buckets,
+    }
+  } catch (error) {
+    databaseReady = false
+    databaseError = truncateError(error?.message || String(error))
+    console.error('[status-service] failed to read status history', error)
+    return makeEmptyHistory(false, databaseError)
+  }
+}
+
+async function getRelayerSnapshot() {
+  if (!isDatabaseConfigured()) {
+    return probeRelayer()
+  }
+
+  let latest = await readLatestCheck()
+  const staleAfterMs = getPollIntervalMs() * 1.5
+  const latestAgeMs = latest ? Date.now() - Date.parse(latest.checkedAt) : Number.POSITIVE_INFINITY
+
+  if (!latest || latestAgeMs > staleAfterMs) {
+    latest = await runPollCycle()
+  }
+
+  return latest
+}
+
+async function statusPayload() {
+  const relayer = await getRelayerSnapshot()
+  const history = await readHistory()
+
   return {
     generatedAt: new Date().toISOString(),
     service: {
       name: 'Walrus Memory Status',
       status: 'operational',
       runtime: 'node',
+      historyEnabled: history.enabled,
     },
     relayer,
+    history,
+    database: {
+      configured: isDatabaseConfigured(),
+      ready: databaseReady,
+      error: databaseError,
+    },
     dependencies: [
       {
         name: 'Sui network',
@@ -235,6 +563,27 @@ async function serveFile(req, res, filePath, pathname, servingIndex = false) {
   return true
 }
 
+function startPolling() {
+  if (!isDatabaseConfigured()) return
+
+  const pollIntervalMs = getPollIntervalMs()
+  void runPollCycle()
+  pollTimer = setInterval(() => {
+    void runPollCycle()
+  }, pollIntervalMs)
+  pollTimer.unref?.()
+  console.log(`[status-service] polling relayer every ${pollIntervalMs} ms`)
+}
+
+async function shutdown(signal) {
+  console.log(`[status-service] received ${signal}, shutting down`)
+  if (pollTimer) clearInterval(pollTimer)
+  server.close(async () => {
+    if (sql) await sql.end({ timeout: 5 })
+    process.exit(0)
+  })
+}
+
 const server = createServer(async (req, res) => {
   if (!['GET', 'HEAD'].includes(req.method || '')) {
     res.writeHead(405, {
@@ -263,6 +612,11 @@ const server = createServer(async (req, res) => {
       status: 'ok',
       service: 'walrus-memory-status',
       generatedAt: new Date().toISOString(),
+      database: {
+        configured: isDatabaseConfigured(),
+        ready: databaseReady,
+        error: databaseError,
+      },
     })
     return
   }
@@ -312,7 +666,18 @@ const server = createServer(async (req, res) => {
   }
 })
 
+process.once('SIGINT', () => {
+  void shutdown('SIGINT')
+})
+process.once('SIGTERM', () => {
+  void shutdown('SIGTERM')
+})
+
+await initializeDatabase()
+startPolling()
+
 server.listen(port, host, () => {
   console.log(`[status-service] serving ${distDir} on http://${host}:${port}`)
   console.log(`[status-service] relayer health target: ${resolveHealthUrl()}`)
+  console.log(`[status-service] history storage: ${isDatabaseConfigured() ? 'postgres' : 'disabled'}`)
 })

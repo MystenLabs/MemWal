@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, ExternalLink, RefreshCw } from 'lucide-react'
 
-type StatusKind = 'operational' | 'degraded' | 'outage' | 'monitoring'
+type StatusKind = 'operational' | 'degraded' | 'outage' | 'monitoring' | 'unknown'
 type LoadState = 'loading' | 'ready' | 'error'
 
 interface HealthPayload {
@@ -28,12 +28,33 @@ interface DependencyStatus {
   url: string
 }
 
+interface HistoryBucket {
+  date: string
+  status: StatusKind
+  total: number
+  ok: number
+  degraded: number
+  outage: number
+}
+
+interface StatusHistory {
+  enabled: boolean
+  source: string
+  days: number
+  target: string
+  totalChecks: number
+  uptimePct: number | null
+  unavailableReason: string | null
+  buckets: HistoryBucket[]
+}
+
 interface StatusSnapshot {
   generatedAt: string
   service: {
     name: string
     status: StatusKind
     runtime?: string
+    historyEnabled?: boolean
   }
   relayer: {
     name: string
@@ -45,6 +66,12 @@ interface StatusSnapshot {
     health: HealthPayload | null
     error: string | null
   }
+  history: StatusHistory
+  database?: {
+    configured: boolean
+    ready: boolean
+    error: string | null
+  }
   dependencies: DependencyStatus[]
 }
 
@@ -54,6 +81,7 @@ interface ComponentRow {
   status: StatusKind
   uptimeLabel: string
   meta: string
+  history: HistoryBucket[]
 }
 
 const REFRESH_INTERVAL_MS = 60_000
@@ -64,6 +92,7 @@ const statusLabel: Record<StatusKind, string> = {
   degraded: 'Degraded',
   outage: 'Unavailable',
   monitoring: 'Monitoring',
+  unknown: 'No Data',
 }
 
 function formatDateTime(value: string | null) {
@@ -98,9 +127,45 @@ function getStatusTitle(status: StatusKind) {
   return 'Checking System Status'
 }
 
+function emptyHistoryBuckets(status: StatusKind = 'unknown') {
+  return Array.from({ length: BAR_COUNT }, (_, index) => ({
+    date: '',
+    status: index === BAR_COUNT - 1 ? status : 'unknown',
+    total: 0,
+    ok: 0,
+    degraded: 0,
+    outage: 0,
+  }))
+}
+
+function normalizeBuckets(history: StatusHistory | null | undefined, latestStatus: StatusKind) {
+  if (!history?.buckets?.length) return emptyHistoryBuckets(latestStatus)
+
+  const buckets = history.buckets.slice(-BAR_COUNT)
+  if (buckets.length < BAR_COUNT) {
+    return [
+      ...emptyHistoryBuckets().slice(0, BAR_COUNT - buckets.length),
+      ...buckets,
+    ]
+  }
+
+  return buckets
+}
+
+function formatUptime(history: StatusHistory | null | undefined, fallback = 'collecting data') {
+  if (!history?.enabled) return 'history unavailable'
+  if (!history.totalChecks || history.uptimePct === null) return fallback
+  const decimals = history.uptimePct === 100 ? 1 : 2
+  return `${history.uptimePct.toFixed(decimals)}% uptime`
+}
+
 function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): ComponentRow[] {
   const relayerStatus = getOverallStatus(snapshot, loadState)
   const health = snapshot?.relayer.health
+  const history = snapshot?.history
+  const relayerHistory = normalizeBuckets(history, relayerStatus)
+  const serviceHistory = normalizeBuckets(history, loadState === 'error' ? 'degraded' : 'operational')
+  const externalHistory = emptyHistoryBuckets('monitoring')
   const hasCompatibility = Boolean(
     health?.relayerVersion &&
     health?.apiVersion &&
@@ -109,35 +174,40 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
   const compatibilityStatus: StatusKind = relayerStatus === 'operational'
     ? hasCompatibility ? 'operational' : 'degraded'
     : relayerStatus
+  const uptimeLabel = formatUptime(history)
 
   return [
     {
       name: 'Walrus Memory Status Service',
       description: 'Public status frontend and same-origin probe API',
       status: loadState === 'error' ? 'degraded' : 'operational',
-      uptimeLabel: 'live',
+      uptimeLabel,
       meta: snapshot?.service.runtime ? `${snapshot.service.runtime} runtime` : 'browser loaded',
+      history: serviceHistory,
     },
     {
       name: 'Walrus Memory Relayer',
       description: 'Server-side health probe against the public relayer',
       status: relayerStatus,
-      uptimeLabel: snapshot?.relayer.httpStatus ? `HTTP ${snapshot.relayer.httpStatus}` : 'pending',
+      uptimeLabel,
       meta: snapshot?.relayer.latencyMs ? `${snapshot.relayer.latencyMs} ms latency` : 'awaiting check',
+      history: relayerHistory,
     },
     {
       name: 'SDK Compatibility Metadata',
       description: 'Relayer version, API version, feature flags, and supported clients',
       status: compatibilityStatus,
-      uptimeLabel: health?.apiVersion ? `API ${health.apiVersion}` : 'metadata pending',
+      uptimeLabel,
       meta: health?.relayerVersion ? `relayer ${health.relayerVersion}` : 'from /health',
+      history: relayerHistory,
     },
     {
       name: 'Memory API Pipeline',
       description: 'Remember, recall, analyze, restore, and MCP routes',
       status: relayerStatus === 'operational' ? 'operational' : relayerStatus,
-      uptimeLabel: health?.mode ? `${health.mode} mode` : 'relayer-backed',
-      meta: 'covered by relayer liveness',
+      uptimeLabel,
+      meta: health?.mode ? `${health.mode} mode` : 'relayer-backed',
+      history: relayerHistory,
     },
     {
       name: 'Sui Network',
@@ -145,6 +215,7 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
       status: 'monitoring',
       uptimeLabel: 'external',
       meta: 'tracked outside this service',
+      history: externalHistory,
     },
     {
       name: 'Walrus Storage',
@@ -152,17 +223,9 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
       status: 'monitoring',
       uptimeLabel: 'external',
       meta: 'tracked outside this service',
+      history: externalHistory,
     },
   ]
-}
-
-function historyBars(status: StatusKind) {
-  return Array.from({ length: BAR_COUNT }, (_, index) => {
-    if (status === 'outage') return index > BAR_COUNT - 8 ? 'outage' : 'operational'
-    if (status === 'degraded') return index > BAR_COUNT - 8 ? 'degraded' : 'operational'
-    if (status === 'monitoring') return 'monitoring'
-    return 'operational'
-  })
 }
 
 function StatusPill({ status }: { status: StatusKind }) {
@@ -180,20 +243,21 @@ function ComponentStatusRow({ row }: { row: ComponentRow }) {
         <StatusPill status={row.status} />
       </div>
 
-      <div className="component-row__history" aria-label={`${row.name} current status timeline`}>
-        {historyBars(row.status).map((barStatus, index) => (
+      <div className="component-row__history" aria-label={`${row.name} uptime history`}>
+        {row.history.map((bucket, index) => (
           <span
-            key={`${row.name}-${index}`}
-            className={`history-bar history-bar--${barStatus}`}
+            key={`${row.name}-${bucket.date || index}`}
+            className={`history-bar history-bar--${bucket.status}`}
+            title={bucket.date ? `${bucket.date}: ${statusLabel[bucket.status]}` : statusLabel[bucket.status]}
             aria-hidden="true"
           />
         ))}
       </div>
 
       <div className="component-row__footer">
-        <span>live snapshot</span>
+        <span>{BAR_COUNT} days ago</span>
         <span>{row.uptimeLabel}</span>
-        <span>now</span>
+        <span>Today</span>
       </div>
       <p className="component-row__meta">{row.meta}</p>
     </article>
@@ -260,6 +324,27 @@ export default function App() {
     snapshot?.relayer.health?.version ??
     'Unknown'
   const buildCommit = snapshot?.relayer.health?.build?.commit?.slice(0, 12) ?? 'Not reported'
+  const historyDays = snapshot?.history.days ?? BAR_COUNT
+  const historyLabel = snapshot?.history.enabled
+    ? snapshot.history.totalChecks > 0
+      ? 'View historical uptime.'
+      : 'Collecting historical uptime.'
+    : 'History storage unavailable.'
+  const storedChecks = snapshot?.history.totalChecks ?? 0
+  const outageDays = snapshot?.history.buckets.filter((bucket) => bucket.status === 'outage').length ?? 0
+  const degradedDays = snapshot?.history.buckets.filter((bucket) => bucket.status === 'degraded').length ?? 0
+  const incidentTitle = overallStatus === 'outage'
+    ? 'Live health check is failing'
+    : outageDays > 0
+      ? `${outageDays} outage day${outageDays === 1 ? '' : 's'} in stored checks`
+      : degradedDays > 0
+        ? `${degradedDays} degraded day${degradedDays === 1 ? '' : 's'} in stored checks`
+        : 'No incidents reported in stored checks'
+  const incidentCopy = snapshot?.history.enabled
+    ? storedChecks > 0
+      ? `Based on ${storedChecks} stored relayer health checks.`
+      : 'Postgres history is connected and waiting for scheduled checks.'
+    : 'Set DATABASE_URL to retain historical uptime checks.'
 
   return (
     <div className="status-page">
@@ -307,20 +392,26 @@ export default function App() {
           </div>
         </section>
 
-        {(error || snapshot?.relayer.error) && (
+        {(error || snapshot?.relayer.error || snapshot?.database?.error) && (
           <section className="status-alert" role="alert">
             <AlertTriangle size={20} aria-hidden="true" />
             <div>
-              <strong>{error ? 'Status service error' : 'Relayer health check error'}</strong>
-              <span>{error ?? snapshot?.relayer.error}</span>
+              <strong>
+                {error
+                  ? 'Status service error'
+                  : snapshot?.relayer.error
+                    ? 'Relayer health check error'
+                    : 'History storage error'}
+              </strong>
+              <span>{error ?? snapshot?.relayer.error ?? snapshot?.database?.error}</span>
             </div>
           </section>
         )}
 
         <section className="component-section" aria-label="Service components">
           <div className="component-section__intro">
-            <p>Component status</p>
-            <span>Live checks only. Historical uptime storage is not connected yet.</span>
+            <p>Uptime over the past {historyDays} days.</p>
+            <span>{historyLabel}</span>
           </div>
           <div className="component-list">
             {rows.map((row) => (
@@ -396,16 +487,8 @@ export default function App() {
           <h2>Past Incidents</h2>
           <article>
             <time>{formatDate(new Date())}</time>
-            <strong>
-              {overallStatus === 'outage'
-                ? 'Live health check is failing'
-                : 'No active incident reported'}
-            </strong>
-            <p>
-              {overallStatus === 'outage'
-                ? 'The status service detected a failed relayer probe. Check Railway logs and upstream providers.'
-                : 'This page currently reports live probe status. Incident history will appear here after a history backend is connected.'}
-            </p>
+            <strong>{incidentTitle}</strong>
+            <p>{incidentCopy}</p>
           </article>
         </section>
 

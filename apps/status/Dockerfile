@@ -20,14 +20,19 @@ RUN pnpm --filter @memwal/status build
 
 FROM node:22-alpine AS runtime
 
-WORKDIR /app
+WORKDIR /app/apps/status
 
+COPY --from=builder /app/node_modules /app/node_modules
+COPY --from=builder /app/apps/status/node_modules ./node_modules
 COPY --from=builder /app/apps/status/dist ./dist
+COPY --from=builder /app/apps/status/package.json ./package.json
 COPY --from=builder /app/apps/status/server.mjs ./server.mjs
 
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV STATUS_RELAYER_URL=https://relayer.memory.walrus.xyz
+ENV STATUS_POLL_INTERVAL_MS=60000
+ENV STATUS_HISTORY_DAYS=90
 EXPOSE 3000
 
 CMD ["node", "server.mjs"]
