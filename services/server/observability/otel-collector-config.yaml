@@ -2,11 +2,9 @@
 #
 # Pipelines:
 #   metrics — scrape the relayer Prometheus /metrics endpoint (+ accept OTLP)
-#   logs    — tail structured JSON container logs (relayer/sidecar run with
-#             LOG_FORMAT=json) (+ accept OTLP)
-#   traces  — accept OTLP only. No service currently emits traces (the Rust
-#             relayer has no OpenTelemetry instrumentation yet); this pipeline
-#             is wired so traces flow the moment instrumentation is added.
+#   logs    — accept OTLP logs from the relayer, plus optional Docker json-file
+#             tailing for local stdout debugging.
+#   traces  — accept OTLP traces from the relayer.
 #
 # All signals are exported to OpenObserve over OTLP/HTTP. The exporter endpoint
 # must NOT end in a slash — the collector appends /v1/{metrics,logs,traces}.
@@ -24,7 +22,7 @@ receivers:
           static_configs:
             - targets: ["${env:RELAYER_METRICS_TARGET}"]
 
-  # OTLP in — future app traces/metrics/logs.
+  # OTLP in — relayer logs/traces or other services that prefer collector fan-in.
   otlp:
     protocols:
       grpc:

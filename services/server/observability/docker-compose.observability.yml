@@ -1,7 +1,7 @@
 # Self-hosted observability PoC for MemWal (WALM-81).
 #
 # Brings up OpenObserve + an OpenTelemetry Collector that scrapes the relayer
-# /metrics endpoint, tails structured JSON container logs, and accepts OTLP.
+# /metrics endpoint and accepts OTLP logs/traces.
 # Runs independently of the main services/server/docker-compose.yml.
 #
 # Usage:

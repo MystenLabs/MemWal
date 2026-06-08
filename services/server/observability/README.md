@@ -1,9 +1,10 @@
 # MemWal observability PoC — OpenObserve (WALM-81)
 
 Self-hosted observability stack: **OpenObserve** + an **OpenTelemetry Collector**
-that scrapes the relayer Prometheus `/metrics`, tails structured JSON container
-logs, and accepts OTLP (ready for future traces). Follows the OpenObserve
-recommendation from WALM-79.
+that scrapes the relayer Prometheus `/metrics` and receives OTLP logs/traces
+from the relayer. Follows the same OpenTelemetry/OpenObserve convention used by
+MailGate: applications export OTLP; metrics scraping/export stays in the
+collector.
 
 > Status: **PoC**. Verified locally end-to-end (collector → OpenObserve ingest
 > + query). Designed to be pointed at a staging/self-hosted environment; the
@@ -14,7 +15,7 @@ recommendation from WALM-79.
 | File | Purpose |
 |------|---------|
 | `docker-compose.observability.yml` | OpenObserve + OTel Collector services |
-| `otel-collector-config.yaml` | metrics scrape + logs tail + OTLP in → OpenObserve |
+| `otel-collector-config.yaml` | metrics scrape + OTLP in → OpenObserve |
 
 ## Run
 
@@ -39,16 +40,40 @@ OpenObserve UI: <http://localhost:5080> (log in with `O2_ROOT_EMAIL` / `O2_ROOT_
 
 Tear down: `docker compose -f docker-compose.observability.yml down` (add `-v` to wipe data).
 
+## Relayer OTLP config
+
+Set these on the relayer when OpenObserve is available:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:5080/api/default
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $O2_AUTH"
+export OTEL_SERVICE_NAME=memwal-relayer
+```
+
+For Railway dev, use the private service URL:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://openobserve.railway.internal:5080/api/default
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic <base64(email:password)>"
+OTEL_SERVICE_NAME=memwal-relayer-dev
+```
+
+The relayer appends `/v1/traces` and `/v1/logs` automatically. If a backend
+requires signal-specific URLs, override with `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.
+
 ## Ingestion
 
 | Signal | Source | Path |
 |--------|--------|------|
 | **Metrics** | relayer Prometheus `/metrics` (`memwal_*`) | collector `prometheus` receiver → OTLP → OpenObserve |
-| **Logs** | relayer/sidecar stdout with `LOG_FORMAT=json` | collector `file_log` (Docker json-file) → OpenObserve |
-| **Traces** | none yet (see Gaps) | collector `otlp` receiver wired and ready |
+| **Logs** | relayer `tracing` events | relayer OTLP HTTP `/v1/logs` → OpenObserve |
+| **Traces** | relayer request spans | relayer OTLP HTTP `/v1/traces` → OpenObserve |
 
-Run the relayer and sidecar with `LOG_FORMAT=json` so the collector parses the
-inner application JSON instead of opaque log lines.
+The collector still accepts OTLP on ports `4317`/`4318` and can tail Docker
+json-file logs for local debugging, but the production path is direct OTLP from
+the relayer. The app does **not** implement Prometheus `remote_write`; keep
+metrics on `/metrics` and let collector/Prometheus scrape them.
 
 ### Quick ingestion smoke test (no relayer needed)
 
@@ -94,23 +119,23 @@ Create under Alerts. Suggested PoC thresholds (tune per environment):
 
 ## Production / staging rollout notes
 
+- **Logs/traces**: set `OTEL_EXPORTER_OTLP_ENDPOINT` and
+  `OTEL_EXPORTER_OTLP_HEADERS` on the relayer. OpenObserve expects the endpoint
+  base to include `/api/<org>`, for example `/api/default`.
 - **Metrics**: keep the relayer `/metrics` endpoint reachable by the collector
   (private network). Set `RELAYER_METRICS_TARGET` to the staging relayer.
-- **Logs on Railway**: the `file_log` receiver tails Docker json-file logs, which
-  works for self-hosted / docker-compose. On Railway, forward logs via a Railway
-  log drain (HTTP) into OpenObserve's `/api/<org>/<stream>/_json` ingest, or run
-  the collector as a sidecar with access to the log stream.
-- Set `LOG_FORMAT=json` on the relayer and sidecar.
+- **Sidecar logs**: the TypeScript sidecar still writes to stdout. If sidecar
+  logs need OpenObserve coverage on Railway, forward them with a Railway log
+  drain or add sidecar OTLP instrumentation separately.
+- `LOG_FORMAT=json` remains useful for local stdout parsing, but OTLP logs do
+  not require Docker log tailing.
 - Replace the root credentials and pin image tags (this PoC uses `:latest`).
 
 ## Known gaps (follow-up)
 
-1. **Traces**: the Rust relayer has no OpenTelemetry instrumentation, so no
-   spans are emitted. The collector `traces` pipeline is wired; adding the
-   `tracing-opentelemetry` layer + OTLP exporter to the relayer is the next step.
-2. **Job-queue health**: there is no apalis/job-queue metric exposed today, so a
+1. **Job-queue health**: there is no apalis/job-queue metric exposed today, so a
    queue-depth/in-flight dashboard isn't possible without adding one.
-3. **External dependency status labels**: dependency failures are derived from
+2. **External dependency status labels**: dependency failures are derived from
    `memwal_external_request_duration_seconds{status}` and
    `memwal_sidecar_failures_total`; per-dependency (Walrus vs OpenAI vs Sui)
    breakdown depends on the `service` label values the relayer emits.
