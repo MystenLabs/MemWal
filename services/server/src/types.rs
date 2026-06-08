@@ -121,8 +121,9 @@ pub struct AppState {
 // ============================================================
 
 /// Wallet key holder for distributing Walrus uploads across configured server
-/// keys. Apalis retries call `next_index()` again at execution time, so a
-/// transient sponsor/RPC failure can move to the next wallet in the pool.
+/// keys. Routes and other non-retry callers use `next_index()` for round-robin
+/// starting assignments; wallet-job retries derive their next index from the
+/// job's starting index and attempt number.
 pub struct KeyPool {
     keys: Vec<String>,
     cursor: AtomicUsize,

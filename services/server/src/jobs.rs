@@ -20,8 +20,8 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
-    SIDECAR_WALRUS_DEP_VERSION, WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert,
-    WalrusPackageUpgradeDetectedAlert, WalrusUploadExhaustedAlert,
+    WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
+    WalrusUploadExhaustedAlert, SIDECAR_WALRUS_DEP_VERSION,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
@@ -128,6 +128,10 @@ fn default_epochs() -> u32 {
 /// neutral "standard" bucket on dequeue.
 fn default_importance() -> f32 {
     crate::services::extractor::IMPORTANCE_STANDARD
+}
+
+fn remember_job_failed_apalis_error(msg: String) -> Error {
+    Error::Failed(Arc::new(Box::new(io::Error::other(msg))))
 }
 
 pub(crate) async fn warm_blob_cache_after_upload(
@@ -244,22 +248,20 @@ async fn handle_legacy_remember_handoff_failure(
     pool: &sqlx::PgPool,
     remember_job_id: &str,
     msg: String,
-) -> Result<(), RememberJobError> {
-    match mark_remember_job_failed(pool, Some(remember_job_id), &msg).await {
-        Ok(()) => Ok(()),
-        Err(persist_err) => Err(RememberJobError::Internal(
-            remember_job_persist_failure_message(&msg, &persist_err),
-        )),
-    }
+) -> Result<(), Error> {
+    let classified =
+        classify_wallet_remember_handoff_failure(pool, Some(remember_job_id), msg).await;
+    Err(classified.into_apalis_error())
 }
 
 /// A wallet job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletJob {
     /// Index into `config.sui_private_keys` used by the sidecar for signing.
-    /// For `UploadAndTransfer`, this is the enqueue-time assignment used for
-    /// logging only; the worker selects a fresh round-robin wallet at execution
-    /// time so retries can move to another wallet.
+    /// For `UploadAndTransfer`, this is the enqueue-time starting assignment;
+    /// retries derive the next wallet from this index plus the Apalis attempt
+    /// number so a job can walk distinct pool wallets without relying on the
+    /// global round-robin cursor.
     pub wallet_index: usize,
     pub operation: WalletOperation,
 }
@@ -381,16 +383,60 @@ impl FromRequest<Request<WalletJob, apalis_sql::context::SqlContext>> for Wallet
     fn from_request(
         req: &Request<WalletJob, apalis_sql::context::SqlContext>,
     ) -> Result<Self, Error> {
-        let mut max =
-            usize::try_from(req.parts.context.max_attempts()).unwrap_or(MAX_ATTEMPTS as usize);
-        if max == 0 {
-            max = MAX_ATTEMPTS as usize;
-        }
-        Ok(Self {
-            current: req.parts.attempt.current(),
-            max,
-        })
+        wallet_attempt_info_from_request(req)
     }
+}
+
+impl FromRequest<Request<RememberJob, apalis_sql::context::SqlContext>> for WalletJobAttemptInfo {
+    fn from_request(
+        req: &Request<RememberJob, apalis_sql::context::SqlContext>,
+    ) -> Result<Self, Error> {
+        wallet_attempt_info_from_request(req)
+    }
+}
+
+fn wallet_attempt_info_from_request<T>(
+    req: &Request<T, apalis_sql::context::SqlContext>,
+) -> Result<WalletJobAttemptInfo, Error> {
+    let mut max =
+        usize::try_from(req.parts.context.max_attempts()).unwrap_or(MAX_ATTEMPTS as usize);
+    if max == 0 {
+        max = MAX_ATTEMPTS as usize;
+    }
+    Ok(WalletJobAttemptInfo {
+        current: req.parts.attempt.current(),
+        max,
+    })
+}
+
+/// Returns the wallet this job should use for a specific Apalis attempt. The
+/// starting wallet is chosen when the job is enqueued; retries advance from that
+/// start index deterministically so concurrent jobs cannot consume this job's
+/// next pool candidate through the global round-robin cursor.
+fn wallet_index_for_upload_attempt(
+    starting_wallet_index: usize,
+    attempt: usize,
+    pool_size: usize,
+) -> Option<usize> {
+    if pool_size == 0 {
+        return None;
+    }
+    let start = starting_wallet_index % pool_size;
+    let offset = attempt.saturating_sub(1) % pool_size;
+    Some(start.wrapping_add(offset) % pool_size)
+}
+
+fn stable_wallet_start_index(seed: &str, pool_size: usize) -> Option<usize> {
+    if pool_size == 0 {
+        return None;
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some((hash as usize) % pool_size)
 }
 
 // ============================================================
@@ -400,9 +446,10 @@ impl FromRequest<Request<WalletJob, apalis_sql::context::SqlContext>> for Wallet
 /// Apalis worker handler for WalletJob.
 ///
 /// Multiple concurrent invocations of this handler share the `wallet_jobs`
-/// queue. Upload jobs select a fresh wallet index at execution time; legacy
-/// metadata-transfer jobs keep their pinned wallet because the blob object is
-/// owned by the wallet that registered/certified it.
+/// queue. Upload jobs derive the execution wallet from the enqueued starting
+/// wallet and current attempt; legacy metadata-transfer jobs keep their pinned
+/// wallet because the blob object is owned by the wallet that
+/// registered/certified it.
 pub(crate) async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
@@ -423,7 +470,11 @@ pub(crate) async fn execute_wallet_job(
             remember_job_id,
             epochs,
         } => {
-            let wallet_index = match state.key_pool.next_index() {
+            let wallet_index = match wallet_index_for_upload_attempt(
+                enqueued_wallet_index,
+                attempt_info.current,
+                state.key_pool.len(),
+            ) {
                 Some(index) => index,
                 None => {
                     return Err(WalletJobError::Permanent(
@@ -433,11 +484,13 @@ pub(crate) async fn execute_wallet_job(
                     .into_apalis_error());
                 }
             };
-            if wallet_index != enqueued_wallet_index {
+            if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(
-                    "[wallet-job:upload] reassigned wallet at execution: enqueued={} executing={}",
+                    "[wallet-job:upload] selected wallet for attempt: enqueued={} executing={} attempt={}/{}",
                     enqueued_wallet_index,
                     wallet_index,
+                    attempt_info.current,
+                    attempt_info.max,
                 );
             }
             execute_upload_and_transfer(
@@ -523,9 +576,9 @@ pub(crate) async fn execute_wallet_job(
                                 return Err(classified.into_apalis_error());
                             }
                             tracing::warn!(
-                                    "[wallet-job:set-metadata] finalization failed after transfer; enqueued index-only retry: {}",
-                                    err
-                                );
+                                "[wallet-job:set-metadata] finalization failed after transfer; enqueued index-only retry: {}",
+                                err
+                            );
                         }
                         Ok(())
                     }
@@ -535,16 +588,14 @@ pub(crate) async fn execute_wallet_job(
                     )),
                 },
                 Err(err) => {
-                    // Same gas-pool escalation as the upload path: a
-                    // balance::split failure stays retriable until the pool is
-                    // exhausted, then aborts. Dispatch the dedicated ops alert
-                    // here too so a gas-pool failure on the metadata-transfer
-                    // recovery path isn't silently marked failed.
+                    // This operation is pinned to the wallet that owns the blob,
+                    // so retrying cannot rotate onto another pool candidate.
+                    // Escalate a balance::split gas-budget failure immediately.
                     let err = escalate_if_gas_pool_exhausted(
                         err,
                         attempt_info.current,
                         attempt_info.max,
-                        state.key_pool.len(),
+                        1,
                     );
                     let msg = err.to_string();
                     maybe_alert_walrus_gas_pool_exhausted(
@@ -1126,13 +1177,12 @@ async fn maybe_alert_walrus_object_locked(
 }
 
 /// Attempts after which repeated gas-budget (`balance::split` ENotEnough)
-/// failures are treated as pool-level exhaustion rather than a single starved
-/// wallet. Upload retries rotate round-robin across the pool, so once the
-/// attempt count reaches the pool size (capped by the max attempt budget) every
-/// candidate wallet has been tried. At least 1, so a single-wallet pool
-/// escalates immediately (nothing else to rotate onto).
-fn gas_pool_exhaustion_threshold(pool_size: usize, max_attempts: usize) -> usize {
-    pool_size.min(max_attempts).max(1)
+/// failures are treated as candidate-level exhaustion rather than a single
+/// starved wallet. Upload jobs pass the configured pool size because retries
+/// walk that pool deterministically. Pinned operations pass 1 because they
+/// cannot rotate onto another wallet.
+fn gas_pool_exhaustion_threshold(candidate_wallets: usize, max_attempts: usize) -> usize {
+    candidate_wallets.min(max_attempts).max(1)
 }
 
 /// Escalate a retriable gas-budget failure to an aborting `GasPoolExhausted`
@@ -1144,11 +1194,11 @@ fn escalate_if_gas_pool_exhausted(
     classified: WalletJobError,
     attempt: usize,
     max_attempts: usize,
-    pool_size: usize,
+    candidate_wallets: usize,
 ) -> WalletJobError {
     if let WalletJobError::Transient(ref msg) = classified {
         if WalletJobError::is_gas_pool_budget_error(msg)
-            && attempt >= gas_pool_exhaustion_threshold(pool_size, max_attempts)
+            && attempt >= gas_pool_exhaustion_threshold(candidate_wallets, max_attempts)
         {
             return WalletJobError::GasPoolExhausted(msg.clone());
         }
@@ -1441,22 +1491,6 @@ pub struct RememberJob {
 /// Type alias for the RememberJob Apalis storage.
 pub type RememberJobStorage = PostgresStorage<RememberJob>;
 
-/// Error type for the RememberJob handler.
-#[derive(Debug)]
-pub enum RememberJobError {
-    Internal(String),
-}
-
-impl std::fmt::Display for RememberJobError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RememberJobError::Internal(msg) => write!(f, "remember job error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for RememberJobError {}
-
 /// Apalis handler for the full remember pipeline.
 ///
 /// Steps:
@@ -1471,7 +1505,8 @@ impl std::error::Error for RememberJobError {}
 pub async fn execute_remember(
     job: RememberJob,
     ctx: Data<Arc<AppState>>,
-) -> Result<(), RememberJobError> {
+    attempt_info: WalletJobAttemptInfo,
+) -> Result<(), Error> {
     let state: &AppState = &ctx;
 
     // ── Step 1: mark running ──────────────────────────────────────
@@ -1494,7 +1529,7 @@ pub async fn execute_remember(
             .bind(&job.job_id)
             .execute(state.db.pool())
             .await;
-            return Err(RememberJobError::Internal(msg));
+            return Err(remember_job_failed_apalis_error(msg));
         }};
     }
 
@@ -1505,10 +1540,14 @@ pub async fn execute_remember(
     };
     // vector is also pre-computed in route handler — no network call needed here.
 
-    let key_index = match state.key_pool.next_index() {
+    let key_pool_len = state.key_pool.len();
+    let starting_key_index = match stable_wallet_start_index(&job.job_id, key_pool_len) {
         Some(idx) => idx,
         None => fail!("No Sui keys configured in pool"),
     };
+    let key_index =
+        wallet_index_for_upload_attempt(starting_key_index, attempt_info.current, key_pool_len)
+            .expect("non-empty key pool must yield wallet index");
 
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
     let upload_result = crate::storage::walrus::upload_blob(
@@ -1607,9 +1646,57 @@ pub async fn execute_remember(
                     job.job_id,
                     msg
                 );
-                return Err(RememberJobError::Internal(msg));
+                let classified = WalletJobError::classify_sidecar_error(&msg);
+                update_remember_job_after_wallet_error(state, Some(&job.job_id), &classified, &msg)
+                    .await;
+                return Err(classified.into_apalis_error());
             }
-            fail!(msg);
+            let classified = escalate_if_gas_pool_exhausted(
+                WalletJobError::classify_sidecar_error(&msg),
+                attempt_info.current,
+                attempt_info.max,
+                key_pool_len,
+            );
+            maybe_alert_walrus_object_locked(
+                state,
+                &classified,
+                Some(&job.job_id),
+                Some(&job.owner),
+                Some(&job.namespace),
+                &msg,
+            )
+            .await;
+            maybe_alert_walrus_gas_pool_exhausted(
+                state,
+                &classified,
+                Some(&job.job_id),
+                Some(&job.owner),
+                Some(&job.namespace),
+                key_index,
+                &msg,
+            )
+            .await;
+            maybe_alert_walrus_upload_exhausted(
+                state,
+                &classified,
+                attempt_info,
+                Some(&job.job_id),
+                &job.owner,
+                &job.namespace,
+                key_index,
+                &msg,
+            )
+            .await;
+            update_remember_job_after_wallet_error(state, Some(&job.job_id), &classified, &msg)
+                .await;
+            tracing::error!(
+                "[remember-job] job_id={} {} classification={} retryable={}",
+                job.job_id,
+                msg,
+                classified.kind(),
+                !classified.aborts_retries()
+            );
+            return Err(classified.into_apalis_error());
         }
     };
     let blob_id = upload.blob_id.clone();
@@ -1797,13 +1884,15 @@ mod tests {
     use super::{
         classify_wallet_remember_handoff_failure, escalate_if_gas_pool_exhausted,
         gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch,
-        mark_remember_job_failed, parse_locked_object_info, wallet_job_request, WalletJob,
-        WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
+        mark_remember_job_failed, parse_locked_object_info, wallet_index_for_upload_attempt,
+        wallet_job_request, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
+        MAX_ATTEMPTS,
     };
 
     /// The exact production error string from the object-lock incident
     /// (testnet job 3d607892…). Used to pin the classifier against real output.
-    const PROD_OBJECT_LOCK_ERROR: &str = "walrus upload failed: Internal Error: walrus upload failed: \
+    const PROD_OBJECT_LOCK_ERROR: &str =
+        "walrus upload failed: Internal Error: walrus upload failed: \
 Transaction is rejected as invalid by more than 1/3 of validators by stake (non-retriable). \
 Non-retriable errors: [Object (0x36f866a4d400ec3dd5d8b0bac30cc36ab6d56172634a6b4dea9e2a554a43b08e, \
 SequenceNumber(884613305), o#B61aVqEgDskxru255FTdzua2RxbbnhDMFxmQ8SCxvj3n) already locked by a \
@@ -2013,11 +2102,23 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     #[test]
+    fn wallet_retry_selection_walks_pool_from_enqueued_wallet() {
+        // This selection is per-job and does not depend on the global KeyPool
+        // cursor, so concurrent jobs cannot consume this job's next wallet.
+        let picked: Vec<_> = (1..=5)
+            .map(|attempt| wallet_index_for_upload_attempt(3, attempt, 4).unwrap())
+            .collect();
+        assert_eq!(picked, vec![3, 0, 1, 2, 3]);
+    }
+
+    #[test]
     fn gas_pool_one_bad_wallet_keeps_retrying_onto_healthy_wallet() {
         // pool of 2: the first wallet's balance::split must stay retriable so the
         // job rotates onto the second (healthy) wallet instead of failing.
         let classified = WalletJobError::classify_sidecar_error(BALANCE_SPLIT_ERR);
-        let after = escalate_if_gas_pool_exhausted(classified, /*attempt*/ 1, /*max*/ 5, /*pool*/ 2);
+        let after = escalate_if_gas_pool_exhausted(
+            classified, /*attempt*/ 1, /*max*/ 5, /*pool*/ 2,
+        );
         assert!(
             matches!(after, WalletJobError::Transient(_)) && !after.aborts_retries(),
             "single bad wallet must keep retrying, got {:?}",
@@ -2030,7 +2131,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         // pool of 2, both wallets hit balance::split → at attempt 2 we have tried
         // every candidate wallet → escalate to an aborting GasPoolExhausted.
         let classified = WalletJobError::classify_sidecar_error(BALANCE_SPLIT_ERR);
-        let after = escalate_if_gas_pool_exhausted(classified, /*attempt*/ 2, /*max*/ 5, /*pool*/ 2);
+        let after = escalate_if_gas_pool_exhausted(
+            classified, /*attempt*/ 2, /*max*/ 5, /*pool*/ 2,
+        );
         assert!(
             matches!(after, WalletJobError::GasPoolExhausted(_)),
             "exhausted pool must escalate, got {:?}",
@@ -2039,6 +2142,16 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         assert!(after.aborts_retries());
         assert!(!after.is_permanent());
         assert_eq!(after.kind(), "gas_pool_exhausted");
+    }
+
+    #[test]
+    fn gas_pool_pinned_wallet_escalates_immediately() {
+        // Metadata-transfer recovery is pinned to the blob owner wallet, so
+        // there are no alternate pool candidates to try.
+        let classified = WalletJobError::classify_sidecar_error(BALANCE_SPLIT_ERR);
+        let after =
+            escalate_if_gas_pool_exhausted(classified, /*attempt*/ 1, /*max*/ 5, 1);
+        assert!(matches!(after, WalletJobError::GasPoolExhausted(_)));
     }
 
     #[test]
