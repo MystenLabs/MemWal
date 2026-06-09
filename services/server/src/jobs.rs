@@ -696,7 +696,7 @@ async fn execute_set_metadata_and_transfer(
     .await;
 
     match set_metadata_result {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(e) => {
             let msg = e.to_string();
             let classified = WalletJobError::classify_sidecar_error(&msg);
