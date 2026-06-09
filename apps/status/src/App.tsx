@@ -3,7 +3,7 @@ import { AlertTriangle, ChevronLeft, ChevronRight, Rss, X } from 'lucide-react'
 
 type StatusKind = 'operational' | 'degraded' | 'outage' | 'monitoring' | 'unknown'
 type LoadState = 'loading' | 'ready' | 'error'
-type PageRoute = 'current' | 'history' | 'uptime'
+type PageRoute = 'current' | 'history' | 'uptime' | 'admin'
 
 interface HealthPayload {
   status?: string
@@ -38,6 +38,33 @@ interface StatusHistory {
   buckets: HistoryBucket[]
 }
 
+interface IncidentUpdate {
+  id: number
+  status: string
+  message: string
+  createdAt: string
+}
+
+interface Incident {
+  id: number
+  identifier: string
+  title: string
+  status: string
+  severity: string
+  component: string | null
+  message: string
+  startedAt: string
+  resolvedAt: string | null
+  createdAt: string
+  updatedAt: string
+  updates?: IncidentUpdate[]
+}
+
+interface IncidentList {
+  active: Incident[]
+  recent: Incident[]
+}
+
 interface StatusSnapshot {
   generatedAt: string
   service: {
@@ -57,6 +84,7 @@ interface StatusSnapshot {
     error: string | null
   }
   history: StatusHistory
+  incidents?: IncidentList
   database?: {
     configured: boolean
     ready: boolean
@@ -102,6 +130,7 @@ const statusLabel: Record<StatusKind, string> = {
 }
 
 function pathToRoute(pathname: string): PageRoute {
+  if (pathname.startsWith('/admin')) return 'admin'
   if (pathname.startsWith('/uptime')) return 'uptime'
   if (pathname.startsWith('/history')) return 'history'
   return 'current'
@@ -256,7 +285,20 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
   ]
 }
 
-function buildIncidentDays(history: StatusHistory | null | undefined, count = 10): IncidentDay[] {
+function buildIncidentDays(history: StatusHistory | null | undefined, incidents: IncidentList | null | undefined, count = 10): IncidentDay[] {
+  const realIncidents = incidents?.active?.length || incidents?.recent?.length
+    ? [...(incidents.active ?? []), ...(incidents.recent ?? [])]
+    : []
+
+  if (realIncidents.length > 0) {
+    return realIncidents.slice(0, count).map((incident) => ({
+      date: incident.startedAt.slice(0, 10),
+      label: formatIncidentDate(new Date(incident.startedAt)),
+      status: incident.status === 'resolved' ? 'none' : (incident.severity === 'critical' ? 'outage' : 'degraded'),
+      message: `${incident.identifier}: ${incident.title} — ${incident.message}`,
+    }))
+  }
+
   const buckets = history?.buckets?.length ? history.buckets : emptyHistoryBuckets()
 
   return buckets.slice(-count).reverse().map((bucket, index) => {
@@ -415,12 +457,14 @@ function ComponentStatusRow({ row }: { row: ComponentRow }) {
 
 function IncidentHistory({
   history,
+  incidents,
   count,
 }: {
   history: StatusHistory | null | undefined
+  incidents: IncidentList | null | undefined
   count: number
 }) {
-  const incidentDays = buildIncidentDays(history, count)
+  const incidentDays = buildIncidentDays(history, incidents, count)
 
   return (
     <section className="incident-history" aria-label="Past incidents">
@@ -558,20 +602,28 @@ function StatusFooter({
   route: PageRoute
   onNavigate: (href: string) => void
 }) {
-  const href = route === 'current' ? '/history' : '/'
-  const label = route === 'current' ? 'Incident History' : 'Current Status'
+  const links = []
+  if (route !== 'current') links.push({ href: '/', label: 'Current Status' })
+  if (route !== 'history') links.push({ href: '/history', label: 'Incident History' })
+  if (route !== 'uptime') links.push({ href: '/uptime', label: 'Uptime' })
+  if (route !== 'admin') links.push({ href: '/admin', label: 'Admin' })
 
   return (
     <footer className="status-footer">
-      <a
-        href={href}
-        onClick={(event) => {
-          event.preventDefault()
-          onNavigate(href)
-        }}
-      >
-        <span aria-hidden="true">←</span> {label}
-      </a>
+      <div className="status-footer__links">
+        {links.map((link) => (
+          <a
+            key={link.href}
+            href={link.href}
+            onClick={(event) => {
+              event.preventDefault()
+              onNavigate(link.href)
+            }}
+          >
+            {link.label}
+          </a>
+        ))}
+      </div>
       <span>Powered by Walrus Memory</span>
     </footer>
   )
@@ -592,6 +644,289 @@ async function loadSnapshot(signal: AbortSignal) {
   return response.json() as Promise<StatusSnapshot>
 }
 
+async function loadIncidents(): Promise<Incident[]> {
+  const response = await fetch('/api/incidents', {
+    method: 'GET',
+    cache: 'no-store',
+    headers: { accept: 'application/json' },
+  })
+  if (!response.ok) throw new Error(`Incidents API returned HTTP ${response.status}`)
+  const data = await response.json()
+  return data.incidents ?? []
+}
+
+async function createIncidentApi(payload: Record<string, unknown>, apiKey: string): Promise<Incident> {
+  const response = await fetch('/api/incidents', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-API-Key': apiKey,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(err.error || `HTTP ${response.status}`)
+  }
+  return response.json()
+}
+
+async function addIncidentUpdateApi(incidentId: number, payload: Record<string, unknown>, apiKey: string): Promise<Incident> {
+  const response = await fetch(`/api/incidents/${incidentId}/updates`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-API-Key': apiKey,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(err.error || `HTTP ${response.status}`)
+  }
+  return response.json()
+}
+
+async function resolveIncidentApi(incidentId: number, apiKey: string): Promise<Incident> {
+  const response = await fetch(`/api/incidents/${incidentId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-API-Key': apiKey,
+    },
+    body: JSON.stringify({ status: 'resolved', resolvedAt: new Date().toISOString() }),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(err.error || `HTTP ${response.status}`)
+  }
+  return response.json()
+}
+
+async function deleteIncidentApi(incidentId: number, apiKey: string): Promise<void> {
+  const response = await fetch(`/api/incidents/${incidentId}`, {
+    method: 'DELETE',
+    headers: {
+      'X-Admin-API-Key': apiKey,
+    },
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+    throw new Error(err.error || `HTTP ${response.status}`)
+  }
+}
+
+function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange: (key: string) => void }) {
+  const [incidents, setIncidents] = useState<Incident[]>([])
+  const [loadState, setLoadState] = useState<LoadState>('loading')
+  const [error, setError] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [formSuccess, setFormSuccess] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    setLoadState('loading')
+    try {
+      const data = await loadIncidents()
+      setIncidents(data)
+      setLoadState('ready')
+      setError(null)
+    } catch (e) {
+      setLoadState('error')
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const handleCreate = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormError(null)
+    setFormSuccess(null)
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const payload = {
+      title: String(formData.get('title') || ''),
+      status: String(formData.get('status') || 'investigating'),
+      severity: String(formData.get('severity') || 'minor'),
+      component: String(formData.get('component') || ''),
+      message: String(formData.get('message') || ''),
+      startedAt: new Date().toISOString(),
+    }
+    if (!payload.title || !payload.message) {
+      setFormError('Title and message are required.')
+      return
+    }
+    try {
+      await createIncidentApi(payload, apiKey)
+      setFormSuccess('Incident created.')
+      form.reset()
+      void refresh()
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleUpdate = async (incidentId: number, event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormError(null)
+    setFormSuccess(null)
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const payload = {
+      status: String(formData.get('status') || ''),
+      message: String(formData.get('message') || ''),
+    }
+    if (!payload.message) {
+      setFormError('Message is required.')
+      return
+    }
+    try {
+      await addIncidentUpdateApi(incidentId, payload, apiKey)
+      setFormSuccess('Update posted.')
+      form.reset()
+      void refresh()
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleResolve = async (incidentId: number) => {
+    setFormError(null)
+    setFormSuccess(null)
+    try {
+      await resolveIncidentApi(incidentId, apiKey)
+      setFormSuccess('Incident resolved.')
+      void refresh()
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleDelete = async (incidentId: number) => {
+    if (!window.confirm('Delete this incident permanently?')) return
+    setFormError(null)
+    setFormSuccess(null)
+    try {
+      await deleteIncidentApi(incidentId, apiKey)
+      setFormSuccess('Incident deleted.')
+      void refresh()
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <section className="admin-panel" aria-label="Incident administration">
+      <h1>Incident Administration</h1>
+
+      <div className="admin-api-key">
+        <label>
+          Admin API Key
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => onApiKeyChange(e.target.value)}
+            placeholder="Enter STATUS_ADMIN_API_KEY"
+          />
+        </label>
+      </div>
+
+      {(formError || formSuccess) && (
+        <div className={`admin-alert ${formError ? 'admin-alert--error' : 'admin-alert--success'}`}>
+          {formError || formSuccess}
+        </div>
+      )}
+
+      <div className="admin-section">
+        <h2>Create Incident</h2>
+        <form onSubmit={handleCreate} className="admin-form">
+          <label>
+            Title
+            <input name="title" type="text" placeholder="e.g., Degraded API performance" required />
+          </label>
+          <label>
+            Status
+            <select name="status" defaultValue="investigating">
+              <option value="investigating">Investigating</option>
+              <option value="identified">Identified</option>
+              <option value="monitoring">Monitoring</option>
+              <option value="resolved">Resolved</option>
+            </select>
+          </label>
+          <label>
+            Severity
+            <select name="severity" defaultValue="minor">
+              <option value="minor">Minor</option>
+              <option value="major">Major</option>
+              <option value="critical">Critical</option>
+            </select>
+          </label>
+          <label>
+            Component
+            <input name="component" type="text" placeholder="e.g., Walrus Memory Relayer" />
+          </label>
+          <label>
+            Message
+            <textarea name="message" rows={3} placeholder="Initial incident message" required />
+          </label>
+          <button type="submit" disabled={!apiKey}>Create Incident</button>
+        </form>
+      </div>
+
+      <div className="admin-section">
+        <h2>Existing Incidents</h2>
+        {loadState === 'loading' && <p>Loading incidents…</p>}
+        {loadState === 'error' && <p className="admin-alert admin-alert--error">{error}</p>}
+        {loadState === 'ready' && incidents.length === 0 && <p>No incidents yet.</p>}
+        {loadState === 'ready' && incidents.length > 0 && (
+          <div className="admin-incident-list">
+            {incidents.map((incident) => (
+              <article key={incident.id} className={`admin-incident admin-incident--${incident.status}`}>
+                <div className="admin-incident__header">
+                  <strong>{incident.identifier}</strong>
+                  <span>{incident.title}</span>
+                  <span className={`status-pill status-pill--${incident.status === 'resolved' ? 'operational' : 'outage'}`}>
+                    {incident.status}
+                  </span>
+                </div>
+                <p>{incident.message}</p>
+                {incident.updates && incident.updates.length > 0 && (
+                  <div className="admin-incident__updates">
+                    {incident.updates.map((u) => (
+                      <div key={u.id}>
+                        <strong>{u.status}</strong> — {u.message}
+                        <em>{new Date(u.createdAt).toLocaleString()}</em>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {incident.status !== 'resolved' && (
+                  <form onSubmit={(e) => handleUpdate(incident.id, e)} className="admin-form admin-form--inline">
+                    <select name="status" defaultValue={incident.status}>
+                      <option value="investigating">Investigating</option>
+                      <option value="identified">Identified</option>
+                      <option value="monitoring">Monitoring</option>
+                      <option value="resolved">Resolved</option>
+                    </select>
+                    <input name="message" type="text" placeholder="Update message" required />
+                    <button type="submit" disabled={!apiKey}>Post Update</button>
+                    <button type="button" disabled={!apiKey} onClick={() => handleResolve(incident.id)}>Resolve</button>
+                  </form>
+                )}
+                <button type="button" className="admin-delete-btn" disabled={!apiKey} onClick={() => handleDelete(incident.id)}>
+                  Delete
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 export default function App() {
   const [route, setRoute] = useState<PageRoute>(() => pathToRoute(window.location.pathname))
   const [snapshot, setSnapshot] = useState<StatusSnapshot | null>(null)
@@ -600,12 +935,28 @@ export default function App() {
   const [selectedComponentName, setSelectedComponentName] = useState('Walrus Memory Relayer')
   const [calendarPage, setCalendarPage] = useState(0)
   const [subscribeOpen, setSubscribeOpen] = useState(false)
+  const [adminApiKey, setAdminApiKey] = useState(() => {
+    try {
+      return sessionStorage.getItem('statusAdminKey') || ''
+    } catch {
+      return ''
+    }
+  })
 
   const navigate = useCallback((href: string) => {
     window.history.pushState(null, '', href)
     setRoute(pathToRoute(href))
     setSubscribeOpen(false)
     window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [])
+
+  const handleApiKeyChange = useCallback((key: string) => {
+    setAdminApiKey(key)
+    try {
+      sessionStorage.setItem('statusAdminKey', key)
+    } catch {
+      // ignore
+    }
   }, [])
 
   const refresh = useCallback(async () => {
@@ -699,15 +1050,19 @@ export default function App() {
               </div>
             </section>
 
-            <IncidentHistory history={snapshot?.history} count={10} />
+            <IncidentHistory history={snapshot?.history} incidents={snapshot?.incidents} count={10} />
           </>
         )}
 
         {route === 'history' && (
           <>
             <HistoryTabs route={route} onNavigate={navigate} />
-            <IncidentHistory history={snapshot?.history} count={30} />
+            <IncidentHistory history={snapshot?.history} incidents={snapshot?.incidents} count={30} />
           </>
+        )}
+
+        {route === 'admin' && (
+          <AdminPanel apiKey={adminApiKey} onApiKeyChange={handleApiKeyChange} />
         )}
 
         {route === 'uptime' && (
