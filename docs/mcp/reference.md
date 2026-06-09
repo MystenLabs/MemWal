@@ -3,11 +3,11 @@ title: "Reference"
 description: "Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting."
 ---
 
-This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For a guided walkthrough, start with the [Quick Start](/mcp/quick-start).
+This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
 
 ## Tools
 
-The MCP server exposes **six tools** — four **memory tools** that round-trip to the relayer, and two **session tools** served locally by the stdio package.
+The MCP server exposes **eight tools** — six **relayer tools** (memory operations plus a health check) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
 
 ## First-run behavior
 
@@ -23,16 +23,25 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a fact to the user's Walrus Memory personal memory. Call only when the user explicitly asks to remember or save something. Pass the full statement — do not summarize.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity) — not only when explicitly asked. Pass the full statement — do not summarize.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `text` | string | yes | The complete fact to save. |
 | `namespace` | string | no | Namespace bucket. Defaults to the session namespace. |
 
+### memwal_remember_bulk
+
+Save several durable facts in one batched call — preferred over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `facts` | string[] (1–20) | yes | Array of complete fact statements — one full fact per entry, no summarizing. |
+| `namespace` | string | no | Namespace bucket applied to every fact. Defaults to the session namespace. |
+
 ### memwal_recall
 
-Search the user's Walrus Memory memory for facts relevant to a query. Returns matches ranked by relevance.
+Search the user's Walrus Memory for facts relevant to a query. The agent calls this **proactively** at the start of a task or when the user references past work, decisions, or preferences. Returns matches ranked by relevance.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -57,6 +66,10 @@ Re-index a namespace from Walrus blobs back into the relayer's search index. Ret
 | --- | --- | --- | --- |
 | `namespace` | string | yes | Namespace bucket to restore. |
 | `limit` | integer (1–500) | no | Max memories to re-index. Default `10`. |
+
+### memwal_health
+
+Lightweight connectivity check. Calls the relayer's public `/health` endpoint (no request signing, no search or decryption) and returns its `status` and `version`. Use this to confirm the server is reachable — **not** `memwal_recall`, which is a full retrieval round-trip. Takes no parameters.
 
 ### memwal_login
 
@@ -300,7 +313,7 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 
 ### Recall returns "No matching memories found" right after a remember
 
-`memwal_remember` enqueues an async upload to Walrus. Embedding generation, SEAL encryption, blob upload, and DB indexing typically take 5–15 seconds. Wait, then retry the recall.
+`memwal_remember` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
 
 ### 401 Unauthorized from the relayer
 
