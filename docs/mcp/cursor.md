@@ -1,6 +1,7 @@
 ---
-title: "Cursor"
-description: "Add portable Walrus Memory to Cursor via the MemWal MCP server."
+title: Cursor
+description: Add portable Walrus Memory to Cursor through the MemWal MCP server.
+keywords: [MCP, Cursor, Walrus Memory, MemWal, plugin, automatic memory]
 ---
 
 Add MemWal to Cursor so the agent can save and recall durable facts. The **MCP server** (memory tools, below) works on every Cursor version; Cursor's plugin system can also add **lifecycle hooks** for extra reinforcement (see [Lifecycle hooks](#lifecycle-hooks-plugin)).
@@ -8,7 +9,7 @@ Add MemWal to Cursor so the agent can save and recall durable facts. The **MCP s
 ## Prerequisites
 
 - Node.js 20+
-- A Walrus Memory account — the first memory tool call opens a browser sign-in (`memwal_login`).
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
@@ -55,10 +56,10 @@ The hook scripts ship inside the plugin bundle (`packages/mcp/plugin/`); hook su
 
 ## Verify
 
-Ask the agent *"what MCP tools do you have available?"* — you should see the `memwal_*` tools. State a durable fact ("I prefer pnpm") and confirm the agent saves it with `memwal_remember`.
+Ask the agent what MCP tools it has available. You should see the `memwal_*` tools. State a durable fact (for example, a preferred package manager) and confirm the agent saves it with `memwal_remember`.
 
 ## Troubleshooting
 
-- **Tools missing** — restart Cursor; check the MCP connection status in Settings.
-- **Not signed in** — ask the agent to run `memwal_login`, approve in the browser, then retry.
-- **`memwal_recall` returns nothing although you saved before** — run `memwal_restore <namespace>` to rebuild the index from Walrus.
+- **Tools missing**: restart Cursor; check the MCP connection status in Settings.
+- **Not signed in**: ask the agent to run `memwal_login`, approve in the browser, then retry.
+- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.

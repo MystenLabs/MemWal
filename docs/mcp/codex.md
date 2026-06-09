@@ -1,14 +1,15 @@
 ---
-title: "Codex"
-description: "Add portable Walrus Memory to OpenAI Codex — as a full plugin with automatic memory, or as a plain MCP server."
+title: Codex
+description: Add portable Walrus Memory to OpenAI Codex as a full plugin with automatic memory, or as a plain MCP server.
+keywords: [MCP, Codex, Walrus Memory, MemWal, plugin, automatic memory]
 ---
 
-Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended — adds automatic-memory hooks) or as **MCP-only** (just the tools).
+Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
 
 ## Prerequisites
 
 - Node.js 20+
-- A Walrus Memory account — the first memory tool call opens a browser sign-in (`memwal_login`).
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
@@ -46,17 +47,17 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
 </Tabs>
 
 <Warning>
-Don't combine both options — the plugin installer already registers `[mcp_servers.memwal]`. Adding it again creates a duplicate server.
+Do not combine both options: the plugin installer already registers `[mcp_servers.memwal]`. Adding it again creates a duplicate server.
 </Warning>
 
-## What's included
+## What the plugin includes
 
 | Component | Plugin | MCP-only |
 |---|:-:|:-:|
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
 
-MCP-only still saves and recalls on its own — the tools are proactive. The plugin adds hooks that reinforce it and make the agent prefer Walrus Memory over any built-in memory.
+MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent prefer Walrus Memory over any built-in memory.
 
 ## Available tools
 
@@ -82,11 +83,11 @@ See [Reference](/mcp/reference) for full parameters.
 
 ## Verify
 
-Ask the agent *"what MCP tools do you have available?"* — you should see the `memwal_*` tools, including `memwal_remember_bulk` and `memwal_health`. Then state a durable fact and confirm it's saved with `memwal_remember`.
+Ask the agent what MCP tools it has available. You should see the `memwal_*` tools, including `memwal_remember_bulk` and `memwal_health`. Then state a durable fact and confirm the agent saves it with `memwal_remember`.
 
 ## Troubleshooting
 
-- **Tools missing** — restart Codex.
-- **Duplicate `memwal` errors** — you have both the plugin and a manual `[mcp_servers.memwal]`; remove the manual entry.
-- **Hooks not firing** — confirm `codex_hooks = true` under `[features]` in `~/.codex/config.toml`, and that you restarted Codex.
-- **`memwal_recall` returns nothing although you saved before** — run `memwal_restore <namespace>` to rebuild the index from Walrus.
+- **Tools missing**: restart Codex.
+- **Duplicate `memwal` errors**: you have both the plugin and a manual `[mcp_servers.memwal]`; remove the manual entry.
+- **Hooks not firing**: confirm `codex_hooks = true` under `[features]` in `~/.codex/config.toml`, and that you restarted Codex.
+- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.

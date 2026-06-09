@@ -1,14 +1,15 @@
 ---
-title: "Claude Code"
-description: "Add portable Walrus Memory to Claude Code — as a full plugin with automatic memory, or as a plain MCP server."
+title: Claude Code
+description: Add portable Walrus Memory to Claude Code as a full plugin with automatic memory, or as a plain MCP server.
+keywords: [MCP, Claude Code, Walrus Memory, MemWal, plugin, automatic memory]
 ---
 
-Add MemWal to Claude Code so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended — adds automatic-memory hooks) or as **MCP-only** (just the tools).
+Add MemWal to Claude Code so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
 
 ## Prerequisites
 
 - Node.js 20+
-- A Walrus Memory account — the first memory tool call opens a browser sign-in (`memwal_login`).
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
@@ -43,14 +44,14 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
   </Tab>
 </Tabs>
 
-## What's included
+## What the plugin includes
 
 | Component | Plugin | MCP-only |
 |---|:-:|:-:|
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
 
-MCP-only still saves and recalls on its own — the tools are proactive. The plugin adds hooks that reinforce it and make the agent **prefer Walrus Memory over Claude Code's built-in memory**.
+MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent **prefer Walrus Memory over Claude Code's built-in memory**.
 
 ## Available tools
 
@@ -83,7 +84,7 @@ You:   I prefer pnpm and always use TypeScript strict mode.
 Agent: (calls memwal_remember on its own to store both preferences)
 ```
 
-**Session 2 — a brand-new chat**
+**Session 2: a brand-new chat**
 
 ```
 You:   set up a new package in this repo
@@ -97,11 +98,11 @@ Agent: (calls memwal_recall, finds your preferences)
 /mcp          → "memwal" should be Connected
 ```
 
-Expand its tools and confirm `memwal_remember_bulk` and `memwal_health` are listed. Then state a durable fact and check that the agent saves it with `memwal_remember`.
+Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`. Then state a durable fact and check that the agent saves it with `memwal_remember`.
 
 ## Troubleshooting
 
-- **Tools missing** — restart Claude Code (MCP servers load at startup).
-- **Not signed in** — ask the agent to run `memwal_login`, approve in the browser, then retry.
-- **Hooks not firing** — use the **Plugin** install, not MCP-only; the hooks ship only with the plugin.
-- **`memwal_recall` returns nothing although you saved before** — run `memwal_restore <namespace>` to rebuild the index from Walrus.
+- **Tools missing**: restart Claude Code (MCP servers load at startup).
+- **Not signed in**: ask the agent to run `memwal_login`, approve in the browser, then retry.
+- **Hooks not firing**: use the **Plugin** install, not MCP-only; the hooks ship only with the plugin.
+- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.

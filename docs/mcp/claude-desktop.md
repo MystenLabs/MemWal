@@ -1,14 +1,15 @@
 ---
-title: "Claude Desktop"
-description: "Add portable Walrus Memory to Claude Desktop via the MemWal MCP server."
+title: Claude Desktop
+description: Add portable Walrus Memory to Claude Desktop through the MemWal MCP server.
+keywords: [MCP, Claude Desktop, Walrus Memory, MemWal, memory]
 ---
 
-Add MemWal to Claude Desktop so the agent can save and recall durable facts. Claude Desktop uses the **MCP server** (the memory tools); the automatic-memory plugin hooks are available on [Claude Code](/mcp/claude-code) and [Codex](/mcp/codex).
+Add MemWal to Claude Desktop so the agent can save and recall durable facts. Claude Desktop uses the **MCP server** (the memory tools); the automatic-memory plugin hooks are available on [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), [Cursor](/mcp/cursor), and [Antigravity](/mcp/antigravity).
 
 ## Prerequisites
 
 - Node.js 20+
-- A Walrus Memory account — the first memory tool call opens a browser sign-in (`memwal_login`).
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
@@ -29,7 +30,7 @@ Add the server to your Claude Desktop config:
 }
 ```
 
-Quit and reopen Claude Desktop (`Cmd+Q` on macOS — closing the window is not enough), then ask the agent to run `memwal_login` on first use.
+Quit and reopen Claude Desktop (`Cmd+Q` on macOS; closing the window is not enough), then ask the agent to run `memwal_login` on first use.
 
 ## Available tools
 
@@ -47,10 +48,10 @@ The tool descriptions tell the agent to save and recall proactively. See [Refere
 
 ## Verify
 
-Ask the agent *"what MCP tools do you have available?"* — you should see the `memwal_*` tools. State a durable fact and confirm the agent saves it with `memwal_remember`.
+Ask the agent what MCP tools it has available. You should see the `memwal_*` tools. State a durable fact and confirm the agent saves it with `memwal_remember`.
 
 ## Troubleshooting
 
-- **Tools missing** — fully quit and reopen Claude Desktop (`Cmd+Q`).
-- **Not signed in** — ask the agent to run `memwal_login`, approve in the browser, then retry.
-- **`memwal_recall` returns nothing although you saved before** — run `memwal_restore <namespace>` to rebuild the index from Walrus.
+- **Tools missing**: fully quit and reopen Claude Desktop (`Cmd+Q`).
+- **Not signed in**: ask the agent to run `memwal_login`, approve in the browser, then retry.
+- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.

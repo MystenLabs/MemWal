@@ -1,6 +1,7 @@
 ---
-title: "Antigravity"
-description: "Add portable Walrus Memory to Antigravity via the MemWal MCP server."
+title: Antigravity
+description: Add portable Walrus Memory to Antigravity through the MemWal MCP server.
+keywords: [MCP, Antigravity, Walrus Memory, MemWal, plugin, automatic memory]
 ---
 
 Add MemWal to Antigravity so the agent recalls context and saves durable facts. Install it as a **plugin** (adds automatic-memory hooks) or as **MCP-only** (just the tools).
@@ -8,7 +9,7 @@ Add MemWal to Antigravity so the agent recalls context and saves durable facts. 
 ## Prerequisites
 
 - Node.js 20+
-- A Walrus Memory account — the first memory tool call opens a browser sign-in (`memwal_login`).
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
@@ -37,7 +38,7 @@ Add MemWal to Antigravity so the agent recalls context and saves durable facts. 
   </Tab>
 </Tabs>
 
-## What's included
+## What the plugin includes
 
 | Component | Plugin | MCP-only |
 |---|:-:|:-:|
@@ -68,10 +69,10 @@ The tool descriptions tell the agent to save and recall proactively. See [Refere
 
 ## Verify
 
-Ask the agent *"what MCP tools do you have available?"* — you should see the `memwal_*` tools. State a durable fact and confirm the agent saves it with `memwal_remember`.
+Ask the agent what MCP tools it has available. You should see the `memwal_*` tools. State a durable fact and confirm the agent saves it with `memwal_remember`.
 
 ## Troubleshooting
 
-- **Tools missing** — restart Antigravity after installation.
-- **Not signed in** — ask the agent to run `memwal_login`, approve in the browser, then retry.
-- **`memwal_recall` returns nothing although you saved before** — run `memwal_restore <namespace>` to rebuild the index from Walrus.
+- **Tools missing**: restart Antigravity after installation.
+- **Not signed in**: ask the agent to run `memwal_login`, approve in the browser, then retry.
+- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.

@@ -1,13 +1,14 @@
 ---
-title: "Reference"
-description: "Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting."
+title: Reference
+description: Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting.
+keywords: [MCP, Walrus Memory, MemWal, reference, CLI, transports, self-hosting]
 ---
 
 This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
 
 ## Tools
 
-The MCP server exposes **eight tools** — six **relayer tools** (memory operations plus a health check) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
+The MCP server exposes **eight tools**: six **relayer tools** (memory operations plus a health check) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
 
 ## First-run behavior
 
@@ -23,7 +24,7 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity) — not only when explicitly asked. Pass the full statement — do not summarize.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity), not only when the user explicitly asks. Pass the full statement; do not summarize.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -32,11 +33,11 @@ Save a durable fact to the user's Walrus Memory. The agent calls this **proactiv
 
 ### memwal_remember_bulk
 
-Save several durable facts in one batched call — preferred over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
+Save several durable facts in one batched call. Prefer this over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `facts` | string[] (1–20) | yes | Array of complete fact statements — one full fact per entry, no summarizing. |
+| `facts` | string[] (1–20) | yes | Array of complete fact statements, one full fact per entry, no summarizing. |
 | `namespace` | string | no | Namespace bucket applied to every fact. Defaults to the session namespace. |
 
 ### memwal_recall
@@ -69,7 +70,7 @@ Re-index a namespace from Walrus blobs back into the relayer's search index. Ret
 
 ### memwal_health
 
-Lightweight connectivity check. Calls the relayer's public `/health` endpoint (no request signing, no search or decryption) and returns its `status` and `version`. Use this to confirm the server is reachable — **not** `memwal_recall`, which is a full retrieval round-trip. Takes no parameters.
+Lightweight connectivity check. Calls the relayer's public `/health` endpoint (no request signing, no search or decryption) and returns its `status` and `version`. Use this to confirm the server is reachable instead of `memwal_recall`, which is a full retrieval round-trip. Takes no parameters.
 
 ### memwal_login
 
