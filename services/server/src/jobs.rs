@@ -690,7 +690,7 @@ async fn execute_set_metadata_and_transfer(
         agent_id.as_deref(),
         vec![SetMetadataBatchEntry {
             blob_object_id,
-            namespace,
+            namespace: namespace.clone(),
         }],
     )
     .await;
