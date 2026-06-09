@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import postgres from 'postgres'
@@ -70,11 +71,33 @@ function adminApiKey() {
   return (process.env.STATUS_ADMIN_API_KEY || '').trim()
 }
 
+const ALLOWED_INCIDENT_STATUSES = ['investigating', 'identified', 'monitoring', 'resolved']
+const ALLOWED_SEVERITIES = ['minor', 'major', 'critical']
+
+function isValidStatus(value) {
+  return ALLOWED_INCIDENT_STATUSES.includes(value)
+}
+
+function isValidSeverity(value) {
+  return ALLOWED_SEVERITIES.includes(value)
+}
+
+function isValidDate(value) {
+  if (!value) return false
+  const d = new Date(value)
+  return !Number.isNaN(d.getTime())
+}
+
 function isAdminAuthValid(req) {
   const key = adminApiKey()
   if (!key) return false
   const header = req.headers['x-admin-api-key'] || ''
-  return header === key
+  if (header.length !== key.length) return false
+  try {
+    return timingSafeEqual(Buffer.from(header), Buffer.from(key))
+  } catch {
+    return false
+  }
 }
 
 function isDatabaseConfigured() {
@@ -427,12 +450,37 @@ async function readLatestCheck() {
 async function listIncidents(limit = 50, offset = 0) {
   if (!(await ensureDatabaseReady())) return []
 
-  const rows = await getSql()`
+  const db = getSql()
+  const rows = await db`
     SELECT id, identifier, title, status, severity, component, message, started_at, resolved_at, created_at, updated_at
     FROM incidents
     ORDER BY created_at DESC
     LIMIT ${limit} OFFSET ${offset}
   `
+
+  if (!rows.length) return []
+
+  const ids = rows.map((r) => Number(r.id))
+  const updateRows = await db`
+    SELECT id, incident_id, status, message, created_at
+    FROM incident_updates
+    WHERE incident_id IN ${db(ids)}
+    ORDER BY created_at DESC
+  `
+
+  const updatesByIncident = new Map()
+  for (const u of updateRows) {
+    const incidentId = Number(u.incident_id)
+    if (!updatesByIncident.has(incidentId)) {
+      updatesByIncident.set(incidentId, [])
+    }
+    updatesByIncident.get(incidentId).push({
+      id: Number(u.id),
+      status: u.status,
+      message: u.message,
+      createdAt: new Date(u.created_at).toISOString(),
+    })
+  }
 
   return rows.map((row) => ({
     id: Number(row.id),
@@ -446,6 +494,7 @@ async function listIncidents(limit = 50, offset = 0) {
     resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
+    updates: updatesByIncident.get(Number(row.id)) || [],
   }))
 }
 
@@ -494,39 +543,44 @@ async function createIncident(payload) {
   if (!(await ensureDatabaseReady())) return null
 
   const db = getSql()
-  const rows = await db`
-    INSERT INTO incidents (title, status, severity, component, message, started_at)
-    VALUES (
-      ${payload.title},
-      ${payload.status},
-      ${payload.severity},
-      ${payload.component || null},
-      ${payload.message},
-      ${new Date(payload.startedAt || Date.now())}
-    )
-    RETURNING id
-  `
+  const id = await db.begin(async (trx) => {
+    const rows = await trx`
+      INSERT INTO incidents (title, status, severity, component, message, started_at)
+      VALUES (
+        ${payload.title},
+        ${payload.status},
+        ${payload.severity},
+        ${payload.component || null},
+        ${payload.message},
+        ${new Date(payload.startedAt || Date.now())}
+      )
+      RETURNING id
+    `
 
-  const id = rows[0]?.id
-  if (!id) return null
+    const id = rows[0]?.id
+    if (!id) return null
 
-  const identifier = `WM-INC-${id}`
-  await db`UPDATE incidents SET identifier = ${identifier} WHERE id = ${id}`
+    const identifier = `WM-INC-${id}`
+    await trx`UPDATE incidents SET identifier = ${identifier} WHERE id = ${id}`
 
-  if (payload.updates?.length) {
-    for (const update of payload.updates) {
-      await db`
-        INSERT INTO incident_updates (incident_id, status, message, created_at)
-        VALUES (${id}, ${update.status}, ${update.message}, ${new Date(update.createdAt || Date.now())})
+    if (payload.updates?.length) {
+      for (const update of payload.updates) {
+        await trx`
+          INSERT INTO incident_updates (incident_id, status, message, created_at)
+          VALUES (${id}, ${update.status}, ${update.message}, ${new Date(update.createdAt || Date.now())})
+        `
+      }
+    } else {
+      await trx`
+        INSERT INTO incident_updates (incident_id, status, message)
+        VALUES (${id}, ${payload.status}, ${payload.message})
       `
     }
-  } else {
-    await db`
-      INSERT INTO incident_updates (incident_id, status, message)
-      VALUES (${id}, ${payload.status}, ${payload.message})
-    `
-  }
 
+    return id
+  })
+
+  if (!id) return null
   return getIncidentWithUpdates(id)
 }
 
@@ -561,6 +615,17 @@ async function updateIncident(id, payload) {
     WHERE id = ${id}
   `
 
+  // If status changed to resolved and no update row was explicitly added, record it
+  if (payload.status === 'resolved' && existing.status !== 'resolved') {
+    const updateMessage = payload.message && payload.message !== existing.message
+      ? payload.message
+      : 'Incident resolved.'
+    await db`
+      INSERT INTO incident_updates (incident_id, status, message)
+      VALUES (${id}, 'resolved', ${updateMessage})
+    `
+  }
+
   return getIncidentWithUpdates(id)
 }
 
@@ -591,8 +656,8 @@ async function addIncidentUpdate(incidentId, payload) {
 
 async function deleteIncident(id) {
   if (!(await ensureDatabaseReady())) return false
-  await getSql()`DELETE FROM incidents WHERE id = ${id}`
-  return true
+  const result = await getSql()`DELETE FROM incidents WHERE id = ${id}`
+  return result.count > 0
 }
 
 async function readActiveAndRecentIncidents(days = 30) {
@@ -1075,6 +1140,18 @@ const server = createServer(async (req, res) => {
           sendJson(res, 400, { error: 'Missing required fields: title, status, severity, message' })
           return
         }
+        if (!isValidStatus(body.status)) {
+          sendJson(res, 400, { error: `Invalid status. Allowed: ${ALLOWED_INCIDENT_STATUSES.join(', ')}` })
+          return
+        }
+        if (!isValidSeverity(body.severity)) {
+          sendJson(res, 400, { error: `Invalid severity. Allowed: ${ALLOWED_SEVERITIES.join(', ')}` })
+          return
+        }
+        if (body.startedAt && !isValidDate(body.startedAt)) {
+          sendJson(res, 400, { error: 'Invalid startedAt date' })
+          return
+        }
         const incident = await createIncident(body)
         if (!incident) {
           sendJson(res, 500, { error: 'Failed to create incident' })
@@ -1118,6 +1195,22 @@ const server = createServer(async (req, res) => {
       }
       try {
         const body = await readJsonBody(req)
+        if (body.status !== undefined && !isValidStatus(body.status)) {
+          sendJson(res, 400, { error: `Invalid status. Allowed: ${ALLOWED_INCIDENT_STATUSES.join(', ')}` })
+          return
+        }
+        if (body.severity !== undefined && !isValidSeverity(body.severity)) {
+          sendJson(res, 400, { error: `Invalid severity. Allowed: ${ALLOWED_SEVERITIES.join(', ')}` })
+          return
+        }
+        if (body.startedAt !== undefined && !isValidDate(body.startedAt)) {
+          sendJson(res, 400, { error: 'Invalid startedAt date' })
+          return
+        }
+        if (body.resolvedAt !== undefined && body.resolvedAt && !isValidDate(body.resolvedAt)) {
+          sendJson(res, 400, { error: 'Invalid resolvedAt date' })
+          return
+        }
         const incident = await updateIncident(incidentId, body)
         if (!incident) {
           sendJson(res, 404, { error: 'Incident not found' })
@@ -1169,6 +1262,14 @@ const server = createServer(async (req, res) => {
           sendJson(res, 400, { error: 'Missing required fields: status, message' })
           return
         }
+        if (!isValidStatus(body.status)) {
+          sendJson(res, 400, { error: `Invalid status. Allowed: ${ALLOWED_INCIDENT_STATUSES.join(', ')}` })
+          return
+        }
+        if (body.createdAt && !isValidDate(body.createdAt)) {
+          sendJson(res, 400, { error: 'Invalid createdAt date' })
+          return
+        }
         const incident = await addIncidentUpdate(incidentId, body)
         if (!incident) {
           sendJson(res, 404, { error: 'Incident not found' })
@@ -1203,11 +1304,6 @@ const server = createServer(async (req, res) => {
       console.error('[status-service] failed to build history feed', error)
       sendText(res, 500, 'Status feed failed to build')
     }
-    return
-  }
-
-  if (method !== 'GET' && method !== 'HEAD') {
-    sendJson(res, 405, { error: 'Method not allowed' })
     return
   }
 
