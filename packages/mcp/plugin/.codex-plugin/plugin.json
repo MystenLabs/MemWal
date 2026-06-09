@@ -1,0 +1,29 @@
+{
+  "name": "memwal",
+  "version": "0.0.5",
+  "description": "Persistent Walrus Memory for Codex. Remembers decisions, preferences, and project context across sessions.",
+  "author": {
+    "name": "Mysten Labs",
+    "url": "https://memory.walrus.xyz"
+  },
+  "homepage": "https://memory.walrus.xyz",
+  "repository": "https://github.com/MystenLabs/MemWal",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "personalization", "mcp", "walrus", "semantic-search"],
+  "mcpServers": "./.codex-mcp.json",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "MemWal",
+    "shortDescription": "Portable, encrypted memory layer for AI coding workflows",
+    "longDescription": "MemWal adds long-term, user-owned memory to Codex. Store decisions, preferences, and session context; memories are encrypted with SEAL and stored on Walrus, and retrieved via semantic search so Codex always has the right context.",
+    "developerName": "Mysten Labs",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://memory.walrus.xyz",
+    "defaultPrompt": [
+      "Search my memories for recent project decisions",
+      "Remember that I prefer pnpm and TypeScript strict mode",
+      "What do you know about my coding preferences?"
+    ]
+  }
+}

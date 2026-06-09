@@ -1,0 +1,19 @@
+{
+  "name": "memwal-plugins",
+  "interface": {
+    "displayName": "MemWal Plugins"
+  },
+  "plugins": [
+    {
+      "name": "memwal",
+      "source": {
+        "source": "local",
+        "path": "./packages/mcp/plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
