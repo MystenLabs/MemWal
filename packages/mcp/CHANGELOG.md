@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.6
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+
 ## 0.0.5
 
 ### Added
