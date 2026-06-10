@@ -3,6 +3,11 @@ name = "memwal-indexer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+grpc = ["dep:sui-rpc", "dep:tonic", "dep:bcs", "dep:hex"]
+grpc_smoke = ["grpc"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -24,11 +29,20 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Utils
+chrono = "0.4"
+
 # Error handling
 thiserror = "1"
 
 # Async trait
 async-trait = "0.1"
 
-# Utils
-chrono = "0.4"
+# gRPC dependencies (gated behind "grpc" feature)
+sui-rpc = { version = "0.3", optional = true }
+tonic = { version = "0.14", optional = true }
+bcs = { version = "0.1", optional = true }
+hex = { version = "0.4", optional = true }
+
+[dev-dependencies]
+sqlx = { version = "0.8", features = ["sqlite"] }
