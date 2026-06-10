@@ -138,8 +138,12 @@
             "group": "Model Context Protocol",
             "pages": [
               "mcp/overview",
-              "mcp/quick-start",
-              "mcp/how-it-works",
+              "mcp/claude-code",
+              "mcp/codex",
+              "mcp/cursor",
+              "mcp/claude-desktop",
+              "mcp/antigravity",
+              "mcp/opencode",
               "mcp/reference",
               "mcp/changelog"
             ]

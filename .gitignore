@@ -132,3 +132,6 @@ plans/
 # reviewable life in past PRs.
 services/server/review/
 claudedocs/
+
+# Temp File
+temp/

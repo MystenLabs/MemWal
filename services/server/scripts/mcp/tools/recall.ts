@@ -28,6 +28,10 @@ const RECALL_INPUT = {
  *
  * Returns top-K most relevant memories (cosine distance over embeddings),
  * with the original plaintext decrypted server-side via SEAL.
+ *
+ * Call this PROACTIVELY at the start of a task, or whenever the user
+ * references past work, prior decisions, or their preferences — don't wait
+ * to be asked.
  */
 export function registerRecallTool(
     server: McpServer,
@@ -35,7 +39,7 @@ export function registerRecallTool(
 ): void {
     server.tool(
         "memwal_recall",
-        "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+        "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
         RECALL_INPUT,
         wrapTool<{ query: string; limit: number; namespace?: string }>(async ({ query, limit, namespace }) => {
             const result = await session.memwal.recall(query, limit, namespace);
