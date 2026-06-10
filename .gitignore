@@ -119,6 +119,8 @@ railway-*.md
 
 # Per-developer MCP client config (user paths)
 .mcp.json
+# ...but the marketplace plugin must ship its own MCP config
+!packages/mcp/plugin/.mcp.json
 
 # Personal/internal planning notes — never include in repo
 plans/
