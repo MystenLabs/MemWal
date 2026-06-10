@@ -9,11 +9,10 @@
 ///
 /// The indexer tracks its cursor in `indexer_state` table so it can resume
 /// from where it left off after restarts.
-mod sui;
-mod json_rpc;
+mod app;
 mod extractors;
-
-use std::time::Duration;
+mod json_rpc;
+mod sui;
 
 // ============================================================
 // Config
@@ -97,145 +96,46 @@ async fn main() {
 
     tracing::info!("database connected, tables ready");
 
-    let http_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("memwal-indexer/0.1")
-        .build()
-        .expect("Failed to build HTTP client");
-
-    let event_source = json_rpc::JsonRpcEventSource::new(
-        http_client,
-        config.sui_rpc_url,
-        config.package_id.clone(),
-    );
-
     let filter = sui::EventFilter::MoveEventType {
         package_id: config.package_id.clone(),
         module: "account".to_string(),
         event: "AccountCreated".to_string(),
     };
 
-    let poll_interval = tokio::time::Duration::from_secs(config.poll_interval_secs);
+    #[cfg(not(feature = "grpc"))]
+    let event_source: Box<dyn sui::EventSource> = {
+        use std::time::Duration;
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("memwal-indexer/0.1")
+            .build()
+            .expect("Failed to build HTTP client");
+        Box::new(json_rpc::JsonRpcEventSource::new(
+            http_client,
+            config.sui_rpc_url,
+            config.package_id,
+        ))
+    };
 
-    // Load cursor
-    let mut cursor = load_cursor(&pool).await;
-    if let Some(ref c) = cursor {
-        tracing::info!("resuming from cursor: {}", c);
-    } else {
-        tracing::info!("starting from beginning (no saved cursor)");
-    }
+    #[cfg(feature = "grpc")]
+    let event_source: Box<dyn sui::EventSource> = {
+        let grpc_source = sui::grpc::GrpcEventSource::new(config.sui_rpc_url)
+            .await
+            .expect("Failed to create gRPC event source");
+        Box::new(grpc_source)
+    };
 
-    let mut event_source = Box::new(event_source) as Box<dyn sui::EventSource>;
+    let mut app = app::IndexerApp::new(
+        event_source,
+        pool,
+        filter,
+        50,
+        tokio::time::Duration::from_secs(config.poll_interval_secs),
+    );
 
-    loop {
-        match event_source.query_events(filter.clone(), cursor.clone(), 50).await {
-            Ok(page) => {
-                let count = page.events.len();
-                if count > 0 {
-                    tracing::info!("fetched {} events", count);
-                }
-
-                for event in &page.events {
-                    if let Err(e) = process_event(&pool, event).await {
-                        tracing::error!("failed to process event: {}", e);
-                    }
-                }
-
-                if let Some(new_cursor) = page.next_cursor {
-                    save_cursor(&pool, &new_cursor).await;
-                    cursor = Some(new_cursor);
-                }
-
-                if page.has_next_page {
-                    continue;
-                }
-            }
-            Err(e) => {
-                tracing::error!("failed to poll events: {}", e);
-            }
-        }
-
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-// ============================================================
-// Event Processing
-// ============================================================
-
-async fn process_event(pool: &sqlx::PgPool, event: &sui::SuiEvent) -> Result<(), String> {
-    let json = event.json.as_ref().ok_or("missing parsed json")?;
-
-    let account_id = json
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing account_id in event".to_string())?;
-
-    let owner = json
-        .get("owner")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing owner in event".to_string())?;
-
-    sqlx::query(
-        "INSERT INTO accounts (account_id, owner)
-         VALUES ($1, $2)
-         ON CONFLICT (account_id) DO NOTHING",
-    )
-    .bind(account_id)
-    .bind(owner)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to insert account: {}", e))?;
-
-    tracing::info!("indexed account: {} (owner: {})", account_id, owner);
-    Ok(())
-}
-
-// ============================================================
-// Cursor Persistence
-// ============================================================
-
-async fn load_cursor(pool: &sqlx::PgPool) -> Option<sui::EventId> {
-    let result: Option<(String,)> = sqlx::query_as(
-        "SELECT value FROM indexer_state WHERE key = 'event_cursor'"
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-
-    result.and_then(|(json_str,)| {
-        // Try new string format first
-        if let Ok(id) = json_str.parse::<sui::EventId>() {
-            return Some(id);
-        }
-        // Fall back to old JSON format
-        #[derive(serde::Deserialize)]
-        struct OldCursor {
-            #[serde(rename = "txDigest")]
-            tx_digest: String,
-            #[serde(rename = "eventSeq")]
-            event_seq: String,
-        }
-        serde_json::from_str::<OldCursor>(&json_str).ok().map(|c| sui::EventId {
-            tx_digest: c.tx_digest,
-            event_seq: c.event_seq.parse().unwrap_or(0),
-        })
-    })
-}
-
-async fn save_cursor(pool: &sqlx::PgPool, cursor: &sui::EventId) {
-    let cursor_str = cursor.to_string();
-    if let Err(e) = sqlx::query(
-        "INSERT INTO indexer_state (key, value)
-         VALUES ('event_cursor', $1)
-         ON CONFLICT (key) DO UPDATE SET value = $1",
-    )
-    .bind(&cursor_str)
-    .execute(pool)
-    .await
-    {
-        tracing::warn!("failed to save cursor: {}", e);
+    if let Err(e) = app.run().await {
+        tracing::error!("indexer exited with error: {}", e);
+        std::process::exit(1);
     }
 }
 
