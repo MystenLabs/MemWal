@@ -10,8 +10,8 @@
 /// The indexer tracks its cursor in `indexer_state` table so it can resume
 /// from where it left off after restarts.
 mod sui;
+mod json_rpc;
 
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // ============================================================
@@ -39,36 +39,6 @@ impl Config {
                 .expect("POLL_INTERVAL_SECS must be a number"),
         }
     }
-}
-
-// ============================================================
-// Sui Event Types
-// ============================================================
-
-#[derive(Debug, Deserialize)]
-struct EventPage {
-    data: Vec<SuiEvent>,
-    #[serde(rename = "nextCursor")]
-    next_cursor: Option<EventCursor>,
-    #[serde(rename = "hasNextPage")]
-    has_next_page: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct EventCursor {
-    #[serde(rename = "txDigest")]
-    tx_digest: String,
-    #[serde(rename = "eventSeq")]
-    event_seq: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SuiEvent {
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    event_type: String,
-    #[serde(rename = "parsedJson")]
-    parsed_json: serde_json::Value,
 }
 
 // ============================================================
@@ -132,39 +102,49 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP client");
 
-    // Load saved cursor (if any)
+    let event_source = json_rpc::JsonRpcEventSource::new(
+        http_client,
+        config.sui_rpc_url,
+        config.package_id.clone(),
+    );
+
+    let filter = sui::EventFilter::MoveEventType {
+        package_id: config.package_id.clone(),
+        module: "account".to_string(),
+        event: "AccountCreated".to_string(),
+    };
+
+    let poll_interval = tokio::time::Duration::from_secs(config.poll_interval_secs);
+
+    // Load cursor
     let mut cursor = load_cursor(&pool).await;
     if let Some(ref c) = cursor {
-        tracing::info!("resuming from cursor: {}:{}", c.tx_digest, c.event_seq);
+        tracing::info!("resuming from cursor: {}", c);
     } else {
         tracing::info!("starting from beginning (no saved cursor)");
     }
 
-    // Main polling loop
-    let event_type = format!("{}::account::AccountCreated", config.package_id);
-    let poll_interval = tokio::time::Duration::from_secs(config.poll_interval_secs);
+    let mut event_source = Box::new(event_source) as Box<dyn sui::EventSource>;
 
     loop {
-        match poll_events(&http_client, &config, &event_type, &cursor).await {
+        match event_source.query_events(filter.clone(), cursor.clone(), 50).await {
             Ok(page) => {
-                let count = page.data.len();
+                let count = page.events.len();
                 if count > 0 {
                     tracing::info!("fetched {} events", count);
                 }
 
-                for event in &page.data {
+                for event in &page.events {
                     if let Err(e) = process_event(&pool, event).await {
                         tracing::error!("failed to process event: {}", e);
                     }
                 }
 
-                // Update cursor
                 if let Some(new_cursor) = page.next_cursor {
                     save_cursor(&pool, &new_cursor).await;
                     cursor = Some(new_cursor);
                 }
 
-                // If there are more pages, don't sleep — fetch immediately
                 if page.has_next_page {
                     continue;
                 }
@@ -179,111 +159,11 @@ async fn main() {
 }
 
 // ============================================================
-// Event Polling
-// ============================================================
-
-async fn poll_events(
-    client: &reqwest::Client,
-    config: &Config,
-    event_type: &str,
-    cursor: &Option<EventCursor>,
-) -> Result<EventPage, String> {
-    let cursor_json = match cursor {
-        Some(c) => serde_json::json!({
-            "txDigest": c.tx_digest,
-            "eventSeq": c.event_seq,
-        }),
-        None => serde_json::Value::Null,
-    };
-
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "suix_queryEvents",
-        "params": [
-            { "MoveEventType": event_type },
-            cursor_json,
-            50,   // limit
-            false  // descending = false (oldest first)
-        ]
-    });
-
-    let resp = client
-        .post(&config.sui_rpc_url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-    let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("<missing>")
-        .to_string();
-
-    let resp_bytes = resp.bytes().await.map_err(|e| {
-        format!(
-            "Failed to read response body: {} (status={}, content-type={})",
-            e, status, content_type
-        )
-    })?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "RPC HTTP error: status={}, content-type={}, body={}",
-            status,
-            content_type,
-            body_snippet(&resp_bytes),
-        ));
-    }
-
-    parse_event_page_response(&resp_bytes, &content_type)
-}
-
-fn parse_event_page_response(resp_bytes: &[u8], content_type: &str) -> Result<EventPage, String> {
-    let resp_json: serde_json::Value = serde_json::from_slice(resp_bytes).map_err(|e| {
-        format!(
-            "Failed to parse response JSON: {} (content-type={}, body={})",
-            e,
-            content_type,
-            body_snippet(resp_bytes),
-        )
-    })?;
-
-    if let Some(error) = resp_json.get("error") {
-        return Err(format!("RPC error: {}", error));
-    }
-
-    let result = resp_json
-        .get("result")
-        .ok_or_else(|| "No result in response".to_string())?;
-
-    let page: EventPage = serde_json::from_value(result.clone())
-        .map_err(|e| format!("Failed to parse event page: {}", e))?;
-
-    Ok(page)
-}
-
-fn body_snippet(bytes: &[u8]) -> String {
-    const MAX_CHARS: usize = 512;
-
-    let text = String::from_utf8_lossy(bytes);
-    let mut snippet: String = text.chars().take(MAX_CHARS).collect();
-    if text.chars().count() > MAX_CHARS {
-        snippet.push_str("...");
-    }
-    snippet.replace('\n', "\\n").replace('\r', "\\r")
-}
-
-// ============================================================
 // Event Processing
 // ============================================================
 
-async fn process_event(pool: &sqlx::PgPool, event: &SuiEvent) -> Result<(), String> {
-    let json = &event.parsed_json;
+async fn process_event(pool: &sqlx::PgPool, event: &sui::SuiEvent) -> Result<(), String> {
+    let json = event.json.as_ref().ok_or("missing parsed json")?;
 
     let account_id = json
         .get("account_id")
@@ -314,33 +194,47 @@ async fn process_event(pool: &sqlx::PgPool, event: &SuiEvent) -> Result<(), Stri
 // Cursor Persistence
 // ============================================================
 
-async fn load_cursor(pool: &sqlx::PgPool) -> Option<EventCursor> {
-    let result: Option<(String,)> =
-        sqlx::query_as("SELECT value FROM indexer_state WHERE key = 'event_cursor'")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+async fn load_cursor(pool: &sqlx::PgPool) -> Option<sui::EventId> {
+    let result: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM indexer_state WHERE key = 'event_cursor'"
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
 
-    result.and_then(|(json_str,)| serde_json::from_str::<EventCursor>(&json_str).ok())
+    result.and_then(|(json_str,)| {
+        // Try new string format first
+        if let Ok(id) = json_str.parse::<sui::EventId>() {
+            return Some(id);
+        }
+        // Fall back to old JSON format
+        #[derive(serde::Deserialize)]
+        struct OldCursor {
+            #[serde(rename = "txDigest")]
+            tx_digest: String,
+            #[serde(rename = "eventSeq")]
+            event_seq: String,
+        }
+        serde_json::from_str::<OldCursor>(&json_str).ok().map(|c| sui::EventId {
+            tx_digest: c.tx_digest,
+            event_seq: c.event_seq.parse().unwrap_or(0),
+        })
+    })
 }
 
-async fn save_cursor(pool: &sqlx::PgPool, cursor: &EventCursor) {
-    let json_str = serde_json::to_string(cursor).unwrap_or_default();
-
+async fn save_cursor(pool: &sqlx::PgPool, cursor: &sui::EventId) {
+    let cursor_str = cursor.to_string();
     if let Err(e) = sqlx::query(
         "INSERT INTO indexer_state (key, value)
          VALUES ('event_cursor', $1)
          ON CONFLICT (key) DO UPDATE SET value = $1",
     )
-    .bind(&json_str)
+    .bind(&cursor_str)
     .execute(pool)
     .await
     {
-        tracing::warn!(
-            "failed to save cursor (will re-process events on restart): {}",
-            e
-        );
+        tracing::warn!("failed to save cursor: {}", e);
     }
 }
 
@@ -359,46 +253,4 @@ fn redact_url(url: &str) -> String {
         }
     }
     url.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_event_page_response_accepts_valid_rpc_result() {
-        let body = br#"{
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "data": [],
-                "nextCursor": null,
-                "hasNextPage": false
-            }
-        }"#;
-
-        let page = parse_event_page_response(body, "application/json").unwrap();
-        assert_eq!(page.data.len(), 0);
-        assert!(!page.has_next_page);
-        assert!(page.next_cursor.is_none());
-    }
-
-    #[test]
-    fn parse_event_page_response_reports_non_json_body() {
-        let err = parse_event_page_response(b"<html>rate limited</html>", "text/html").unwrap_err();
-
-        assert!(err.contains("Failed to parse response JSON"));
-        assert!(err.contains("content-type=text/html"));
-        assert!(err.contains("<html>rate limited</html>"));
-    }
-
-    #[test]
-    fn body_snippet_escapes_newlines_and_truncates() {
-        let body = format!("{}\nnext", "a".repeat(600));
-        let snippet = body_snippet(body.as_bytes());
-
-        assert!(snippet.ends_with("..."));
-        assert!(!snippet.contains('\n'));
-        assert!(snippet.len() < body.len());
-    }
 }
