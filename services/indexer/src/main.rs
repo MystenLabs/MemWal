@@ -11,6 +11,7 @@
 /// from where it left off after restarts.
 mod sui;
 mod json_rpc;
+mod extractors;
 
 use std::time::Duration;
 
