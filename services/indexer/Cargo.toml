@@ -24,5 +24,11 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Error handling
+thiserror = "1"
+
+# Async trait
+async-trait = "0.1"
+
 # Utils
 chrono = "0.4"

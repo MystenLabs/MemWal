@@ -9,6 +9,8 @@
 ///
 /// The indexer tracks its cursor in `indexer_state` table so it can resume
 /// from where it left off after restarts.
+mod sui;
+
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
