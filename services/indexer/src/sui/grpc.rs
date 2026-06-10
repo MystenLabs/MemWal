@@ -187,3 +187,36 @@ fn map_proto_event(
         timestamp_ms: None,
     })
 }
+
+#[cfg(all(test, feature = "grpc_smoke"))]
+mod smoke_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_grpc_connectivity_and_list_events() {
+        let rpc_url = std::env::var("SUI_RPC_URL")
+            .unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string());
+
+        let mut source = GrpcEventSource::new(rpc_url)
+            .await
+            .expect("should connect to gRPC endpoint");
+
+        // Query with a harmless filter that likely returns no results
+        let page = source
+            .query_events(
+                EventFilter::MoveEventType {
+                    package_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                        .to_string(),
+                    module: "coin".to_string(),
+                    event: "CoinCreated".to_string(),
+                },
+                None,
+                1,
+            )
+            .await
+            .expect("query_events should not fail");
+
+        // We only care that the call succeeds; empty result is fine.
+        tracing::info!("smoke test received {} events", page.events.len());
+    }
+}
