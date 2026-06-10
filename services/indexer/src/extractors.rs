@@ -50,3 +50,61 @@ impl AccountCreatedExtractor {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sui::EventId;
+
+    #[test]
+    fn extract_from_json() {
+        let event = SuiEvent {
+            id: EventId {
+                tx_digest: "0x1234".to_string(),
+                event_seq: 0,
+            },
+            package_id: "0xpkg".to_string(),
+            module: "account".to_string(),
+            event_type: "0xpkg::account::AccountCreated".to_string(),
+            bcs: vec![],
+            json: Some(serde_json::json!({
+                "account_id": "0xabc",
+                "owner": "0xdef"
+            })),
+            timestamp_ms: None,
+        };
+        let row = AccountCreatedExtractor::extract(&event).unwrap();
+        assert_eq!(row.account_id, "0xabc");
+        assert_eq!(row.owner, "0xdef");
+    }
+
+    #[test]
+    fn extract_from_bcs() {
+        #[derive(serde::Serialize)]
+        struct AccountCreatedEvent {
+            account_id: [u8; 32],
+            owner: [u8; 32],
+        }
+        let payload = AccountCreatedEvent {
+            account_id: [1u8; 32],
+            owner: [2u8; 32],
+        };
+        let bcs = bcs::to_bytes(&payload).unwrap();
+
+        let event = SuiEvent {
+            id: EventId {
+                tx_digest: "0x1234".to_string(),
+                event_seq: 0,
+            },
+            package_id: "0xpkg".to_string(),
+            module: "account".to_string(),
+            event_type: "0xpkg::account::AccountCreated".to_string(),
+            bcs,
+            json: None,
+            timestamp_ms: None,
+        };
+        let row = AccountCreatedExtractor::extract(&event).unwrap();
+        assert_eq!(row.account_id, format!("0x{}", hex::encode([1u8; 32])));
+        assert_eq!(row.owner, format!("0x{}", hex::encode([2u8; 32])));
+    }
+}

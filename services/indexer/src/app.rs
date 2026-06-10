@@ -1,6 +1,5 @@
 use crate::extractors::AccountCreatedExtractor;
 use crate::sui::{EventFilter, EventId, EventSource, EventSourceError};
-use sqlx::PgPool;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -18,7 +17,7 @@ pub enum FatalError {
 
 pub struct IndexerApp {
     event_source: Box<dyn EventSource>,
-    pool: PgPool,
+    pool: sqlx::AnyPool,
     filter: EventFilter,
     limit: usize,
     poll_interval: Duration,
@@ -29,7 +28,7 @@ pub struct IndexerApp {
 impl IndexerApp {
     pub fn new(
         event_source: Box<dyn EventSource>,
-        pool: PgPool,
+        pool: sqlx::AnyPool,
         filter: EventFilter,
         limit: usize,
         poll_interval: Duration,
@@ -176,7 +175,7 @@ impl IndexerApp {
 
     async fn save_cursor_in_tx<'a>(
         &self,
-        tx: &mut sqlx::Transaction<'a, sqlx::Postgres>,
+        tx: &mut sqlx::Transaction<'a, sqlx::Any>,
         cursor: &EventId,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
@@ -188,5 +187,105 @@ impl IndexerApp {
         .execute(&mut **tx)
         .await
         .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sui::{EventFilter, EventId, EventPage, EventSource, EventSourceError, SuiEvent};
+    use async_trait::async_trait;
+
+    struct MockEventSource {
+        pages: Vec<EventPage>,
+        call_count: usize,
+    }
+
+    #[async_trait]
+    impl EventSource for MockEventSource {
+        async fn query_events(
+            &mut self,
+            _filter: EventFilter,
+            _cursor: Option<EventId>,
+            _limit: usize,
+        ) -> Result<EventPage, EventSourceError> {
+            if self.call_count < self.pages.len() {
+                let page = self.pages[self.call_count].clone();
+                self.call_count += 1;
+                Ok(page)
+            } else {
+                Ok(EventPage {
+                    events: vec![],
+                    next_cursor: None,
+                    has_next_page: false,
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn app_batches_and_saves_cursor() {
+        let _ = sqlx::any::install_drivers(&[sqlx::sqlite::any::DRIVER]);
+
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .expect("sqlite in-memory");
+
+        sqlx::raw_sql(
+            "CREATE TABLE accounts (account_id TEXT PRIMARY KEY, owner TEXT NOT NULL);
+             CREATE TABLE indexer_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mock = MockEventSource {
+            pages: vec![EventPage {
+                events: vec![
+                    SuiEvent {
+                        id: EventId { tx_digest: "0x1".to_string(), event_seq: 0 },
+                        package_id: "0xpkg".to_string(),
+                        module: "account".to_string(),
+                        event_type: "0xpkg::account::AccountCreated".to_string(),
+                        bcs: vec![],
+                        json: Some(serde_json::json!({"account_id": "acc1", "owner": "own1"})),
+                        timestamp_ms: None,
+                    },
+                ],
+                next_cursor: Some(EventId { tx_digest: "0x1".to_string(), event_seq: 0 }),
+                has_next_page: false,
+            }],
+            call_count: 0,
+        };
+
+        let mut app = IndexerApp::new(
+            Box::new(mock),
+            pool.clone(),
+            EventFilter::MoveEventType {
+                package_id: "0xpkg".to_string(),
+                module: "account".to_string(),
+                event: "AccountCreated".to_string(),
+            },
+            50,
+            Duration::from_secs(3600), // long poll interval so test doesn't loop
+        );
+
+        app.run_once().await.unwrap();
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+
+        let cursor: (String,) = sqlx::query_as(
+            "SELECT value FROM indexer_state WHERE key = 'event_cursor'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(cursor.0, "0x1:0");
     }
 }

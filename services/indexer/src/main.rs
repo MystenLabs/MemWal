@@ -81,12 +81,16 @@ async fn main() {
     tracing::info!("  package: {}", config.package_id);
     tracing::info!("  poll interval: {}s", config.poll_interval_secs);
 
-    // Connect to PostgreSQL
-    let pool = sqlx::postgres::PgPoolOptions::new()
+    // Install Any driver for PostgreSQL
+    sqlx::any::install_drivers(&[sqlx::postgres::any::DRIVER])
+        .expect("Failed to install PostgreSQL driver");
+
+    // Connect to database
+    let pool = sqlx::any::AnyPoolOptions::new()
         .max_connections(3)
         .connect(&config.database_url)
         .await
-        .expect("Failed to connect to PostgreSQL");
+        .expect("Failed to connect to database");
 
     // Run migration
     sqlx::raw_sql(MIGRATION_SQL)
