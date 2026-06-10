@@ -39,7 +39,7 @@ thiserror = "1"
 async-trait = "0.1"
 
 # gRPC dependencies (gated behind "grpc" feature)
-sui-rpc = { version = "0.3", optional = true }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk", optional = true, features = ["unstable"] }
 tonic = { version = "0.14", optional = true }
 bcs = { version = "0.1", optional = true }
 hex = { version = "0.4", optional = true }

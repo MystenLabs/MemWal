@@ -79,3 +79,6 @@ pub trait EventSource: Send {
         limit: usize,
     ) -> Result<EventPage, EventSourceError>;
 }
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
