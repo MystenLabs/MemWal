@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
     WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
-    WalrusUploadExhaustedAlert, SIDECAR_WALRUS_DEP_VERSION,
+    WalrusUploadExhaustedAlert, WalrusWalletBalanceLowAlert, SIDECAR_WALRUS_DEP_VERSION,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
@@ -349,6 +349,7 @@ pub async fn execute_meta_transfer(
 /// Maximum number of attempts (1 initial + N-1 retries).
 #[allow(dead_code)]
 pub const MAX_ATTEMPTS: u32 = 5;
+const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
 
 /// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
 #[allow(dead_code)]
@@ -372,6 +373,9 @@ pub(crate) struct WalletJobAttemptInfo {
 
 impl WalletJobAttemptInfo {
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
+        if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+            return false;
+        }
         // Only retryable (non-aborting) errors can "exhaust" the budget. An
         // aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
         // immediately, so it never produces a misleading "exhausted" alert.
@@ -676,7 +680,7 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    crate::storage::walrus::set_metadata_batch(
+    let set_metadata_result = crate::storage::walrus::set_metadata_batch(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -686,22 +690,35 @@ async fn execute_set_metadata_and_transfer(
         agent_id.as_deref(),
         vec![SetMetadataBatchEntry {
             blob_object_id,
-            namespace,
+            namespace: namespace.clone(),
         }],
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
-        let msg = e.to_string();
-        let classified = WalletJobError::classify_sidecar_error(&msg);
-        if classified.is_permanent() {
-            tracing::error!(
-                "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
-                msg
-            );
+    .await;
+
+    match set_metadata_result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            let classified = WalletJobError::classify_sidecar_error(&msg);
+            maybe_alert_walrus_low_wal_balance(
+                state,
+                &classified,
+                wallet_index,
+                None,
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
+            if classified.is_permanent() {
+                tracing::error!(
+                    "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
+                    msg
+                );
+            }
+            Err(classified)
         }
-        classified
-    })
+    }
 }
 
 async fn insert_vector_and_mark_remember_done(
@@ -967,6 +984,16 @@ async fn execute_upload_and_transfer(
             maybe_alert_walrus_object_locked(
                 state,
                 &classified,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
+            maybe_alert_walrus_low_wal_balance(
+                state,
+                &classified,
+                wallet_index,
                 remember_job_id.as_deref(),
                 Some(&owner),
                 Some(&namespace),
@@ -1242,6 +1269,92 @@ async fn maybe_alert_walrus_gas_pool_exhausted(
     }
 }
 
+#[derive(Debug)]
+struct WalrusWALBalanceAlert {
+    required: Option<u64>,
+    available: u64,
+}
+
+fn extract_u64_after_token(message: &str, token: &str) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    let start = lower.find(token)?;
+    let mut saw_digit = false;
+    let mut digits = String::new();
+    for ch in lower[start + token.len()..].chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            digits.push(ch);
+        } else if saw_digit {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn parse_wal_balance_alert_info(message: &str) -> Option<WalrusWALBalanceAlert> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("insufficient balance") || !lower.contains("::wal::wal") {
+        return None;
+    }
+
+    let available = extract_u64_after_token(message, "available:")?;
+    if available >= WAL_BALANCE_LOW_THRESHOLD_MIST {
+        return None;
+    }
+
+    Some(WalrusWALBalanceAlert {
+        required: extract_u64_after_token(message, "required:"),
+        available,
+    })
+}
+
+async fn maybe_alert_walrus_low_wal_balance(
+    state: &AppState,
+    error: &WalletJobError,
+    wallet_index: usize,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    msg: &str,
+) {
+    if !matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+        return;
+    }
+
+    let info = match parse_wal_balance_alert_info(msg) {
+        Some(info) => info,
+        None => return,
+    };
+
+    let alert = WalrusWalletBalanceLowAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        available: info.available,
+        required: info.required,
+        threshold: WAL_BALANCE_LOW_THRESHOLD_MIST,
+        wallet_index,
+        configured_wallets: state.key_pool.len(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state
+        .alerts
+        .notify_walrus_low_wal_balance(alert)
+        .await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for low WAL balance: {}",
+            err
+        );
+    }
+}
+
 async fn maybe_alert_walrus_upload_exhausted(
     state: &AppState,
     error: &WalletJobError,
@@ -1252,6 +1365,10 @@ async fn maybe_alert_walrus_upload_exhausted(
     wallet_index: usize,
     msg: &str,
 ) {
+    if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+        return;
+    }
+
     if !attempt_info.exhausted_by(error) {
         return;
     }
@@ -1306,6 +1423,10 @@ pub enum WalletJobError {
     Transient(String),
     /// Permanent failure — Apalis should mark Dead immediately (no retry).
     Permanent(String),
+    /// A wallet's WAL balance is below the alert threshold (default 2 WAL). This
+    /// keeps retries enabled so other pool wallets can carry the request, while
+    /// still surfacing a dedicated ops alert.
+    WalrusBalanceLow(String),
     /// A Sui owned object/version is locked to a competing transaction. The
     /// lock does not clear with immediate retries — it holds until the lock
     /// resolves, typically at the next epoch boundary — so retrying within the
@@ -1330,6 +1451,7 @@ impl WalletJobError {
         match self {
             WalletJobError::Transient(_) => "transient",
             WalletJobError::Permanent(_) => "permanent",
+            WalletJobError::WalrusBalanceLow(_) => "walrus_balance_low",
             WalletJobError::ObjectLockedUntilEpoch(_) => "object_locked_until_epoch",
             WalletJobError::GasPoolExhausted(_) => "gas_pool_exhausted",
         }
@@ -1370,6 +1492,9 @@ impl WalletJobError {
     /// Until the sidecar emits structured error codes, we match on substrings.
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        if parse_wal_balance_alert_info(msg).is_some() {
+            return WalletJobError::WalrusBalanceLow(msg.to_string());
+        }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
         // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
         // split to cover the sponsored budget (its SUI is fragmented or too low).
@@ -1437,6 +1562,7 @@ impl WalletJobError {
         let error = io::Error::other(self.to_string());
         match self {
             WalletJobError::Transient(_) => Error::Failed(Arc::new(Box::new(error))),
+            WalletJobError::WalrusBalanceLow(_) => Error::Failed(Arc::new(Box::new(error))),
             WalletJobError::Permanent(_)
             | WalletJobError::ObjectLockedUntilEpoch(_)
             | WalletJobError::GasPoolExhausted(_) => Error::Abort(Arc::new(Box::new(error))),
@@ -1451,6 +1577,9 @@ impl std::fmt::Display for WalletJobError {
             WalletJobError::Permanent(msg) => write!(f, "wallet job error (permanent): {}", msg),
             WalletJobError::ObjectLockedUntilEpoch(msg) => {
                 write!(f, "wallet job error (object locked until epoch): {}", msg)
+            }
+            WalletJobError::WalrusBalanceLow(msg) => {
+                write!(f, "wallet job error (insufficient WAL): {}", msg)
             }
             WalletJobError::GasPoolExhausted(msg) => {
                 write!(f, "wallet job error (gas pool exhausted): {}", msg)
@@ -1885,8 +2014,8 @@ mod tests {
         classify_wallet_remember_handoff_failure, escalate_if_gas_pool_exhausted,
         gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch,
         mark_remember_job_failed, parse_locked_object_info, wallet_index_for_upload_attempt,
-        wallet_job_request, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
-        MAX_ATTEMPTS,
+        wallet_job_request, parse_wal_balance_alert_info,
+        WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
     };
 
     /// The exact production error string from the object-lock incident
@@ -2076,6 +2205,33 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     const BALANCE_SPLIT_ERR: &str = "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}";
+    const LOW_WAL_BALANCE_ERR: &str =
+        "walrus upload failed: Insufficient balance of 0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL for owner 0xabc...def. Required: 64367730, Available: 10708877";
+
+    #[test]
+    fn parse_wal_balance_alert_info_extracts_required_and_available() {
+        let parsed = parse_wal_balance_alert_info(LOW_WAL_BALANCE_ERR).expect("expected low WAL signal");
+        assert_eq!(parsed.required, Some(64367730));
+        assert_eq!(parsed.available, 10708877);
+    }
+
+    #[test]
+    fn classify_low_wal_balance_is_dedicated_transient() {
+        let classified = WalletJobError::classify_sidecar_error(LOW_WAL_BALANCE_ERR);
+        assert!(matches!(
+            classified,
+            WalletJobError::WalrusBalanceLow(_)
+        ));
+        assert!(!classified.aborts_retries());
+        assert!(!classified.is_permanent());
+        assert_eq!(classified.kind(), "walrus_balance_low");
+    }
+
+    #[test]
+    fn low_wal_balance_does_not_trigger_exhausted_retries_alert_gate() {
+        let classified = WalletJobError::classify_sidecar_error(LOW_WAL_BALANCE_ERR);
+        assert!(!WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&classified));
+    }
 
     #[test]
     fn classify_balance_split_is_retriable_transient_by_default() {
