@@ -247,40 +247,77 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
 }
 
 function buildIncidentDays(history: StatusHistory | null | undefined, incidents: IncidentList | null | undefined, count = 10): IncidentDay[] {
-  const realIncidents = incidents?.active?.length || incidents?.recent?.length
-    ? [...(incidents.active ?? []), ...(incidents.recent ?? [])]
-    : []
+  const allIncidents = [
+    ...(incidents?.active ?? []),
+    ...(incidents?.recent ?? []),
+  ]
 
-  if (realIncidents.length > 0) {
-    return realIncidents.slice(0, count).map((incident) => ({
-      date: incident.startedAt.slice(0, 10),
-      label: formatIncidentDate(new Date(incident.startedAt)),
-      status: incident.status === 'resolved' ? 'none' : (incident.severity === 'critical' ? 'outage' : 'degraded'),
-      message: `${incident.identifier}: ${incident.title} — ${incident.message}`,
-    }))
+  const incidentsByDate = new Map<string, Incident[]>()
+  for (const incident of allIncidents) {
+    const date = incident.startedAt.slice(0, 10)
+    const list = incidentsByDate.get(date) ?? []
+    list.push(incident)
+    incidentsByDate.set(date, list)
   }
 
-  const buckets = history?.buckets?.length ? history.buckets : emptyHistoryBuckets()
-
-  return buckets.slice(-count).reverse().map((bucket, index) => {
-    const date = bucket.date ? parseDateKey(bucket.date) : addUtcDays(startOfUtcDay(new Date()), -index)
-    const isToday = index === 0
-    const status = bucket.outage > 0 ? 'outage' : bucket.degraded > 0 ? 'degraded' : 'none'
-    const message = status === 'outage'
-      ? 'Relayer health checks reported a major outage.'
-      : status === 'degraded'
-        ? 'Relayer health checks reported degraded performance.'
-        : isToday
-          ? 'No incidents reported today.'
-          : 'No incidents reported.'
-
-    return {
-      date: toDateKey(date),
-      label: formatIncidentDate(date),
-      status,
-      message,
+  const bucketByDate = new Map<string, HistoryBucket>()
+  if (history?.buckets) {
+    for (const bucket of history.buckets) {
+      bucketByDate.set(bucket.date, bucket)
     }
-  })
+  }
+
+  const today = startOfUtcDay(new Date())
+  const days: IncidentDay[] = []
+
+  for (let i = count - 1; i >= 0; i--) {
+    const date = addUtcDays(today, -i)
+    const dateKey = toDateKey(date)
+    const dayIncidents = incidentsByDate.get(dateKey)
+    const bucket = bucketByDate.get(dateKey)
+    const isToday = i === 0
+
+    if (dayIncidents && dayIncidents.length > 0) {
+      const messages = dayIncidents.map((inc) => {
+        const statusText = inc.status === 'resolved' ? '' : ` — ${inc.status}`
+        return `${inc.identifier}: ${inc.title}${statusText}`
+      })
+      const allResolved = dayIncidents.every((inc) => inc.status === 'resolved')
+      const severity = dayIncidents.some((inc) => inc.severity === 'critical' || inc.severity === 'major')
+        ? 'outage'
+        : 'degraded'
+      days.push({
+        date: dateKey,
+        label: formatIncidentDate(date),
+        status: allResolved ? 'none' : severity,
+        message: messages.join('  '),
+      })
+    } else if (bucket) {
+      const status = bucket.outage > 0 ? 'outage' : bucket.degraded > 0 ? 'degraded' : 'none'
+      const message = status === 'outage'
+        ? 'Relayer health checks reported a major outage.'
+        : status === 'degraded'
+          ? 'Relayer health checks reported degraded performance.'
+          : isToday
+            ? 'No incidents reported today.'
+            : 'No incidents reported.'
+      days.push({
+        date: dateKey,
+        label: formatIncidentDate(date),
+        status,
+        message,
+      })
+    } else {
+      days.push({
+        date: dateKey,
+        label: formatIncidentDate(date),
+        status: 'none',
+        message: isToday ? 'No incidents reported today.' : 'No incidents reported.',
+      })
+    }
+  }
+
+  return days
 }
 
 function buildCalendarMonths(history: HistoryBucket[], pageOffset: number): CalendarMonth[] {
