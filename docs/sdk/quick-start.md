@@ -47,6 +47,10 @@ yarn add @mysten/sui @mysten/seal @mysten/walrus
 
 </CodeGroup>
 
+<Note>
+**Version compatibility:** `@mysten/seal` and `@mysten/walrus` must both accept the same `@mysten/sui` major. Known-good versions: `@mysten/sui@^2.16.2`, `@mysten/seal@^1.1.3`, `@mysten/walrus@^1.1.7`. Avoid `@mysten/walrus@0.x` — it bundles `@mysten/sui@1.x` and conflicts with `@mysten/seal@1.x`. If installation fails with `ERESOLVE` on `@mysten/sui`, upgrade `@mysten/walrus` and run `npm why @mysten/sui` to find which dependency still pins sui v1.
+</Note>
+
 For `withMemWal`, you also need:
 
 <CodeGroup>
