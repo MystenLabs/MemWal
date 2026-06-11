@@ -17,10 +17,10 @@ Without `nodejs_compat`, the dependency tree fails to resolve at runtime even th
 
 ## Bundle size
 
-`@mysten-incubation/memwal` pulls in a large peer dependency graph. A Worker bundling the default `MemWal` client lands around **~3 MB**. This is within Workers limits but worth knowing:
+Even the default `MemWal` client requires `@mysten/seal` and `@mysten/sui` as peer dependencies — it builds a SEAL session key on the client to authenticate each request — so it pulls in a sizeable dependency graph. A Worker bundling the default client lands around **~3 MB**. This is within Workers limits but worth knowing:
 
 - A single incompatible peer version can break the build for the **entire** Worker, not just the memory feature. Pin your `@mysten/*` versions and treat the memory dependency as a unit.
-- The default `@mysten-incubation/memwal` entry point bundles most cleanly in edge runtimes because the relayer handles embeddings, SEAL, and storage server-side. The `@mysten-incubation/memwal/manual` entry point pulls in client-side SEAL and Walrus operations, adding significantly more to the bundle — prefer the default entry point on Workers unless you specifically need the manual flow.
+- The default `@mysten-incubation/memwal` entry point is the lightest to bundle: the relayer handles embeddings and Walrus storage server-side, so the client only needs `@mysten/seal` + `@mysten/sui` (both required peers). The `@mysten-incubation/memwal/manual` entry point additionally pulls in `@mysten/walrus` and client-side encryption/upload, adding more to the bundle — prefer the default entry point on Workers unless you specifically need the manual flow.
 
 ## Crash isolation with dynamic import
 
