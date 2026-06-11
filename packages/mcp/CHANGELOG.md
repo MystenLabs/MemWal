@@ -1,11 +1,5 @@
 # @mysten-incubation/memwal-mcp
 
-## 0.0.6
-
-### Fixed
-
-- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
-
 ## 0.0.5
 
 ### Added
@@ -15,6 +9,11 @@
 ### Changed
 
 - Memory tools are now **proactive**. The MCP tool descriptions instruct agents to call `memwal_recall` and `memwal_remember` on their own (rather than only when explicitly asked); a new **`memwal_remember_bulk`** tool saves several facts in one call; and a new **`memwal_health`** tool gives a fast connectivity check (use it instead of `memwal_recall` for health checks). These behaviours come from the relayer's MCP tool layer — run a matching relayer/sidecar version.
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+- Recover from silently dead relayer SSE sessions. The bridge previously waited forever on `reader.read()` when the relayer-side session went dead while the TCP socket stayed open, causing tool calls (notably `memwal_recall`) to hang indefinitely with no diagnostic output. A heartbeat watchdog now aborts the SSE stream after `MEMWAL_MCP_SSE_IDLE_MS` (default 30s) of silence, triggering the existing reconnect path and replaying in-flight requests on the fresh session. Tunable via the `MEMWAL_MCP_SSE_IDLE_MS` env var; values below 500ms fall back to the default.
 
 ## 0.0.4
 

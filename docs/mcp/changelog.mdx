@@ -4,12 +4,6 @@ description: Release history for the Walrus Memory MCP package.
 keywords: [MCP, Walrus Memory, MemWal, changelog, releases]
 ---
 
-## 0.0.6
-
-### Fixed
-
-- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
-
 ## 0.0.5
 
 ### Added
@@ -21,6 +15,11 @@ keywords: [MCP, Walrus Memory, MemWal, changelog, releases]
 ### Changed
 
 - Memory tools are now **proactive**: their descriptions instruct agents to call `memwal_recall` and `memwal_remember` on their own, rather than only when the user explicitly asks.
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+- Recover from silently dead relayer SSE sessions: the bridge previously hung forever on a dead SSE stream (notably `memwal_recall` never returning). A heartbeat watchdog now aborts the stream after `MEMWAL_MCP_SSE_IDLE_MS` (default 30s) of silence and reconnects, replaying any in-flight requests on the fresh session. Tunable via the `MEMWAL_MCP_SSE_IDLE_MS` env var.
 
 ## 0.0.4
 
