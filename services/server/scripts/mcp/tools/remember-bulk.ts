@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
-import { wrapTool } from "./util.js";
+import { wrapTool, explorerFooter } from "./util.js";
 
 const REMEMBER_BULK_INPUT = {
     facts: z
@@ -48,15 +48,16 @@ export function registerRememberBulkTool(
                 const err = r.error ? ` error=${r.error}` : "";
                 return `${i + 1}. [${r.status}]${blob}${err}${text ? ` — ${text}` : ""}`;
             });
-            const summary = `Saved ${result.succeeded}/${result.total} fact(s) to MemWal (failed=${result.failed}).`;
+            const summary = `Saved ${result.succeeded}/${result.total} fact(s) to Walrus Memory (failed=${result.failed}).`;
+            const footer = result.succeeded > 0 ? `\n\n${explorerFooter()}` : "";
             return {
                 content: [
                     {
                         type: "text",
                         text:
                             lines.length > 0
-                                ? `${summary}\n\n${lines.join("\n")}`
-                                : summary,
+                                ? `${summary}\n\n${lines.join("\n")}${footer}`
+                                : `${summary}${footer}`,
                     },
                 ],
             };

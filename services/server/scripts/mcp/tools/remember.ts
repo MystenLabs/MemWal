@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
-import { wrapTool } from "./util.js";
+import { wrapTool, walruscanBlobUrl } from "./util.js";
 
 const REMEMBER_INPUT = {
     text: z
@@ -45,7 +45,7 @@ export function registerRememberTool(
                 content: [
                     {
                         type: "text",
-                        text: `Saved to MemWal. blob_id=${result.blob_id} namespace=${result.namespace}`,
+                        text: `Saved to Walrus Memory. blob_id=${result.blob_id} namespace=${result.namespace}\nExplorer: ${walruscanBlobUrl(result.blob_id)}`,
                     },
                 ],
             };
