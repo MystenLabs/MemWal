@@ -111,11 +111,15 @@ impl EventSource for JsonRpcEventSource {
         let resp_bytes = resp.bytes().await.map_err(EventSourceError::transient)?;
 
         if !status.is_success() {
-            return Err(EventSourceError::permanent(JsonRpcError(format!(
+            let err = JsonRpcError(format!(
                 "HTTP error: status={}, body={}",
                 status,
                 body_snippet(&resp_bytes)
-            ))));
+            ));
+            if is_transient_http_status(status) {
+                return Err(EventSourceError::transient(err));
+            }
+            return Err(EventSourceError::permanent(err));
         }
 
         let page = parse_jsonrpc_page(&resp_bytes, &content_type)
@@ -191,6 +195,16 @@ fn parse_jsonrpc_page(resp_bytes: &[u8], content_type: &str) -> Result<JsonRpcEv
         .map_err(|e| format!("Failed to parse event page: {}", e))
 }
 
+/// Whether an unsuccessful HTTP status should be retried (transient) rather
+/// than treated as a permanent, fatal error. 5xx, 429 (rate limit) and 408
+/// (request timeout) are the flaky-infra cases the public fullnode produces;
+/// other 4xx (bad request, auth, not found) indicate a real client-side bug.
+fn is_transient_http_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+}
+
 fn body_snippet(bytes: &[u8]) -> String {
     const MAX_CHARS: usize = 512;
     let text = String::from_utf8_lossy(bytes);
@@ -204,6 +218,25 @@ fn body_snippet(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn server_errors_and_rate_limits_are_transient() {
+        // The public fullnode's flaky responses must be retried, not fatal.
+        assert!(is_transient_http_status(StatusCode::SERVICE_UNAVAILABLE)); // 503
+        assert!(is_transient_http_status(StatusCode::BAD_GATEWAY)); // 502
+        assert!(is_transient_http_status(StatusCode::GATEWAY_TIMEOUT)); // 504
+        assert!(is_transient_http_status(StatusCode::INTERNAL_SERVER_ERROR)); // 500
+        assert!(is_transient_http_status(StatusCode::TOO_MANY_REQUESTS)); // 429
+        assert!(is_transient_http_status(StatusCode::REQUEST_TIMEOUT)); // 408
+    }
+
+    #[test]
+    fn client_errors_are_permanent() {
+        assert!(!is_transient_http_status(StatusCode::BAD_REQUEST)); // 400
+        assert!(!is_transient_http_status(StatusCode::UNAUTHORIZED)); // 401
+        assert!(!is_transient_http_status(StatusCode::NOT_FOUND)); // 404
+    }
 
     #[test]
     fn parse_event_page_response_accepts_valid_rpc_result() {
