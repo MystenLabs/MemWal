@@ -722,7 +722,7 @@ async function deleteIncidentApi(incidentId: number, apiKey: string): Promise<vo
   }
 }
 
-function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange: (key: string) => void }) {
+function AdminPanel({ apiKey, onApiKeyChange, onMutate }: { apiKey: string; onApiKeyChange: (key: string) => void; onMutate?: () => void }) {
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState<string | null>(null)
@@ -769,6 +769,7 @@ function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange
       setFormSuccess('Incident created.')
       form.reset()
       void refresh()
+      onMutate?.()
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e))
     }
@@ -793,6 +794,7 @@ function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange
       setFormSuccess('Update posted.')
       form.reset()
       void refresh()
+      onMutate?.()
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e))
     }
@@ -805,6 +807,7 @@ function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange
       await resolveIncidentApi(incidentId, apiKey)
       setFormSuccess('Incident resolved.')
       void refresh()
+      onMutate?.()
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e))
     }
@@ -818,6 +821,7 @@ function AdminPanel({ apiKey, onApiKeyChange }: { apiKey: string; onApiKeyChange
       await deleteIncidentApi(incidentId, apiKey)
       setFormSuccess('Incident deleted.')
       void refresh()
+      onMutate?.()
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e))
     }
@@ -1068,7 +1072,7 @@ export default function App() {
         )}
 
         {route === 'admin' && (
-          <AdminPanel apiKey={adminApiKey} onApiKeyChange={handleApiKeyChange} />
+          <AdminPanel apiKey={adminApiKey} onApiKeyChange={handleApiKeyChange} onMutate={refresh} />
         )}
 
         {route === 'uptime' && (

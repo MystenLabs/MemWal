@@ -638,6 +638,14 @@ async function addIncidentUpdate(incidentId, payload) {
   if (!(await ensureDatabaseReady())) return null
 
   const db = getSql()
+
+  // Fetch current status to detect resolved transition
+  const existingRows = await db`
+    SELECT status FROM incidents WHERE id = ${incidentId}
+  `
+  const existingStatus = existingRows[0]?.status
+  const transitioningToResolved = payload.status === 'resolved' && existingStatus !== 'resolved'
+
   await db`
     INSERT INTO incident_updates (incident_id, status, message, created_at)
     VALUES (
@@ -649,11 +657,19 @@ async function addIncidentUpdate(incidentId, payload) {
   `
 
   if (payload.status) {
-    await db`
-      UPDATE incidents
-      SET status = ${payload.status}, updated_at = now()
-      WHERE id = ${incidentId}
-    `
+    if (transitioningToResolved) {
+      await db`
+        UPDATE incidents
+        SET status = ${payload.status}, resolved_at = now(), updated_at = now()
+        WHERE id = ${incidentId}
+      `
+    } else {
+      await db`
+        UPDATE incidents
+        SET status = ${payload.status}, updated_at = now()
+        WHERE id = ${incidentId}
+      `
+    }
   }
 
   return getIncidentWithUpdates(incidentId)
