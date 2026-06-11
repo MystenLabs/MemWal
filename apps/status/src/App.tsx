@@ -270,7 +270,7 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
   const today = startOfUtcDay(new Date())
   const days: IncidentDay[] = []
 
-  for (let i = count - 1; i >= 0; i--) {
+  for (let i = 0; i < count; i++) {
     const date = addUtcDays(today, -i)
     const dateKey = toDateKey(date)
     const dayIncidents = incidentsByDate.get(dateKey)
