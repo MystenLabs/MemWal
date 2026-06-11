@@ -123,7 +123,11 @@ async fn main() {
 
     #[cfg(feature = "grpc")]
     let event_source: Box<dyn sui::EventSource> = {
-        let grpc_source = sui::grpc::GrpcEventSource::new(config.sui_rpc_url)
+        let resume = load_grpc_resume(&pool).await;
+        if resume.is_some() {
+            tracing::info!("resuming gRPC source from persisted watermark cursor");
+        }
+        let grpc_source = sui::grpc::GrpcEventSource::new(config.sui_rpc_url, resume)
             .await
             .expect("Failed to create gRPC event source");
         Box::new(grpc_source)
@@ -146,6 +150,30 @@ async fn main() {
 // ============================================================
 // Helpers
 // ============================================================
+
+/// Loads the gRPC resume seed `(EventId, opaque watermark cursor)` from
+/// `indexer_state`. Returns `None` unless both the cursor and a previously
+/// persisted resume token are present (e.g. a fresh DB, or a cursor carried
+/// over from the JSON-RPC source, which has no gRPC watermark).
+#[cfg(feature = "grpc")]
+async fn load_grpc_resume(pool: &sqlx::AnyPool) -> Option<(sui::EventId, Vec<u8>)> {
+    let cursor: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM indexer_state WHERE key = 'event_cursor'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let token: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM indexer_state WHERE key = 'event_resume_token'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+
+    let cursor = cursor?.0.parse::<sui::EventId>().ok()?;
+    let token = hex::decode(token?.0).ok()?;
+    Some((cursor, token))
+}
 
 fn redact_url(url: &str) -> String {
     // Redact password in DATABASE_URL for logging

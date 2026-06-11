@@ -164,6 +164,7 @@ impl EventSource for JsonRpcEventSource {
             events,
             next_cursor,
             has_next_page: page.has_next_page,
+            resume_token: None,
         })
     }
 }

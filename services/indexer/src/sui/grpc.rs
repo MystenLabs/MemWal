@@ -21,16 +21,27 @@ pub struct GrpcEventSource {
 }
 
 impl GrpcEventSource {
-    pub async fn new(rpc_url: String) -> Result<Self, tonic::transport::Error> {
+    /// Creates a gRPC event source, optionally seeded with a persisted resume
+    /// position `(EventId, opaque watermark cursor)`. The watermark cursor is
+    /// opaque and cannot be reconstructed from the `EventId`, so without this
+    /// seed the source would re-scan from genesis after every restart.
+    pub async fn new(
+        rpc_url: String,
+        resume: Option<(EventId, Vec<u8>)>,
+    ) -> Result<Self, tonic::transport::Error> {
         let channel = tonic::transport::Endpoint::new(rpc_url)?
             .connect_timeout(Duration::from_secs(10))
             .connect()
             .await?;
         let client = sui_rpc::proto::sui::rpc::v2alpha::ledger_service_client::LedgerServiceClient::new(channel);
+        let (last_event_id, last_grpc_cursor) = match resume {
+            Some((id, token)) => (Some(id), Some(tonic::codegen::Bytes::from(token))),
+            None => (None, None),
+        };
         Ok(Self {
             client,
-            last_event_id: None,
-            last_grpc_cursor: None,
+            last_event_id,
+            last_grpc_cursor,
         })
     }
 
@@ -155,10 +166,15 @@ impl EventSource for GrpcEventSource {
         self.last_event_id = last_event_id.clone();
         self.last_grpc_cursor = last_watermark_cursor;
 
+        // Surface the opaque watermark so the app can persist it and seed a
+        // future restart via `GrpcEventSource::new`.
+        let resume_token = self.last_grpc_cursor.as_ref().map(|b| b.to_vec());
+
         Ok(EventPage {
             events,
             next_cursor: last_event_id,
             has_next_page,
+            resume_token,
         })
     }
 }
@@ -197,7 +213,7 @@ mod smoke_tests {
         let rpc_url = std::env::var("SUI_RPC_URL")
             .unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string());
 
-        let mut source = GrpcEventSource::new(rpc_url)
+        let mut source = GrpcEventSource::new(rpc_url, None)
             .await
             .expect("should connect to gRPC endpoint");
 

@@ -51,6 +51,11 @@ pub struct EventPage {
     pub events: Vec<SuiEvent>,
     pub next_cursor: Option<EventId>,
     pub has_next_page: bool,
+    /// Opaque, source-specific cursor that must be persisted to resume after a
+    /// restart (used by the gRPC source, whose watermark cursor cannot be
+    /// reconstructed from `next_cursor`). `None` for sources that resume purely
+    /// from `next_cursor` (e.g. JSON-RPC).
+    pub resume_token: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Error)]
