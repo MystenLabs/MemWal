@@ -597,9 +597,14 @@ async function updateIncident(id, payload) {
   const component = payload.component !== undefined ? payload.component : existing.component
   const message = payload.message !== undefined ? payload.message : existing.message
   const startedAt = payload.startedAt !== undefined ? new Date(payload.startedAt) : new Date(existing.startedAt)
-  const resolvedAt = payload.resolvedAt !== undefined
-    ? (payload.resolvedAt ? new Date(payload.resolvedAt) : null)
-    : (existing.resolvedAt ? new Date(existing.resolvedAt) : null)
+  let resolvedAt
+  if (payload.resolvedAt !== undefined) {
+    resolvedAt = payload.resolvedAt ? new Date(payload.resolvedAt) : null
+  } else if (status === 'resolved' && existing.status !== 'resolved') {
+    resolvedAt = new Date()
+  } else {
+    resolvedAt = existing.resolvedAt ? new Date(existing.resolvedAt) : null
+  }
 
   await db`
     UPDATE incidents
