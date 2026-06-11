@@ -606,7 +606,6 @@ function StatusFooter({
   if (route !== 'current') links.push({ href: '/', label: 'Current Status' })
   if (route !== 'history') links.push({ href: '/history', label: 'Incident History' })
   if (route !== 'uptime') links.push({ href: '/uptime', label: 'Uptime' })
-  if (route !== 'admin') links.push({ href: '/admin', label: 'Admin' })
 
   return (
     <footer className="status-footer">
