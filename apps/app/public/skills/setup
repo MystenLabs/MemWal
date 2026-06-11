@@ -22,17 +22,24 @@ user explicitly asks for developer integration.
 
 ## Setup Rules
 
-1. First decide whether you have local shell and filesystem access.
-2. If you can edit local user config files, do the setup yourself after showing
+1. Identify the AI client first. ChatGPT (or another client that cannot run a
+   local MCP command but supports custom connector headers) uses the Remote
+   MCP section below. Every other client (Claude Desktop, Claude Code, Cursor,
+   Codex, other local apps) uses the Local MCP Server section.
+2. Decide whether you have local shell and filesystem access.
+3. If you can edit local user config files, do the setup yourself after showing
    the config you will add.
-3. If you cannot edit local files, give the user exact commands/config to paste
-   and wait for their result.
-4. Preserve existing MCP servers. Merge the `memwal` server; do not replace the
+4. If you cannot edit local files yourself, prefer giving the user ONE terminal
+   command to paste (for example a `claude mcp add ...` or login command) over
+   raw JSON/TOML to hand-edit. Fall back to a config block only when no command
+   exists for that client; then state the exact file path and merge the
+   `memwal` entry, never replace the whole file.
+5. Preserve existing MCP servers. Merge the `memwal` server; do not replace the
    whole config.
-5. Never print or expose values from `~/.memwal/credentials.json`.
-6. Tell the user to fully quit and reopen the AI client after config changes.
-7. Stop at the first real blocker and report the exact failure.
-8. Keep the final status short. Do not repeat full config blocks or terminal
+6. Never print or expose values from `~/.memwal/credentials.json`.
+7. Tell the user to fully quit and reopen the AI client after config changes.
+8. Stop at the first real blocker and report the exact failure.
+9. Keep the final status short. Do not repeat full config blocks or terminal
    commands after setup succeeds unless the user must copy/paste them manually.
 
 ## Requirements
@@ -45,6 +52,8 @@ node -v
 
 Walrus Memory MCP requires Node.js 20 or newer. If Node is missing or older
 than 20, ask the user to install Node.js 20+ from https://nodejs.org/ and stop.
+The Remote MCP path needs Node.js only once, for the login step on the user's
+computer.
 
 The user signs in through the browser with Google/zkLogin or a Sui-compatible
 wallet. The sign-in flow writes persistent credentials to:
@@ -116,6 +125,9 @@ Edit `~/.cursor/mcp.json` and merge:
 ```
 
 ### Claude Desktop
+
+Use the config file below. Claude Desktop's Settings > Connectors UI only
+supports OAuth remote servers and does not work for Walrus Memory.
 
 Edit:
 
@@ -195,7 +207,11 @@ seconds while `npx` fetches the package.
 
 ## Verify Tools
 
-Ask the AI client:
+Fastest check: ask the client to call `memwal_health`. A healthy reply proves
+the server is reachable. If health succeeds but memory tools return 401,
+credentials are missing; run the login.
+
+Then ask the AI client:
 
 ```text
 What MCP tools do you have available?
@@ -236,11 +252,23 @@ Use memwal_recall to search for: "setup verification succeeded"
 If the tools support a `namespace` argument, use a setup-only namespace such as
 `setup-verification`.
 
-## ChatGPT and Remote MCP
+## Remote MCP (ChatGPT and other header-capable clients)
 
-ChatGPT custom MCP apps use remote MCP servers, not a local `npx` stdio config.
+Some clients connect to a remote MCP server URL instead of running a local
+command. Use this path only when the client supports custom request headers.
+ChatGPT (developer mode) supports this today.
 
-Use remote MCP only when the client supports custom headers:
+Prerequisite: credentials must already exist. Have the user run the login once
+on their computer (see Recommended Login). The Remote MCP path needs Node.js
+only for that one step.
+
+For ChatGPT:
+
+1. Settings > Connectors > enable Developer mode.
+2. Add a connector with URL `https://relayer.memory.walrus.xyz/api/mcp`.
+3. Add the two headers shown in the template below.
+
+For config-file clients that support remote servers with headers, merge:
 
 ```json
 {
@@ -256,11 +284,21 @@ Use remote MCP only when the client supports custom headers:
 }
 ```
 
-The values come from `~/.memwal/credentials.json` after login. Treat the bearer
-token like an API key. Do not save it in a repo file or print it in chat.
+To fill the placeholders, have the USER open the credentials file themselves:
 
-If the client cannot attach required headers, explain the blocker and suggest a
-local MCP client such as Cursor, Claude Desktop, Claude Code, or Codex.
+```bash
+cat ~/.memwal/credentials.json
+```
+
+`delegatePrivateKey` is the Bearer token; `accountId` is the
+`x-memwal-account-id` value. The user pastes them directly into the connector
+settings, never into the chat. You (the agent) must not read or print this
+file. Treat the bearer token like an API key and never save it in a repo file.
+
+If the client cannot attach custom headers, remote MCP is not available for it
+today. Tell the user which clients are supported (ChatGPT developer mode,
+Claude Desktop, Claude Code, Cursor, Codex) and offer to set one of those up
+instead. Do not re-run this skill for the same client.
 
 ## Troubleshooting
 
@@ -290,12 +328,19 @@ window is not enough.
 Login: succeeded.
 Config: <path changed>.
 After reopening, ask: "What MCP tools do you have available?"
+
+Memory is automatic from here: the assistant saves durable facts and recalls
+them as you chat. There is no sync schedule to configure. Try:
+- "What do you remember about me?"
+- "Remember that I prefer short answers."
 ```
 
 Rules for the final response:
 
 - Put the restart instruction before verification details.
-- Keep it under 8 lines if there is no blocker.
+- Keep it under 14 lines if there is no blocker.
+- Offer at most 3 starter prompts.
+- Never state storage sizes or explorer links that the tools did not return.
 - Do not include the full TOML/JSON config again after it has already been
   applied.
 - Do not include long verification prompts before the restart. After restart,
