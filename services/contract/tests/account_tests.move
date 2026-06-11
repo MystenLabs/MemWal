@@ -8,8 +8,12 @@ module memwal::account_tests {
 
     const OWNER: address = @0xCAFE;
     const OTHER: address = @0xBEEF;
-    /// Simulated delegate key's Sui address
-    const DELEGATE_ADDR: address = @0xDE1E;
+    /// Delegate key's Sui address — MUST equal blake2b256(0x00 || pk_aa), where
+    /// pk_aa = 0xaa*32, because add_delegate_key now asserts the address is
+    /// derived from the public key. Guarded by test_delegate_addr_derivation.
+    const DELEGATE_ADDR: address = @0x9f89215dc3a091bc288a2ddfb1860f0cb9efc4d39a2bb728944f741a650a7fb1;
+    /// Address derived from pk_bb = 0xbb*32.
+    const DELEGATE_ADDR_2: address = @0xcbb8c34831749c2416ec0339bfc46f42d696576d08d8621e39ef767c42933d77;
 
     // ============================================================
     // Helper: init + create_account in one go
@@ -140,6 +144,38 @@ module memwal::account_tests {
         scenario.end();
     }
 
+    /// Guards the hardcoded DELEGATE_ADDR/_2 constants against drift from the
+    /// on-chain Ed25519 → address derivation used by add_delegate_key.
+    #[test]
+    fun test_delegate_addr_derivation() {
+        let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(account::test_ed25519_address(&pk) == DELEGATE_ADDR);
+        let pk2 = x"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(account::test_ed25519_address(&pk2) == DELEGATE_ADDR_2);
+    }
+
+    /// add_delegate_key must reject a sui_address that is not derived from the
+    /// supplied public_key (the WALM finding from the audit).
+    #[test]
+    #[expected_failure(abort_code = account::EDelegateAddressMismatch)]
+    fun test_add_delegate_key_address_mismatch_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario);
+
+        scenario.next_tx(OWNER);
+        {
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            let clock = clock::create_for_testing(scenario.ctx());
+            // @0xDE1E is NOT blake2b256(0x00 || pk) -> abort EDelegateAddressMismatch.
+            account::add_delegate_key(&mut account, pk, @0xDE1E, string::utf8(b"Mismatched"), &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(account);
+        };
+
+        scenario.end();
+    }
+
     #[test]
     fun test_add_multiple_delegate_keys() {
         let mut scenario = test_scenario::begin(OWNER);
@@ -164,7 +200,7 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk2,
-                @0xDE2E,
+                DELEGATE_ADDR_2,
                 string::utf8(b"Key 2"),
                 &clock,
                 scenario.ctx(),
@@ -174,7 +210,7 @@ module memwal::account_tests {
             assert!(account.is_delegate(&pk1));
             assert!(account.is_delegate(&pk2));
             assert!(account.is_delegate_address(DELEGATE_ADDR));
-            assert!(account.is_delegate_address(@0xDE2E));
+            assert!(account.is_delegate_address(DELEGATE_ADDR_2));
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -250,8 +286,9 @@ module memwal::account_tests {
             let clock = clock::create_for_testing(scenario.ctx());
 
             account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key 1"), &clock, scenario.ctx());
-            // Adding same key again should fail
-            account::add_delegate_key(&mut account, pk, @0xDE2E, string::utf8(b"Key 2"), &clock, scenario.ctx());
+            // Adding same key again should fail (same pk, so the address still
+            // matches the derivation — we reach the duplicate check).
+            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key 2"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -672,7 +709,9 @@ module memwal::account_tests {
             while (i <= 20) {
                 let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
                 pk.push_back((i as u8));
-                account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
+                // Each iteration uses a distinct pk, so derive the matching
+                // address per key to satisfy the address/pubkey check.
+                account::add_delegate_key(&mut account, pk, account::test_ed25519_address(&pk), string::utf8(b"Key"), &clock, scenario.ctx());
                 i = i + 1;
             };
 

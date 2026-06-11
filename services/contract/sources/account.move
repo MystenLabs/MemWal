@@ -56,6 +56,9 @@ module memwal::account {
     const ELabelTooLong: u64 = 10;
     /// Account is already in the requested active state
     const EAccountAlreadyActive: u64 = 11;
+    /// Provided delegate `sui_address` is not the address derived from the
+    /// provided `public_key`
+    const EDelegateAddressMismatch: u64 = 12;
     /// Caller is not authorized to decrypt (SEAL)
     const ENoAccess: u64 = 100;
 
@@ -250,6 +253,12 @@ module memwal::account {
             account.delegate_keys.length() < MAX_DELEGATE_KEYS,
             ETooManyDelegateKeys,
         );
+
+        // Verify sui_address is the Sui address actually derived from
+        // public_key (Ed25519 derivation = blake2b256(0x00 || public_key)).
+        // Without this, a delegate record could pair a public_key with an
+        // unrelated address; the SDKs always derive it this way.
+        assert!(ed25519_address(&public_key) == sui_address, EDelegateAddressMismatch);
 
         // Check key doesn't already exist
         let mut i = 0;
@@ -539,15 +548,24 @@ module memwal::account {
         // Account must be active
         assert!(account.active, EAccountDeactivated);
 
+        // The requested key ID MUST be namespaced to THIS account's owner,
+        // regardless of whether the caller is the owner or a delegate. This is
+        // the binding between `id` and `account`: without it, a caller could
+        // pass an unrelated account they control (where they are trivially a
+        // delegate) to authorize decryption of someone else's key id. The
+        // owner branch always satisfied this via has_suffix; enforcing it up
+        // front closes the delegate-path bypass.
+        let owner_bytes = sui::bcs::to_bytes(&account.owner);
+        assert!(has_suffix(&id, &owner_bytes), ENoAccess);
+
         let caller = ctx.sender();
 
-        // Owner check: key ID must end with BCS(owner) and caller must be the owner
-        let owner_bytes = sui::bcs::to_bytes(&account.owner);
-        let is_owner = (caller == account.owner) && has_suffix(&id, &owner_bytes);
-        // Delegate key holders can decrypt
-        let is_delegate = is_delegate_address(account, caller);
+        // Owner can decrypt — return early; this also avoids scanning the
+        // delegate list in the common owner path.
+        if (caller == account.owner) return;
 
-        assert!(is_owner || is_delegate, ENoAccess);
+        // Otherwise the caller must be a registered delegate of this account.
+        assert!(is_delegate_address(account, caller), ENoAccess);
     }
 
     /// Compute the SEAL key ID for a given owner address.
@@ -600,6 +618,16 @@ module memwal::account {
         assert!(object::id_to_address(&cap_pkg) == @memwal, ENotUpgradeAuthority);
     }
 
+    /// Derive the Sui address of an Ed25519 public key:
+    /// `blake2b256(0x00 || public_key)`, where `0x00` is the Ed25519 scheme
+    /// flag. This is Sui's standard address derivation and matches what the
+    /// TypeScript/Python SDKs compute for a delegate's `sui_address`.
+    fun ed25519_address(public_key: &vector<u8>): address {
+        let mut preimage = vector<u8>[0u8];
+        preimage.append(*public_key);
+        sui::address::from_bytes(sui::hash::blake2b256(&preimage))
+    }
+
     /// Check if `data` ends with `suffix`.
     /// Used for flexible key ID matching (with or without package prefix).
     fun has_suffix(data: &vector<u8>, suffix: &vector<u8>): bool {
@@ -622,6 +650,13 @@ module memwal::account {
     #[test_only]
     public fun test_init(ctx: &mut TxContext) {
         init(ctx);
+    }
+
+    /// Expose the Ed25519 → Sui address derivation so tests can register
+    /// delegates with a correctly-derived `sui_address`.
+    #[test_only]
+    public fun test_ed25519_address(public_key: &vector<u8>): address {
+        ed25519_address(public_key)
     }
 
     /// Create a fake `UpgradeCap` for tests, claiming to control this package.
