@@ -706,7 +706,32 @@ async function readActiveAndRecentIncidents(days = 30) {
     resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
+    updates: [],
   }))
+
+  const ids = incidents.map((i) => i.id)
+  if (ids.length > 0) {
+    const updateRows = await getSql()`
+      SELECT id, incident_id, status, message, created_at
+      FROM incident_updates
+      WHERE incident_id IN (${ids})
+      ORDER BY created_at ASC
+    `
+    const updatesById = new Map()
+    for (const row of updateRows) {
+      const id = Number(row.incident_id)
+      if (!updatesById.has(id)) updatesById.set(id, [])
+      updatesById.get(id).push({
+        id: Number(row.id),
+        status: row.status,
+        message: row.message,
+        createdAt: new Date(row.created_at).toISOString(),
+      })
+    }
+    for (const incident of incidents) {
+      incident.updates = updatesById.get(incident.id) ?? []
+    }
+  }
 
   return {
     active: incidents.filter((i) => i.status !== 'resolved'),

@@ -103,7 +103,7 @@ interface IncidentDay {
   date: string
   label: string
   status: 'none' | 'degraded' | 'outage'
-  message: string
+  messages: string[]
 }
 
 interface CalendarDay {
@@ -278,10 +278,20 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
     const isToday = i === 0
 
     if (dayIncidents && dayIncidents.length > 0) {
-      const messages = dayIncidents.map((inc) => {
+      const messages: string[] = []
+      for (const inc of dayIncidents) {
         const statusText = inc.status === 'resolved' ? '' : ` — ${inc.status}`
-        return `${inc.identifier}: ${inc.title}${statusText}`
-      })
+        messages.push(`${inc.identifier}: ${inc.title}${statusText}`)
+        if (inc.updates && inc.updates.length > 0) {
+          for (const u of inc.updates) {
+            const time = new Date(u.createdAt).toLocaleTimeString('en-US', {
+              hour: 'numeric',
+              minute: '2-digit',
+            })
+            messages.push(`  ${time} — ${u.status} — ${u.message}`)
+          }
+        }
+      }
       const allResolved = dayIncidents.every((inc) => inc.status === 'resolved')
       const severity = dayIncidents.some((inc) => inc.severity === 'critical' || inc.severity === 'major')
         ? 'outage'
@@ -290,7 +300,7 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
         date: dateKey,
         label: formatIncidentDate(date),
         status: allResolved ? 'none' : severity,
-        message: messages.join('  '),
+        messages,
       })
     } else if (bucket) {
       const outagePct = bucket.total ? bucket.outage / bucket.total : 0
@@ -303,7 +313,7 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
       } else {
         status = 'none'
       }
-      const message = status === 'outage'
+      const msg = status === 'outage'
         ? 'Relayer health checks reported a major outage.'
         : status === 'degraded'
           ? 'Relayer health checks reported degraded performance.'
@@ -314,14 +324,14 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
         date: dateKey,
         label: formatIncidentDate(date),
         status,
-        message,
+        messages: [msg],
       })
     } else {
       days.push({
         date: dateKey,
         label: formatIncidentDate(date),
         status: 'none',
-        message: isToday ? 'No incidents reported today.' : 'No incidents reported.',
+        messages: [isToday ? 'No incidents reported today.' : 'No incidents reported.'],
       })
     }
   }
@@ -480,7 +490,11 @@ function IncidentHistory({
         {incidentDays.map((day) => (
           <article key={day.date} className={`incident-day incident-day--${day.status}`}>
             <h2>{day.label}</h2>
-            <p>{day.message}</p>
+            {day.messages.map((msg, idx) => (
+              <p key={idx} className={idx === 0 ? 'incident-day__primary' : 'incident-day__update'}>
+                {msg}
+              </p>
+            ))}
           </article>
         ))}
       </div>

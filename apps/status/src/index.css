@@ -457,6 +457,12 @@ select {
   color: var(--red);
 }
 
+.incident-day__update {
+  margin-left: 16px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
+
 .uptime-calendar {
   padding: 42px 0 16px;
 }
