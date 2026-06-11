@@ -85,6 +85,7 @@
                   "sdk/usage/with-memwal"
                 ]
               },
+              "sdk/cookbook-multi-tenant",
               "sdk/api-reference",
               "sdk/changelog"
             ]
