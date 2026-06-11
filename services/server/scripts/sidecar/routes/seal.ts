@@ -16,6 +16,7 @@ import {
     JSON_LIMIT_SEAL_DECRYPT,
     JSON_LIMIT_SEAL_DECRYPT_BATCH,
     JSON_LIMIT_SEAL_ENCRYPT,
+    SEAL_APPROVE_PACKAGE_ID,
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_THRESHOLD,
 } from "../config.js";
@@ -94,8 +95,14 @@ async function resolveSessionKey(
     });
 }
 
-/** Build the seal_approve PTB for a set of SEAL key IDs. */
-async function buildSealApproveTxBytes(packageId: string, accountId: string, ids: string[]): Promise<Uint8Array> {
+/**
+ * Build the seal_approve PTB for a set of SEAL key IDs.
+ *
+ * `approvePackageId` is the package version whose `seal_approve` policy runs —
+ * this must be the UPGRADED version id to activate a post-upgrade policy, and
+ * is resolved separately from the encryption-namespace packageId by the caller.
+ */
+async function buildSealApproveTxBytes(approvePackageId: string, accountId: string, ids: string[]): Promise<Uint8Array> {
     const tx = new Transaction();
     for (const id of ids) {
         // Convert hex ID to byte array for PTB
@@ -104,7 +111,7 @@ async function buildSealApproveTxBytes(packageId: string, accountId: string, ids
         );
         // Pass MemWalAccount (owned object) instead of AccountRegistry
         tx.moveCall({
-            target: `${packageId}::account::seal_approve`,
+            target: `${approvePackageId}::account::seal_approve`,
             arguments: [
                 tx.pure("vector<u8>", idBytes),
                 tx.object(accountId),
@@ -112,6 +119,18 @@ async function buildSealApproveTxBytes(packageId: string, accountId: string, ids
         });
     }
     return await tx.build({ client: suiClient as any, onlyTransactionKind: true });
+}
+
+/**
+ * Resolve which package version's `seal_approve` should run for a request.
+ *
+ * Returns the operator-pinned upgraded version id (SEAL_APPROVE_PACKAGE_ID)
+ * when set, otherwise falls back to the request's own packageId (pre-upgrade
+ * behavior). The encryption namespace / SessionKey always stays on the
+ * request's packageId regardless, so existing blobs remain decryptable.
+ */
+function resolveApprovePackageId(namespacePackageId: string): string {
+    return SEAL_APPROVE_PACKAGE_ID || namespacePackageId;
 }
 
 export function registerSealRoutes(app: Express): void {
@@ -167,7 +186,9 @@ export function registerSealRoutes(app: Express): void {
             const fullId = parsed.id;
 
             phase = "build_ptb";
-            const txBytes = await buildSealApproveTxBytes(packageId, accountId, [fullId]);
+            // Namespace (parsed from the blob / used for the SessionKey) stays on
+            // `packageId`; the seal_approve POLICY runs from the upgraded version.
+            const txBytes = await buildSealApproveTxBytes(resolveApprovePackageId(packageId), accountId, [fullId]);
 
             phase = "fetch_keys";
             // Fetch keys from key servers
@@ -243,9 +264,10 @@ export function registerSealRoutes(app: Express): void {
             }
 
             phase = "build_ptb";
-            // Build ONE PTB with seal_approve for ALL unique IDs
+            // Build ONE PTB with seal_approve for ALL unique IDs. Namespace stays
+            // on `packageId`; the seal_approve POLICY runs from the upgraded version.
             const allIds = [...new Set(parsedItems.map(p => p.fullId))];
-            const txBytes = await buildSealApproveTxBytes(packageId, accountId, allIds);
+            const txBytes = await buildSealApproveTxBytes(resolveApprovePackageId(packageId), accountId, allIds);
 
             phase = "fetch_keys";
             // ONE fetchKeys call for ALL IDs

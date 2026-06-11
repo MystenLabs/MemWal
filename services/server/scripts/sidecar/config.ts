@@ -52,6 +52,26 @@ if (SEAL_SERVER_CONFIGS.length === 0) {
     );
 }
 
+// Package version whose `seal_approve` access-control policy should RUN during
+// SEAL key requests. After a Move package upgrade, a Sui call to the original
+// package id still executes the PRE-upgrade `seal_approve` — only a call that
+// targets the upgraded version id runs the new policy. Encryption and
+// SessionKeys must keep using the original package id (the SEAL key
+// derivation namespace) so existing blobs stay decryptable, so the policy
+// target is configured separately here.
+//
+// Leave empty (default) to target the request's own packageId — i.e. no
+// behavior change until an upgrade ships. After upgrading, set this to the new
+// `published-at` version id to activate the upgraded policy without
+// re-encrypting any existing data.
+export const SEAL_APPROVE_PACKAGE_ID = process.env.SEAL_APPROVE_PACKAGE_ID?.trim() || "";
+
+if (SEAL_APPROVE_PACKAGE_ID) {
+    console.log(
+        `[sidecar] seal_approve policy target pinned to ${SEAL_APPROVE_PACKAGE_ID} (encryption namespace still uses each request's packageId)`,
+    );
+}
+
 // ============================================================
 // Server wallets (Walrus uploads)
 // ============================================================
