@@ -7,17 +7,17 @@ MemWal runs on the [Cloudflare Workers](https://developers.cloudflare.com/worker
 
 ## Required configuration
 
-The `@mysten-incubation/memwal` dependency tree (`@mysten/seal`, `@mysten/sui`, and others) relies on Node.js built-ins at runtime. Enable the Node.js compatibility flag in your `wrangler.toml`:
+The SDK relies on the Node.js `crypto` built-in (and `@mysten/seal` / `@mysten/sui` pull in more Node APIs). Enable the Node.js compatibility flag in your `wrangler.toml`:
 
 ```toml wrangler.toml
 compatibility_flags = ["nodejs_compat"]
 ```
 
-Without `nodejs_compat`, the dependency tree fails to resolve at runtime even though the Worker bundles successfully.
+Without `nodejs_compat` the build fails outright — `wrangler deploy` stops with `Could not resolve "crypto"` (the SDK calls `await import("crypto")` internally). Adding the flag resolves it.
 
 ## Bundle size
 
-Even the default `MemWal` client requires `@mysten/seal` and `@mysten/sui` as peer dependencies — it builds a SEAL session key on the client to authenticate each request — so it pulls in a sizeable dependency graph. A Worker bundling the default client lands around **~3 MB**. This is within Workers limits but worth knowing:
+Even the default `MemWal` client requires `@mysten/seal` and `@mysten/sui` as peer dependencies — it builds a SEAL session key on the client to authenticate each request — so it pulls in a sizeable dependency graph. A Worker bundling just the default client comes out to roughly **1.2 MB raw / ~225 KB gzipped** (measured with `wrangler deploy --dry-run`, `@mysten/sui` 2.x). That is comfortably within the Workers size limit, but worth knowing:
 
 - A single incompatible peer version can break the build for the **entire** Worker, not just the memory feature. Pin your `@mysten/*` versions and treat the memory dependency as a unit.
 - The default `@mysten-incubation/memwal` entry point is the lightest to bundle: the relayer handles embeddings and Walrus storage server-side, so the client only needs `@mysten/seal` + `@mysten/sui` (both required peers). The `@mysten-incubation/memwal/manual` entry point additionally pulls in `@mysten/walrus` and client-side encryption/upload, adding more to the bundle — prefer the default entry point on Workers unless you specifically need the manual flow.
