@@ -4,16 +4,17 @@
 
 ### Added
 
-- **Automatic memory plugin** for Claude Code, Codex, Cursor, and Antigravity (`plugin/`): an installable plugin that bundles the MemWal MCP server with lifecycle hooks (SessionStart, UserPromptSubmit, PostToolUse) which remind the agent to recall relevant context and save durable facts on its own — no manual prompting. Install in Claude Code via `/plugin marketplace add` + `/plugin install memwal`; install in Codex via `node plugin/scripts/install_codex_hooks.mjs`.
+- Automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity.
+- New `memwal_remember_bulk` and `memwal_health` tools.
 
 ### Changed
 
-- Memory tools are now **proactive**. The MCP tool descriptions instruct agents to call `memwal_recall` and `memwal_remember` on their own (rather than only when explicitly asked); a new **`memwal_remember_bulk`** tool saves several facts in one call; and a new **`memwal_health`** tool gives a fast connectivity check (use it instead of `memwal_recall` for health checks). These behaviours come from the relayer's MCP tool layer — run a matching relayer/sidecar version.
+- Memory tools are now proactive — agents recall and save context on their own.
 
 ### Fixed
 
-- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
-- Recover from silently dead relayer SSE sessions. The bridge previously waited forever on `reader.read()` when the relayer-side session went dead while the TCP socket stayed open, causing tool calls (notably `memwal_recall`) to hang indefinitely with no diagnostic output. A heartbeat watchdog now aborts the SSE stream after `MEMWAL_MCP_SSE_IDLE_MS` (default 30s) of silence, triggering the existing reconnect path and replaying in-flight requests on the fresh session. Tunable via the `MEMWAL_MCP_SSE_IDLE_MS` env var; values below 500ms fall back to the default.
+- Plugin bundle now ships its `.mcp.json` so the MCP server registers on install.
+- Automatically recover from dropped relayer connections that could hang tool calls.
 
 ## 0.0.4
 
