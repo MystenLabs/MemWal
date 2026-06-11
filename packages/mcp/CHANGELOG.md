@@ -1,16 +1,14 @@
 # @mysten-incubation/memwal-mcp
 
-## 0.0.6
-
-### Fixed
-
-- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
-
 ## 0.0.5
 
 ### Added
 
 - **Automatic memory plugin** for Claude Code, Codex, Cursor, and Antigravity (`plugin/`): an installable plugin that bundles the MemWal MCP server with lifecycle hooks (SessionStart, UserPromptSubmit, PostToolUse) which remind the agent to recall relevant context and save durable facts on its own — no manual prompting. Install in Claude Code via `/plugin marketplace add` + `/plugin install memwal`; install in Codex via `node plugin/scripts/install_codex_hooks.mjs`.
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
 
 ### Changed
 
