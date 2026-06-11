@@ -21,7 +21,7 @@
 //! Trust model: only the relayer can reach the sidecar (loopback). Forwarding
 //! the user's `Authorization` header into the sidecar is safe; the sidecar's
 //! own shared-secret auth middleware does not run on `/mcp/*` (mounted before
-//! it in `sidecar-server.ts`).
+//! it in `scripts/sidecar/app.ts`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

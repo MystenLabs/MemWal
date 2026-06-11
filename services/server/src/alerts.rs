@@ -14,6 +14,9 @@ const WALRUS_GAS_POOL_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_GAS_POOL_ALERT_DEDUP_
 const WALRUS_GAS_POOL_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
 const WALRUS_LOW_BALANCE_ALERT_DEDUP_SECS_ENV: &str = "WALRUS_LOW_BALANCE_ALERT_DEDUP_SECS";
 const WALRUS_LOW_BALANCE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600);
+const WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS_ENV: &str =
+    "WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS";
+const WALRUS_QUEUE_SATURATION_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(1800);
 
 /// Mirrors the `@mysten/walrus` dep version in
 /// `services/server/scripts/package.json`. Bump this constant in lockstep
@@ -85,6 +88,10 @@ pub struct AlertManager {
     /// Suppresses low-WAL balance spam. WAL shortfalls are wallet-specific;
     /// one alert per (network, wallet_index) per window is enough.
     walrus_low_balance_dedup: AlertDedup,
+    /// Suppresses upload-queue saturation spam. Saturation is pipeline-wide
+    /// and the monitor keeps polling every interval while the backlog lasts,
+    /// so one notification per network per window is enough.
+    walrus_queue_saturation_dedup: AlertDedup,
 }
 
 impl AlertManager {
@@ -110,6 +117,10 @@ impl AlertManager {
             walrus_low_balance_dedup: AlertDedup::new(dedup_window_from_env(
                 WALRUS_LOW_BALANCE_ALERT_DEDUP_SECS_ENV,
                 WALRUS_LOW_BALANCE_ALERT_DEDUP_DEFAULT,
+            )),
+            walrus_queue_saturation_dedup: AlertDedup::new(dedup_window_from_env(
+                WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS_ENV,
+                WALRUS_QUEUE_SATURATION_ALERT_DEDUP_DEFAULT,
             )),
         }
     }
@@ -205,6 +216,27 @@ impl AlertManager {
             return Ok(());
         }
         let payload = SlackPayload::for_walrus_low_wal_balance(&alert);
+        slack.send_payload(&payload).await
+    }
+
+    pub async fn notify_walrus_upload_queue_saturated(
+        &self,
+        alert: WalrusUploadQueueSaturatedAlert,
+    ) -> Result<(), AlertError> {
+        let Some(slack) = &self.slack else {
+            return Ok(());
+        };
+        // Saturation is pipeline-wide: one notification per network per
+        // window — the monitor re-fires after the dedup window elapses if
+        // the backlog is still there.
+        let key = (
+            alert.sui_network.clone(),
+            "upload_queue_saturated".to_string(),
+        );
+        if self.walrus_queue_saturation_dedup.should_suppress(key) {
+            return Ok(());
+        }
+        let payload = SlackPayload::for_walrus_upload_queue_saturated(&alert);
         slack.send_payload(&payload).await
     }
 }
@@ -330,6 +362,24 @@ pub struct WalrusGasPoolExhaustedAlert {
     pub wallet_index: usize,
     pub configured_wallets: usize,
     pub error: String,
+}
+
+/// Fired when the sidecar's Walrus upload queue stays saturated — every
+/// upload slot busy AND more than `threshold` requests queued — for several
+/// consecutive monitor checks. This is the early-warning for the
+/// 2026-06-10-style incident: inflow exceeds the wallet pool's upload
+/// throughput, and once queued requests outlive the sidecar's acquire
+/// timeout, jobs start failing with "timed out waiting for wallet N upload
+/// slot". Action: check for a bulk-write burst, and/or add wallets to
+/// `SERVER_SUI_PRIVATE_KEYS` (throughput scales linearly with pool size).
+#[derive(Debug)]
+pub struct WalrusUploadQueueSaturatedAlert {
+    pub sui_network: String,
+    pub queued: u64,
+    pub active: u64,
+    pub global_capacity: u64,
+    pub threshold: u64,
+    pub consecutive_checks: u32,
 }
 
 #[derive(Debug)]
@@ -572,6 +622,50 @@ impl SlackPayload {
         }
     }
 
+    fn for_walrus_upload_queue_saturated(alert: &WalrusUploadQueueSaturatedAlert) -> Self {
+        let title = "MemWal Walrus upload queue saturated".to_string();
+        let summary = format!(
+            "Sidecar upload queue on {} has {} request(s) waiting (threshold {}) with all {} upload slot(s) busy for {} consecutive checks. \
+             If this persists, queued uploads will start timing out (\"timed out waiting for wallet N upload slot\").",
+            alert.sui_network,
+            alert.queued,
+            alert.threshold,
+            alert.global_capacity,
+            alert.consecutive_checks,
+        );
+        let action = "*Action (ops):* check for a bulk-write burst (sidecar `[walrus/upload] begin` rate vs ~3 uploads/min/wallet drain), \
+and/or add wallets to `SERVER_SUI_PRIVATE_KEYS` — upload throughput scales linearly with pool size. \
+Congestion-requeued jobs ride it out with minutes-scale backoff, but sustained saturation will eventually exhaust them."
+            .to_string();
+        let details = format!(
+            "*Network:* `{}`\n*Queued uploads:* `{}`\n*Active uploads:* `{}`\n*Global capacity:* `{}`\n*Threshold:* `{}`\n*Consecutive checks:* `{}`",
+            alert.sui_network,
+            alert.queued,
+            alert.active,
+            alert.global_capacity,
+            alert.threshold,
+            alert.consecutive_checks,
+        );
+
+        Self {
+            text: summary.clone(),
+            blocks: vec![
+                SlackBlock::Header {
+                    text: plain_text(title),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(summary),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(action),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(details),
+                },
+            ],
+        }
+    }
+
     fn for_walrus_low_wal_balance(alert: &WalrusWalletBalanceLowAlert) -> Self {
         let title = "MemWal Walrus upload blocked — insufficient WAL".to_string();
         let available_wal = format_wal_amount(alert.available);
@@ -723,6 +817,28 @@ mod tests {
         assert!(json.contains("default"));
         assert!(json.contains("mainnet"));
         assert!(json.contains("walrus upload failed"));
+    }
+
+    #[test]
+    fn walrus_queue_saturated_payload_surfaces_queue_state_and_action() {
+        let payload =
+            SlackPayload::for_walrus_upload_queue_saturated(&WalrusUploadQueueSaturatedAlert {
+                sui_network: "mainnet".into(),
+                queued: 116,
+                active: 5,
+                global_capacity: 5,
+                threshold: 20,
+                consecutive_checks: 4,
+            });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("mainnet"));
+        assert!(json.contains("116"));
+        assert!(json.contains("20"));
+        // Ops action must point at pool sizing, not at a job bug.
+        assert!(json.contains("SERVER_SUI_PRIVATE_KEYS"));
+        // Early-warning copy explains what happens if the backlog persists.
+        assert!(json.contains("timed out waiting for wallet"));
     }
 
     #[test]
