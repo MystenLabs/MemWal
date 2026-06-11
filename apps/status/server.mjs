@@ -714,8 +714,17 @@ function startOfUtcDay(date) {
 
 function bucketStatus(bucket) {
   if (!bucket.total) return 'unknown'
-  if (bucket.outage > 0) return 'outage'
-  if (bucket.degraded > 0) return 'degraded'
+
+  const outagePct = bucket.outage / bucket.total
+  const degradedPct = bucket.degraded / bucket.total
+
+  // Statuspage-style thresholds (60s polling ≈ 1,440 checks/day)
+  // > 5% outage  (~72+ min) → red (significant downtime)
+  if (outagePct > 0.05) return 'outage'
+
+  // Minor blips: some outage or notable degraded → yellow
+  if (outagePct > 0 || degradedPct > 0.05) return 'degraded'
+
   return 'operational'
 }
 
