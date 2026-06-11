@@ -293,7 +293,16 @@ function buildIncidentDays(history: StatusHistory | null | undefined, incidents:
         message: messages.join('  '),
       })
     } else if (bucket) {
-      const status = bucket.outage > 0 ? 'outage' : bucket.degraded > 0 ? 'degraded' : 'none'
+      const outagePct = bucket.total ? bucket.outage / bucket.total : 0
+      const degradedPct = bucket.total ? bucket.degraded / bucket.total : 0
+      let status: 'outage' | 'degraded' | 'none'
+      if (outagePct > 0.05) {
+        status = 'outage'
+      } else if (outagePct > 0 || degradedPct > 0.05) {
+        status = 'degraded'
+      } else {
+        status = 'none'
+      }
       const message = status === 'outage'
         ? 'Relayer health checks reported a major outage.'
         : status === 'degraded'
