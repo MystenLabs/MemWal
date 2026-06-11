@@ -230,57 +230,18 @@ function formatUptime(history: StatusHistory | null | undefined) {
 
 function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): ComponentRow[] {
   const relayerStatus = getOverallStatus(snapshot, loadState)
-  const health = snapshot?.relayer.health
   const history = snapshot?.history
   const relayerHistory = normalizeBuckets(history, relayerStatus)
-  const serviceHistory = normalizeBuckets(history, loadState === 'error' ? 'degraded' : 'operational')
-  const externalHistory = emptyHistoryBuckets('monitoring')
-  const hasCompatibility = Boolean(
-    health?.relayerVersion &&
-    health?.apiVersion &&
-    health?.minSupportedSdk,
-  )
-  const compatibilityStatus: StatusKind = relayerStatus === 'operational'
-    ? hasCompatibility ? 'operational' : 'degraded'
-    : relayerStatus
   const uptimeLabel = formatUptime(history)
 
+  // TODO(WALM-99): Temporarily showing only the relayer.
+  // Restore full list when other components have real monitoring.
   return [
-    {
-      name: 'Walrus Memory Status Service',
-      status: loadState === 'error' ? 'degraded' : 'operational',
-      uptimeLabel,
-      history: serviceHistory,
-    },
     {
       name: 'Walrus Memory Relayer',
       status: relayerStatus,
       uptimeLabel,
       history: relayerHistory,
-    },
-    {
-      name: 'SDK Compatibility Metadata',
-      status: compatibilityStatus,
-      uptimeLabel,
-      history: relayerHistory,
-    },
-    {
-      name: 'Memory API Pipeline',
-      status: relayerStatus === 'operational' ? 'operational' : relayerStatus,
-      uptimeLabel,
-      history: relayerHistory,
-    },
-    {
-      name: 'Sui Network',
-      status: 'monitoring',
-      uptimeLabel: 'external',
-      history: externalHistory,
-    },
-    {
-      name: 'Walrus Storage',
-      status: 'monitoring',
-      uptimeLabel: 'external',
-      history: externalHistory,
     },
   ]
 }
