@@ -47,8 +47,10 @@ COPY --from=builder --chown=appuser:appuser /app/target/release/memwal-server ./
 COPY --chown=appuser:appuser scripts/package.json scripts/package-lock.json ./scripts/
 RUN cd scripts && npm ci --omit=dev
 COPY --chown=appuser:appuser scripts/*.ts ./scripts/
-# MCP module — sidecar-server.ts imports ./mcp/index.js. Without this copy
-# the runtime image fails at boot with module-not-found for ./mcp/*.
+# Sidecar + MCP modules — sidecar-server.ts imports ./sidecar/server.js,
+# which in turn imports ./mcp/index.js. Without these copies the runtime
+# image fails at boot with module-not-found for ./sidecar/* or ./mcp/*.
+COPY --chown=appuser:appuser scripts/sidecar/ ./scripts/sidecar/
 COPY --chown=appuser:appuser scripts/mcp/ ./scripts/mcp/
 
 # Copy migrations (for reference / manual runs)

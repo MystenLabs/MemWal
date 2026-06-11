@@ -157,7 +157,17 @@ cwd = "/Users/YOUR_USERNAME"
 
 ### Claude Code
 
-Run:
+Preferred: install the Walrus Memory plugin. It bundles the same MCP server
+plus lifecycle hooks that make memory automatic. Run inside Claude Code:
+
+```text
+/plugin marketplace add MystenLabs/MemWal
+/plugin install memwal@memwal-plugins
+```
+
+Then restart Claude Code.
+
+MCP-only alternative:
 
 ```bash
 claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
@@ -194,9 +204,11 @@ What MCP tools do you have available?
 Expected Walrus Memory tools:
 
 - `memwal_remember`
+- `memwal_remember_bulk`
 - `memwal_recall`
 - `memwal_analyze`
 - `memwal_restore`
+- `memwal_health`
 - `memwal_login`
 - `memwal_logout`
 
@@ -259,6 +271,7 @@ local MCP client such as Cursor, Claude Desktop, Claude Code, or Codex.
 | No Walrus Memory tools after restart | Check the MCP config path and fully restart the client. |
 | Only `memwal_login` works | Credentials are missing. Run `memwal_login` or `npx -y @mysten-incubation/memwal-mcp login --prod`. |
 | Memory tools return 401 | The delegate key may be stale or revoked. Run `npx -y @mysten-incubation/memwal-mcp login --prod` again. |
+| `memwal_recall` returns nothing although memories were saved before | Run `memwal_restore <namespace>` to rebuild the search index from Walrus, then retry the recall. |
 | Sign out | Run `npx -y @mysten-incubation/memwal-mcp --logout`. This removes local credentials but does not revoke the delegate key. |
 
 ## Final Report

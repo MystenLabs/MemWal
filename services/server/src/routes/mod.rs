@@ -56,6 +56,7 @@ pub async fn enqueue_wallet_job(
     storage
         .push_request(wallet_job_request(WalletJob {
             wallet_index,
+            congestion_requeues: 0,
             operation,
         }))
         .await

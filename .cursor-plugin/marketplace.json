@@ -1,0 +1,17 @@
+{
+  "name": "memwal-plugins",
+  "owner": {
+    "name": "Mysten Labs"
+  },
+  "metadata": {
+    "description": "Official MemWal plugins for Cursor"
+  },
+  "plugins": [
+    {
+      "name": "memwal",
+      "source": "./packages/mcp/plugin",
+      "description": "Automatic Walrus Memory — proactive recall and durable-fact saving via the MemWal MCP + lifecycle hooks.",
+      "version": "0.0.6"
+    }
+  ]
+}

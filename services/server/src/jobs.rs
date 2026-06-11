@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alerts::{
     WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
-    WalrusUploadExhaustedAlert, SIDECAR_WALRUS_DEP_VERSION,
+    WalrusUploadExhaustedAlert, WalrusWalletBalanceLowAlert, SIDECAR_WALRUS_DEP_VERSION,
 };
 use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
@@ -263,6 +263,14 @@ pub struct WalletJob {
     /// number so a job can walk distinct pool wallets without relying on the
     /// global round-robin cursor.
     pub wallet_index: usize,
+    /// How many times this job has been re-enqueued because the sidecar's
+    /// upload slots were saturated (`UploadSlotCongestion`). Congestion
+    /// requeues are scheduled with a real minutes-scale backoff and do NOT
+    /// burn the Apalis wallet-attempt budget — see
+    /// `maybe_requeue_for_upload_congestion`. `serde(default)` keeps payloads
+    /// already queued before this field existed deserializable.
+    #[serde(default)]
+    pub congestion_requeues: u32,
     pub operation: WalletOperation,
 }
 
@@ -349,6 +357,25 @@ pub async fn execute_meta_transfer(
 /// Maximum number of attempts (1 initial + N-1 retries).
 #[allow(dead_code)]
 pub const MAX_ATTEMPTS: u32 = 5;
+const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
+
+/// Maximum number of congestion requeues per upload job. Each requeue is
+/// scheduled with `congestion_backoff_secs` delay, so 6 requeues spread over
+/// ~25 minutes — enough to outlive a sidecar upload-queue backlog (observed
+/// drain time for a 120-deep queue at ~16 uploads/min is ~8 minutes). Once
+/// the budget is spent, congestion errors fall back to normal Apalis attempts
+/// so a never-ending saturation still terminates in a (correct) "exhausted
+/// retries" alert.
+const MAX_CONGESTION_REQUEUES: u32 = 6;
+
+/// Backoff before re-running a congestion-requeued upload: 30s, 60s, 120s,
+/// 240s, 480s, then capped at 600s. Deliberately minutes-scale — the 2-16s
+/// `backoff_duration` style is useless against a backlog that takes minutes
+/// to drain (the 2026-06-10 incident burned all 5 wallet attempts inside one
+/// congestion window).
+fn congestion_backoff_secs(requeues: u32) -> u64 {
+    (30u64 << requeues.min(31)).min(600)
+}
 
 /// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
 #[allow(dead_code)]
@@ -372,6 +399,9 @@ pub(crate) struct WalletJobAttemptInfo {
 
 impl WalletJobAttemptInfo {
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
+        if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+            return false;
+        }
         // Only retryable (non-aborting) errors can "exhaust" the budget. An
         // aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
         // immediately, so it never produces a misleading "exhausted" alert.
@@ -457,6 +487,7 @@ pub(crate) async fn execute_wallet_job(
 ) -> Result<(), Error> {
     let state: &AppState = &ctx;
     let enqueued_wallet_index = job.wallet_index;
+    let congestion_requeues = job.congestion_requeues;
 
     let result = match job.operation {
         WalletOperation::UploadAndTransfer {
@@ -505,6 +536,7 @@ pub(crate) async fn execute_wallet_job(
                 agent_public_key,
                 remember_job_id,
                 epochs,
+                congestion_requeues,
                 attempt_info,
             )
             .await
@@ -676,7 +708,7 @@ async fn execute_set_metadata_and_transfer(
     package_id: Option<String>,
     agent_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    crate::storage::walrus::set_metadata_batch(
+    let set_metadata_result = crate::storage::walrus::set_metadata_batch(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -686,22 +718,35 @@ async fn execute_set_metadata_and_transfer(
         agent_id.as_deref(),
         vec![SetMetadataBatchEntry {
             blob_object_id,
-            namespace,
+            namespace: namespace.clone(),
         }],
     )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
-        let msg = e.to_string();
-        let classified = WalletJobError::classify_sidecar_error(&msg);
-        if classified.is_permanent() {
-            tracing::error!(
-                "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
-                msg
-            );
+    .await;
+
+    match set_metadata_result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            let classified = WalletJobError::classify_sidecar_error(&msg);
+            maybe_alert_walrus_low_wal_balance(
+                state,
+                &classified,
+                wallet_index,
+                None,
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
+            if classified.is_permanent() {
+                tracing::error!(
+                    "[wallet-job:set-metadata] permanent failure (will mark Dead): {}",
+                    msg
+                );
+            }
+            Err(classified)
         }
-        classified
-    })
+    }
 }
 
 async fn insert_vector_and_mark_remember_done(
@@ -781,6 +826,7 @@ async fn enqueue_finalize_uploaded_blob(
     storage
         .push_request(wallet_job_request(WalletJob {
             wallet_index,
+            congestion_requeues: 0,
             operation: WalletOperation::FinalizeUploadedBlob {
                 owner,
                 namespace,
@@ -818,6 +864,7 @@ async fn execute_upload_and_transfer(
     agent_public_key: Option<String>,
     remember_job_id: Option<String>,
     epochs: u32,
+    congestion_requeues: u32,
     attempt_info: WalletJobAttemptInfo,
 ) -> Result<(), WalletJobError> {
     // ── Mark running ───────────────────────────────────────────
@@ -908,6 +955,7 @@ async fn execute_upload_and_transfer(
             if let Err(e) = storage
                 .push_request(wallet_job_request(WalletJob {
                     wallet_index,
+                    congestion_requeues: 0,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
                         owner,
@@ -956,6 +1004,81 @@ async fn execute_upload_and_transfer(
                 attempt_info.max,
                 state.key_pool.len(),
             );
+            // Upload-slot congestion is the pipeline's fault, not this job's.
+            // Re-enqueue a fresh delayed copy (minutes-scale backoff, wallet
+            // rotated, attempt budget untouched) instead of burning all 5
+            // wallet attempts inside the same backlog window. Past the
+            // requeue budget, fall through to the normal retry path so a
+            // never-ending saturation still ends in an "exhausted" alert.
+            if matches!(classified, WalletJobError::UploadSlotCongestion(_))
+                && congestion_requeues < MAX_CONGESTION_REQUEUES
+            {
+                // Keep the polling row alive ('running' + congestion message)
+                // while the requeued copy waits out the backlog.
+                update_remember_job_after_wallet_error(
+                    state,
+                    remember_job_id.as_deref(),
+                    &classified,
+                    &msg,
+                )
+                .await;
+
+                let delay_secs = congestion_backoff_secs(congestion_requeues);
+                let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+                let next_wallet = (wallet_index + 1) % state.key_pool.len().max(1);
+                let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
+                let mut storage = state.wallet_storage.clone();
+                match storage
+                    .schedule_request(
+                        wallet_job_request(WalletJob {
+                            wallet_index: next_wallet,
+                            congestion_requeues: congestion_requeues + 1,
+                            operation: WalletOperation::UploadAndTransfer {
+                                encrypted_b64,
+                                vector,
+                                importance,
+                                owner,
+                                namespace,
+                                package_id,
+                                agent_public_key,
+                                remember_job_id,
+                                epochs,
+                            },
+                        }),
+                        run_at,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::warn!(
+                            "[wallet-job:upload] job_id={} upload slots saturated; requeued delay={}s requeue={}/{} next_wallet={}",
+                            job_id_for_log,
+                            delay_secs,
+                            congestion_requeues + 1,
+                            MAX_CONGESTION_REQUEUES,
+                            next_wallet,
+                        );
+                        return Ok(());
+                    }
+                    Err(requeue_err) => {
+                        // The job payload was consumed by the failed schedule
+                        // call — fall back to a plain transient error so
+                        // Apalis keeps the original job alive on its own
+                        // retry cadence. (Congestion fires none of the
+                        // alert helpers below, and the polling row was
+                        // already updated above.)
+                        tracing::error!(
+                            "[wallet-job:upload] job_id={} congestion requeue failed, falling back to Apalis retry: {}",
+                            job_id_for_log,
+                            requeue_err,
+                        );
+                        return Err(WalletJobError::Transient(format!(
+                            "{}; congestion requeue failed: {}",
+                            msg, requeue_err
+                        )));
+                    }
+                }
+            }
             maybe_alert_walrus_package_upgrade_detected(
                 state,
                 remember_job_id.as_deref(),
@@ -967,6 +1090,16 @@ async fn execute_upload_and_transfer(
             maybe_alert_walrus_object_locked(
                 state,
                 &classified,
+                remember_job_id.as_deref(),
+                Some(&owner),
+                Some(&namespace),
+                &msg,
+            )
+            .await;
+            maybe_alert_walrus_low_wal_balance(
+                state,
+                &classified,
+                wallet_index,
                 remember_job_id.as_deref(),
                 Some(&owner),
                 Some(&namespace),
@@ -1242,6 +1375,92 @@ async fn maybe_alert_walrus_gas_pool_exhausted(
     }
 }
 
+#[derive(Debug)]
+struct WalrusWALBalanceAlert {
+    required: Option<u64>,
+    available: u64,
+}
+
+fn extract_u64_after_token(message: &str, token: &str) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    let start = lower.find(token)?;
+    let mut saw_digit = false;
+    let mut digits = String::new();
+    for ch in lower[start + token.len()..].chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            digits.push(ch);
+        } else if saw_digit {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn parse_wal_balance_alert_info(message: &str) -> Option<WalrusWALBalanceAlert> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("insufficient balance") || !lower.contains("::wal::wal") {
+        return None;
+    }
+
+    let available = extract_u64_after_token(message, "available:")?;
+    if available >= WAL_BALANCE_LOW_THRESHOLD_MIST {
+        return None;
+    }
+
+    Some(WalrusWALBalanceAlert {
+        required: extract_u64_after_token(message, "required:"),
+        available,
+    })
+}
+
+async fn maybe_alert_walrus_low_wal_balance(
+    state: &AppState,
+    error: &WalletJobError,
+    wallet_index: usize,
+    remember_job_id: Option<&str>,
+    owner: Option<&str>,
+    namespace: Option<&str>,
+    msg: &str,
+) {
+    if !matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+        return;
+    }
+
+    let info = match parse_wal_balance_alert_info(msg) {
+        Some(info) => info,
+        None => return,
+    };
+
+    let alert = WalrusWalletBalanceLowAlert {
+        remember_job_id: remember_job_id.map(str::to_owned),
+        owner: owner.map(str::to_owned),
+        namespace: namespace.map(str::to_owned),
+        sui_network: state.config.sui_network.clone(),
+        available: info.available,
+        required: info.required,
+        threshold: WAL_BALANCE_LOW_THRESHOLD_MIST,
+        wallet_index,
+        configured_wallets: state.key_pool.len(),
+        error: msg.to_string(),
+    };
+
+    if let Err(err) = state
+        .alerts
+        .notify_walrus_low_wal_balance(alert)
+        .await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] failed to send Slack alert for low WAL balance: {}",
+            err
+        );
+    }
+}
+
 async fn maybe_alert_walrus_upload_exhausted(
     state: &AppState,
     error: &WalletJobError,
@@ -1252,6 +1471,10 @@ async fn maybe_alert_walrus_upload_exhausted(
     wallet_index: usize,
     msg: &str,
 ) {
+    if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
+        return;
+    }
+
     if !attempt_info.exhausted_by(error) {
         return;
     }
@@ -1306,6 +1529,10 @@ pub enum WalletJobError {
     Transient(String),
     /// Permanent failure — Apalis should mark Dead immediately (no retry).
     Permanent(String),
+    /// A wallet's WAL balance is below the alert threshold (default 2 WAL). This
+    /// keeps retries enabled so other pool wallets can carry the request, while
+    /// still surfacing a dedicated ops alert.
+    WalrusBalanceLow(String),
     /// A Sui owned object/version is locked to a competing transaction. The
     /// lock does not clear with immediate retries — it holds until the lock
     /// resolves, typically at the next epoch boundary — so retrying within the
@@ -1323,6 +1550,14 @@ pub enum WalletJobError {
     /// surface a distinct gas-pool maintenance alert rather than a misleading
     /// "wallet retries exhausted" one.
     GasPoolExhausted(String),
+    /// The sidecar's upload limiter timed out handing out a slot — every
+    /// upload slot was busy for the whole acquire window. This is pure
+    /// congestion: nothing is wrong with the job or the wallet, the pipeline
+    /// is just saturated. Retrying on the normal 2-16s cadence burns the
+    /// whole wallet-attempt budget inside one backlog window, so the caller
+    /// re-enqueues a fresh delayed copy instead (minutes-scale backoff,
+    /// attempt budget untouched) up to `MAX_CONGESTION_REQUEUES` times.
+    UploadSlotCongestion(String),
 }
 
 impl WalletJobError {
@@ -1330,8 +1565,10 @@ impl WalletJobError {
         match self {
             WalletJobError::Transient(_) => "transient",
             WalletJobError::Permanent(_) => "permanent",
+            WalletJobError::WalrusBalanceLow(_) => "walrus_balance_low",
             WalletJobError::ObjectLockedUntilEpoch(_) => "object_locked_until_epoch",
             WalletJobError::GasPoolExhausted(_) => "gas_pool_exhausted",
+            WalletJobError::UploadSlotCongestion(_) => "upload_slot_congestion",
         }
     }
 
@@ -1368,8 +1605,25 @@ impl WalletJobError {
     /// Heuristic classification from the sidecar's error string. The sidecar
     /// surfaces Sui execution errors verbatim (Move abort codes, lock errors).
     /// Until the sidecar emits structured error codes, we match on substrings.
+    /// True if `msg` is the sidecar's upload-limiter acquire timeout
+    /// (`WalrusUploadLimitError`: "timed out waiting for wallet N upload
+    /// slot" / "... global upload slot"). Matched on substrings because the
+    /// message arrives wrapped in transport layers ("walrus upload failed:
+    /// Internal Error: ...").
+    pub fn is_upload_slot_congestion_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        lower.contains("timed out waiting for") && lower.contains("upload slot")
+    }
+
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
+        if parse_wal_balance_alert_info(msg).is_some() {
+            return WalletJobError::WalrusBalanceLow(msg.to_string());
+        }
+        // Sidecar upload limiter saturated — see UploadSlotCongestion docs.
+        if Self::is_upload_slot_congestion_error(msg) {
+            return WalletJobError::UploadSlotCongestion(msg.to_string());
+        }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
         // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
         // split to cover the sponsored budget (its SUI is fragmented or too low).
@@ -1437,6 +1691,11 @@ impl WalletJobError {
         let error = io::Error::other(self.to_string());
         match self {
             WalletJobError::Transient(_) => Error::Failed(Arc::new(Box::new(error))),
+            WalletJobError::WalrusBalanceLow(_) => Error::Failed(Arc::new(Box::new(error))),
+            // Congestion normally never reaches Apalis (the caller requeues a
+            // delayed copy and returns Ok); past the requeue budget it rides
+            // the normal retry track.
+            WalletJobError::UploadSlotCongestion(_) => Error::Failed(Arc::new(Box::new(error))),
             WalletJobError::Permanent(_)
             | WalletJobError::ObjectLockedUntilEpoch(_)
             | WalletJobError::GasPoolExhausted(_) => Error::Abort(Arc::new(Box::new(error))),
@@ -1452,8 +1711,14 @@ impl std::fmt::Display for WalletJobError {
             WalletJobError::ObjectLockedUntilEpoch(msg) => {
                 write!(f, "wallet job error (object locked until epoch): {}", msg)
             }
+            WalletJobError::WalrusBalanceLow(msg) => {
+                write!(f, "wallet job error (insufficient WAL): {}", msg)
+            }
             WalletJobError::GasPoolExhausted(msg) => {
                 write!(f, "wallet job error (gas pool exhausted): {}", msg)
+            }
+            WalletJobError::UploadSlotCongestion(msg) => {
+                write!(f, "wallet job error (upload slot congestion): {}", msg)
             }
         }
     }
@@ -1591,6 +1856,7 @@ pub async fn execute_remember(
             if let Err(e) = storage
                 .push_request(wallet_job_request(WalletJob {
                     wallet_index: key_index,
+                    congestion_requeues: 0,
                     operation: WalletOperation::SetMetadataAndTransfer {
                         blob_object_id: object_id,
                         owner: job.owner.clone(),
@@ -1842,6 +2108,7 @@ pub async fn execute_bulk_remember(
         storage
             .push_request(wallet_job_request(WalletJob {
                 wallet_index,
+                congestion_requeues: 0,
                 operation: WalletOperation::UploadAndTransfer {
                     encrypted_b64: item.encrypted_b64,
                     vector: item.vector,
@@ -1882,11 +2149,12 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, escalate_if_gas_pool_exhausted,
-        gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch,
-        mark_remember_job_failed, parse_locked_object_info, wallet_index_for_upload_attempt,
-        wallet_job_request, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
-        MAX_ATTEMPTS,
+        classify_wallet_remember_handoff_failure, congestion_backoff_secs,
+        escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
+        is_walrus_package_version_mismatch, mark_remember_job_failed, parse_locked_object_info,
+        wallet_index_for_upload_attempt, wallet_job_request, parse_wal_balance_alert_info,
+        WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
+        MAX_CONGESTION_REQUEUES,
     };
 
     /// The exact production error string from the object-lock incident
@@ -1968,6 +2236,94 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             err.into_apalis_error(),
             apalis::prelude::Error::Abort(_)
         ));
+    }
+
+    /// The exact production error string from the 2026-06-10 congestion
+    /// incident — the sidecar's WalrusUploadLimitError wrapped by the Rust
+    /// transport layers.
+    const PROD_CONGESTION_ERROR: &str = "walrus upload failed: Internal Error: \
+        walrus upload failed: timed out waiting for wallet 3 upload slot";
+
+    #[test]
+    fn classify_prod_congestion_error_as_upload_slot_congestion() {
+        let classified = WalletJobError::classify_sidecar_error(PROD_CONGESTION_ERROR);
+        assert!(
+            matches!(classified, WalletJobError::UploadSlotCongestion(_)),
+            "prod congestion error must classify as UploadSlotCongestion, got {}",
+            classified.kind()
+        );
+        // Congestion is retryable — it must neither abort nor read as
+        // permanent; the caller decides between delayed requeue and the
+        // normal Apalis track.
+        assert!(!classified.aborts_retries());
+        assert!(!classified.is_permanent());
+
+        // The global-limiter variant of the same timeout classifies too.
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(
+                "walrus upload failed: timed out waiting for global upload slot"
+            ),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+    }
+
+    #[test]
+    fn congestion_does_not_classify_unrelated_timeouts() {
+        // A generic RPC timeout must stay on the normal Transient track —
+        // only the sidecar's upload-slot acquire timeout is congestion.
+        let classified =
+            WalletJobError::classify_sidecar_error("walrus upload failed: request timeout");
+        assert!(!matches!(
+            classified,
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+    }
+
+    #[test]
+    fn congestion_backoff_is_minutes_scale_and_capped() {
+        assert_eq!(congestion_backoff_secs(0), 30);
+        assert_eq!(congestion_backoff_secs(1), 60);
+        assert_eq!(congestion_backoff_secs(2), 120);
+        assert_eq!(congestion_backoff_secs(3), 240);
+        assert_eq!(congestion_backoff_secs(4), 480);
+        assert_eq!(congestion_backoff_secs(5), 600);
+        assert_eq!(congestion_backoff_secs(40), 600); // shift-safe at silly inputs
+
+        // The whole requeue budget must outlive a realistic backlog drain
+        // (the 2026-06-10 queue needed ~8 minutes at ~16 uploads/min).
+        let total: u64 = (0..MAX_CONGESTION_REQUEUES).map(congestion_backoff_secs).sum();
+        assert!(
+            total >= 20 * 60,
+            "congestion requeue budget should span >= 20 minutes, got {}s",
+            total
+        );
+    }
+
+    #[test]
+    fn wallet_job_payload_without_congestion_field_deserializes() {
+        // Jobs already queued in Postgres before the field existed must keep
+        // deserializing (serde default = 0).
+        let job = WalletJob {
+            wallet_index: 2,
+            congestion_requeues: 3,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner: "0xabc".to_string(),
+                namespace: "default".to_string(),
+                remember_job_id: Some("job-1".to_string()),
+                blob_id: "blob".to_string(),
+                vector: vec![0.1],
+                blob_size_bytes: 1,
+                importance: 0.5,
+            },
+        };
+        let mut value = serde_json::to_value(&job).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("congestion_requeues");
+        let legacy: WalletJob = serde_json::from_value(value).expect("legacy payload");
+        assert_eq!(legacy.congestion_requeues, 0);
+        assert_eq!(legacy.wallet_index, 2);
     }
 
     #[test]
@@ -2076,6 +2432,33 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     const BALANCE_SPLIT_ERR: &str = "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed: MoveAbort(MoveLocation { module: 0x2::balance, function_name: Some(\\\"split\\\") }, 2)\"}]}";
+    const LOW_WAL_BALANCE_ERR: &str =
+        "walrus upload failed: Insufficient balance of 0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL for owner 0xabc...def. Required: 64367730, Available: 10708877";
+
+    #[test]
+    fn parse_wal_balance_alert_info_extracts_required_and_available() {
+        let parsed = parse_wal_balance_alert_info(LOW_WAL_BALANCE_ERR).expect("expected low WAL signal");
+        assert_eq!(parsed.required, Some(64367730));
+        assert_eq!(parsed.available, 10708877);
+    }
+
+    #[test]
+    fn classify_low_wal_balance_is_dedicated_transient() {
+        let classified = WalletJobError::classify_sidecar_error(LOW_WAL_BALANCE_ERR);
+        assert!(matches!(
+            classified,
+            WalletJobError::WalrusBalanceLow(_)
+        ));
+        assert!(!classified.aborts_retries());
+        assert!(!classified.is_permanent());
+        assert_eq!(classified.kind(), "walrus_balance_low");
+    }
+
+    #[test]
+    fn low_wal_balance_does_not_trigger_exhausted_retries_alert_gate() {
+        let classified = WalletJobError::classify_sidecar_error(LOW_WAL_BALANCE_ERR);
+        assert!(!WalletJobAttemptInfo { current: 5, max: 5 }.exhausted_by(&classified));
+    }
 
     #[test]
     fn classify_balance_split_is_retriable_transient_by_default() {
@@ -2279,6 +2662,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     fn wallet_job_request_sets_explicit_max_attempts() {
         let req = wallet_job_request(WalletJob {
             wallet_index: 0,
+            congestion_requeues: 0,
             operation: WalletOperation::FinalizeUploadedBlob {
                 owner: "0xowner".to_string(),
                 namespace: "default".to_string(),
