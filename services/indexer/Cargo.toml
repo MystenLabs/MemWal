@@ -3,12 +3,17 @@ name = "memwal-indexer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+grpc = ["dep:sui-rpc", "dep:tonic"]
+grpc_smoke = ["grpc"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # Database (PostgreSQL)
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "sqlite", "any", "chrono"] }
 
 # HTTP client (for Sui RPC)
 reqwest = { version = "0.12", features = ["json"] }
@@ -26,3 +31,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utils
 chrono = "0.4"
+
+# Error handling
+thiserror = "1"
+
+# Async trait
+async-trait = "0.1"
+
+# gRPC dependencies (gated behind "grpc" feature)
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk", optional = true, features = ["unstable"] }
+tonic = { version = "0.14", optional = true }
+
+# Encoding / decoding (used by extractors for both JSON-RPC and gRPC paths)
+bcs = "0.1"
+hex = "0.4"
+
+[dev-dependencies]
+sqlx = { version = "0.8", features = ["sqlite"] }

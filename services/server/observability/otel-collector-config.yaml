@@ -1,0 +1,101 @@
+# OpenTelemetry Collector config for the MemWal observability PoC (WALM-81).
+#
+# Pipelines:
+#   metrics — scrape the relayer Prometheus /metrics endpoint (+ accept OTLP)
+#   logs    — accept OTLP logs from the relayer, plus optional Docker json-file
+#             tailing for local stdout debugging.
+#   traces  — accept OTLP traces from the relayer.
+#
+# All signals are exported to OpenObserve over OTLP/HTTP. The exporter endpoint
+# must NOT end in a slash — the collector appends /v1/{metrics,logs,traces}.
+
+receivers:
+  # Pull the relayer's Prometheus metrics. RELAYER_METRICS_TARGET defaults to
+  # the host gateway so it can scrape a relayer running on the host or the
+  # main docker-compose stack's published :8000.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: memwal-relayer
+          scrape_interval: 15s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:RELAYER_METRICS_TARGET}"]
+
+  # OTLP in — relayer logs/traces or other services that prefer collector fan-in.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Tail Docker json-file container logs. Inner payload is parsed only when it
+  # looks like JSON (LOG_FORMAT=json), so plain-text containers don't error.
+  file_log:
+    include: ["/var/lib/docker/containers/*/*-json.log"]
+    include_file_path: true
+    operators:
+      - type: json_parser # docker json-file wrapper: {log, stream, time}
+        timestamp:
+          parse_from: attributes.time
+          layout: "%Y-%m-%dT%H:%M:%S.%LZ"
+      - type: json_parser # inner application JSON (tracing_subscriber .json())
+        parse_from: attributes.log
+        if: 'attributes.log matches "^\\s*\\{"'
+        severity:
+          parse_from: attributes.level
+
+processors:
+  # Guard the collector against OOM when the backend is slow or unreachable.
+  # Must run FIRST in every pipeline so it sheds load before data is buffered.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    # Cap a single export so a backlog can't build one oversized payload that
+    # OpenObserve rejects; the collector splits batches larger than this.
+    send_batch_max_size: 2048
+  resource_detection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+
+exporters:
+  otlp_http/openobserve:
+    # Host is env-driven so one config works everywhere: "openobserve" on the
+    # compose network, or "openobserve.railway.internal" as a Railway service.
+    endpoint: "http://${env:OPENOBSERVE_HOST}:5080/api/${env:O2_ORG}"
+    headers:
+      Authorization: "Basic ${env:O2_AUTH}"
+      stream-name: default
+    retry_on_failure:
+      enabled: true
+
+extensions:
+  # Liveness probe for the collector itself, on :13133. External orchestrators
+  # (or another compose service) can use it to gate on collector readiness.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [prometheus, otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [otlp_http/openobserve]
+    logs:
+      receivers: [file_log, otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [otlp_http/openobserve]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [otlp_http/openobserve]

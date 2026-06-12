@@ -47,6 +47,10 @@ yarn add @mysten/sui @mysten/seal @mysten/walrus
 
 </CodeGroup>
 
+<Note>
+**Version compatibility:** `@mysten/seal` and `@mysten/walrus` must both accept the same `@mysten/sui` major. Known-good versions: `@mysten/sui@^2.16.2`, `@mysten/seal@^1.1.3`, `@mysten/walrus@^1.1.7`. Avoid `@mysten/walrus@0.x` — it bundles `@mysten/sui@1.x` and conflicts with `@mysten/seal@1.x`. If installation fails with `ERESOLVE` on `@mysten/sui`, upgrade `@mysten/walrus` and run `npm why @mysten/sui` to find which dependency still pins sui v1.
+</Note>
+
 For `withMemWal`, you also need:
 
 <CodeGroup>
@@ -88,12 +92,17 @@ Before wiring the SDK into your app:
 
 ## First Memory
 
+<Warning>
+**Use your own account, not an example one.** Generate your own `accountId` and delegate key at [memory.walrus.xyz](https://memory.walrus.xyz) before running. Recall is scoped per **account + namespace**, so writing against an account ID copied from docs or another project means your memories land in a shared space that everyone using it can read, instead of being isolated to you. The values below are placeholders; replace them with your own.
+</Warning>
+
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
-  key: "<your-ed25519-private-key>",
-  accountId: "<your-memwal-account-id>",
+  // Load your own credentials from the environment; never hardcode a shared example ID.
+  key: process.env.MEMWAL_KEY ?? "<your-ed25519-private-key>",
+  accountId: process.env.MEMWAL_ACCOUNT_ID ?? "<your-memwal-account-id>",
   serverUrl: "https://your-relayer-url.com",
   namespace: "demo",
 });
