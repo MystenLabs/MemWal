@@ -7,6 +7,10 @@
 - Automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity.
 - New `memwal_remember_bulk` and `memwal_health` tools.
 
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+
 ### Changed
 
 - Memory tools are now proactive — agents recall and save context on their own.

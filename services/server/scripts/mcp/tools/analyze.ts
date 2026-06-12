@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
-import { wrapTool } from "./util.js";
+import { wrapTool, explorerFooter } from "./util.js";
 
 const ANALYZE_INPUT = {
     text: z
@@ -37,19 +37,20 @@ export function registerAnalyzeTool(
             });
             const lines = result.results.map(
                 (r, i) =>
-                    `${i + 1}. [${r.status}] ${
+                    `${i + 1}. [${r.status}]${r.blob_id ? ` blob_id=${r.blob_id}` : ""} ${
                         result.facts[i]?.text ?? "(unknown fact)"
                     }`
             );
             const summary = `Extracted ${result.facts.length} fact(s) — succeeded=${result.succeeded} failed=${result.failed}`;
+            const footer = result.succeeded > 0 ? `\n\n${explorerFooter()}` : "";
             return {
                 content: [
                     {
                         type: "text",
                         text:
                             lines.length > 0
-                                ? `${summary}\n\n${lines.join("\n")}`
-                                : summary,
+                                ? `${summary}\n\n${lines.join("\n")}${footer}`
+                                : `${summary}${footer}`,
                     },
                 ],
             };
