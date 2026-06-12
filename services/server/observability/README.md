@@ -130,6 +130,51 @@ Create under Alerts. Suggested PoC thresholds (tune per environment):
 - `LOG_FORMAT=json` remains useful for local stdout parsing, but OTLP logs do
   not require Docker log tailing.
 - Replace the root credentials and pin image tags (this PoC uses `:latest`).
+- The collector exposes a `health_check` liveness endpoint on `:13133`
+  (`curl localhost:13133`) — wire it into orchestrator probes when deploying.
+  A `memory_limiter` processor runs first in every pipeline; the compose
+  `mem_limit` values are the ceiling it sizes against, so tune them together.
+
+## Deploy the collector on Railway
+
+On Railway each component is its own service — there is no docker-compose. The
+relayer already pushes **logs + traces** straight to OpenObserve over OTLP, so
+the only thing missing is **metrics**: nobody scrapes the relayer's Prometheus
+`/metrics`. Deploy this collector as a service to close that gap (it scrapes the
+relayer over the private network and forwards to OpenObserve).
+
+`Dockerfile` + `railway.json` in this directory make it deployable: the config
+is baked into the image (Railway can't bind-mount it).
+
+1. **New service** → *Deploy from GitHub repo* → select the repo.
+2. **Settings → Root Directory**: `services/server/observability`
+   (Railway reads `railway.json` here and builds the `Dockerfile`).
+3. **Variables** (Settings → Variables):
+
+   | Variable | Value (dev) |
+   |----------|-------------|
+   | `O2_ORG` | `default` |
+   | `O2_AUTH` | base64(`email:password`) of the OpenObserve root user |
+   | `OPENOBSERVE_HOST` | `openobserve.railway.internal` |
+   | `RELAYER_METRICS_TARGET` | `${{relayer.RAILWAY_PRIVATE_DOMAIN}}:3001` |
+
+   > **Use the relayer's private domain, not its display name.** Railway's
+   > `*.railway.internal` host is a *generated* name fixed at service creation
+   > (e.g. the "relayer" service resolves as `lucky-strength.railway.internal`,
+   > **not** `relayer.railway.internal`). The reference
+   > `${{relayer.RAILWAY_PRIVATE_DOMAIN}}` resolves to it automatically; or copy
+   > the literal value from the relayer service's `RAILWAY_PRIVATE_DOMAIN`. The
+   > `:3001` is the relayer's **internal** `PORT`, not a public URL.
+   >
+   > Railway's private network is **IPv6-only**, so the relayer must bind `[::]`
+   > (done in `services/server/src/main.rs`) — a service bound to `0.0.0.0` is
+   > unreachable over `*.railway.internal`.
+4. **Deploy.** No public domain is needed — the collector only makes outbound
+   connections (scrape + export). Optionally expose `:13133` for health checks.
+
+The collector's OTLP receivers and Docker `file_log` tailing stay idle on
+Railway (nothing connects to them there); only the metrics pipeline is active.
+Logs/traces continue to flow relayer → OpenObserve directly.
 
 ## Known gaps (follow-up)
 
