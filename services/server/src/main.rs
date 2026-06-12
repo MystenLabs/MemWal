@@ -897,8 +897,11 @@ async fn main() {
             observability::request_context_middleware,
         ));
 
-    // Start server
-    let addr = format!("0.0.0.0:{}", config.port);
+    // Start server. Bind the IPv6 unspecified address (dual-stack: still
+    // accepts IPv4 via mapped addresses) so the relayer is reachable over
+    // Railway's private network, which is IPv6-only — e.g. for the
+    // observability collector scraping /metrics at relayer.railway.internal.
+    let addr = format!("[::]:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind address");
