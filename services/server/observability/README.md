@@ -156,11 +156,19 @@ is baked into the image (Railway can't bind-mount it).
    | `O2_ORG` | `default` |
    | `O2_AUTH` | base64(`email:password`) of the OpenObserve root user |
    | `OPENOBSERVE_HOST` | `openobserve.railway.internal` |
-   | `RELAYER_METRICS_TARGET` | `relayer.railway.internal:3001` |
+   | `RELAYER_METRICS_TARGET` | `${{relayer.RAILWAY_PRIVATE_DOMAIN}}:3001` |
 
-   > `RELAYER_METRICS_TARGET` uses the relayer's **internal** port (its `PORT`,
-   > `3001` on dev), not a public URL. Railway's private network is IPv6 — the
-   > collector resolves `*.railway.internal` over IPv6 automatically.
+   > **Use the relayer's private domain, not its display name.** Railway's
+   > `*.railway.internal` host is a *generated* name fixed at service creation
+   > (e.g. the "relayer" service resolves as `lucky-strength.railway.internal`,
+   > **not** `relayer.railway.internal`). The reference
+   > `${{relayer.RAILWAY_PRIVATE_DOMAIN}}` resolves to it automatically; or copy
+   > the literal value from the relayer service's `RAILWAY_PRIVATE_DOMAIN`. The
+   > `:3001` is the relayer's **internal** `PORT`, not a public URL.
+   >
+   > Railway's private network is **IPv6-only**, so the relayer must bind `[::]`
+   > (done in `services/server/src/main.rs`) — a service bound to `0.0.0.0` is
+   > unreachable over `*.railway.internal`.
 4. **Deploy.** No public domain is needed — the collector only makes outbound
    connections (scrape + export). Optionally expose `:13133` for health checks.
 
