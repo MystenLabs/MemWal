@@ -47,9 +47,18 @@ receivers:
           parse_from: attributes.level
 
 processors:
+  # Guard the collector against OOM when the backend is slow or unreachable.
+  # Must run FIRST in every pipeline so it sheds load before data is buffered.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
   batch:
     timeout: 5s
     send_batch_size: 1024
+    # Cap a single export so a backlog can't build one oversized payload that
+    # OpenObserve rejects; the collector splits batches larger than this.
+    send_batch_max_size: 2048
   resource_detection:
     detectors: [env, system]
     timeout: 5s
@@ -64,20 +73,27 @@ exporters:
     retry_on_failure:
       enabled: true
 
+extensions:
+  # Liveness probe for the collector itself, on :13133. External orchestrators
+  # (or another compose service) can use it to gate on collector readiness.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 service:
+  extensions: [health_check]
   telemetry:
     logs:
       level: info
   pipelines:
     metrics:
       receivers: [prometheus, otlp]
-      processors: [resource_detection, batch]
+      processors: [memory_limiter, resource_detection, batch]
       exporters: [otlp_http/openobserve]
     logs:
       receivers: [file_log, otlp]
-      processors: [resource_detection, batch]
+      processors: [memory_limiter, resource_detection, batch]
       exporters: [otlp_http/openobserve]
     traces:
       receivers: [otlp]
-      processors: [resource_detection, batch]
+      processors: [memory_limiter, resource_detection, batch]
       exporters: [otlp_http/openobserve]

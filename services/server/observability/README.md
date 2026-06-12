@@ -130,6 +130,10 @@ Create under Alerts. Suggested PoC thresholds (tune per environment):
 - `LOG_FORMAT=json` remains useful for local stdout parsing, but OTLP logs do
   not require Docker log tailing.
 - Replace the root credentials and pin image tags (this PoC uses `:latest`).
+- The collector exposes a `health_check` liveness endpoint on `:13133`
+  (`curl localhost:13133`) — wire it into orchestrator probes when deploying.
+  A `memory_limiter` processor runs first in every pipeline; the compose
+  `mem_limit` values are the ceiling it sizes against, so tune them together.
 
 ## Known gaps (follow-up)
 

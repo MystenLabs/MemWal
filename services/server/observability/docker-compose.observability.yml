@@ -25,6 +25,9 @@ services:
       - "5081:5081" # OTLP/gRPC ingest
     volumes:
       - openobserve_data:/data
+    # PoC ceilings so a runaway ingest can't starve the host. Tune per environment.
+    mem_limit: 1g
+    cpus: 1.0
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
@@ -49,6 +52,11 @@ services:
     ports:
       - "4317:4317" # OTLP/gRPC in
       - "4318:4318" # OTLP/HTTP in
+      - "13133:13133" # health_check extension (collector liveness)
+    # The collector's memory_limiter caps usage at a % of this ceiling, so the
+    # limit must sit above the relayer's steady-state batch volume. Tune per env.
+    mem_limit: 512m
+    cpus: 0.5
 
 volumes:
   openobserve_data:
