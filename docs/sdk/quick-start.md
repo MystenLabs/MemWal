@@ -93,14 +93,14 @@ Before wiring the SDK into your app:
 ## First Memory
 
 <Warning>
-**Use your own account, not an example one.** Generate your own `accountId` and delegate key at [memory.walrus.xyz](https://memory.walrus.xyz) before running. Recall is scoped per **account + namespace**, so writing against an account ID copied from docs or another project means your memories land in — and are readable from — a shared space instead of being isolated to you. The values below are placeholders; replace them with your own.
+**Use your own account, not an example one.** Generate your own `accountId` and delegate key at [memory.walrus.xyz](https://memory.walrus.xyz) before running. Recall is scoped per **account + namespace**, so writing against an account ID copied from docs or another project means your memories land in a shared space that everyone using it can read, instead of being isolated to you. The values below are placeholders; replace them with your own.
 </Warning>
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
 
 const memwal = MemWal.create({
-  // Load your own credentials from the environment — never hardcode a shared example ID.
+  // Load your own credentials from the environment; never hardcode a shared example ID.
   key: process.env.MEMWAL_KEY ?? "<your-ed25519-private-key>",
   accountId: process.env.MEMWAL_ACCOUNT_ID ?? "<your-memwal-account-id>",
   serverUrl: "https://your-relayer-url.com",

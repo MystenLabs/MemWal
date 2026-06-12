@@ -130,7 +130,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     import { MemWal } from "@mysten-incubation/memwal";
 
     const memwal = MemWal.create({
-      // Load your own credentials from the environment — don't hardcode an example ID.
+      // Load your own credentials from the environment; don't hardcode an example ID.
       key: process.env.MEMWAL_KEY ?? "<your-ed25519-private-key>",
       accountId: process.env.MEMWAL_ACCOUNT_ID ?? "<your-memwal-account-id>",
       serverUrl: "https://relayer.memory.walrus.xyz",
@@ -139,7 +139,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     ```
 
     <Warning>
-    Use the `accountId` **you** generated in the previous step. Recall is scoped per **account + namespace** — reusing an account ID copied from docs or another project puts your memories in a shared space instead of isolating them to you.
+    Use the `accountId` **you** generated in the previous step. Recall is scoped per **account + namespace**. Reusing an account ID copied from docs or another project puts your memories in a shared space instead of isolating them to you.
     </Warning>
   </Step>
 
