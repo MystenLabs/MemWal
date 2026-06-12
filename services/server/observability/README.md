@@ -135,6 +135,39 @@ Create under Alerts. Suggested PoC thresholds (tune per environment):
   A `memory_limiter` processor runs first in every pipeline; the compose
   `mem_limit` values are the ceiling it sizes against, so tune them together.
 
+## Deploy the collector on Railway
+
+On Railway each component is its own service — there is no docker-compose. The
+relayer already pushes **logs + traces** straight to OpenObserve over OTLP, so
+the only thing missing is **metrics**: nobody scrapes the relayer's Prometheus
+`/metrics`. Deploy this collector as a service to close that gap (it scrapes the
+relayer over the private network and forwards to OpenObserve).
+
+`Dockerfile` + `railway.json` in this directory make it deployable: the config
+is baked into the image (Railway can't bind-mount it).
+
+1. **New service** → *Deploy from GitHub repo* → select the repo.
+2. **Settings → Root Directory**: `services/server/observability`
+   (Railway reads `railway.json` here and builds the `Dockerfile`).
+3. **Variables** (Settings → Variables):
+
+   | Variable | Value (dev) |
+   |----------|-------------|
+   | `O2_ORG` | `default` |
+   | `O2_AUTH` | base64(`email:password`) of the OpenObserve root user |
+   | `OPENOBSERVE_HOST` | `openobserve.railway.internal` |
+   | `RELAYER_METRICS_TARGET` | `relayer.railway.internal:3001` |
+
+   > `RELAYER_METRICS_TARGET` uses the relayer's **internal** port (its `PORT`,
+   > `3001` on dev), not a public URL. Railway's private network is IPv6 — the
+   > collector resolves `*.railway.internal` over IPv6 automatically.
+4. **Deploy.** No public domain is needed — the collector only makes outbound
+   connections (scrape + export). Optionally expose `:13133` for health checks.
+
+The collector's OTLP receivers and Docker `file_log` tailing stay idle on
+Railway (nothing connects to them there); only the metrics pipeline is active.
+Logs/traces continue to flow relayer → OpenObserve directly.
+
 ## Known gaps (follow-up)
 
 1. **Job-queue health**: there is no apalis/job-queue metric exposed today, so a

@@ -66,7 +66,9 @@ processors:
 
 exporters:
   otlp_http/openobserve:
-    endpoint: "http://openobserve:5080/api/${env:O2_ORG}"
+    # Host is env-driven so one config works everywhere: "openobserve" on the
+    # compose network, or "openobserve.railway.internal" as a Railway service.
+    endpoint: "http://${env:OPENOBSERVE_HOST}:5080/api/${env:O2_ORG}"
     headers:
       Authorization: "Basic ${env:O2_AUTH}"
       stream-name: default
