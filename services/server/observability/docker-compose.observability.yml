@@ -1,0 +1,65 @@
+# Self-hosted observability PoC for MemWal (WALM-81).
+#
+# Brings up OpenObserve + an OpenTelemetry Collector that scrapes the relayer
+# /metrics endpoint and accepts OTLP logs/traces.
+# Runs independently of the main services/server/docker-compose.yml.
+#
+# Usage:
+#   export O2_AUTH=$(printf '%s' "$O2_ROOT_EMAIL:$O2_ROOT_PASSWORD" | base64)
+#   docker compose -f docker-compose.observability.yml up -d
+# OpenObserve UI: http://localhost:5080  (login with O2_ROOT_EMAIL/PASSWORD)
+
+name: memwal-observability
+
+services:
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    container_name: memwal-openobserve
+    restart: unless-stopped
+    environment:
+      ZO_ROOT_USER_EMAIL: ${O2_ROOT_EMAIL:-root@memwal.local}
+      ZO_ROOT_USER_PASSWORD: ${O2_ROOT_PASSWORD:-Complexpass#123}
+      ZO_DATA_DIR: /data
+    ports:
+      - "5080:5080" # HTTP UI + OTLP/HTTP ingest
+      - "5081:5081" # OTLP/gRPC ingest
+    volumes:
+      - openobserve_data:/data
+    # PoC ceilings so a runaway ingest can't starve the host. Tune per environment.
+    mem_limit: 1g
+    cpus: 1.0
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: memwal-otel-collector
+    restart: unless-stopped
+    depends_on:
+      - openobserve
+    command: ["--config=/etc/otel/config.yaml"]
+    environment:
+      O2_ORG: ${O2_ORG:-default}
+      # OpenObserve host the exporter targets. Defaults to the compose service
+      # name; on Railway set OPENOBSERVE_HOST=openobserve.railway.internal.
+      OPENOBSERVE_HOST: ${OPENOBSERVE_HOST:-openobserve}
+      # base64("email:password") — see README. Required.
+      O2_AUTH: ${O2_AUTH:?set O2_AUTH=base64(email:password) — see README}
+      # Where the relayer exposes /metrics. host.docker.internal reaches a
+      # relayer on the host or the main compose's published :8000.
+      RELAYER_METRICS_TARGET: ${RELAYER_METRICS_TARGET:-host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux compatibility
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml:ro
+      # Read-only access to container logs for the filelog receiver.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    ports:
+      - "4317:4317" # OTLP/gRPC in
+      - "4318:4318" # OTLP/HTTP in
+      - "13133:13133" # health_check extension (collector liveness)
+    # The collector's memory_limiter caps usage at a % of this ceiling, so the
+    # limit must sit above the relayer's steady-state batch volume. Tune per env.
+    mem_limit: 512m
+    cpus: 0.5
+
+volumes:
+  openobserve_data:

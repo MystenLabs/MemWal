@@ -104,6 +104,22 @@ const LOCAL_TOOL_DEFINITIONS = [
 const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
+/** Maximum silence we tolerate on the SSE stream before assuming the
+ * relayer-side session has gone dead. The relayer sends keepalive events
+ * roughly every 3s, so 30s ≈ 10 missed heartbeats — well past any plausible
+ * network blip but quick enough that a stuck tool call recovers on its own.
+ *
+ * Override via `MEMWAL_MCP_SSE_IDLE_MS` (mostly for tests). Values below 500ms
+ * are clamped — anything tighter races the heartbeat cadence and produces
+ * spurious reconnects. */
+function resolveSseIdleMs(): number {
+    const raw = process.env.MEMWAL_MCP_SSE_IDLE_MS;
+    if (!raw) return 30_000;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 500) return 30_000;
+    return n;
+}
+
 interface RpcMessage {
     jsonrpc: "2.0";
     id?: number | string | null;
@@ -200,12 +216,35 @@ async function openSseStream(
         wake();
     }
 
+    // Heartbeat watchdog: an alive SSE session emits keepalive events every
+    // few seconds. If reader.read() stops yielding chunks entirely, the
+    // server-side session has gone dead even though the TCP socket may still
+    // be open (observed in the wild: relayer session state silently dropped
+    // while the bridge waited forever for a response that never arrived,
+    // because the next POST landed in the void). Abort the controller — the
+    // catch block sets streamEnded=true and runBridge's serverPump triggers
+    // reconnect("server-pump-eof"), which replays any in-flight requests on
+    // the fresh session.
+    const idleTimeoutMs = resolveSseIdleMs();
+    const checkIntervalMs = Math.max(500, Math.floor(idleTimeoutMs / 3));
+    let lastChunkAt = Date.now();
+    const watchdog = setInterval(() => {
+        const idleMs = Date.now() - lastChunkAt;
+        if (idleMs > idleTimeoutMs && !controller.signal.aborted) {
+            log.warn("bridge.sse_idle_watchdog_fired", { idleMs, idleTimeoutMs });
+            controller.abort();
+        }
+    }, checkIntervalMs);
+    // unref so the watchdog never holds the event loop open during shutdown.
+    watchdog.unref?.();
+
     // Pump the SSE stream in the background.
     const pump = (async () => {
         try {
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
+                lastChunkAt = Date.now();
                 buf += decoder.decode(value, { stream: true });
                 let sep: number;
                 while ((sep = buf.indexOf("\n\n")) >= 0) {
@@ -251,6 +290,7 @@ async function openSseStream(
                 }
             }
         } finally {
+            clearInterval(watchdog);
             streamEnded = true;
             // Wake any waiter so they see EOF.
             wake();

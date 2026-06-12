@@ -1,0 +1,31 @@
+name: memwal-status
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: memwal-status-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: memwal_status
+      POSTGRES_USER: memwal_status
+      POSTGRES_PASSWORD: memwal_status_secret
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - memwal_status_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memwal_status -d memwal_status"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+        reservations:
+          memory: 128m
+          cpus: "0.25"
+
+volumes:
+  memwal_status_pgdata:

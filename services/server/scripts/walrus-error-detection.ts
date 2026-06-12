@@ -41,6 +41,26 @@ export function isWalrusReferencedObjectStale(message: string): boolean {
         && /at version/i.test(message);
 }
 
+export type EnokiSponsoredTransactionInvalidation = "expired" | "referenced_object_stale";
+
+export function isEnokiSponsoredTransactionExpired(message: string): boolean {
+    if (!message) return false;
+    return /sponsored transaction has expired/i.test(message)
+        || /"code"\s*:\s*"expired"/i.test(message);
+}
+
+export function classifyEnokiSponsoredTransactionInvalidation(
+    message: string,
+): EnokiSponsoredTransactionInvalidation | null {
+    if (isEnokiSponsoredTransactionExpired(message)) {
+        return "expired";
+    }
+    if (isWalrusReferencedObjectStale(message)) {
+        return "referenced_object_stale";
+    }
+    return null;
+}
+
 /**
  * Detect Walrus SDK upload failures where register succeeded, but the SDK/RPC
  * path cannot observe the newly-created blob object in transaction effects yet.

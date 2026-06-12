@@ -33,10 +33,15 @@ serde_json = "1"
 # Config
 dotenvy = "0.15"
 
-# Logging
+# Logging / observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus = "0.13"
+opentelemetry = { version = "0.31", features = ["logs", "trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["logs", "rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-json", "logs", "reqwest-blocking-client", "trace"] }
+opentelemetry-appender-tracing = "0.31"
+tracing-opentelemetry = "0.32"
 
 # HTTP client (for Sui RPC onchain verification)
 reqwest = { version = "0.12", features = ["json", "stream"] }

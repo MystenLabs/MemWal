@@ -32,7 +32,7 @@ export function registerRestoreTool(
 ): void {
     server.tool(
         "memwal_restore",
-        "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only (restored / skipped / total) — does not return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.",
+        "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts only (restored / skipped / total) — does not return memory texts. Call memwal_recall afterwards to query the rebuilt index.",
         RESTORE_INPUT,
         wrapTool<{ namespace: string; limit: number }>(async ({ namespace, limit }) => {
             const result = await session.memwal.restore(namespace, limit);

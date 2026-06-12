@@ -1,0 +1,12 @@
+{
+  "id": "memwal",
+  "name": "memwal",
+  "version": "0.0.5",
+  "description": "Automatic Walrus Memory for Antigravity — proactive recall and durable-fact saving via the MemWal MCP + lifecycle hooks.",
+  "author": { "name": "Mysten Labs" },
+  "homepage": "https://memory.walrus.xyz",
+  "repository": "https://github.com/MystenLabs/MemWal",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "mcp", "walrus", "sui", "semantic-search"],
+  "contextFileName": "AGENTS.md"
+}
