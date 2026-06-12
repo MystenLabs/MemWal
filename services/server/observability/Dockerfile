@@ -3,7 +3,7 @@
 #
 # Pinned tag for reproducibility — bump deliberately to a current contrib
 # release rather than tracking :latest.
-FROM otel/opentelemetry-collector-contrib:0.115.0
+FROM otel/opentelemetry-collector-contrib:0.154.0
 
 # Build context is this directory (services/server/observability).
 COPY otel-collector-config.yaml /etc/otel/config.yaml
