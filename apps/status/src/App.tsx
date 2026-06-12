@@ -65,6 +65,18 @@ interface IncidentList {
   recent: Incident[]
 }
 
+interface StatusComponent {
+  id: string
+  name: string
+  status: StatusKind
+  url: string
+  httpStatus: number | null
+  latencyMs: number | null
+  checkedAt: string
+  health: HealthPayload | null
+  error: string | null
+}
+
 interface StatusSnapshot {
   generatedAt: string
   service: {
@@ -73,17 +85,8 @@ interface StatusSnapshot {
     runtime?: string
     historyEnabled?: boolean
   }
-  relayer: {
-    name: string
-    status: StatusKind
-    url: string
-    httpStatus: number | null
-    latencyMs: number | null
-    checkedAt: string
-    health: HealthPayload | null
-    error: string | null
-  }
-  history: StatusHistory
+  components: StatusComponent[]
+  histories: Record<string, StatusHistory>
   incidents?: IncidentList
   database?: {
     configured: boolean
@@ -152,8 +155,13 @@ function formatMonthYear(value: Date) {
 }
 
 function getOverallStatus(snapshot: StatusSnapshot | null, loadState: LoadState): StatusKind {
-  if (snapshot?.relayer.status) return snapshot.relayer.status
-  return loadState === 'error' ? 'outage' : 'monitoring'
+  if (loadState === 'error') return 'outage'
+  const components = snapshot?.components ?? []
+  if (components.length === 0) return 'monitoring'
+  if (components.some((c) => c.status === 'outage')) return 'outage'
+  if (components.some((c) => c.status === 'degraded')) return 'degraded'
+  if (components.every((c) => c.status === 'operational')) return 'operational'
+  return 'monitoring'
 }
 
 function getStatusTitle(status: StatusKind) {
@@ -229,21 +237,27 @@ function formatUptime(history: StatusHistory | null | undefined) {
 }
 
 function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): ComponentRow[] {
-  const relayerStatus = getOverallStatus(snapshot, loadState)
-  const history = snapshot?.history
-  const relayerHistory = normalizeBuckets(history, relayerStatus)
-  const uptimeLabel = formatUptime(history)
+  const components = snapshot?.components ?? []
+  if (components.length === 0 && loadState === 'error') {
+    return [
+      {
+        name: 'Walrus Memory Relayer production (mainnet)',
+        status: 'outage',
+        uptimeLabel: 'history unavailable',
+        history: normalizeBuckets(null, 'outage'),
+      },
+    ]
+  }
 
-  // TODO(WALM-99): Temporarily showing only the relayer.
-  // Restore full list when other components have real monitoring.
-  return [
-    {
-      name: 'Walrus Memory Relayer',
-      status: relayerStatus,
-      uptimeLabel,
-      history: relayerHistory,
-    },
-  ]
+  return components.map((component) => {
+    const history = snapshot?.histories?.[component.id]
+    return {
+      name: component.name,
+      status: component.status,
+      uptimeLabel: formatUptime(history),
+      history: normalizeBuckets(history, component.status),
+    }
+  })
 }
 
 function buildIncidentDays(history: StatusHistory | null | undefined, incidents: IncidentList | null | undefined, count = 10): IncidentDay[] {
@@ -736,7 +750,17 @@ async function deleteIncidentApi(incidentId: number, apiKey: string): Promise<vo
   }
 }
 
-function AdminPanel({ apiKey, onApiKeyChange, onMutate }: { apiKey: string; onApiKeyChange: (key: string) => void; onMutate?: () => void }) {
+function AdminPanel({
+  apiKey,
+  onApiKeyChange,
+  onMutate,
+  componentNames,
+}: {
+  apiKey: string
+  onApiKeyChange: (key: string) => void
+  onMutate?: () => void
+  componentNames: string[]
+}) {
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState<string | null>(null)
@@ -889,8 +913,13 @@ function AdminPanel({ apiKey, onApiKeyChange, onMutate }: { apiKey: string; onAp
           </label>
           <label>
             Component
-            <input name="component" type="text" placeholder="e.g., Walrus Memory Relayer" />
+            <select name="component" defaultValue={componentNames[0] ?? ''}>
+              {componentNames.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
           </label>
+
           <label>
             Message
             <textarea name="message" rows={3} placeholder="Initial incident message" required />
@@ -956,7 +985,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<StatusSnapshot | null>(null)
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState<string | null>(null)
-  const [selectedComponentName, setSelectedComponentName] = useState('Walrus Memory Relayer')
+  const [selectedComponentName, setSelectedComponentName] = useState('Walrus Memory Relayer production (mainnet)')
   const [calendarPage, setCalendarPage] = useState(0)
   const [subscribeOpen, setSubscribeOpen] = useState(false)
   const [adminApiKey, setAdminApiKey] = useState(() => {
@@ -1020,7 +1049,9 @@ export default function App() {
   const overallStatus = getOverallStatus(snapshot, loadState)
   const rows = useMemo(() => buildRows(snapshot, loadState), [snapshot, loadState])
   const uptimeRows = useMemo(() => rows.filter((row) => row.status !== 'monitoring'), [rows])
-  const historyDays = snapshot?.history.days ?? BAR_COUNT
+  const productionHistory = snapshot?.histories?.['relayer-production']
+  const historyDays = productionHistory?.days ?? BAR_COUNT
+  const componentError = snapshot?.components?.find((c) => c.error)?.error
 
   return (
     <div className={`status-page status-page--${route}`}>
@@ -1038,18 +1069,18 @@ export default function App() {
               <h1>{getStatusTitle(overallStatus)}</h1>
             </section>
 
-            {(error || snapshot?.relayer.error || snapshot?.database?.error) && (
+            {(error || componentError || snapshot?.database?.error) && (
               <section className="status-alert" role="alert">
                 <AlertTriangle size={20} aria-hidden="true" />
                 <div>
                   <strong>
                     {error
                       ? 'Status service error'
-                      : snapshot?.relayer.error
+                      : componentError
                         ? 'Relayer health check error'
                         : 'History storage error'}
                   </strong>
-                  <span>{error ?? snapshot?.relayer.error ?? snapshot?.database?.error}</span>
+                  <span>{error ?? componentError ?? snapshot?.database?.error}</span>
                 </div>
               </section>
             )}
@@ -1074,19 +1105,27 @@ export default function App() {
               </div>
             </section>
 
-            <IncidentHistory history={snapshot?.history} incidents={snapshot?.incidents} count={10} />
+            <IncidentHistory history={productionHistory} incidents={snapshot?.incidents} count={10} />
           </>
         )}
 
         {route === 'history' && (
           <>
             <HistoryTabs route={route} onNavigate={navigate} />
-            <IncidentHistory history={snapshot?.history} incidents={snapshot?.incidents} count={30} />
+            <IncidentHistory history={productionHistory} incidents={snapshot?.incidents} count={30} />
           </>
         )}
 
         {route === 'admin' && (
-          <AdminPanel apiKey={adminApiKey} onApiKeyChange={handleApiKeyChange} onMutate={refresh} />
+          <AdminPanel
+            apiKey={adminApiKey}
+            onApiKeyChange={handleApiKeyChange}
+            onMutate={refresh}
+            componentNames={snapshot?.components?.map((c) => c.name) ?? [
+              'Walrus Memory Relayer production (mainnet)',
+              'Walrus Memory Relayer staging (testnet)',
+            ]}
+          />
         )}
 
         {route === 'uptime' && (

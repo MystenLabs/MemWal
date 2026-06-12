@@ -12,12 +12,32 @@ const distPrefix = `${distDir}${path.sep}`
 const port = Number(process.env.PORT || 3000)
 const host = process.env.HOST || '0.0.0.0'
 
-const DEFAULT_RELAYER_URL = 'https://relayer.memory.walrus.xyz'
+const DEFAULT_RELAYER_PRODUCTION_URL = 'https://relayer.memory.walrus.xyz'
+const DEFAULT_RELAYER_STAGING_URL = 'https://relayer-staging.memory.walrus.xyz'
 const DEFAULT_HEALTH_PATH = '/health'
 const DEFAULT_TIMEOUT_MS = 8000
 const DEFAULT_POLL_INTERVAL_MS = 60_000
 const DEFAULT_HISTORY_DAYS = 90
 const HISTORY_TARGET = 'relayer'
+
+function getRelayerComponents() {
+  return [
+    {
+      id: 'relayer-production',
+      name: 'Walrus Memory Relayer production (mainnet)',
+      url: (
+        process.env.STATUS_RELAYER_PRODUCTION_URL ||
+        process.env.STATUS_RELAYER_URL ||
+        DEFAULT_RELAYER_PRODUCTION_URL
+      ).trim(),
+    },
+    {
+      id: 'relayer-staging',
+      name: 'Walrus Memory Relayer staging (testnet)',
+      url: (process.env.STATUS_RELAYER_STAGING_URL || DEFAULT_RELAYER_STAGING_URL).trim(),
+    },
+  ]
+}
 
 let sql = null
 let databaseReady = false
@@ -109,14 +129,14 @@ function relayerBaseUrl() {
     process.env.STATUS_RELAYER_URL ||
     process.env.MEMWAL_SERVER_URL ||
     process.env.VITE_MEMWAL_SERVER_URL ||
-    DEFAULT_RELAYER_URL
+    DEFAULT_RELAYER_PRODUCTION_URL
   ).trim()
 }
 
-function resolveHealthUrl() {
-  const rawBase = relayerBaseUrl()
+function resolveHealthUrl(rawBase) {
+  const base = (rawBase || relayerBaseUrl()).trim()
   const healthPath = (process.env.STATUS_HEALTH_PATH || DEFAULT_HEALTH_PATH).trim() || DEFAULT_HEALTH_PATH
-  const url = new URL(rawBase)
+  const url = new URL(base)
 
   if (!process.env.STATUS_HEALTH_PATH && /\/health\/?$/.test(url.pathname)) {
     url.search = ''
@@ -308,9 +328,9 @@ async function ensureDatabaseReady() {
   return databaseInitPromise
 }
 
-async function probeRelayer() {
+async function probeRelayer(name, rawBase, target) {
   const checkedAt = new Date().toISOString()
-  const url = resolveHealthUrl()
+  const url = resolveHealthUrl(rawBase)
   const startedAt = performance.now()
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), getTimeoutMs())
@@ -338,7 +358,8 @@ async function probeRelayer() {
     const status = response.ok ? (reportedOk ? 'operational' : 'degraded') : 'outage'
 
     return {
-      name: 'Public relayer API',
+      id: target,
+      name,
       status,
       url,
       httpStatus: response.status,
@@ -354,7 +375,8 @@ async function probeRelayer() {
       : error?.message || String(error)
 
     return {
-      name: 'Public relayer API',
+      id: target,
+      name,
       status: 'outage',
       url,
       httpStatus: null,
@@ -385,7 +407,7 @@ async function insertCheck(relayer) {
       )
       VALUES (
         ${new Date(relayer.checkedAt)},
-        ${HISTORY_TARGET},
+        ${relayer.id},
         ${relayer.status},
         ${relayer.httpStatus},
         ${relayer.latencyMs},
@@ -405,9 +427,14 @@ async function insertCheck(relayer) {
 }
 
 async function probeAndStore() {
-  const relayer = await probeRelayer()
-  await insertCheck(relayer)
-  return relayer
+  const components = getRelayerComponents()
+  const results = await Promise.all(
+    components.map((c) => probeRelayer(c.name, c.url, c.id))
+  )
+  for (const relayer of results) {
+    await insertCheck(relayer)
+  }
+  return results
 }
 
 async function runPollCycle() {
@@ -421,10 +448,12 @@ async function runPollCycle() {
 }
 
 function rowToRelayer(row) {
+  const component = getRelayerComponents().find((c) => c.id === row.target)
   return {
-    name: 'Public relayer API',
+    id: row.target || HISTORY_TARGET,
+    name: component?.name || 'Walrus Memory Relayer',
     status: row.status,
-    url: resolveHealthUrl(),
+    url: component ? resolveHealthUrl(component.url) : resolveHealthUrl(),
     httpStatus: row.http_status,
     latencyMs: row.latency_ms,
     checkedAt: new Date(row.checked_at).toISOString(),
@@ -433,13 +462,13 @@ function rowToRelayer(row) {
   }
 }
 
-async function readLatestCheck() {
+async function readLatestCheck(target) {
   if (!(await ensureDatabaseReady())) return null
 
   const rows = await getSql()`
-    SELECT checked_at, status, http_status, latency_ms, error, payload
+    SELECT target, checked_at, status, http_status, latency_ms, error, payload
     FROM status_checks
-    WHERE target = ${HISTORY_TARGET}
+    WHERE target = ${target}
     ORDER BY checked_at DESC
     LIMIT 1
   `
@@ -781,7 +810,7 @@ function normalizePayload(payload) {
   }
 }
 
-function makeEmptyHistory(enabled, reason = null) {
+function makeEmptyHistory(enabled, reason = null, target = HISTORY_TARGET) {
   const days = getHistoryDays()
   const today = startOfUtcDay(new Date())
   const firstDay = addUtcDays(today, -(days - 1))
@@ -798,7 +827,7 @@ function makeEmptyHistory(enabled, reason = null) {
     enabled,
     source: enabled ? 'postgres' : 'live',
     days,
-    target: HISTORY_TARGET,
+    target,
     totalChecks: 0,
     uptimePct: null,
     unavailableReason: reason,
@@ -806,10 +835,10 @@ function makeEmptyHistory(enabled, reason = null) {
   }
 }
 
-async function readHistory() {
+async function readHistory(target) {
   const days = getHistoryDays()
   if (!(await ensureDatabaseReady())) {
-    return makeEmptyHistory(false, databaseError)
+    return makeEmptyHistory(false, databaseError, target)
   }
 
   try {
@@ -821,7 +850,7 @@ async function readHistory() {
         count(*) FILTER (WHERE status = 'degraded')::int AS degraded,
         count(*) FILTER (WHERE status = 'outage')::int AS outage
       FROM status_checks
-      WHERE target = ${HISTORY_TARGET}
+      WHERE target = ${target}
         AND checked_at >= now() - (${days}::int * interval '1 day')
       GROUP BY 1
       ORDER BY 1
@@ -867,7 +896,7 @@ async function readHistory() {
       enabled: true,
       source: 'postgres',
       days,
-      target: HISTORY_TARGET,
+      target,
       totalChecks,
       uptimePct: totalChecks > 0 ? Number(((upChecks / totalChecks) * 100).toFixed(2)) : null,
       unavailableReason: null,
@@ -877,41 +906,71 @@ async function readHistory() {
     databaseReady = false
     databaseError = truncateError(error?.message || String(error))
     console.error('[status-service] failed to read status history', error)
-    return makeEmptyHistory(false, databaseError)
+    return makeEmptyHistory(false, databaseError, target)
   }
 }
 
+
+
 async function getRelayerSnapshot() {
+  const components = getRelayerComponents()
+
   if (!isDatabaseConfigured()) {
-    return probeRelayer()
+    return Promise.all(
+      components.map((c) => probeRelayer(c.name, c.url, c.id))
+    )
   }
 
-  let latest = await readLatestCheck()
   const staleAfterMs = getPollIntervalMs() * 1.5
-  const latestAgeMs = latest ? Date.now() - Date.parse(latest.checkedAt) : Number.POSITIVE_INFINITY
+  let needsPoll = false
 
-  if (!latest || latestAgeMs > staleAfterMs) {
-    latest = await runPollCycle()
+  const latestChecks = await Promise.all(
+    components.map(async (c) => {
+      const latest = await readLatestCheck(c.id)
+      const latestAgeMs = latest ? Date.now() - Date.parse(latest.checkedAt) : Number.POSITIVE_INFINITY
+      if (!latest || latestAgeMs > staleAfterMs) {
+        needsPoll = true
+      }
+      return { component: c, latest }
+    })
+  )
+
+  if (needsPoll) {
+    await runPollCycle()
+    for (const item of latestChecks) {
+      item.latest = await readLatestCheck(item.component.id)
+    }
   }
 
-  return latest
+  return latestChecks.map((item) => item.latest)
 }
 
 async function statusPayload() {
-  const relayer = await getRelayerSnapshot()
-  const history = await readHistory()
+  const components = await getRelayerSnapshot()
+  const histories = {}
+  for (const component of components) {
+    histories[component.id] = await readHistory(component.id)
+  }
   const incidents = await readActiveAndRecentIncidents()
+
+  const serviceStatus = components.some((c) => c.status === 'outage')
+    ? 'outage'
+    : components.some((c) => c.status === 'degraded')
+      ? 'degraded'
+      : 'operational'
+
+  const historyEnabled = Object.values(histories).some((h) => h.enabled)
 
   return {
     generatedAt: new Date().toISOString(),
     service: {
       name: 'Walrus Memory Status',
-      status: 'operational',
+      status: serviceStatus,
       runtime: 'node',
-      historyEnabled: history.enabled,
+      historyEnabled,
     },
-    relayer,
-    history,
+    components,
+    histories,
     incidents,
     database: {
       configured: isDatabaseConfigured(),
@@ -935,6 +994,9 @@ async function statusPayload() {
 
 function feedEntries(snapshot, baseUrl) {
   const entries = []
+  const components = snapshot.components ?? []
+  const production = components.find((c) => c.id === 'relayer-production') || components[0]
+  const worstComponent = components.find((c) => c.status === 'outage') || components.find((c) => c.status === 'degraded') || production
 
   const activeIncidents = snapshot.incidents?.active ?? []
   const recentIncidents = snapshot.incidents?.recent ?? []
@@ -950,25 +1012,26 @@ function feedEntries(snapshot, baseUrl) {
         link: `${baseUrl}/history`,
       })
     }
-  } else if (snapshot.relayer.status === 'operational') {
+  } else if (snapshot.service?.status === 'operational') {
     entries.push({
       id: `${baseUrl}/`,
       title: 'All Systems Operational',
-      updated: snapshot.relayer.checkedAt || snapshot.generatedAt,
-      summary: 'Walrus Memory Relayer is operational. No incidents reported.',
+      updated: production?.checkedAt || snapshot.generatedAt,
+      summary: 'Walrus Memory Relayers are operational. No incidents reported.',
       link: `${baseUrl}/`,
     })
   } else {
     entries.push({
       id: `${baseUrl}/`,
-      title: `Walrus Memory Relayer ${snapshot.relayer.status}`,
-      updated: snapshot.relayer.checkedAt || snapshot.generatedAt,
-      summary: snapshot.relayer.error || `Relayer status is ${snapshot.relayer.status}.`,
+      title: `Walrus Memory Relayer ${worstComponent?.status || 'unavailable'}`,
+      updated: worstComponent?.checkedAt || snapshot.generatedAt,
+      summary: worstComponent?.error || `Relayer status is ${worstComponent?.status || 'unknown'}.`,
       link: `${baseUrl}/`,
     })
   }
 
-  for (const bucket of snapshot.history?.buckets ?? []) {
+  const productionHistory = snapshot.histories?.['relayer-production']
+  for (const bucket of productionHistory?.buckets ?? []) {
     if (bucket.status !== 'outage' && bucket.status !== 'degraded') continue
     entries.push({
       id: `${baseUrl}/history#${bucket.date}`,
@@ -1072,7 +1135,7 @@ function startPolling() {
     void runPollCycle()
   }, pollIntervalMs)
   pollTimer.unref?.()
-  console.log(`[status-service] polling relayer every ${pollIntervalMs} ms`)
+  console.log(`[status-service] polling ${getRelayerComponents().length} relayers every ${pollIntervalMs} ms`)
 }
 
 function readJsonBody(req, maxBytes = 256_000) {
@@ -1405,6 +1468,8 @@ startPolling()
 
 server.listen(port, host, () => {
   console.log(`[status-service] serving ${distDir} on http://${host}:${port}`)
-  console.log(`[status-service] relayer health target: ${resolveHealthUrl()}`)
+  for (const component of getRelayerComponents()) {
+    console.log(`[status-service] relayer health target [${component.id}]: ${resolveHealthUrl(component.url)}`)
+  }
   console.log(`[status-service] history storage: ${isDatabaseConfigured() ? 'postgres' : 'disabled'}`)
 })

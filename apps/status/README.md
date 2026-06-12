@@ -30,7 +30,9 @@ pnpm --filter @memwal/status dev:client
 
 ## Runtime env
 
-- `STATUS_RELAYER_URL`: relayer base URL, default `https://relayer.memory.walrus.xyz`
+- `STATUS_RELAYER_PRODUCTION_URL`: production relayer base URL, default `https://relayer.memory.walrus.xyz`
+- `STATUS_RELAYER_STAGING_URL`: staging relayer base URL, default `https://relayer-staging.memory.walrus.xyz`
+- `STATUS_RELAYER_URL`: backward-compatible fallback for production if `STATUS_RELAYER_PRODUCTION_URL` is unset
 - `STATUS_HEALTH_PATH`: health path, default `/health`
 - `STATUS_REQUEST_TIMEOUT_MS`: probe timeout, default `8000`
 - `DATABASE_URL`: optional Postgres URL used to store uptime checks
@@ -38,7 +40,8 @@ pnpm --filter @memwal/status dev:client
 - `STATUS_HISTORY_DAYS`: number of daily uptime buckets to return, default `90`
 
 When `DATABASE_URL` is set, the service creates the `status_checks` table on
-startup, polls the relayer health endpoint in the background, and stores each
-check. `/api/status` returns the latest check plus daily uptime buckets for the
+startup, polls both relayer health endpoints in the background, and stores each
+check. `/api/status` returns the latest checks plus daily uptime buckets for each
+component.
 status page. If Postgres is unavailable, the service falls back to live checks so
 Railway health checks can still pass.
