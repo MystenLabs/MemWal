@@ -8,13 +8,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio::time::error::Elapsed;
 
 const DEFAULT_WRITE_STREAM_MAX_CONCURRENCY: usize = 8;
 const MIN_WRITE_STREAM_MAX_CONCURRENCY: usize = 1;
 const MAX_WRITE_STREAM_MAX_CONCURRENCY: usize = 100;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquireError {
     Timeout,
     Closed,
@@ -38,6 +37,7 @@ impl std::error::Error for AcquireError {}
 
 /// Guard that releases one or more permits when dropped.
 #[derive(Debug)]
+#[must_use = "permit releases on drop"]
 pub struct WriteStreamPermit {
     semaphore: Arc<Semaphore>,
     permits: usize,
@@ -65,10 +65,6 @@ impl WriteStreamLimiter {
             semaphore: Arc::new(Semaphore::new(max_permits)),
             max_permits,
         }
-    }
-
-    pub fn default_limiter() -> Self {
-        Self::new(DEFAULT_WRITE_STREAM_MAX_CONCURRENCY)
     }
 
     pub fn max_permits(&self) -> usize {
@@ -105,13 +101,19 @@ impl WriteStreamLimiter {
         }
         let permit = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
             .await
-            .map_err(|_: Elapsed| AcquireError::Timeout)?
+            .map_err(|_| AcquireError::Timeout)?
             .map_err(|_| AcquireError::Closed)?;
         permit.forget();
         Ok(WriteStreamPermit {
             semaphore: Arc::clone(&self.semaphore),
             permits: n,
         })
+    }
+}
+
+impl Default for WriteStreamLimiter {
+    fn default() -> Self {
+        Self::new(DEFAULT_WRITE_STREAM_MAX_CONCURRENCY)
     }
 }
 
