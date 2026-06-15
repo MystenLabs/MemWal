@@ -101,7 +101,8 @@ fn spawn_prepare_remember_job(
     owner: String,
     namespace: String,
     agent_public_key: String,
-    _permit: crate::services::write_stream::WriteStreamPermit,
+    // Held until prep completes; releases the permit on drop.
+    permit: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -195,6 +196,9 @@ fn spawn_prepare_remember_job(
         } else {
             work.await;
         }
+
+        // Hold the permit until prep hands off to the durable wallet queue.
+        let _ = permit;
     });
 }
 
@@ -203,7 +207,8 @@ fn spawn_prepare_bulk_remember_job(
     owner: String,
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
-    _permits: crate::services::write_stream::WriteStreamPermit,
+    // Held until prep completes; releases all permits on drop.
+    permits: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -333,6 +338,9 @@ fn spawn_prepare_bulk_remember_job(
         } else {
             work.await;
         }
+
+        // Hold the permits until prep hands off to the durable bulk queue.
+        let _ = permits;
     });
 }
 
@@ -637,6 +645,26 @@ pub async fn remember(
     let namespace_owned = namespace.clone();
     let text = body.text;
 
+    // Acquire a write-stream permit before persisting the job row so a
+    // saturated write stream never leaves orphaned `running` rows.
+    let permit = match state
+        .write_stream_limiter
+        .acquire(state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permit) => permit,
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember"));
+        }
+        Err(crate::services::write_stream::AcquireError::Closed) => {
+            return Err(AppError::Internal("write stream limiter closed".into()));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { .. }) => {
+            // n=1 can never exceed capacity
+            return Err(AppError::Internal("write stream capacity exceeded".into()));
+        }
+    };
+
     let job_id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query(
@@ -648,18 +676,6 @@ pub async fn remember(
     .execute(state.db.pool())
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
-
-    // Acquire a write-stream permit before starting prep work.
-    let permit = match state
-        .write_stream_limiter
-        .acquire(state.config.write_stream_acquire_timeout)
-        .await
-    {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Err(crate::routes::write_stream_saturated("/api/remember"));
-        }
-    };
 
     spawn_prepare_remember_job(
         Arc::clone(&state),
@@ -773,6 +789,32 @@ pub async fn remember_bulk(
         &owner[..10.min(owner.len())],
     );
 
+    // Acquire write-stream permits before persisting rows so a saturated
+    // write stream never leaves orphaned `running` rows.
+    let item_count = body.items.len();
+    let permits = match state
+        .write_stream_limiter
+        .acquire_many(item_count, state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permits) => permits,
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember/bulk"));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity {
+            requested,
+            max,
+        }) => {
+            return Err(AppError::BadRequest(format!(
+                "Bulk request of {} items exceeds write stream capacity of {}; reduce batch size",
+                requested, max
+            )));
+        }
+        Err(crate::services::write_stream::AcquireError::Closed) => {
+            return Err(AppError::Internal("write stream limiter closed".into()));
+        }
+    };
+
     let mut job_ids: Vec<String> = Vec::with_capacity(body.items.len());
     let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
@@ -798,18 +840,6 @@ pub async fn remember_bulk(
     }
 
     let total = job_ids.len();
-
-    let item_count = pending_items.len();
-    let permits = match state
-        .write_stream_limiter
-        .acquire_many(item_count, state.config.write_stream_acquire_timeout)
-        .await
-    {
-        Ok(permits) => permits,
-        Err(_) => {
-            return Err(crate::routes::write_stream_saturated("/api/remember/bulk"));
-        }
-    };
 
     spawn_prepare_bulk_remember_job(
         Arc::clone(&state),
