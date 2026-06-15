@@ -476,11 +476,15 @@ pub async fn analyze(
         Err(crate::services::write_stream::AcquireError::Timeout) => {
             return Err(crate::routes::write_stream_saturated("/api/analyze"));
         }
-        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { requested, max }) => {
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity {
+            requested,
+            max: _,
+        }) => {
+            crate::observability::record_write_stream_rejected("/api/analyze");
             crate::observability::record_write_stream_acquired("failure");
-            return Err(AppError::BadRequest(format!(
-                "Analyze extracted {} facts, exceeding write stream capacity of {}; reduce input",
-                requested, max
+            return Err(AppError::RateLimited(format!(
+                "Analyze extracted {} facts, exceeding write stream capacity; reduce input",
+                requested
             )));
         }
         Err(_) => {
@@ -502,7 +506,7 @@ pub async fn analyze(
             let state = Arc::clone(&state);
             let owner = owner.clone();
             let fact = fact.clone();
-            let permit = permits
+            let _permit = permits
                 .split_one()
                 .expect("acquired permits equal facts.len()");
             async move {
@@ -525,9 +529,8 @@ pub async fn analyze(
                     vector_result?,
                     encrypted_result?,
                 ));
-                // Hold the permit until this fact's prep hands off to the
+                // `_permit` is held until this fact's prep hands off to the
                 // durable wallet queue (or fails).
-                let _ = permit;
                 result
             }
         })

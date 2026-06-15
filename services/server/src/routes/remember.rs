@@ -102,7 +102,7 @@ fn spawn_prepare_remember_job(
     namespace: String,
     agent_public_key: String,
     // Held until prep completes; releases the permit on drop.
-    permit: crate::services::write_stream::WriteStreamPermit,
+    _permit: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -196,9 +196,6 @@ fn spawn_prepare_remember_job(
         } else {
             work.await;
         }
-
-        // Hold the permit until prep hands off to the durable wallet queue.
-        let _ = permit;
     });
 }
 
@@ -224,7 +221,7 @@ fn spawn_prepare_bulk_remember_job(
                     .map(|item| {
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
-                        let permit = permits
+                        let _permit = permits
                             .pop()
                             .expect("permits length matches pending_items length");
                         async move {
@@ -267,9 +264,8 @@ fn spawn_prepare_bulk_remember_job(
                                 vector_result?,
                                 encrypted_result?,
                             ));
-                            // Hold the permit until this item's prep hands off
+                            // `_permit` is held until this item's prep hands off
                             // to the durable bulk queue (or fails).
-                            let _ = permit;
                             result
                         }
                     })
@@ -684,9 +680,12 @@ pub async fn remember(
             return Err(AppError::Internal("write stream limiter closed".into()));
         }
         Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { .. }) => {
+            crate::observability::record_write_stream_rejected("/api/remember");
             crate::observability::record_write_stream_acquired("failure");
-            // n=1 can never exceed capacity
-            return Err(AppError::Internal("write stream capacity exceeded".into()));
+            // n=1 can never exceed capacity, but keep the arm consistent.
+            return Err(AppError::RateLimited(
+                "Write stream capacity exceeded; retry after a short delay".into(),
+            ));
         }
     };
 
@@ -848,12 +847,13 @@ pub async fn remember_bulk(
         }
         Err(crate::services::write_stream::AcquireError::WouldExceedCapacity {
             requested,
-            max,
+            max: _,
         }) => {
+            crate::observability::record_write_stream_rejected("/api/remember/bulk");
             crate::observability::record_write_stream_acquired("failure");
-            return Err(AppError::BadRequest(format!(
-                "Bulk request of {} items exceeds write stream capacity of {}; reduce batch size",
-                requested, max
+            return Err(AppError::RateLimited(format!(
+                "Bulk request of {} items exceeds write stream capacity; reduce batch size",
+                requested
             )));
         }
         Err(crate::services::write_stream::AcquireError::Closed) => {
