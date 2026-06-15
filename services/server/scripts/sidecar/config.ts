@@ -142,9 +142,11 @@ export const UPLOAD_RELAY_TIP_CACHE_TTL_MS = (() => {
 // Walrus upload concurrency limits
 // ============================================================
 
+// Keep the sidecar ceiling above the Rust WriteStreamLimiter default (8)
+// so the sidecar only acts as defense-in-depth.
 export const WALRUS_UPLOAD_MAX_CONCURRENCY = parsePositiveIntEnv(
     "WALRUS_UPLOAD_MAX_CONCURRENCY",
-    Math.max(1, SERVER_SUI_PRIVATE_KEYS.length || 1),
+    Math.max(12, SERVER_SUI_PRIVATE_KEYS.length || 1),
     1,
     100,
 );
