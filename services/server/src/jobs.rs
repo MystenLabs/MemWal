@@ -908,6 +908,22 @@ async fn execute_upload_and_transfer(
         encrypted.len(),
     );
 
+    // Acquire a write-stream permit before hitting the sidecar. This ensures
+    // the sidecar upload queue cannot grow beyond the Rust-managed budget.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(permit) => permit,
+        Err(_) => {
+            // Limiter closed or timeout — leave job in queue for retry.
+            return Err(WalletJobError::Transient(
+                "write stream permit unavailable; will retry".into(),
+            ));
+        }
+    };
+
     // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
     let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
