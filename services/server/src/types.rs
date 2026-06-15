@@ -344,16 +344,62 @@ fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<S
 pub(crate) fn parse_write_stream_max_concurrency() -> usize {
     std::env::var("WRITE_STREAM_MAX_CONCURRENCY")
         .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .map(|v| v.clamp(1, 100))
+        .and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match trimmed.parse::<usize>() {
+                Ok(n) => {
+                    if n < 1 || n > 100 {
+                        tracing::warn!(
+                            "WRITE_STREAM_MAX_CONCURRENCY={} is out of range; clamping to {}",
+                            v,
+                            n.clamp(1, 100)
+                        );
+                    }
+                    Some(n.clamp(1, 100))
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "WRITE_STREAM_MAX_CONCURRENCY={} is invalid; using default 8",
+                        v
+                    );
+                    None
+                }
+            }
+        })
         .unwrap_or(8)
 }
 
 pub(crate) fn parse_write_stream_acquire_timeout() -> std::time::Duration {
     let millis = std::env::var("WRITE_STREAM_ACQUIRE_TIMEOUT_MS")
         .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|v| v.clamp(100, 60_000))
+        .and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match trimmed.parse::<u64>() {
+                Ok(n) => {
+                    if n < 100 || n > 60_000 {
+                        tracing::warn!(
+                            "WRITE_STREAM_ACQUIRE_TIMEOUT_MS={} is out of range; clamping to {}",
+                            v,
+                            n.clamp(100, 60_000)
+                        );
+                    }
+                    Some(n.clamp(100, 60_000))
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "WRITE_STREAM_ACQUIRE_TIMEOUT_MS={} is invalid; using default 5000",
+                        v
+                    );
+                    None
+                }
+            }
+        })
         .unwrap_or(5_000);
     std::time::Duration::from_millis(millis)
 }

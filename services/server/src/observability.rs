@@ -622,6 +622,15 @@ pub fn record_write_stream_acquired_success() {
     record_write_stream_acquired("success");
 }
 
+pub fn record_write_stream_acquired_success_n(n: usize) {
+    if n == 0 {
+        return;
+    }
+    WRITE_STREAM_ACQUIRED_TOTAL
+        .with_label_values(&["success"])
+        .inc_by(n as u64);
+}
+
 pub fn record_write_stream_rejected(route: &str) {
     WRITE_STREAM_REJECTED_TOTAL.with_label_values(&[route]).inc();
 }

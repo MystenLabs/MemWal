@@ -84,6 +84,12 @@ pub struct WriteStreamLimiter {
     max_permits: usize,
 }
 
+pub enum AcquireError {
+    Timeout,
+    Closed,
+    WouldExceedCapacity { requested: usize, max: usize },
+}
+
 impl WriteStreamLimiter {
     pub fn new(max_permits: usize) -> Self;
     pub async fn acquire(&self, timeout: Duration) -> Result<WriteStreamPermit, AcquireError>;
@@ -118,7 +124,8 @@ Initialize in `main.rs` after config load.
 1. Validate items and insert one `remember_jobs` row per item.
 2. Attempt to acquire `items.len()` permits with a bounded timeout.
 3. If the full set cannot be acquired, return `429`. No prep work starts.
-4. Each item's prep task releases its own permit after enqueueing its wallet job.
+4. Split the acquired batch permit into one guard per item. Each item holds its own permit through embedding/SEAL-encryption prep.
+5. The item's permit is released when its prep completes (successfully, by handing off to the durable bulk queue) or fails. The wallet worker later reacquires a permit before the actual sidecar upload.
 
 #### `/api/remember/manual`
 
@@ -129,7 +136,7 @@ Initialize in `main.rs` after config load.
 
 #### `/api/analyze`
 
-- **Production path**: after fact extraction, attempt to acquire `facts.len()` permits with a bounded timeout. If acquisition fails, return `429`. Then prep (embed + encrypt) each fact, enqueue one `WalletOperation::UploadAndTransfer` per fact, and release each fact's permit after its wallet job is enqueued.
+- **Production path**: after fact extraction, attempt to acquire `facts.len()` permits with a bounded timeout. If acquisition fails, return `429`. Then split the batch permit into one guard per fact. Each fact holds its permit through embedding/SEAL-encryption prep and releases it when that fact's prep completes (or fails). The wallet worker later reacquires a permit before the actual sidecar upload.
 - **Benchmark mode (`BENCHMARK_MODE=true`)**: each fact calls `engine.store_blob(...)` synchronously. Acquire one permit per fact, hold it for the duration of the synchronous store, and release on completion.
 
 ### 5.4 Wallet worker
@@ -197,6 +204,7 @@ Client POST /api/remember/bulk with N items
 | Scenario | Behavior |
 |---|---|
 | Slot acquisition timeout in handler | Return `429 Too Many Requests`. The `remember_jobs` row remains `running`; stale-job sweeper handles abandoned rows. |
+| Request needs more permits than configured ceiling (`WouldExceedCapacity`) | Return `429 Too Many Requests` immediately. The request is never queued and no prep work starts. |
 | Prep failure (embed/encrypt/quota) | Release slot immediately, mark `remember_jobs` as `failed`. |
 | Wallet job transient failure | Apalis retries. Each retry attempt reacquires a slot before calling the sidecar. |
 | Wallet job permanent failure / object locked | Mark `remember_jobs` as `failed`; release slot. |

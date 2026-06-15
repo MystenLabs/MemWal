@@ -839,7 +839,7 @@ pub async fn remember_bulk(
         .await
     {
         Ok(permits) => {
-            crate::observability::record_write_stream_acquired_success();
+            crate::observability::record_write_stream_acquired_success_n(item_count);
             permits
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
