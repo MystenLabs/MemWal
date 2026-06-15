@@ -441,9 +441,8 @@ async fn main() {
     // Wrap the immutable config so the MemoryEngine + handlers share it.
     let config = Arc::new(config);
 
-    let write_stream_limiter = Arc::new(WriteStreamLimiter::new(
-        config.write_stream_max_concurrency,
-    ));
+    let write_stream_limiter =
+        Arc::new(WriteStreamLimiter::new(config.write_stream_max_concurrency));
     tracing::info!(
         "  write stream limiter: max_concurrency={} acquire_timeout_ms={}",
         write_stream_limiter.max_permits(),
@@ -546,8 +545,7 @@ async fn main() {
     // throttle the burst) — before queued requests outlive the sidecar's
     // 120s acquire timeout and start failing.
     let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
-    let saturation_consecutive =
-        parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
+    let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
     let saturation_interval_secs =
         parse_env_u64("SIDECAR_QUEUE_SATURATION_INTERVAL_SECS", 30, 5, 300);
     tracing::info!(
@@ -562,9 +560,8 @@ async fn main() {
         let monitor_alerts = Arc::clone(&state.alerts);
         let monitor_network = config.sui_network.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                saturation_interval_secs,
-            ));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
             let mut consecutive_saturated = 0u32;
             loop {
                 interval.tick().await;
@@ -623,8 +620,9 @@ async fn main() {
                         threshold: saturation_threshold,
                         consecutive_checks: consecutive_saturated,
                     };
-                    if let Err(err) =
-                        monitor_alerts.notify_walrus_upload_queue_saturated(alert).await
+                    if let Err(err) = monitor_alerts
+                        .notify_walrus_upload_queue_saturated(alert)
+                        .await
                     {
                         tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
                     }

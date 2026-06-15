@@ -794,10 +794,20 @@ pub async fn remember_bulk(
         }
     }
 
+    let item_count = body.items.len();
+    if item_count > state.config.write_stream_max_concurrency {
+        crate::observability::record_write_stream_rejected("/api/remember/bulk");
+        crate::observability::record_write_stream_acquired("failure");
+        return Err(AppError::RateLimited(format!(
+            "Bulk request of {} items exceeds write stream capacity; reduce batch size",
+            item_count
+        )));
+    }
+
     let owner = &auth.owner;
     tracing::info!(
         "remember_bulk: {} items owner={}",
-        body.items.len(),
+        item_count,
         &owner[..10.min(owner.len())],
     );
 
@@ -832,7 +842,6 @@ pub async fn remember_bulk(
     // Acquire write-stream permits after persisting rows. On timeout the
     // caller gets 429 immediately while the rows stay running for the
     // stale-job sweeper.
-    let item_count = pending_items.len();
     let mut permits = match state
         .write_stream_limiter
         .acquire_many(item_count, state.config.write_stream_acquire_timeout)

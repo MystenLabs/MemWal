@@ -615,7 +615,9 @@ pub fn observe_write_stream_state(total: usize, available: usize, waiters: usize
 }
 
 pub fn record_write_stream_acquired(result: &str) {
-    WRITE_STREAM_ACQUIRED_TOTAL.with_label_values(&[result]).inc();
+    WRITE_STREAM_ACQUIRED_TOTAL
+        .with_label_values(&[result])
+        .inc();
 }
 
 pub fn record_write_stream_acquired_success() {
@@ -632,7 +634,9 @@ pub fn record_write_stream_acquired_success_n(n: usize) {
 }
 
 pub fn record_write_stream_rejected(route: &str) {
-    WRITE_STREAM_REJECTED_TOTAL.with_label_values(&[route]).inc();
+    WRITE_STREAM_REJECTED_TOTAL
+        .with_label_values(&[route])
+        .inc();
 }
 
 fn record_http_request(method: &str, route: &str, status: StatusCode, elapsed: Duration) {

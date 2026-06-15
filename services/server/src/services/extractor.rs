@@ -345,7 +345,10 @@ impl LlmExtractor {
         // client, and the SDK/harness will not retry a 202 with
         // facts=[]. The explicit string `"NONE"` from the LLM remains
         // the valid no-facts path (handled by `parse_extracted_facts`).
-        let raw_content = api_resp.choices.first().and_then(|c| c.message.content.as_deref());
+        let raw_content = api_resp
+            .choices
+            .first()
+            .and_then(|c| c.message.content.as_deref());
         let content = match raw_content {
             Some(s) => s.trim().to_string(),
             None => {
@@ -1433,9 +1436,13 @@ mod tests {
 
         // Transient
         assert!(is_upstream_status_transient(StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_upstream_status_transient(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_upstream_status_transient(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
         assert!(is_upstream_status_transient(StatusCode::BAD_GATEWAY));
-        assert!(is_upstream_status_transient(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_upstream_status_transient(
+            StatusCode::SERVICE_UNAVAILABLE
+        ));
         assert!(is_upstream_status_transient(StatusCode::GATEWAY_TIMEOUT));
 
         // Not transient — real bugs / config errors that retrying won't fix

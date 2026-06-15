@@ -368,7 +368,10 @@ mod tests {
     #[tokio::test]
     async fn split_one_divides_guard_into_single_permits() {
         let limiter = WriteStreamLimiter::new(3);
-        let mut guard = limiter.acquire_many(3, Duration::from_secs(1)).await.unwrap();
+        let mut guard = limiter
+            .acquire_many(3, Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(limiter.snapshot().available, 0);
 
         let p1 = guard.split_one().unwrap();
@@ -390,7 +393,10 @@ mod tests {
     #[tokio::test]
     async fn split_one_on_zero_permits_returns_none() {
         let limiter = WriteStreamLimiter::new(1);
-        let mut guard = limiter.acquire_many(0, Duration::from_secs(1)).await.unwrap();
+        let mut guard = limiter
+            .acquire_many(0, Duration::from_secs(1))
+            .await
+            .unwrap();
         assert!(guard.split_one().is_none());
         assert_eq!(limiter.snapshot().available, 1);
     }

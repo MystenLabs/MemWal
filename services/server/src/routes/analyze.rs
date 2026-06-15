@@ -489,7 +489,9 @@ pub async fn analyze(
         }
         Err(_) => {
             crate::observability::record_write_stream_acquired("failure");
-            return Err(AppError::Internal("write stream limiter unavailable".into()));
+            return Err(AppError::Internal(
+                "write stream limiter unavailable".into(),
+            ));
         }
     };
 
