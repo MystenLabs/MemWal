@@ -233,6 +233,13 @@ pub struct Config {
     /// Temporary MigrationCap object id used only by server-side P2 migration
     /// jobs. Never exposed through `/config`; burn it after migration finalize.
     pub p2_migration_cap_id: Option<String>,
+    /// Fixed Sui key-pool index used to SIGN cap-gated migration ops
+    /// (admin_import_account / admin_create_namespace / admin_add_delegate_key /
+    /// admin_set_wrapped_dek / admin_record_memory). The `MigrationCap` is an
+    /// owned object held by ONE address, so these must always sign with the same
+    /// key — never the round-robin pool. Default 0. (Design: a single server
+    /// fallback key drives migration — migration §12/§14.)
+    pub migration_key_index: usize,
     /// Public `/config` protocol selector: `old` (default) or `p2`.
     pub cutover_protocol: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
@@ -324,6 +331,10 @@ impl Config {
             p2_namespace_registry_id: optional_env("MEMWAL_P2_NAMESPACE_REGISTRY_ID"),
             p2_namespace_id: optional_env("MEMWAL_P2_NAMESPACE_ID"),
             p2_migration_cap_id: optional_env("MEMWAL_P2_MIGRATION_CAP_ID"),
+            migration_key_index: std::env::var("MEMWAL_MIGRATION_KEY_INDEX")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0),
             cutover_protocol: std::env::var("MEMWAL_CUTOVER_PROTOCOL")
                 .unwrap_or_else(|_| "old".to_string())
                 .trim()

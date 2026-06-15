@@ -279,10 +279,7 @@ pub async fn migration_v2_import_accounts(
         let is_new_account = existing_account.is_none();
 
         let outcome: Result<(String, String, usize), AppError> = async {
-            let key_index = state
-                .key_pool
-                .next_index()
-                .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+            let key_index = state.config.migration_key_index;
             if let Some(account_id) = existing_account.clone() {
                 // Owner already has a P2 account → create only this namespace.
                 let tx = chain::admin_create_namespace(
@@ -335,10 +332,7 @@ pub async fn migration_v2_import_accounts(
                 })?;
                 let mut delegates = 0usize;
                 for dk in legacy.delegate_keys.iter() {
-                    let ki = state
-                        .key_pool
-                        .next_index()
-                        .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+                    let ki = state.config.migration_key_index;
                     chain::admin_add_delegate_key(
                         &state.http_client,
                         &state.config.sidecar_url,
@@ -533,10 +527,7 @@ pub async fn migration_v2_backfill(
                 body.key_version,
             )
             .await?;
-            let key_index = state
-                .key_pool
-                .next_index()
-                .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+            let key_index = state.config.migration_key_index;
             let tx = chain::admin_set_wrapped_dek(
                 &state.http_client,
                 &state.config.sidecar_url,
@@ -612,10 +603,7 @@ pub async fn migration_v2_backfill(
         })?;
         let envelope_bytes =
             envelope::seal_envelope(dek, &namespace_bytes, body.key_version, &plaintext);
-        let wallet_index = state
-            .key_pool
-            .next_index()
-            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+        let wallet_index = state.config.migration_key_index;
         enqueue_wallet_job(
             &state,
             wallet_index,
