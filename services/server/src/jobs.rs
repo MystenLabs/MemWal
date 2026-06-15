@@ -65,6 +65,26 @@ pub enum WalletOperation {
         #[serde(default = "default_epochs")]
         epochs: u32,
     },
+    /// Upload a V2 WMEM envelope, keep the Walrus Blob server-owned, record the
+    /// thin `WalrusMemoryBlob` pointer on-chain with `MigrationCap`, then index
+    /// the row with P2 protocol metadata.
+    UploadP2Envelope {
+        envelope_b64: String,
+        vector: Vec<f32>,
+        #[serde(default = "default_importance")]
+        importance: f32,
+        owner: String,
+        namespace: String,
+        package_id: String,
+        namespace_id: String,
+        key_version: u32,
+        agent_public_key: Option<String>,
+        remember_job_id: Option<String>,
+        #[serde(default = "default_epochs")]
+        epochs: u32,
+        #[serde(default)]
+        migrated_from_blob_id: Option<String>,
+    },
     /// Legacy metadata+transfer operation for rows created before `/walrus/upload`
     /// started doing metadata+transfer atomically.
     SetMetadataAndTransfer {
@@ -658,6 +678,53 @@ pub(crate) async fn execute_wallet_job(
                 }
             }
         }
+        WalletOperation::UploadP2Envelope {
+            envelope_b64,
+            vector,
+            importance,
+            owner,
+            namespace,
+            package_id,
+            namespace_id,
+            key_version,
+            agent_public_key,
+            remember_job_id,
+            epochs,
+            migrated_from_blob_id,
+        } => {
+            let wallet_index = match wallet_index_for_upload_attempt(
+                enqueued_wallet_index,
+                attempt_info.current,
+                state.key_pool.len(),
+            ) {
+                Some(index) => index,
+                None => {
+                    return Err(WalletJobError::Permanent(
+                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                            .into(),
+                    )
+                    .into_apalis_error());
+                }
+            };
+            execute_upload_p2_envelope(
+                state,
+                wallet_index,
+                envelope_b64,
+                vector,
+                importance,
+                owner,
+                namespace,
+                package_id,
+                namespace_id,
+                key_version,
+                agent_public_key,
+                remember_job_id,
+                epochs,
+                migrated_from_blob_id,
+                attempt_info,
+            )
+            .await
+        }
         WalletOperation::FinalizeUploadedBlob {
             owner,
             namespace,
@@ -845,6 +912,241 @@ async fn enqueue_finalize_uploaded_blob(
             ))
         })
         .map(|_| ())
+}
+
+// ────────────────────────────────────────────────────────────
+// WalletOperation::UploadP2Envelope
+// ────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_upload_p2_envelope(
+    state: &AppState,
+    wallet_index: usize,
+    envelope_b64: String,
+    vector: Vec<f32>,
+    importance: f32,
+    owner: String,
+    namespace: String,
+    package_id: String,
+    namespace_id: String,
+    key_version: u32,
+    agent_public_key: Option<String>,
+    remember_job_id: Option<String>,
+    epochs: u32,
+    migrated_from_blob_id: Option<String>,
+    attempt_info: WalletJobAttemptInfo,
+) -> Result<(), WalletJobError> {
+    let migration_cap_id = state
+        .config
+        .p2_migration_cap_id
+        .as_deref()
+        .ok_or_else(|| {
+            WalletJobError::Permanent(
+                "MEMWAL_P2_MIGRATION_CAP_ID is required for P2 migration uploads".into(),
+            )
+        })?;
+
+    if let Some(ref jid) = remember_job_id {
+        let _ = sqlx::query(
+            "UPDATE remember_jobs SET status = 'running', error_msg = NULL, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(jid)
+        .execute(state.db.pool())
+        .await;
+    }
+
+    let envelope = match base64::engine::general_purpose::STANDARD.decode(&envelope_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("base64 decode failed: {}", e);
+            let classified = WalletJobError::Permanent(msg.clone());
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            return Err(classified);
+        }
+    };
+
+    tracing::info!(
+        "[wallet-job:p2-upload] job_id={} owner={} ns={} namespace_id={} key={} bytes={}",
+        remember_job_id.as_deref().unwrap_or("-"),
+        &owner[..10.min(owner.len())],
+        namespace,
+        namespace_id,
+        wallet_index,
+        envelope.len(),
+    );
+
+    let upload = match crate::storage::walrus::upload_blob_deferred(
+        &state.http_client,
+        &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
+        &envelope,
+        epochs as u64,
+        &owner,
+        wallet_index,
+        &namespace,
+        &package_id,
+        key_version,
+        agent_public_key.as_deref(),
+        remember_job_id.as_deref(),
+    )
+    .await
+    {
+        Ok(upload) => upload,
+        Err(UploadBlobError::App(e)) => {
+            let msg = format!("walrus deferred upload failed: {}", e);
+            let classified = escalate_if_gas_pool_exhausted(
+                WalletJobError::classify_sidecar_error(&msg),
+                attempt_info.current,
+                attempt_info.max,
+                state.key_pool.len(),
+            );
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            return Err(classified);
+        }
+        Err(UploadBlobError::MetadataTransferFailed { message, .. }) => {
+            let msg = format!("unexpected P2 deferred metadata transfer failure: {}", message);
+            let classified = WalletJobError::classify_sidecar_error(&msg);
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            return Err(classified);
+        }
+    };
+
+    let blob_id = upload.blob_id.clone();
+    let walrus_object_id = upload.object_id.clone();
+    warm_blob_cache_after_upload(state, &blob_id, &envelope).await;
+
+    let storage_end_epoch = 0u32;
+    if let Err(e) = crate::storage::chain::admin_record_memory(
+        &state.http_client,
+        &state.config.sidecar_url,
+        state.config.sidecar_secret.as_deref(),
+        wallet_index,
+        &package_id,
+        migration_cap_id,
+        &namespace_id,
+        &blob_id,
+        key_version,
+        storage_end_epoch,
+    )
+    .await
+    {
+        let msg = format!("admin_record_memory failed: {}", e);
+        let classified = WalletJobError::classify_sidecar_error(&msg);
+        update_remember_job_after_wallet_error(
+            state,
+            remember_job_id.as_deref(),
+            &classified,
+            &msg,
+        )
+        .await;
+        return Err(classified);
+    }
+
+    let vector_id = remember_job_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Err(e) = state
+        .db
+        .insert_vector_with_protocol(
+            &vector_id,
+            &owner,
+            &namespace,
+            &blob_id,
+            &vector,
+            envelope.len() as i64,
+            importance,
+            crate::storage::db::VectorEntryProtocolMetadata {
+                package_id: Some(&package_id),
+                protocol: Some("p2"),
+                namespace_object_id: Some(&namespace_id),
+                key_version: Some(key_version as i32),
+                walrus_object_id: walrus_object_id.as_deref(),
+                storage_end_epoch: Some(storage_end_epoch as i32),
+                migrated_from_blob_id: migrated_from_blob_id.as_deref(),
+            },
+        )
+        .await
+    {
+        let msg = format!("insert_vector_with_protocol failed: {}", e);
+        let classified = WalletJobError::classify_sidecar_error(&msg);
+        update_remember_job_after_wallet_error(
+            state,
+            remember_job_id.as_deref(),
+            &classified,
+            &msg,
+        )
+        .await;
+        return Err(classified);
+    }
+
+    if let Some(ref old_blob_id) = migrated_from_blob_id {
+        if let Err(e) = sqlx::query(
+            "UPDATE blob_migrations
+             SET p2_blob_id = $1,
+                 p2_walrus_object_id = $2,
+                 status = 'migrated',
+                 migrated_at = NOW(),
+                 last_error = NULL,
+                 updated_at = NOW()
+             WHERE old_blob_id = $3",
+        )
+        .bind(&blob_id)
+        .bind(walrus_object_id.as_deref())
+        .bind(old_blob_id)
+        .execute(state.db.pool())
+        .await
+        {
+            let msg = format!("blob_migrations update failed: {}", e);
+            let classified = WalletJobError::classify_sidecar_error(&msg);
+            update_remember_job_after_wallet_error(
+                state,
+                remember_job_id.as_deref(),
+                &classified,
+                &msg,
+            )
+            .await;
+            return Err(classified);
+        }
+    }
+
+    if let Some(ref jid) = remember_job_id {
+        let _ = sqlx::query(
+            "UPDATE remember_jobs SET status = 'done', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(&blob_id)
+        .bind(jid)
+        .execute(state.db.pool())
+        .await;
+    }
+
+    tracing::info!(
+        "[wallet-job:p2-upload] done job_id={} blob_id={} owner={} ns={} key={}",
+        remember_job_id.as_deref().unwrap_or("-"),
+        blob_id,
+        &owner[..10.min(owner.len())],
+        namespace,
+        wallet_index,
+    );
+
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────

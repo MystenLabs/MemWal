@@ -8,6 +8,39 @@ pub struct VectorDb {
     pool: PgPool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct VectorEntryProtocolMetadata<'a> {
+    pub package_id: Option<&'a str>,
+    pub protocol: Option<&'a str>,
+    pub namespace_object_id: Option<&'a str>,
+    pub key_version: Option<i32>,
+    pub walrus_object_id: Option<&'a str>,
+    pub storage_end_epoch: Option<i32>,
+    pub migrated_from_blob_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct V2MigrationCandidate {
+    pub owner: String,
+    pub namespace: String,
+    pub blob_id: String,
+    pub vector: Vec<f32>,
+    pub importance: f32,
+    pub old_package_id: Option<String>,
+    pub old_account_id: Option<String>,
+    pub p2_account_id: Option<String>,
+    pub p2_namespace_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct V2AccountMigrationCandidate {
+    pub owner: String,
+    pub namespace: String,
+    pub legacy_account_id: Option<String>,
+    pub p2_account_id: Option<String>,
+    pub p2_namespace_id: Option<String>,
+}
+
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     if result.is_ok() {
         "ok"
@@ -90,6 +123,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        // V2 protocol migration/coexistence metadata.
+        let migration_010 = include_str!("../../migrations/010_protocol_v2_migration.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -119,19 +159,71 @@ impl VectorDb {
         blob_size_bytes: i64,
         importance: f32,
     ) -> Result<(), AppError> {
+        self.insert_vector_with_protocol(
+            id,
+            owner,
+            namespace,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
+            VectorEntryProtocolMetadata::default(),
+        )
+        .await
+    }
+
+    /// Insert a vector row plus protocol metadata for OLD/P2 coexistence.
+    ///
+    /// Migration backfill uses this to write verified P2 copies alongside legacy
+    /// rows. Normal legacy writes call `insert_vector` and get `protocol=legacy`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_vector_with_protocol(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        vector: &[f32],
+        blob_size_bytes: i64,
+        importance: f32,
+        metadata: VectorEntryProtocolMetadata<'_>,
+    ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
+        let protocol = metadata.protocol.unwrap_or("legacy");
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO vector_entries (
+                id,
+                owner,
+                namespace,
+                blob_id,
+                embedding,
+                blob_size_bytes,
+                importance,
+                package_id,
+                protocol,
+                namespace_object_id,
+                key_version,
+                walrus_object_id,
+                storage_end_epoch,
+                migrated_from_blob_id
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                package_id = EXCLUDED.package_id,
+                protocol = EXCLUDED.protocol,
+                namespace_object_id = EXCLUDED.namespace_object_id,
+                key_version = EXCLUDED.key_version,
+                walrus_object_id = EXCLUDED.walrus_object_id,
+                storage_end_epoch = EXCLUDED.storage_end_epoch,
+                migrated_from_blob_id = EXCLUDED.migrated_from_blob_id",
         )
         .bind(id)
         .bind(owner)
@@ -140,6 +232,13 @@ impl VectorDb {
         .bind(embedding)
         .bind(blob_size_bytes)
         .bind(importance)
+        .bind(metadata.package_id)
+        .bind(protocol)
+        .bind(metadata.namespace_object_id)
+        .bind(metadata.key_version)
+        .bind(metadata.walrus_object_id)
+        .bind(metadata.storage_end_epoch)
+        .bind(metadata.migrated_from_blob_id)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
@@ -260,6 +359,7 @@ impl VectorDb {
         owner: &str,
         namespace: &str,
         limit: usize,
+        protocol: Option<&str>,
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
@@ -269,21 +369,41 @@ impl VectorDb {
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
-            sqlx::query_as(
-                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
+        let result: Result<
+            Vec<(
+                String,
+                f64,
+                Option<String>,
+                String,
+                Option<String>,
+                Option<i32>,
+                chrono::DateTime<chrono::Utc>,
+                f32,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT blob_id,
+                        (embedding <=> $1)::float8 AS distance,
+                        package_id,
+                        protocol,
+                        namespace_object_id,
+                        key_version,
+                        created_at,
+                        importance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
+               AND ($5::TEXT IS NULL OR protocol = $5)
              ORDER BY embedding <=> $1
              LIMIT $4",
-            )
-            .bind(embedding)
-            .bind(owner)
-            .bind(namespace)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        )
+        .bind(embedding)
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit as i64)
+        .bind(protocol)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),
@@ -293,15 +413,295 @@ impl VectorDb {
 
         let results = rows
             .into_iter()
-            .map(|(blob_id, distance, created_at, importance)| SearchHit {
-                blob_id,
-                distance,
-                created_at,
-                importance,
-            })
+            .map(
+                |(
+                    blob_id,
+                    distance,
+                    package_id,
+                    protocol,
+                    namespace_object_id,
+                    key_version,
+                    created_at,
+                    importance,
+                )| SearchHit {
+                    blob_id,
+                    distance,
+                    package_id,
+                    protocol,
+                    namespace_object_id,
+                    key_version,
+                    created_at,
+                    importance,
+                },
+            )
             .collect();
 
         Ok(results)
+    }
+
+    /// Legacy vector rows that do not yet have a P2 copy. The caller is
+    /// responsible for decrypting/uploading; this method only selects stable
+    /// metadata and embedding vectors.
+    pub async fn list_v2_migration_candidates(
+        &self,
+        owner: Option<&str>,
+        namespace: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<V2MigrationCandidate>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<
+            Vec<(
+                String,
+                String,
+                String,
+                Vector,
+                f32,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT
+                ve.owner,
+                ve.namespace,
+                ve.blob_id,
+                ve.embedding,
+                ve.importance,
+                ve.package_id,
+                COALESCE(bm.old_account_id, am.legacy_account_id, a.account_id) AS old_account_id,
+                COALESCE(bm.p2_account_id, am.p2_account_id) AS p2_account_id,
+                COALESCE(bm.p2_namespace_id, am.p2_namespace_id) AS p2_namespace_id
+             FROM vector_entries ve
+             LEFT JOIN blob_migrations bm ON bm.old_blob_id = ve.blob_id
+             LEFT JOIN account_migrations am
+                ON am.owner = ve.owner AND am.namespace_name = ve.namespace
+             LEFT JOIN accounts a ON a.owner = ve.owner
+             WHERE ve.protocol = 'legacy'
+               AND ($1::TEXT IS NULL OR ve.owner = $1)
+               AND ($2::TEXT IS NULL OR ve.namespace = $2)
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM vector_entries p2
+                    WHERE p2.protocol = 'p2'
+                      AND p2.migrated_from_blob_id = ve.blob_id
+               )
+               AND COALESCE(bm.status, 'pending') NOT IN ('queued', 'migrated', 'verified', 'done')
+             ORDER BY ve.created_at ASC
+             LIMIT $3",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to list migration candidates: {}", e)));
+        crate::observability::observe_db(
+            "migration.v2_candidates",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    owner,
+                    namespace,
+                    blob_id,
+                    vector,
+                    importance,
+                    old_package_id,
+                    old_account_id,
+                    p2_account_id,
+                    p2_namespace_id,
+                )| V2MigrationCandidate {
+                    owner,
+                    namespace,
+                    blob_id,
+                    vector: vector.to_vec(),
+                    importance,
+                    old_package_id,
+                    old_account_id,
+                    p2_account_id,
+                    p2_namespace_id,
+                },
+            )
+            .collect())
+    }
+
+    /// Distinct legacy account/namespace pairs that still need a P2 account or
+    /// namespace mirror before blob backfill can run.
+    pub async fn list_v2_account_migration_candidates(
+        &self,
+        owner: Option<&str>,
+        namespace: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<V2AccountMigrationCandidate>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<
+            Vec<(
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT DISTINCT
+                ve.owner,
+                ve.namespace,
+                COALESCE(am.legacy_account_id, a.account_id) AS legacy_account_id,
+                COALESCE(am.p2_account_id, owner_map.p2_account_id) AS p2_account_id,
+                am.p2_namespace_id
+             FROM vector_entries ve
+             LEFT JOIN accounts a ON a.owner = ve.owner
+             LEFT JOIN account_migrations am
+                ON am.owner = ve.owner AND am.namespace_name = ve.namespace
+             LEFT JOIN LATERAL (
+                SELECT p2_account_id
+                FROM account_migrations existing
+                WHERE existing.owner = ve.owner
+                  AND existing.p2_account_id IS NOT NULL
+                ORDER BY imported_at NULLS LAST, updated_at DESC
+                LIMIT 1
+             ) owner_map ON TRUE
+             WHERE ve.protocol = 'legacy'
+               AND ($1::TEXT IS NULL OR ve.owner = $1)
+               AND ($2::TEXT IS NULL OR ve.namespace = $2)
+               AND (
+                    am.p2_namespace_id IS NULL
+                    OR am.status NOT IN ('imported', 'verified', 'done')
+               )
+             ORDER BY ve.owner, ve.namespace
+             LIMIT $3",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to list account migration candidates: {}",
+                e
+            ))
+        });
+        crate::observability::observe_db(
+            "migration.v2_account_candidates",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(owner, namespace, legacy_account_id, p2_account_id, p2_namespace_id)| {
+                    V2AccountMigrationCandidate {
+                        owner,
+                        namespace,
+                        legacy_account_id,
+                        p2_account_id,
+                        p2_namespace_id,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_v2_account_migration(
+        &self,
+        legacy_account_id: &str,
+        owner: &str,
+        namespace: &str,
+        p2_account_id: &str,
+        p2_namespace_id: &str,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO account_migrations (
+                legacy_account_id,
+                owner,
+                namespace_name,
+                p2_account_id,
+                p2_namespace_id,
+                status,
+                imported_at,
+                last_error,
+                updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, 'imported', NOW(), NULL, NOW())
+             ON CONFLICT (legacy_account_id, namespace_name) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                p2_account_id = EXCLUDED.p2_account_id,
+                p2_namespace_id = EXCLUDED.p2_namespace_id,
+                status = 'imported',
+                imported_at = COALESCE(account_migrations.imported_at, NOW()),
+                last_error = NULL,
+                updated_at = NOW()",
+        )
+        .bind(legacy_account_id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(p2_account_id)
+        .bind(p2_namespace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to record account migration: {}", e)));
+        crate::observability::observe_db(
+            "migration.v2_account_record",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+        Ok(())
+    }
+
+    pub async fn mark_v2_account_migration_failed(
+        &self,
+        legacy_account_id: &str,
+        owner: &str,
+        namespace: &str,
+        error: &str,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO account_migrations (
+                legacy_account_id,
+                owner,
+                namespace_name,
+                status,
+                last_error,
+                updated_at
+             )
+             VALUES ($1, $2, $3, 'failed', $4, NOW())
+             ON CONFLICT (legacy_account_id, namespace_name) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                status = 'failed',
+                last_error = EXCLUDED.last_error,
+                updated_at = NOW()",
+        )
+        .bind(legacy_account_id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(error)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to mark account migration failed: {}", e))
+        });
+        crate::observability::observe_db(
+            "migration.v2_account_failed",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+        Ok(())
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)

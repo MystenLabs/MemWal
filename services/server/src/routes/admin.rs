@@ -10,15 +10,19 @@
 //! SDK needs to build a SEAL SessionKey.
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::{Extension, Json};
+use base64::Engine as _;
 use futures::stream::{self, StreamExt};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
-use crate::storage::{seal, walrus};
+use crate::jobs::WalletOperation;
+use crate::storage::{chain, envelope, seal, sui, walrus};
 use crate::types::*;
 
-use super::cleanup_expired_blob;
+use super::{cleanup_expired_blob, enqueue_wallet_job};
 
 /// the `/api/ask` system prompt — a versioned text asset with a
 /// `{MEMORY_CONTEXT}` placeholder (substituted with the `<memory>`-tag-
@@ -153,11 +157,317 @@ pub async fn version() -> Json<crate::compatibility::VersionResponse> {
 /// UX for v0.3.x apps that only passed `{ key, accountId }`.
 pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
-        package_id: state.config.package_id.clone(),
+        package_id: state.config.public_package_id().to_string(),
+        registry_id: state.config.public_registry_id().to_string(),
+        namespace_id: state.config.public_namespace_id().map(str::to_string),
+        key_version: state.config.key_version,
+        protocol: state.config.public_protocol().to_string(),
         network: state.config.sui_network.clone(),
         sui_rpc_url: state.config.sui_rpc_url.clone(),
         rate_limit_disabled: state.config.rate_limit.bench_bypass_enabled,
     })
+}
+
+fn migration_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-memwal-migration-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+        })
+}
+
+fn require_migration_token(headers: &HeaderMap, config: &Config) -> Result<(), AppError> {
+    let expected = config.sidecar_secret.as_deref().ok_or_else(|| {
+        AppError::Unauthorized("migration token is not configured on this server".into())
+    })?;
+    let provided = migration_token_from_headers(headers)
+        .ok_or_else(|| AppError::Unauthorized("missing migration token".into()))?;
+    if provided != expected {
+        return Err(AppError::Unauthorized("invalid migration token".into()));
+    }
+    Ok(())
+}
+
+/// POST /internal/migration/v2/backfill
+///
+/// Internal migration helper. It decrypts OLD blobs with the configured server
+/// fallback key, creates WMEM envelopes under the P2 namespace DEK, and enqueues
+/// server-owned Walrus uploads + `admin_record_memory` jobs. It assumes
+/// `account_migrations` has already been populated with `p2_account_id` and
+/// `p2_namespace_id` for each owner/namespace.
+pub async fn migration_v2_backfill(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<V2BackfillRequest>,
+) -> Result<Json<V2BackfillResponse>, AppError> {
+    require_migration_token(&headers, &state.config)?;
+    if body.key_version == 0 {
+        return Err(AppError::BadRequest("keyVersion must be positive".into()));
+    }
+
+    let limit = body.limit.clamp(1, 250);
+    let p2_package_id = state
+        .config
+        .p2_package_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_PACKAGE_ID is required".into()))?;
+    let migration_cap_id = state
+        .config
+        .p2_migration_cap_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_MIGRATION_CAP_ID is required".into()))?;
+    let fallback_private_key = state
+        .config
+        .sui_private_key
+        .as_deref()
+        .or_else(|| state.config.sui_private_keys.first().map(String::as_str))
+        .ok_or_else(|| {
+            AppError::Internal(
+                "SERVER_SUI_PRIVATE_KEY or SERVER_SUI_PRIVATE_KEYS is required for OLD decrypt"
+                    .into(),
+            )
+        })?;
+    let credential = seal::SealCredential::DelegateKey(fallback_private_key.to_string());
+
+    let candidates = state
+        .db
+        .list_v2_migration_candidates(
+            body.owner.as_deref(),
+            body.namespace.as_deref(),
+            limit as i64,
+        )
+        .await?;
+    if body.dry_run {
+        return Ok(Json(V2BackfillResponse {
+            selected: candidates.len(),
+            queued: 0,
+            skipped: 0,
+            dry_run: true,
+            protocol: "p2".to_string(),
+        }));
+    }
+
+    let mut deks: HashMap<String, [u8; envelope::DEK_LEN]> = HashMap::new();
+    let mut queued = 0usize;
+    let mut skipped = 0usize;
+
+    for candidate in candidates.iter() {
+        let Some(old_account_id) = candidate.old_account_id.as_deref() else {
+            tracing::warn!(
+                old_blob_id = %candidate.blob_id,
+                owner = %candidate.owner,
+                "migration backfill skip: missing old account id"
+            );
+            skipped += 1;
+            continue;
+        };
+        if candidate.p2_account_id.is_none() {
+            tracing::warn!(
+                old_blob_id = %candidate.blob_id,
+                owner = %candidate.owner,
+                "migration backfill skip: missing P2 account id"
+            );
+            skipped += 1;
+            continue;
+        }
+        let Some(p2_namespace_id) = candidate.p2_namespace_id.as_deref() else {
+            tracing::warn!(
+                old_blob_id = %candidate.blob_id,
+                owner = %candidate.owner,
+                "migration backfill skip: missing P2 namespace id"
+            );
+            skipped += 1;
+            continue;
+        };
+
+        let namespace_bytes = envelope::parse_object_id(p2_namespace_id)
+            .map_err(|e| AppError::Internal(format!("invalid P2 namespace id: {}", e)))?;
+
+        if !deks.contains_key(p2_namespace_id) {
+            let existing = sui::fetch_namespace_wrapped_dek(
+                &state.http_client,
+                &state.config.sui_rpc_url,
+                p2_namespace_id,
+                body.key_version,
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("fetch wrapped DEK failed: {}", e)))?;
+            if existing.is_some() {
+                tracing::warn!(
+                    namespace_id = %p2_namespace_id,
+                    key_version = body.key_version,
+                    "migration backfill skip namespace: wrapped DEK already exists and raw DEK is not recoverable in this worker"
+                );
+                skipped += 1;
+                continue;
+            }
+
+            let dek = envelope::generate_dek();
+            let wrapped = seal::seal_encrypt_namespace(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                &dek,
+                p2_package_id,
+                p2_namespace_id,
+                body.key_version,
+            )
+            .await?;
+            let key_index = state
+                .key_pool
+                .next_index()
+                .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+            let tx = chain::admin_set_wrapped_dek(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                key_index,
+                p2_package_id,
+                migration_cap_id,
+                p2_namespace_id,
+                body.key_version,
+                &wrapped,
+            )
+            .await?;
+            tracing::info!(
+                namespace_id = %p2_namespace_id,
+                key_version = body.key_version,
+                digest = %tx.digest,
+                "migration backfill stored wrapped DEK"
+            );
+            deks.insert(p2_namespace_id.to_string(), dek);
+        }
+
+        let old_ciphertext = match walrus::download_blob_from_aggregators(
+            &state.http_client,
+            &state.config.walrus_aggregator_urls,
+            &candidate.blob_id,
+            state.config.walrus_skip_consistency_check,
+            std::time::Duration::from_millis(state.config.walrus_aggregator_race_after_ms),
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    old_blob_id = %candidate.blob_id,
+                    error = %e,
+                    "migration backfill skip: old blob download failed"
+                );
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let old_package_id = candidate
+            .old_package_id
+            .as_deref()
+            .unwrap_or(&state.config.package_id);
+        let plaintext = match seal::seal_decrypt(
+            &state.http_client,
+            &state.config.sidecar_url,
+            state.config.sidecar_secret.as_deref(),
+            &old_ciphertext,
+            &credential,
+            old_package_id,
+            old_account_id,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    old_blob_id = %candidate.blob_id,
+                    old_account_id = %old_account_id,
+                    error = %e,
+                    "migration backfill skip: old decrypt failed"
+                );
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let dek = deks.get(p2_namespace_id).ok_or_else(|| {
+            AppError::Internal("internal migration state missing namespace DEK".into())
+        })?;
+        let envelope_bytes =
+            envelope::seal_envelope(dek, &namespace_bytes, body.key_version, &plaintext);
+        let wallet_index = state
+            .key_pool
+            .next_index()
+            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+        enqueue_wallet_job(
+            &state,
+            wallet_index,
+            WalletOperation::UploadP2Envelope {
+                envelope_b64: base64::engine::general_purpose::STANDARD.encode(&envelope_bytes),
+                vector: candidate.vector.clone(),
+                importance: candidate.importance,
+                owner: candidate.owner.clone(),
+                namespace: candidate.namespace.clone(),
+                package_id: p2_package_id.to_string(),
+                namespace_id: p2_namespace_id.to_string(),
+                key_version: body.key_version,
+                agent_public_key: None,
+                remember_job_id: None,
+                epochs: state.config.walrus_storage_epochs,
+                migrated_from_blob_id: Some(candidate.blob_id.clone()),
+            },
+        )
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO blob_migrations (
+                old_blob_id,
+                owner,
+                namespace,
+                old_package_id,
+                p2_package_id,
+                old_account_id,
+                p2_account_id,
+                p2_namespace_id,
+                key_version,
+                status,
+                updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', NOW())
+             ON CONFLICT (old_blob_id) DO UPDATE SET
+                p2_package_id = EXCLUDED.p2_package_id,
+                old_account_id = EXCLUDED.old_account_id,
+                p2_account_id = EXCLUDED.p2_account_id,
+                p2_namespace_id = EXCLUDED.p2_namespace_id,
+                key_version = EXCLUDED.key_version,
+                status = 'queued',
+                last_error = NULL,
+                updated_at = NOW()",
+        )
+        .bind(&candidate.blob_id)
+        .bind(&candidate.owner)
+        .bind(&candidate.namespace)
+        .bind(old_package_id)
+        .bind(p2_package_id)
+        .bind(old_account_id)
+        .bind(candidate.p2_account_id.as_deref())
+        .bind(p2_namespace_id)
+        .bind(body.key_version as i32)
+        .execute(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to mark blob migration queued: {}", e)))?;
+
+        queued += 1;
+    }
+
+    Ok(Json(V2BackfillResponse {
+        selected: candidates.len(),
+        queued,
+        skipped,
+        dry_run: false,
+        protocol: "p2".to_string(),
+    }))
 }
 
 // ============================================================
@@ -211,7 +521,13 @@ pub async fn ask(
     let query_vector = state.embedder.embed(&body.question).await?;
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(
+            &query_vector,
+            owner,
+            namespace,
+            limit,
+            Some(state.config.public_db_protocol()),
+        )
         .await?;
 
     // Hydrate the hits through the storage engine, concurrently — same
@@ -569,6 +885,8 @@ pub async fn restore(
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
             let sidecar_secret = state.config.sidecar_secret.clone();
+            let namespace_id = state.config.namespace_id.clone();
+            let registry_id = state.config.registry_id.clone();
             let credential = credential.clone();
             // Use the package_id that was stored with this blob (supports contract upgrades)
             let package_id = blob_package_ids
@@ -577,7 +895,7 @@ pub async fn restore(
                 .unwrap_or_else(|| state.config.package_id.clone());
             let account_id = auth.account_id.clone();
             async move {
-                match seal::seal_decrypt(
+                match seal::seal_decrypt_configured(
                     http_client,
                     &sidecar_url,
                     sidecar_secret.as_deref(),
@@ -585,6 +903,8 @@ pub async fn restore(
                     &credential,
                     &package_id,
                     &account_id,
+                    namespace_id.as_deref(),
+                    Some(registry_id.as_str()),
                 )
                 .await
                 {

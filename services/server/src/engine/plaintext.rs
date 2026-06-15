@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::storage::db::VectorDb;
-use crate::types::{AppError, AuthInfo};
+use crate::types::{AppError, AuthInfo, SearchHit};
 
 use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 
@@ -133,14 +133,14 @@ impl MemoryEngine for PlaintextEngine {
     async fn fetch_batch(
         &self,
         owner: &str,
-        hits: &[(String, f64)],
+        hits: &[SearchHit],
         _auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
         let t0 = std::time::Instant::now();
         let mut results = Vec::with_capacity(hits.len());
         let mut dropped = 0usize;
-        for (blob_id, distance) in hits {
-            match self.hydrate(owner, blob_id, *distance).await? {
+        for hit in hits {
+            match self.hydrate(owner, &hit.blob_id, hit.distance).await? {
                 Some(m) => results.push(m),
                 None => dropped += 1,
             }

@@ -185,7 +185,13 @@ pub async fn recall(
     let t1 = std::time::Instant::now();
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(
+            &query_vector,
+            owner,
+            namespace,
+            limit,
+            Some(state.config.public_db_protocol()),
+        )
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
     let hit_count = hits.len();
@@ -208,12 +214,8 @@ pub async fn recall(
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
-    let hit_refs: Vec<(String, f64)> = hits
-        .iter()
-        .map(|h| (h.blob_id.clone(), h.distance))
-        .collect();
     let (mut hydrated, dropped_count, timings) =
-        state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
+        state.engine.fetch_batch(owner, &hits, &auth).await?;
     let fetch_ms = t2.elapsed().as_millis();
 
     // Zip `created_at` (recency signal) + `importance` from the
@@ -344,7 +346,13 @@ pub async fn recall_manual(
     let limit = body.limit.min(100);
     let hits = state
         .db
-        .search_similar(&body.vector, owner, namespace, limit)
+        .search_similar(
+            &body.vector,
+            owner,
+            namespace,
+            limit,
+            Some(state.config.public_db_protocol()),
+        )
         .await?;
 
     // Apply the shared CompositeRanker so manual ordering matches
@@ -433,6 +441,10 @@ mod tests {
         SearchHit {
             blob_id: blob_id.into(),
             distance,
+            package_id: None,
+            protocol: "legacy".to_string(),
+            namespace_object_id: None,
+            key_version: None,
             created_at: t_now() - chrono::Duration::days(age_days),
             importance,
         }

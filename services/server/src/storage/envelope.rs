@@ -76,6 +76,8 @@ pub enum EnvelopeError {
     Truncated,
     /// AEAD authentication failed — wrong DEK, or ciphertext/header tampered.
     Decrypt,
+    /// Sui object id did not parse as a 32-byte id.
+    InvalidObjectId,
 }
 
 impl fmt::Display for EnvelopeError {
@@ -87,8 +89,12 @@ impl fmt::Display for EnvelopeError {
             }
             EnvelopeError::Truncated => write!(f, "envelope: truncated container"),
             EnvelopeError::Decrypt => {
-                write!(f, "envelope: AEAD authentication failed (wrong key or tampered)")
+                write!(
+                    f,
+                    "envelope: AEAD authentication failed (wrong key or tampered)"
+                )
             }
+            EnvelopeError::InvalidObjectId => write!(f, "envelope: invalid Sui object id"),
         }
     }
 }
@@ -101,6 +107,34 @@ pub fn generate_dek() -> [u8; DEK_LEN] {
     let mut dek = [0u8; DEK_LEN];
     OsRng.fill_bytes(&mut dek);
     dek
+}
+
+/// Parse a Sui object id (`0x` + 32-byte hex, accepting shorter object ids with
+/// leading zero padding) into the 32-byte namespace id stored in the envelope.
+pub fn parse_object_id(value: &str) -> Result<[u8; NS_ID_LEN], EnvelopeError> {
+    let raw = value.strip_prefix("0x").unwrap_or(value);
+    if raw.is_empty() || raw.len() > NS_ID_LEN * 2 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(EnvelopeError::InvalidObjectId);
+    }
+
+    let padded = format!("{raw:0>64}");
+    let mut out = [0u8; NS_ID_LEN];
+    for (idx, chunk) in padded.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).map_err(|_| EnvelopeError::InvalidObjectId)?;
+        out[idx] = u8::from_str_radix(hex, 16).map_err(|_| EnvelopeError::InvalidObjectId)?;
+    }
+    Ok(out)
+}
+
+/// Format a 32-byte Sui object id for JSON-RPC / sidecar calls.
+pub fn format_object_id(bytes: &[u8; NS_ID_LEN]) -> String {
+    let mut out = String::with_capacity(2 + NS_ID_LEN * 2);
+    out.push_str("0x");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 /// Serialize the cleartext prefix `magic || format_version || header_len ||
@@ -133,7 +167,13 @@ pub fn seal_envelope(
 
     let cipher = Aes256Gcm::new_from_slice(dek).expect("DEK is exactly 32 bytes");
     let ciphertext = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad: &prefix })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: &prefix,
+            },
+        )
         // AES-GCM encryption is infallible for our message sizes (< 64 GiB).
         .expect("aes-256-gcm encrypt");
 
@@ -170,7 +210,11 @@ pub fn parse_header(container: &[u8]) -> Result<EnvelopeHeader, EnvelopeError> {
         container[h + NS_ID_LEN + 2],
         container[h + NS_ID_LEN + 3],
     ]);
-    Ok(EnvelopeHeader { format_version, namespace_id, key_version })
+    Ok(EnvelopeHeader {
+        format_version,
+        namespace_id,
+        key_version,
+    })
 }
 
 /// Decrypt a container with `dek`, returning the plaintext. The GCM tag verifies
@@ -192,7 +236,13 @@ pub fn open_envelope(dek: &[u8; DEK_LEN], container: &[u8]) -> Result<Vec<u8>, E
 
     let cipher = Aes256Gcm::new_from_slice(dek).expect("DEK is exactly 32 bytes");
     cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad: prefix })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad: prefix,
+            },
+        )
         .map_err(|_| EnvelopeError::Decrypt)
 }
 
@@ -229,6 +279,16 @@ mod tests {
         assert_eq!(h.key_version, 42);
     }
 
+    #[test]
+    fn object_id_helpers_round_trip() {
+        let id = parse_object_id("0x2a").unwrap();
+        assert_eq!(id[31], 0x2a);
+        assert_eq!(
+            format_object_id(&id),
+            "0x000000000000000000000000000000000000000000000000000000000000002a"
+        );
+    }
+
     /// The fixed-IV landmine guard: the SAME (dek, namespace, key_version,
     /// plaintext) must produce DIFFERENT containers (fresh nonce), while the
     /// cleartext prefix stays identical.
@@ -238,9 +298,16 @@ mod tests {
         let (n, kv, pt) = (ns(5), 1u32, b"same plaintext" as &[u8]);
         let c1 = seal_envelope(&dek, &n, kv, pt);
         let c2 = seal_envelope(&dek, &n, kv, pt);
-        assert_ne!(c1, c2, "containers must differ (fresh nonce per encryption)");
+        assert_ne!(
+            c1, c2,
+            "containers must differ (fresh nonce per encryption)"
+        );
         let prefix_end = PRECHEADER_LEN + HEADER_V1_LEN;
-        assert_eq!(c1[..prefix_end], c2[..prefix_end], "prefix is deterministic");
+        assert_eq!(
+            c1[..prefix_end],
+            c2[..prefix_end],
+            "prefix is deterministic"
+        );
         assert_ne!(
             c1[prefix_end..prefix_end + NONCE_LEN],
             c2[prefix_end..prefix_end + NONCE_LEN],
@@ -281,10 +348,16 @@ mod tests {
 
     #[test]
     fn bad_magic_and_version() {
-        assert_eq!(parse_header(b"XXXX....").unwrap_err(), EnvelopeError::BadMagic);
+        assert_eq!(
+            parse_header(b"XXXX....").unwrap_err(),
+            EnvelopeError::BadMagic
+        );
         let mut c = seal_envelope(&generate_dek(), &ns(1), 1, b"x");
         c[4] = 0x09; // bogus format_version
-        assert_eq!(parse_header(&c).unwrap_err(), EnvelopeError::UnsupportedVersion(9));
+        assert_eq!(
+            parse_header(&c).unwrap_err(),
+            EnvelopeError::UnsupportedVersion(9)
+        );
     }
 
     #[test]

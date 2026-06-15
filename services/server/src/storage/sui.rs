@@ -1,5 +1,19 @@
 use serde::Deserialize;
 
+#[derive(Debug, Clone)]
+pub struct OnchainAccountForMigration {
+    pub active: bool,
+    pub delegate_keys: Vec<OnchainDelegateKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnchainDelegateKey {
+    pub public_key_hex: String,
+    pub label: String,
+    pub perms: u8,
+    pub created_at: u64,
+}
+
 /// Verify that a given public key is registered as a delegate key
 /// in the onchain MemWalAccount object.
 ///
@@ -128,6 +142,127 @@ pub async fn verify_delegate_key_onchain(
         delegate_keys.len(),
         account_object_id
     )))
+}
+
+/// Fetch the legacy Account object fields needed to mirror authentication into
+/// the P2 account. Older V1 accounts did not carry `perms`; those delegates are
+/// imported as READ|WRITE (3), matching the pre-P2 delegate behavior.
+pub async fn fetch_account_for_migration(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    account_object_id: &str,
+) -> Result<OnchainAccountForMigration, OnchainVerifyError> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_getObject",
+        "params": [
+            account_object_id,
+            { "showContent": true }
+        ]
+    });
+
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject_migration_account",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+    })?;
+    let status_label = response.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject_migration_account",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let rpc_response: RpcResponse =
+        parse_json_rpc_response(response, "sui_getObject migration account").await?;
+
+    if let Some(error) = rpc_response.error {
+        return Err(OnchainVerifyError::RpcError(format!(
+            "RPC error {}: {}",
+            error.code, error.message
+        )));
+    }
+
+    let result = rpc_response
+        .result
+        .ok_or_else(|| OnchainVerifyError::RpcError("No result in RPC response".into()))?;
+    let content = result
+        .data
+        .and_then(|d| d.content)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no content".into()))?;
+    let fields = content
+        .fields
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
+
+    let active = fields
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let delegate_values = fields
+        .get("delegate_keys")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    let mut delegate_keys = Vec::with_capacity(delegate_values.len());
+    for dk in delegate_values {
+        let Some(dk_fields) = dk.get("fields").or(Some(dk)) else {
+            continue;
+        };
+        let Some(public_key) = dk_fields.get("public_key").and_then(json_u8_vector) else {
+            tracing::warn!(
+                account_id = %account_object_id,
+                "skipping malformed legacy delegate key without public_key"
+            );
+            continue;
+        };
+        if public_key.len() != 32 {
+            tracing::warn!(
+                account_id = %account_object_id,
+                len = public_key.len(),
+                "skipping malformed legacy delegate key with invalid length"
+            );
+            continue;
+        }
+
+        let label = dk_fields
+            .get("label")
+            .and_then(json_string_from_value)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Migrated delegate".to_string());
+        let created_at = dk_fields
+            .get("created_at")
+            .and_then(json_u64_from_value)
+            .unwrap_or(0);
+        let perms = dk_fields
+            .get("perms")
+            .and_then(json_u64_from_value)
+            .and_then(|v| u8::try_from(v).ok())
+            .unwrap_or(3);
+
+        delegate_keys.push(OnchainDelegateKey {
+            public_key_hex: hex::encode(public_key),
+            label,
+            perms,
+            created_at,
+        });
+    }
+
+    Ok(OnchainAccountForMigration {
+        active,
+        delegate_keys,
+    })
 }
 
 /// Scan the AccountRegistry to find which account holds a given delegate key.
@@ -336,6 +471,181 @@ pub async fn find_account_by_delegate_key(
     ))
 }
 
+/// Fetch `MemoryNamespace.wrapped_deks[key_version]` from the Move `Table`.
+///
+/// Sui JSON-RPC exposes `Table<K,V>` entries as dynamic fields under the table
+/// object's inner id. The namespace object only carries that table id, so this
+/// scans dynamic fields for the requested u32 key and fetches the value object.
+pub async fn fetch_namespace_wrapped_dek(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    namespace_id: &str,
+    key_version: u32,
+) -> Result<Option<Vec<u8>>, OnchainVerifyError> {
+    let ns_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_getObject",
+        "params": [namespace_id, { "showContent": true }]
+    });
+
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&ns_body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let ns_resp = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject_namespace",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("Failed to fetch namespace: {}", e))
+    })?;
+    let status_label = ns_resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject_namespace",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let ns_json: serde_json::Value =
+        parse_json_rpc_response(ns_resp, "sui_getObject namespace").await?;
+    let table_id = ns_json
+        .pointer("/result/data/content/fields/wrapped_deks/fields/id/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OnchainVerifyError::RpcError(
+                "Failed to extract wrapped_deks table ID from namespace".into(),
+            )
+        })?
+        .to_string();
+
+    let mut cursor: Option<String> = None;
+    loop {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "suix_getDynamicFields",
+            "params": [table_id, cursor, 50]
+        });
+
+        let request = http_client
+            .post(rpc_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .json(&body);
+        let request = crate::observability::apply_request_id_header(request);
+        let started = std::time::Instant::now();
+        let response = request.send().await.map_err(|e| {
+            crate::observability::observe_external(
+                "sui_rpc",
+                "suix_getDynamicFields_wrapped_deks",
+                "transport_error",
+                started.elapsed(),
+            );
+            OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+        })?;
+        let status_label = response.status().as_u16().to_string();
+        crate::observability::observe_external(
+            "sui_rpc",
+            "suix_getDynamicFields_wrapped_deks",
+            &status_label,
+            started.elapsed(),
+        );
+
+        let resp_json: serde_json::Value =
+            parse_json_rpc_response(response, "suix_getDynamicFields wrapped_deks").await?;
+        if let Some(error) = resp_json.get("error") {
+            return Err(OnchainVerifyError::RpcError(format!(
+                "RPC error: {}",
+                error
+            )));
+        }
+
+        let result = resp_json
+            .get("result")
+            .ok_or_else(|| OnchainVerifyError::RpcError("No result in response".into()))?;
+        let data = result
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| OnchainVerifyError::RpcError("No data array in response".into()))?;
+
+        for field_info in data {
+            let Some(name) = field_info.get("name") else {
+                continue;
+            };
+            if !json_u32_eq(name, key_version) {
+                continue;
+            }
+
+            let field_obj_id = field_info
+                .get("objectId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    OnchainVerifyError::RpcError("Missing objectId in dynamic field".into())
+                })?;
+            let field_body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sui_getObject",
+                "params": [field_obj_id, { "showContent": true }]
+            });
+
+            let request = http_client
+                .post(rpc_url)
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .json(&field_body);
+            let request = crate::observability::apply_request_id_header(request);
+            let started = std::time::Instant::now();
+            let field_resp = request.send().await.map_err(|e| {
+                crate::observability::observe_external(
+                    "sui_rpc",
+                    "sui_getObject_wrapped_dek_field",
+                    "transport_error",
+                    started.elapsed(),
+                );
+                OnchainVerifyError::RpcError(format!("Failed to fetch wrapped_dek field: {}", e))
+            })?;
+            let status_label = field_resp.status().as_u16().to_string();
+            crate::observability::observe_external(
+                "sui_rpc",
+                "sui_getObject_wrapped_dek_field",
+                &status_label,
+                started.elapsed(),
+            );
+
+            let field_json: serde_json::Value =
+                parse_json_rpc_response(field_resp, "sui_getObject wrapped_dek field").await?;
+            let value = field_json
+                .pointer("/result/data/content/fields/value")
+                .ok_or_else(|| {
+                    OnchainVerifyError::RpcError("Missing value in wrapped_dek field".into())
+                })?;
+            return json_u8_vector(value)
+                .map(Some)
+                .ok_or_else(|| OnchainVerifyError::RpcError("Malformed wrapped_dek value".into()));
+        }
+
+        let next_cursor = result
+            .get("nextCursor")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let has_next = result
+            .get("hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !has_next || next_cursor.is_none() {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    Ok(None)
+}
+
 // ============================================================
 // Types for JSON-RPC response parsing
 // ============================================================
@@ -389,6 +699,48 @@ fn body_snippet(bytes: &[u8]) -> String {
         snippet.push_str("...");
     }
     snippet.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn json_u32_eq(value: &serde_json::Value, expected: u32) -> bool {
+    let Some(found) = json_u64_from_value(value) else {
+        return false;
+    };
+    found == u64::from(expected)
+}
+
+fn json_u64_from_value(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.parse::<u64>().ok(),
+        serde_json::Value::Object(map) => map.get("value").and_then(json_u64_from_value),
+        _ => None,
+    }
+}
+
+fn json_u8_vector(value: &serde_json::Value) -> Option<Vec<u8>> {
+    let arr = match value {
+        serde_json::Value::Array(arr) => arr,
+        serde_json::Value::Object(map) => map.get("value")?.as_array()?,
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let n = json_u64_from_value(item)?;
+        let byte = u8::try_from(n).ok()?;
+        out.push(byte);
+    }
+    Some(out)
+}
+
+fn json_string_from_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => map
+            .get("value")
+            .and_then(json_string_from_value)
+            .or_else(|| map.get("fields").and_then(json_string_from_value)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -212,8 +212,29 @@ pub struct Config {
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
     /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
     pub sui_private_keys: Vec<String>,
+    /// Active/legacy package id. During Phase 1-3 this remains OLD; P2 ids are
+    /// loaded separately and only become public config after cutover.
     pub package_id: String,
+    /// Active/legacy account registry id.
     pub registry_id: String,
+    /// Optional V2 namespace object used for namespace-anchored SEAL IDs.
+    /// When absent, the relayer keeps using the legacy owner-address SEAL ID.
+    pub namespace_id: Option<String>,
+    /// V2 namespace key version. Used only when `namespace_id` is configured.
+    pub key_version: u32,
+    /// Fresh P2 package id used by the background migration before public cutover.
+    pub p2_package_id: Option<String>,
+    /// P2 account registry id.
+    pub p2_registry_id: Option<String>,
+    /// P2 namespace registry id (`(owner,name) -> namespace_id`).
+    pub p2_namespace_registry_id: Option<String>,
+    /// P2 smoke/default namespace id. Full migration resolves per-owner namespaces.
+    pub p2_namespace_id: Option<String>,
+    /// Temporary MigrationCap object id used only by server-side P2 migration
+    /// jobs. Never exposed through `/config`; burn it after migration finalize.
+    pub p2_migration_cap_id: Option<String>,
+    /// Public `/config` protocol selector: `old` (default) or `p2`.
+    pub cutover_protocol: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
@@ -289,6 +310,24 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
+            namespace_id: std::env::var("MEMWAL_NAMESPACE_ID")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            key_version: std::env::var("MEMWAL_KEY_VERSION")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(1),
+            p2_package_id: optional_env("MEMWAL_P2_PACKAGE_ID"),
+            p2_registry_id: optional_env("MEMWAL_P2_REGISTRY_ID"),
+            p2_namespace_registry_id: optional_env("MEMWAL_P2_NAMESPACE_REGISTRY_ID"),
+            p2_namespace_id: optional_env("MEMWAL_P2_NAMESPACE_ID"),
+            p2_migration_cap_id: optional_env("MEMWAL_P2_MIGRATION_CAP_ID"),
+            cutover_protocol: std::env::var("MEMWAL_CUTOVER_PROTOCOL")
+                .unwrap_or_else(|_| "old".to_string())
+                .trim()
+                .to_ascii_lowercase(),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
@@ -299,6 +338,48 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+        }
+    }
+
+    pub fn public_package_id(&self) -> &str {
+        if self.cutover_protocol == "p2" {
+            self.p2_package_id.as_deref().unwrap_or(&self.package_id)
+        } else {
+            &self.package_id
+        }
+    }
+
+    pub fn public_registry_id(&self) -> &str {
+        if self.cutover_protocol == "p2" {
+            self.p2_registry_id.as_deref().unwrap_or(&self.registry_id)
+        } else {
+            &self.registry_id
+        }
+    }
+
+    pub fn public_namespace_id(&self) -> Option<&str> {
+        if self.cutover_protocol == "p2" {
+            self.p2_namespace_id
+                .as_deref()
+                .or(self.namespace_id.as_deref())
+        } else {
+            self.namespace_id.as_deref()
+        }
+    }
+
+    pub fn public_protocol(&self) -> &str {
+        if self.cutover_protocol == "p2" {
+            "p2"
+        } else {
+            "old"
+        }
+    }
+
+    pub fn public_db_protocol(&self) -> &str {
+        if self.cutover_protocol == "p2" {
+            "p2"
+        } else {
+            "legacy"
         }
     }
 }
@@ -312,6 +393,13 @@ fn env_bool(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
@@ -529,6 +617,12 @@ pub struct RecallResult {
 pub struct SearchHit {
     pub blob_id: String,
     pub distance: f64,
+    /// Protocol metadata for coexistence. Legacy rows may be NULL and fall back
+    /// to the relayer's active OLD stack.
+    pub package_id: Option<String>,
+    pub protocol: String,
+    pub namespace_object_id: Option<String>,
+    pub key_version: Option<i32>,
     /// Insertion timestamp from `vector_entries.created_at`. Used by the
     /// composite ranker for recency scoring; threaded through unchanged
     /// in the engine `fetch_*` calls. Always present (column is NOT NULL
@@ -916,6 +1010,15 @@ pub struct PromptVersions {
 pub struct ConfigResponse {
     #[serde(rename = "packageId")]
     pub package_id: String,
+    #[serde(rename = "registryId")]
+    pub registry_id: String,
+    #[serde(rename = "namespaceId", skip_serializing_if = "Option::is_none")]
+    pub namespace_id: Option<String>,
+    #[serde(rename = "keyVersion")]
+    pub key_version: u32,
+    /// `old` until the migration readiness gate is satisfied; `p2` only after
+    /// global cutover.
+    pub protocol: String,
     pub network: String,
     #[serde(rename = "suiRpcUrl")]
     pub sui_rpc_url: String,
@@ -923,6 +1026,69 @@ pub struct ConfigResponse {
     /// scripts pre-flight the server config before running.
     #[serde(rename = "rateLimitDisabled")]
     pub rate_limit_disabled: bool,
+}
+
+// ============================================================
+// Internal V2 Migration Types
+// ============================================================
+
+fn default_migration_limit() -> usize {
+    25
+}
+
+fn default_migration_key_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+pub struct V2BackfillRequest {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_migration_limit")]
+    pub limit: usize,
+    #[serde(rename = "keyVersion", default = "default_migration_key_version")]
+    pub key_version: u32,
+    #[serde(rename = "dryRun", default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct V2ImportAccountsRequest {
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_migration_limit")]
+    pub limit: usize,
+    #[serde(rename = "dryRun", default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct V2ImportAccountsResponse {
+    pub selected: usize,
+    #[serde(rename = "importedAccounts")]
+    pub imported_accounts: usize,
+    #[serde(rename = "importedNamespaces")]
+    pub imported_namespaces: usize,
+    #[serde(rename = "importedDelegates")]
+    pub imported_delegates: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    #[serde(rename = "dryRun")]
+    pub dry_run: bool,
+    pub protocol: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct V2BackfillResponse {
+    pub selected: usize,
+    pub queued: usize,
+    pub skipped: usize,
+    pub dry_run: bool,
+    pub protocol: String,
 }
 
 // ============================================================

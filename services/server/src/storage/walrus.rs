@@ -88,6 +88,10 @@ struct WalrusUploadRequest {
     package_id: String,
     epochs: u64,
     defer_transfer: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol: Option<String>,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
 }
@@ -170,6 +174,44 @@ pub async fn upload_blob(
         agent_id,
         job_id,
         false,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Upload a V2 envelope blob while keeping the Walrus Blob object server-owned.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_blob_deferred(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    epochs: u64,
+    owner_address: &str,
+    key_index: usize,
+    namespace: &str,
+    package_id: &str,
+    key_version: u32,
+    agent_id: Option<&str>,
+    job_id: Option<&str>,
+) -> Result<UploadResult, UploadBlobError> {
+    upload_blob_inner(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        data,
+        epochs,
+        owner_address,
+        key_index,
+        namespace,
+        package_id,
+        agent_id,
+        job_id,
+        true,
+        Some(key_version),
+        Some("p2"),
     )
     .await
 }
@@ -188,6 +230,8 @@ async fn upload_blob_inner(
     agent_id: Option<&str>,
     job_id: Option<&str>,
     defer_transfer: bool,
+    key_version: Option<u32>,
+    protocol: Option<&str>,
 ) -> Result<UploadResult, UploadBlobError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -201,6 +245,8 @@ async fn upload_blob_inner(
         package_id: package_id.to_string(),
         epochs,
         defer_transfer,
+        key_version,
+        protocol: protocol.map(str::to_string),
         agent_id: agent_id.map(|s| s.to_string()),
     });
     if let Some(secret) = sidecar_secret {

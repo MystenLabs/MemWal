@@ -43,7 +43,7 @@ pub mod walrus_seal;
 
 use async_trait::async_trait;
 
-use crate::types::{AppError, AuthInfo};
+use crate::types::{AppError, AuthInfo, SearchHit};
 
 pub use plaintext::PlaintextEngine;
 pub use walrus_seal::WalrusSealEngine;
@@ -170,7 +170,7 @@ pub trait MemoryEngine: Send + Sync {
     async fn fetch_batch(
         &self,
         owner: &str,
-        hits: &[(String, f64)],
+        hits: &[SearchHit],
         auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError>;
 

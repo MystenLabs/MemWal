@@ -178,6 +178,16 @@ async fn main() {
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
     tracing::info!("  package id: {}", config.package_id);
     tracing::info!("  registry id: {}", config.registry_id);
+    if let Some(p2_package_id) = config.p2_package_id.as_deref() {
+        tracing::info!("  p2 package id: {}", p2_package_id);
+    }
+    if let Some(p2_registry_id) = config.p2_registry_id.as_deref() {
+        tracing::info!("  p2 registry id: {}", p2_registry_id);
+    }
+    if let Some(p2_namespace_registry_id) = config.p2_namespace_registry_id.as_deref() {
+        tracing::info!("  p2 namespace registry id: {}", p2_namespace_registry_id);
+    }
+    tracing::info!("  public protocol: {}", config.public_protocol());
     tracing::info!(
         "  memwal account: {}",
         config
@@ -516,8 +526,7 @@ async fn main() {
     // throttle the burst) — before queued requests outlive the sidecar's
     // 120s acquire timeout and start failing.
     let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
-    let saturation_consecutive =
-        parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
+    let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
     let saturation_interval_secs =
         parse_env_u64("SIDECAR_QUEUE_SATURATION_INTERVAL_SECS", 30, 5, 300);
     tracing::info!(
@@ -532,9 +541,8 @@ async fn main() {
         let monitor_alerts = Arc::clone(&state.alerts);
         let monitor_network = config.sui_network.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                saturation_interval_secs,
-            ));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
             let mut consecutive_saturated = 0u32;
             loop {
                 interval.tick().await;
@@ -593,8 +601,9 @@ async fn main() {
                         threshold: saturation_threshold,
                         consecutive_checks: consecutive_saturated,
                     };
-                    if let Err(err) =
-                        monitor_alerts.notify_walrus_upload_queue_saturated(alert).await
+                    if let Err(err) = monitor_alerts
+                        .notify_walrus_upload_queue_saturated(alert)
+                        .await
                     {
                         tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
                     }
@@ -838,6 +847,10 @@ async fn main() {
         .route(
             "/metrics",
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/internal/migration/v2/backfill",
+            post(routes::migration_v2_backfill).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .merge(sponsor_routes)
         .merge(mcp_routes);

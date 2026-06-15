@@ -58,8 +58,13 @@ struct SealDecryptBatchResponse {
 #[serde(rename_all = "camelCase")]
 struct SealEncryptRequest {
     data: String,
-    owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
     package_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_version: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -74,6 +79,10 @@ struct SealDecryptRequest {
     data: String,
     package_id: String,
     account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -96,13 +105,99 @@ pub async fn seal_encrypt(
     owner_address: &str,
     package_id: &str,
 ) -> Result<Vec<u8>, AppError> {
+    seal_encrypt_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        data,
+        Some(owner_address),
+        package_id,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Encrypt plaintext using the V2 namespace-anchored SEAL ID.
+pub async fn seal_encrypt_namespace(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    package_id: &str,
+    namespace_id: &str,
+    key_version: u32,
+) -> Result<Vec<u8>, AppError> {
+    seal_encrypt_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        data,
+        None,
+        package_id,
+        Some(namespace_id),
+        Some(key_version),
+    )
+    .await
+}
+
+/// Encrypt using V2 when a namespace is configured; otherwise use legacy V1.
+pub async fn seal_encrypt_configured(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    owner_address: &str,
+    package_id: &str,
+    namespace_id: Option<&str>,
+    key_version: u32,
+) -> Result<Vec<u8>, AppError> {
+    match namespace_id {
+        Some(namespace_id) => {
+            seal_encrypt_namespace(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                data,
+                package_id,
+                namespace_id,
+                key_version,
+            )
+            .await
+        }
+        None => {
+            seal_encrypt(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                data,
+                owner_address,
+                package_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn seal_encrypt_impl(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    owner_address: Option<&str>,
+    package_id: &str,
+    namespace_id: Option<&str>,
+    key_version: Option<u32>,
+) -> Result<Vec<u8>, AppError> {
     let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
     let mut req = client.post(&url).json(&SealEncryptRequest {
         data: data_b64,
-        owner: owner_address.to_string(),
+        owner: owner_address.map(str::to_string),
         package_id: package_id.to_string(),
+        namespace_id: namespace_id.map(str::to_string),
+        key_version,
     });
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
@@ -177,6 +272,99 @@ pub async fn seal_decrypt(
     package_id: &str,
     account_id: &str,
 ) -> Result<Vec<u8>, AppError> {
+    seal_decrypt_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        encrypted_data,
+        credential,
+        package_id,
+        account_id,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Decrypt V2 namespace-anchored SEAL ciphertext via the sidecar.
+pub async fn seal_decrypt_namespace(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_data: &[u8],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: &str,
+    registry_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    seal_decrypt_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        encrypted_data,
+        credential,
+        package_id,
+        account_id,
+        Some(namespace_id),
+        Some(registry_id),
+    )
+    .await
+}
+
+/// Decrypt using V2 when namespace+registry are configured; otherwise legacy V1.
+pub async fn seal_decrypt_configured(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_data: &[u8],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: Option<&str>,
+    registry_id: Option<&str>,
+) -> Result<Vec<u8>, AppError> {
+    match (namespace_id, registry_id) {
+        (Some(namespace_id), Some(registry_id)) => {
+            seal_decrypt_namespace(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                encrypted_data,
+                credential,
+                package_id,
+                account_id,
+                namespace_id,
+                registry_id,
+            )
+            .await
+        }
+        _ => {
+            seal_decrypt(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                encrypted_data,
+                credential,
+                package_id,
+                account_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn seal_decrypt_impl(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_data: &[u8],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: Option<&str>,
+    registry_id: Option<&str>,
+) -> Result<Vec<u8>, AppError> {
     let url = format!("{}/seal/decrypt", sidecar_url);
     let data_b64 = BASE64.encode(encrypted_data);
 
@@ -184,6 +372,8 @@ pub async fn seal_decrypt(
         data: data_b64,
         package_id: package_id.to_string(),
         account_id: account_id.to_string(),
+        namespace_id: namespace_id.map(str::to_string),
+        registry_id: registry_id.map(str::to_string),
     });
     req = match credential {
         SealCredential::Session(s) => req.header("x-seal-session", s),
@@ -284,6 +474,99 @@ pub async fn seal_decrypt_batch(
     package_id: &str,
     account_id: &str,
 ) -> Result<Vec<DecryptOutcome>, AppError> {
+    seal_decrypt_batch_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        encrypted_blobs,
+        credential,
+        package_id,
+        account_id,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Batch-decrypt namespace-anchored V2 SEAL ciphertexts.
+pub async fn seal_decrypt_batch_namespace(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_blobs: &[(String, Vec<u8>)],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: &str,
+    registry_id: &str,
+) -> Result<Vec<DecryptOutcome>, AppError> {
+    seal_decrypt_batch_impl(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        encrypted_blobs,
+        credential,
+        package_id,
+        account_id,
+        Some(namespace_id),
+        Some(registry_id),
+    )
+    .await
+}
+
+/// Batch-decrypt using V2 when namespace+registry are configured; otherwise legacy V1.
+pub async fn seal_decrypt_batch_configured(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_blobs: &[(String, Vec<u8>)],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: Option<&str>,
+    registry_id: Option<&str>,
+) -> Result<Vec<DecryptOutcome>, AppError> {
+    match (namespace_id, registry_id) {
+        (Some(namespace_id), Some(registry_id)) => {
+            seal_decrypt_batch_namespace(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                encrypted_blobs,
+                credential,
+                package_id,
+                account_id,
+                namespace_id,
+                registry_id,
+            )
+            .await
+        }
+        _ => {
+            seal_decrypt_batch(
+                client,
+                sidecar_url,
+                sidecar_secret,
+                encrypted_blobs,
+                credential,
+                package_id,
+                account_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn seal_decrypt_batch_impl(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    encrypted_blobs: &[(String, Vec<u8>)],
+    credential: &SealCredential,
+    package_id: &str,
+    account_id: &str,
+    namespace_id: Option<&str>,
+    registry_id: Option<&str>,
+) -> Result<Vec<DecryptOutcome>, AppError> {
     if encrypted_blobs.is_empty() {
         return Ok(vec![]);
     }
@@ -297,6 +580,8 @@ pub async fn seal_decrypt_batch(
         "items": items,
         "packageId": package_id,
         "accountId": account_id,
+        "namespaceId": namespace_id,
+        "registryId": registry_id,
     });
 
     let mut req = client.post(&url).json(&body);

@@ -26,9 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::storage::db::VectorDb;
+use crate::storage::envelope;
 use crate::storage::seal::{self, DecryptOutcome, SealCredential};
+use crate::storage::sui;
 use crate::storage::walrus;
-use crate::types::{AppError, AuthInfo, Config, KeyPool};
+use crate::types::{AppError, AuthInfo, Config, KeyPool, SearchHit};
 
 use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 
@@ -36,6 +38,14 @@ use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
 const BLOB_CACHE_KEY_PREFIX: &str = "memwal:blob:v1:";
 /// SEAL decrypt-batch chunk size (matches the inlined `recall` value).
 const SEAL_DECRYPT_BATCH_SIZE: usize = 25;
+
+#[derive(Clone, PartialEq, Eq)]
+struct DecryptStack {
+    package_id: String,
+    namespace_id: Option<String>,
+    registry_id: Option<String>,
+    key_version: Option<u32>,
+}
 
 /// Production engine — uploads prepared ciphertext to Walrus, indexes
 /// the row in Postgres, serves reads through the Redis blob cache.
@@ -88,6 +98,135 @@ impl WalrusSealEngine {
                         .into(),
                 )
             })
+    }
+
+    fn decrypt_stack_for_hit(&self, hit: &SearchHit) -> DecryptStack {
+        let is_p2 = hit.protocol == "p2" || hit.namespace_object_id.is_some();
+        let package_id = hit.package_id.clone().unwrap_or_else(|| {
+            if is_p2 {
+                self.config
+                    .p2_package_id
+                    .clone()
+                    .unwrap_or_else(|| self.config.package_id.clone())
+            } else {
+                self.config.package_id.clone()
+            }
+        });
+        let namespace_id = if is_p2 {
+            hit.namespace_object_id
+                .clone()
+                .or_else(|| self.config.p2_namespace_id.clone())
+                .or_else(|| self.config.namespace_id.clone())
+        } else {
+            None
+        };
+        let registry_id = namespace_id.as_ref().and_then(|_| {
+            self.config
+                .p2_registry_id
+                .clone()
+                .or_else(|| Some(self.config.registry_id.clone()))
+        });
+        let key_version = if is_p2 {
+            hit.key_version
+                .and_then(|v| u32::try_from(v).ok())
+                .or(Some(self.config.key_version))
+        } else {
+            None
+        };
+
+        DecryptStack {
+            package_id,
+            namespace_id,
+            registry_id,
+            key_version,
+        }
+    }
+
+    async fn decrypt_wrapped_dek(
+        &self,
+        credential: &SealCredential,
+        account_id: &str,
+        stack: &DecryptStack,
+    ) -> Result<[u8; envelope::DEK_LEN], AppError> {
+        let namespace_id = stack.namespace_id.as_deref().ok_or_else(|| {
+            AppError::Internal("P2 decrypt stack missing namespace_id".into())
+        })?;
+        let registry_id = stack
+            .registry_id
+            .as_deref()
+            .ok_or_else(|| AppError::Internal("P2 decrypt stack missing registry_id".into()))?;
+        let key_version = stack
+            .key_version
+            .ok_or_else(|| AppError::Internal("P2 decrypt stack missing key_version".into()))?;
+
+        let wrapped = sui::fetch_namespace_wrapped_dek(
+            &self.http_client,
+            &self.config.sui_rpc_url,
+            namespace_id,
+            key_version,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("fetch wrapped DEK failed: {}", e)))?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "wrapped DEK not found for namespace={} key_version={}",
+                namespace_id, key_version
+            ))
+        })?;
+
+        let dek = seal::seal_decrypt_namespace(
+            &self.http_client,
+            &self.config.sidecar_url,
+            self.config.sidecar_secret.as_deref(),
+            &wrapped,
+            credential,
+            &stack.package_id,
+            account_id,
+            namespace_id,
+            registry_id,
+        )
+        .await?;
+        let dek: [u8; envelope::DEK_LEN] = dek.try_into().map_err(|actual: Vec<u8>| {
+            AppError::Internal(format!(
+                "wrapped DEK decrypted to {} bytes, expected {}",
+                actual.len(),
+                envelope::DEK_LEN
+            ))
+        })?;
+        Ok(dek)
+    }
+
+    async fn decrypt_p2_envelope(
+        &self,
+        ciphertext: &[u8],
+        credential: &SealCredential,
+        account_id: &str,
+        stack: &DecryptStack,
+    ) -> Result<Vec<u8>, AppError> {
+        let header = envelope::parse_header(ciphertext)
+            .map_err(|e| AppError::Internal(format!("P2 envelope parse failed: {}", e)))?;
+        let namespace_id = envelope::format_object_id(&header.namespace_id);
+        let stack_namespace = stack.namespace_id.as_deref().ok_or_else(|| {
+            AppError::Internal("P2 decrypt stack missing namespace_id".into())
+        })?;
+        if namespace_id != stack_namespace {
+            return Err(AppError::Internal(format!(
+                "P2 envelope namespace mismatch: header={} stack={}",
+                namespace_id, stack_namespace
+            )));
+        }
+        if Some(header.key_version) != stack.key_version {
+            return Err(AppError::Internal(format!(
+                "P2 envelope key_version mismatch: header={} stack={:?}",
+                header.key_version, stack.key_version
+            )));
+        }
+
+        let dek = self
+            .decrypt_wrapped_dek(credential, account_id, stack)
+            .await?;
+        envelope::open_envelope(&dek, ciphertext)
+            .map_err(|e| AppError::Internal(format!("P2 envelope decrypt failed: {}", e)))
     }
 
     /// Reactively delete an expired blob's index row. Best-effort —
@@ -310,24 +449,61 @@ impl MemoryEngine for WalrusSealEngine {
             None => return Ok(None),
         };
 
-        // Step 2: SEAL decrypt via sidecar.
-        let plaintext_bytes = match seal::seal_decrypt(
-            &self.http_client,
-            &self.config.sidecar_url,
-            self.config.sidecar_secret.as_deref(),
-            &ciphertext,
-            &credential,
-            &self.config.package_id,
-            &auth.account_id,
-        )
-        .await
-        {
-            Ok(p) => p,
+        // Step 2: decrypt. P2 blobs are WMEM envelopes; legacy blobs are raw
+        // SEAL encrypted objects.
+        let plaintext_bytes = match envelope::parse_header(&ciphertext) {
+            Ok(header) => {
+                let stack = DecryptStack {
+                    package_id: self
+                        .config
+                        .p2_package_id
+                        .clone()
+                        .unwrap_or_else(|| self.config.package_id.clone()),
+                    namespace_id: Some(envelope::format_object_id(&header.namespace_id)),
+                    registry_id: self
+                        .config
+                        .p2_registry_id
+                        .clone()
+                        .or_else(|| Some(self.config.registry_id.clone())),
+                    key_version: Some(header.key_version),
+                };
+                match self
+                    .decrypt_p2_envelope(&ciphertext, &credential, &auth.account_id, &stack)
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("P2 envelope decrypt failed for {}: {}", blob_id, e);
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(envelope::EnvelopeError::BadMagic) => {
+                match seal::seal_decrypt_configured(
+                    &self.http_client,
+                    &self.config.sidecar_url,
+                    self.config.sidecar_secret.as_deref(),
+                    &ciphertext,
+                    &credential,
+                    &self.config.package_id,
+                    &auth.account_id,
+                    self.config.namespace_id.as_deref(),
+                    Some(self.config.registry_id.as_str()),
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // `seal_decrypt` (single) doesn't classify permanence
+                        // the way `seal_decrypt_batch` does; mirror the inlined
+                        // `ask` behaviour — log, drop, no cleanup on a single failure.
+                        tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                        return Ok(None);
+                    }
+                }
+            }
             Err(e) => {
-                // `seal_decrypt` (single) doesn't classify permanence the
-                // way `seal_decrypt_batch` does; mirror the inlined `ask`
-                // behaviour — log, drop, no cleanup on a single failure.
-                tracing::warn!("SEAL decrypt failed for {}: {}", blob_id, e);
+                tracing::warn!("P2 envelope header invalid for {}: {}", blob_id, e);
                 return Ok(None);
             }
         };
@@ -365,7 +541,7 @@ impl MemoryEngine for WalrusSealEngine {
     async fn fetch_batch(
         &self,
         owner: &str,
-        hits: &[(String, f64)],
+        hits: &[SearchHit],
         auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
         if hits.is_empty() {
@@ -377,25 +553,19 @@ impl MemoryEngine for WalrusSealEngine {
         // with cache write-back on cold hits). Blobs that 404 / error
         // drop out here (and get reactive cleanup inside `fetch_ciphertext`).
         struct Fetched {
-            blob_id: String,
-            distance: f64,
+            hit: SearchHit,
             ciphertext: Vec<u8>,
             was_cached: bool,
         }
         let walrus_start = std::time::Instant::now();
-        let fetch_tasks = hits.iter().map(|(blob_id, distance)| {
-            let blob_id = blob_id.clone();
-            let distance = *distance;
-            async move {
-                self.fetch_ciphertext(&blob_id, owner)
-                    .await
-                    .map(|(ciphertext, was_cached)| Fetched {
-                        blob_id,
-                        distance,
-                        ciphertext,
-                        was_cached,
-                    })
-            }
+        let fetch_tasks = hits.iter().cloned().map(|hit| async move {
+            self.fetch_ciphertext(&hit.blob_id, owner)
+                .await
+                .map(|(ciphertext, was_cached)| Fetched {
+                    hit,
+                    ciphertext,
+                    was_cached,
+                })
         });
         let fetched: Vec<Fetched> = futures::future::join_all(fetch_tasks)
             .await
@@ -417,31 +587,104 @@ impl MemoryEngine for WalrusSealEngine {
 
         // Step 2: batch-decrypt the ciphertexts in chunks.
         let seal_start = std::time::Instant::now();
-        let batch_input: Vec<(String, Vec<u8>)> = fetched
-            .iter()
-            .map(|f| (f.blob_id.clone(), f.ciphertext.clone()))
+        let mut decrypted: Vec<DecryptOutcome> = (0..fetched.len())
+            .map(|_| DecryptOutcome::Missing)
             .collect();
-        let mut decrypted: Vec<DecryptOutcome> = Vec::with_capacity(batch_input.len());
-        for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
-            match seal::seal_decrypt_batch(
-                &self.http_client,
-                &self.config.sidecar_url,
-                self.config.sidecar_secret.as_deref(),
-                chunk,
-                &credential,
-                &self.config.package_id,
-                &auth.account_id,
-            )
-            .await
-            {
-                Ok(outcomes) => decrypted.extend(outcomes),
-                Err(e) => {
-                    tracing::warn!(
-                        "engine.fetch_batch: seal_decrypt_batch failed for {} blobs: {}",
-                        chunk.len(),
-                        e
-                    );
-                    decrypted.extend((0..chunk.len()).map(|_| DecryptOutcome::Missing));
+
+        struct DecryptGroup {
+            stack: DecryptStack,
+            indices: Vec<usize>,
+        }
+
+        let mut groups: Vec<DecryptGroup> = Vec::new();
+        for (idx, fetched_item) in fetched.iter().enumerate() {
+            let stack = self.decrypt_stack_for_hit(&fetched_item.hit);
+            if let Some(group) = groups.iter_mut().find(|group| group.stack == stack) {
+                group.indices.push(idx);
+            } else {
+                groups.push(DecryptGroup {
+                    stack,
+                    indices: vec![idx],
+                });
+            }
+        }
+
+        for group in groups {
+            for chunk in group.indices.chunks(SEAL_DECRYPT_BATCH_SIZE) {
+                let batch_input: Vec<(String, Vec<u8>)> = chunk
+                    .iter()
+                    .map(|idx| {
+                        let fetched_item = &fetched[*idx];
+                        (
+                            fetched_item.hit.blob_id.clone(),
+                            fetched_item.ciphertext.clone(),
+                        )
+                    })
+                    .collect();
+                if group.stack.namespace_id.is_some() {
+                    match self
+                        .decrypt_wrapped_dek(&credential, &auth.account_id, &group.stack)
+                        .await
+                    {
+                        Ok(dek) => {
+                            for idx in chunk.iter().copied() {
+                                let fetched_item = &fetched[idx];
+                                decrypted[idx] =
+                                    match envelope::open_envelope(&dek, &fetched_item.ciphertext) {
+                                        Ok(plaintext) => DecryptOutcome::Ok(plaintext),
+                                        Err(e) => DecryptOutcome::Failed {
+                                            error: format!("P2 envelope decrypt failed: {}", e),
+                                            permanent: true,
+                                        },
+                                    };
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "engine.fetch_batch: P2 wrapped DEK decrypt failed for {} blobs package={} namespace={:?} key_version={:?}: {}",
+                                chunk.len(),
+                                group.stack.package_id,
+                                group.stack.namespace_id,
+                                group.stack.key_version,
+                                e
+                            );
+                            for idx in chunk.iter().copied() {
+                                decrypted[idx] = DecryptOutcome::Failed {
+                                    error: e.to_string(),
+                                    permanent: false,
+                                };
+                            }
+                        }
+                    }
+                } else {
+                    match seal::seal_decrypt_batch_configured(
+                        &self.http_client,
+                        &self.config.sidecar_url,
+                        self.config.sidecar_secret.as_deref(),
+                        &batch_input,
+                        &credential,
+                        &group.stack.package_id,
+                        &auth.account_id,
+                        group.stack.namespace_id.as_deref(),
+                        group.stack.registry_id.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(outcomes) => {
+                            for (idx, outcome) in chunk.iter().copied().zip(outcomes) {
+                                decrypted[idx] = outcome;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "engine.fetch_batch: seal_decrypt_batch failed for {} blobs package={} namespace={:?}: {}",
+                                chunk.len(),
+                                group.stack.package_id,
+                                group.stack.namespace_id,
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -454,9 +697,9 @@ impl MemoryEngine for WalrusSealEngine {
             match outcome {
                 DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
                     Ok(text) => results.push(HydratedMemory {
-                        blob_id: f.blob_id.clone(),
+                        blob_id: f.hit.blob_id.clone(),
                         text,
-                        distance: f.distance,
+                        distance: f.hit.distance,
                         // Engine doesn't fetch created_at / importance;
                         // recall handler zips them on. See HydratedMemory.
                         created_at: None,
@@ -465,7 +708,7 @@ impl MemoryEngine for WalrusSealEngine {
                     Err(e) => {
                         tracing::warn!(
                             "Invalid UTF-8 in decrypted data for blob {}: {}",
-                            f.blob_id,
+                            f.hit.blob_id,
                             e
                         );
                         decrypt_drops += 1;
@@ -475,14 +718,14 @@ impl MemoryEngine for WalrusSealEngine {
                     if permanent {
                         tracing::warn!(
                             "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
-                            f.blob_id,
+                            f.hit.blob_id,
                             error
                         );
-                        self.cleanup_expired_blob(&f.blob_id, owner).await;
+                        self.cleanup_expired_blob(&f.hit.blob_id, owner).await;
                     } else {
                         tracing::warn!(
                             "SEAL decrypt transient failure for blob {}: {}",
-                            f.blob_id,
+                            f.hit.blob_id,
                             error
                         );
                     }

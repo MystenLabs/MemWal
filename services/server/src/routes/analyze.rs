@@ -202,6 +202,7 @@ pub async fn analyze(
                         owner,
                         namespace,
                         PRE_EXTRACTION_CONTEXT_LIMIT,
+                        Some(state.config.public_db_protocol()),
                     ),
                 )
                 .await;
@@ -216,10 +217,6 @@ pub async fn analyze(
                         Vec::new()
                     }
                     Ok(Ok(hits)) => {
-                        let hit_refs: Vec<(String, f64)> = hits
-                            .iter()
-                            .map(|h| (h.blob_id.clone(), h.distance))
-                            .collect();
                         // `fetch_batch` handles decrypt + cache + reactive
                         // cleanup on 404 / decrypt failure. Dropped hits
                         // just shrink the context; the extractor still
@@ -227,7 +224,7 @@ pub async fn analyze(
                         // (e.g. sidecar 5xx) or timeout, log and fall back.
                         match tokio::time::timeout(
                             std::time::Duration::from_millis(FETCH_TIMEOUT_MS),
-                            state.engine.fetch_batch(owner, &hit_refs, &auth),
+                            state.engine.fetch_batch(owner, &hits, &auth),
                         )
                         .await
                         {
@@ -242,7 +239,7 @@ pub async fn analyze(
                                     tracing::warn!(
                                         owner = %owner,
                                         namespace = %namespace,
-                                        requested = hit_refs.len(),
+                                        requested = hits.len(),
                                         got = hydrated.len(),
                                         dropped,
                                         "analyze pre-extraction: some context memories dropped at decrypt"
@@ -454,13 +451,15 @@ pub async fn analyze(
             let fact = fact.clone();
             async move {
                 let embed_fut = state.embedder.embed(&fact.text);
-                let encrypt_fut = crate::storage::seal::seal_encrypt(
+                let encrypt_fut = crate::storage::seal::seal_encrypt_configured(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),
                     fact.text.as_bytes(),
                     &owner,
                     &state.config.package_id,
+                    state.config.namespace_id.as_deref(),
+                    state.config.key_version,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 // carry `importance` through the prep tuple so

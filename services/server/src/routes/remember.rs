@@ -127,13 +127,15 @@ fn spawn_prepare_remember_job(
                 };
 
                 let embed_fut = state.embedder.embed(&embed_input);
-                let encrypt_fut = crate::storage::seal::seal_encrypt(
+                let encrypt_fut = crate::storage::seal::seal_encrypt_configured(
                     &state.http_client,
                     &state.config.sidecar_url,
                     state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
                     &state.config.package_id,
+                    state.config.namespace_id.as_deref(),
+                    state.config.key_version,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 let vector = vector_result?;
@@ -240,13 +242,15 @@ fn spawn_prepare_bulk_remember_job(
                             };
 
                             let embed_fut = state.embedder.embed(&embed_input);
-                            let encrypt_fut = crate::storage::seal::seal_encrypt(
+                            let encrypt_fut = crate::storage::seal::seal_encrypt_configured(
                                 &state.http_client,
                                 &state.config.sidecar_url,
                                 state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
                                 &state.config.package_id,
+                                state.config.namespace_id.as_deref(),
+                                state.config.key_version,
                             );
                             let (vector_result, encrypted_result) =
                                 tokio::join!(embed_fut, encrypt_fut);
@@ -1071,6 +1075,14 @@ mod tests {
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
+            namespace_id: None,
+            key_version: 1,
+            p2_package_id: None,
+            p2_registry_id: None,
+            p2_namespace_registry_id: None,
+            p2_namespace_id: None,
+            p2_migration_cap_id: None,
+            cutover_protocol: "old".to_string(),
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
