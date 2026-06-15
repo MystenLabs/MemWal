@@ -856,6 +856,10 @@ async fn main() {
             "/internal/migration/v2/backfill",
             post(routes::migration_v2_backfill).layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/internal/migration/v2/verify-decrypt",
+            post(routes::migration_v2_verify_decrypt).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .merge(sponsor_routes)
         .merge(mcp_routes);
 

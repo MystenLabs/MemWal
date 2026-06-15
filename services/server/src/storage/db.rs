@@ -130,6 +130,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
+        // Transient DEK cache that makes the V2 backfill resumable/idempotent.
+        let migration_011 = include_str!("../../migrations/011_migration_dek_cache.sql");
+        sqlx::raw_sql(migration_011)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -659,6 +666,48 @@ impl VectorDb {
             started.elapsed(),
         );
         result?;
+        Ok(())
+    }
+
+    /// Read the cached raw DEK for a `(namespace, key_version)` migration cohort,
+    /// if one was persisted by an earlier backfill call. Lets the backfill resume
+    /// a namespace whose wrapped DEK is already on chain. See migration 011.
+    pub async fn get_migration_dek(
+        &self,
+        namespace_id: &str,
+        key_version: u32,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let dek: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT dek FROM migration_dek_cache WHERE namespace_id = $1 AND key_version = $2",
+        )
+        .bind(namespace_id)
+        .bind(key_version as i32)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read migration DEK: {}", e)))?;
+        Ok(dek)
+    }
+
+    /// Persist the raw DEK for a `(namespace, key_version)` migration cohort so
+    /// subsequent backfill calls re-use it instead of re-generating / skipping.
+    /// First writer wins (the on-chain wrapped DEK is set in the same step).
+    pub async fn put_migration_dek(
+        &self,
+        namespace_id: &str,
+        key_version: u32,
+        dek: &[u8],
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO migration_dek_cache (namespace_id, key_version, dek)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (namespace_id, key_version) DO NOTHING",
+        )
+        .bind(namespace_id)
+        .bind(key_version as i32)
+        .bind(dek)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to store migration DEK: {}", e)))?;
         Ok(())
     }
 

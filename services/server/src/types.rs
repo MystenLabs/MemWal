@@ -1109,6 +1109,28 @@ pub struct V2BackfillResponse {
     pub protocol: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct V2VerifyDecryptRequest {
+    pub blob_id: String,
+    /// "v1" (default) = §14 OLD decrypt; "v2" = open a migrated WMEM envelope.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Override the OLD package id for v1 decrypt (defaults to MEMWAL_PACKAGE_ID).
+    #[serde(default, rename = "packageId")]
+    pub package_id: Option<String>,
+    /// Max characters of plaintext to return (default 2000).
+    #[serde(default, rename = "maxChars")]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct V2VerifyDecryptResponse {
+    pub blob_id: String,
+    pub mode: String,
+    pub len: usize,
+    pub plaintext: String,
+}
+
 // ============================================================
 // Sponsor Types
 // ============================================================

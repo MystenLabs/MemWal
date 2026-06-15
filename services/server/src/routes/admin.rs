@@ -511,54 +511,84 @@ pub async fn migration_v2_backfill(
             .map_err(|e| AppError::Internal(format!("invalid P2 namespace id: {}", e)))?;
 
         if !deks.contains_key(p2_namespace_id) {
-            let existing = sui::fetch_namespace_wrapped_dek(
-                &state.http_client,
-                &state.config.sui_rpc_url,
-                p2_namespace_id,
-                body.key_version,
-            )
-            .await
-            .map_err(|e| AppError::Internal(format!("fetch wrapped DEK failed: {}", e)))?;
-            if existing.is_some() {
-                tracing::warn!(
+            // Resumable DEK resolution: in-memory cache → DB cache → generate.
+            // The DB cache (migration_dek_cache, migration 011) lets a later
+            // backfill call — or a retry after a partial failure — recover the raw
+            // DEK instead of dead-ending on "wrapped DEK already exists".
+            let dek = if let Some(cached) = state
+                .db
+                .get_migration_dek(p2_namespace_id, body.key_version)
+                .await?
+            {
+                if cached.len() != envelope::DEK_LEN {
+                    return Err(AppError::Internal(format!(
+                        "cached migration DEK for {} has wrong length {}",
+                        p2_namespace_id,
+                        cached.len()
+                    )));
+                }
+                let mut dek = [0u8; envelope::DEK_LEN];
+                dek.copy_from_slice(&cached);
+                dek
+            } else {
+                let existing = sui::fetch_namespace_wrapped_dek(
+                    &state.http_client,
+                    &state.config.sui_rpc_url,
+                    p2_namespace_id,
+                    body.key_version,
+                )
+                .await
+                .map_err(|e| AppError::Internal(format!("fetch wrapped DEK failed: {}", e)))?;
+                if existing.is_some() {
+                    // Wrapped DEK is on chain but no cached raw DEK (a pre-cache
+                    // run): it cannot be recovered for this key_version. Re-run the
+                    // namespace under a fresh keyVersion (recall scans 1..=current).
+                    tracing::warn!(
+                        namespace_id = %p2_namespace_id,
+                        key_version = body.key_version,
+                        "migration backfill skip namespace: wrapped DEK on chain but raw DEK not in cache (pre-cache run); re-run with a fresh keyVersion"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+
+                let dek = envelope::generate_dek();
+                let wrapped = seal::seal_encrypt_namespace(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    &dek,
+                    p2_package_id,
+                    p2_namespace_id,
+                    body.key_version,
+                )
+                .await?;
+                let key_index = state.config.migration_key_index;
+                let tx = chain::admin_set_wrapped_dek(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    key_index,
+                    p2_package_id,
+                    migration_cap_id,
+                    p2_namespace_id,
+                    body.key_version,
+                    &wrapped,
+                )
+                .await?;
+                // Persist the raw DEK so subsequent calls are resumable/idempotent.
+                state
+                    .db
+                    .put_migration_dek(p2_namespace_id, body.key_version, &dek)
+                    .await?;
+                tracing::info!(
                     namespace_id = %p2_namespace_id,
                     key_version = body.key_version,
-                    "migration backfill skip namespace: wrapped DEK already exists and raw DEK is not recoverable in this worker"
+                    digest = %tx.digest,
+                    "migration backfill stored wrapped DEK"
                 );
-                skipped += 1;
-                continue;
-            }
-
-            let dek = envelope::generate_dek();
-            let wrapped = seal::seal_encrypt_namespace(
-                &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
-                &dek,
-                p2_package_id,
-                p2_namespace_id,
-                body.key_version,
-            )
-            .await?;
-            let key_index = state.config.migration_key_index;
-            let tx = chain::admin_set_wrapped_dek(
-                &state.http_client,
-                &state.config.sidecar_url,
-                state.config.sidecar_secret.as_deref(),
-                key_index,
-                p2_package_id,
-                migration_cap_id,
-                p2_namespace_id,
-                body.key_version,
-                &wrapped,
-            )
-            .await?;
-            tracing::info!(
-                namespace_id = %p2_namespace_id,
-                key_version = body.key_version,
-                digest = %tx.digest,
-                "migration backfill stored wrapped DEK"
-            );
+                dek
+            };
             deks.insert(p2_namespace_id.to_string(), dek);
         }
 
@@ -684,6 +714,112 @@ pub async fn migration_v2_backfill(
         skipped,
         dry_run: false,
         protocol: "p2".to_string(),
+    }))
+}
+
+/// POST /internal/migration/v2/verify-decrypt
+///
+/// Migration verification utility: download a single blob and return its
+/// plaintext, so an operator can confirm — on real data —
+///   * `mode:"v1"` (default): the §14 OLD-decrypt path works on a pre-existing
+///     package-1 blob (download → SEAL decrypt via the server account + fallback
+///     key, whose delegate-branch bug approves any blob id), and
+///   * `mode:"v2"`: a migrated WMEM envelope round-trips (read header → look up the
+///     cohort DEK from migration_dek_cache → AES-256-GCM open).
+///
+/// Gated by the migration token; intended for the isolated migration environment.
+/// `maxChars` truncates the returned preview (default 2000).
+pub async fn migration_v2_verify_decrypt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<V2VerifyDecryptRequest>,
+) -> Result<Json<V2VerifyDecryptResponse>, AppError> {
+    require_migration_token(&headers, &state.config)?;
+    let mode = body.mode.as_deref().unwrap_or("v1");
+
+    let ciphertext = walrus::download_blob_from_aggregators(
+        &state.http_client,
+        &state.config.walrus_aggregator_urls,
+        &body.blob_id,
+        state.config.walrus_skip_consistency_check,
+        std::time::Duration::from_millis(state.config.walrus_aggregator_race_after_ms),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("blob download failed: {}", e)))?;
+
+    let plaintext = match mode {
+        "v1" => {
+            let fallback_private_key = state
+                .config
+                .sui_private_key
+                .as_deref()
+                .or_else(|| state.config.sui_private_keys.first().map(String::as_str))
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "SERVER_SUI_PRIVATE_KEY or SERVER_SUI_PRIVATE_KEYS is required".into(),
+                    )
+                })?;
+            let credential = seal::SealCredential::DelegateKey(fallback_private_key.to_string());
+            let old_account_id = state
+                .config
+                .migration_old_account_id
+                .as_deref()
+                .ok_or_else(|| {
+                    AppError::Internal("MEMWAL_MIGRATION_OLD_ACCOUNT_ID is required".into())
+                })?;
+            let old_package_id = body
+                .package_id
+                .as_deref()
+                .unwrap_or(&state.config.package_id);
+            seal::seal_decrypt(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                &ciphertext,
+                &credential,
+                old_package_id,
+                old_account_id,
+            )
+            .await?
+        }
+        "v2" => {
+            let header = envelope::parse_header(&ciphertext)
+                .map_err(|e| AppError::Internal(format!("not a WMEM envelope: {}", e)))?;
+            let namespace_id = envelope::format_object_id(&header.namespace_id);
+            let cached = state
+                .db
+                .get_migration_dek(&namespace_id, header.key_version)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "no cached DEK for namespace {} key_version {}",
+                        namespace_id, header.key_version
+                    ))
+                })?;
+            if cached.len() != envelope::DEK_LEN {
+                return Err(AppError::Internal("cached DEK has wrong length".into()));
+            }
+            let mut dek = [0u8; envelope::DEK_LEN];
+            dek.copy_from_slice(&cached);
+            envelope::open_envelope(&dek, &ciphertext)
+                .map_err(|e| AppError::Internal(format!("envelope open failed: {}", e)))?
+        }
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown mode '{}' (use v1 or v2)",
+                other
+            )))
+        }
+    };
+
+    let len = plaintext.len();
+    let text = String::from_utf8_lossy(&plaintext).to_string();
+    let preview: String = text.chars().take(body.max_chars.unwrap_or(2000)).collect();
+    Ok(Json(V2VerifyDecryptResponse {
+        blob_id: body.blob_id,
+        mode: mode.to_string(),
+        len,
+        plaintext: preview,
     }))
 }
 
