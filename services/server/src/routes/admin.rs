@@ -192,6 +192,222 @@ fn require_migration_token(headers: &HeaderMap, config: &Config) -> Result<(), A
     Ok(())
 }
 
+/// POST /internal/migration/v2/import-accounts
+///
+/// Phase-3 account mirror. For each legacy `(owner, namespace)` that still lacks
+/// a P2 namespace, this creates the P2 `Account` (once per owner — the registry
+/// enforces one account per owner) and the `MemoryNamespace`, copies the legacy
+/// delegate keys onto the P2 account, and records the mapping in
+/// `account_migrations`. It MUST run before `migration_v2_backfill`, which
+/// resolves the P2 account + namespace for each blob from `account_migrations`.
+///
+/// Idempotent: already-mirrored pairs are filtered out by the candidate query;
+/// a second namespace for an owner reuses the existing P2 account.
+pub async fn migration_v2_import_accounts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<V2ImportAccountsRequest>,
+) -> Result<Json<V2ImportAccountsResponse>, AppError> {
+    require_migration_token(&headers, &state.config)?;
+
+    let limit = body.limit.clamp(1, 250);
+    let p2_package_id = state
+        .config
+        .p2_package_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_PACKAGE_ID is required".into()))?;
+    let migration_cap_id = state
+        .config
+        .p2_migration_cap_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_MIGRATION_CAP_ID is required".into()))?;
+    let account_registry_id = state
+        .config
+        .p2_registry_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_REGISTRY_ID is required".into()))?;
+    let namespace_registry_id = state
+        .config
+        .p2_namespace_registry_id
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("MEMWAL_P2_NAMESPACE_REGISTRY_ID is required".into()))?;
+
+    let candidates = state
+        .db
+        .list_v2_account_migration_candidates(
+            body.owner.as_deref(),
+            body.namespace.as_deref(),
+            limit as i64,
+        )
+        .await?;
+
+    if body.dry_run {
+        return Ok(Json(V2ImportAccountsResponse {
+            selected: candidates.len(),
+            imported_accounts: 0,
+            imported_namespaces: 0,
+            imported_delegates: 0,
+            skipped: 0,
+            failed: 0,
+            dry_run: true,
+            protocol: "p2".to_string(),
+        }));
+    }
+
+    // P2 accounts minted in THIS run, so a second namespace for the same owner
+    // reuses the account (one account per owner) instead of re-importing.
+    let mut owner_accounts: HashMap<String, String> = HashMap::new();
+    let mut imported_accounts = 0usize;
+    let mut imported_namespaces = 0usize;
+    let mut imported_delegates = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for c in candidates.iter() {
+        let Some(legacy_account_id) = c.legacy_account_id.as_deref() else {
+            tracing::warn!(owner = %c.owner, namespace = %c.namespace, "account-mirror skip: missing legacy account id");
+            skipped += 1;
+            continue;
+        };
+
+        // An existing P2 account for this owner: from a prior namespace's mirror
+        // (candidate row) or one minted earlier in this run.
+        let existing_account = c
+            .p2_account_id
+            .clone()
+            .or_else(|| owner_accounts.get(&c.owner).cloned());
+        let is_new_account = existing_account.is_none();
+
+        let outcome: Result<(String, String, usize), AppError> = async {
+            let key_index = state
+                .key_pool
+                .next_index()
+                .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+            if let Some(account_id) = existing_account.clone() {
+                // Owner already has a P2 account → create only this namespace.
+                let tx = chain::admin_create_namespace(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    key_index,
+                    p2_package_id,
+                    migration_cap_id,
+                    namespace_registry_id,
+                    &c.owner,
+                    &c.namespace,
+                    0,
+                )
+                .await?;
+                let namespace_id = tx.namespace_id.ok_or_else(|| {
+                    AppError::Internal("admin_create_namespace returned no namespace id".into())
+                })?;
+                Ok((account_id, namespace_id, 0))
+            } else {
+                // First namespace for this owner → import account + namespace + delegates.
+                let legacy = sui::fetch_account_for_migration(
+                    &state.http_client,
+                    &state.config.sui_rpc_url,
+                    legacy_account_id,
+                )
+                .await
+                .map_err(|e| AppError::Internal(format!("fetch legacy account failed: {}", e)))?;
+                let tx = chain::admin_import_account(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    key_index,
+                    p2_package_id,
+                    migration_cap_id,
+                    account_registry_id,
+                    namespace_registry_id,
+                    &c.owner,
+                    legacy_account_id,
+                    &c.namespace,
+                    0,
+                    legacy.active,
+                )
+                .await?;
+                let account_id = tx.account_id.ok_or_else(|| {
+                    AppError::Internal("admin_import_account returned no account id".into())
+                })?;
+                let namespace_id = tx.namespace_id.ok_or_else(|| {
+                    AppError::Internal("admin_import_account returned no namespace id".into())
+                })?;
+                let mut delegates = 0usize;
+                for dk in legacy.delegate_keys.iter() {
+                    let ki = state
+                        .key_pool
+                        .next_index()
+                        .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+                    chain::admin_add_delegate_key(
+                        &state.http_client,
+                        &state.config.sidecar_url,
+                        state.config.sidecar_secret.as_deref(),
+                        ki,
+                        p2_package_id,
+                        migration_cap_id,
+                        &account_id,
+                        &dk.public_key_hex,
+                        &dk.label,
+                        dk.perms,
+                        dk.created_at,
+                    )
+                    .await?;
+                    delegates += 1;
+                }
+                Ok((account_id, namespace_id, delegates))
+            }
+        }
+        .await;
+
+        match outcome {
+            Ok((account_id, namespace_id, delegates)) => {
+                state
+                    .db
+                    .record_v2_account_migration(
+                        legacy_account_id,
+                        &c.owner,
+                        &c.namespace,
+                        &account_id,
+                        &namespace_id,
+                    )
+                    .await?;
+                owner_accounts.insert(c.owner.clone(), account_id);
+                if is_new_account {
+                    imported_accounts += 1;
+                }
+                imported_namespaces += 1;
+                imported_delegates += delegates;
+                tracing::info!(owner = %c.owner, namespace = %c.namespace, namespace_id = %namespace_id, "account-mirror: imported");
+            }
+            Err(e) => {
+                tracing::warn!(owner = %c.owner, namespace = %c.namespace, error = %e, "account-mirror: failed");
+                let _ = state
+                    .db
+                    .mark_v2_account_migration_failed(
+                        legacy_account_id,
+                        &c.owner,
+                        &c.namespace,
+                        &e.to_string(),
+                    )
+                    .await;
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(Json(V2ImportAccountsResponse {
+        selected: candidates.len(),
+        imported_accounts,
+        imported_namespaces,
+        imported_delegates,
+        skipped,
+        failed,
+        dry_run: false,
+        protocol: "p2".to_string(),
+    }))
+}
+
 /// POST /internal/migration/v2/backfill
 ///
 /// Internal migration helper. It decrypts OLD blobs with the configured server

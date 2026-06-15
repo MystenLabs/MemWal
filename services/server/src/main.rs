@@ -849,6 +849,10 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
+            "/internal/migration/v2/import-accounts",
+            post(routes::migration_v2_import_accounts).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/internal/migration/v2/backfill",
             post(routes::migration_v2_backfill).layer(DefaultBodyLimit::max(64 * 1024)),
         )
