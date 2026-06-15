@@ -240,6 +240,12 @@ pub struct Config {
     /// key — never the round-robin pool. Default 0. (Design: a single server
     /// fallback key drives migration — migration §12/§14.)
     pub migration_key_index: usize,
+    /// §14 server account on the OLD contract that has the fallback key
+    /// (`sui_private_key`) registered as a delegate. The backfill passes THIS
+    /// account (not each user's own account) to the OLD `seal_approve`,
+    /// leveraging the delegate-branch bug (no id binding) to decrypt any blob —
+    /// without polluting user accounts (migration §14). Required to run backfill.
+    pub migration_old_account_id: Option<String>,
     /// Public `/config` protocol selector: `old` (default) or `p2`.
     pub cutover_protocol: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
@@ -335,6 +341,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .unwrap_or(0),
+            migration_old_account_id: optional_env("MEMWAL_MIGRATION_OLD_ACCOUNT_ID"),
             cutover_protocol: std::env::var("MEMWAL_CUTOVER_PROTOCOL")
                 .unwrap_or_else(|_| "old".to_string())
                 .trim()

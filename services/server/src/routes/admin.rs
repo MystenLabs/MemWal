@@ -442,6 +442,19 @@ pub async fn migration_v2_backfill(
             )
         })?;
     let credential = seal::SealCredential::DelegateKey(fallback_private_key.to_string());
+    // §14: decrypt OLD blobs by passing the dedicated server account (which has the
+    // fallback key as a delegate) to the OLD seal_approve. The delegate-branch bug
+    // (no id binding) then approves ANY blob id — without making the fallback a
+    // delegate on each user's account.
+    let migration_old_account_id = state
+        .config
+        .migration_old_account_id
+        .as_deref()
+        .ok_or_else(|| {
+            AppError::Internal(
+                "MEMWAL_MIGRATION_OLD_ACCOUNT_ID is required (the §14 server account on the OLD contract with the fallback key as a delegate)".into(),
+            )
+        })?;
 
     let candidates = state
         .db
@@ -581,7 +594,7 @@ pub async fn migration_v2_backfill(
             &old_ciphertext,
             &credential,
             old_package_id,
-            old_account_id,
+            migration_old_account_id,
         )
         .await
         {
