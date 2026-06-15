@@ -926,6 +926,7 @@ async fn execute_upload_and_transfer(
             ));
         }
         Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
             // Limiter closed — leave job in queue for retry.
             return Err(WalletJobError::Transient(
                 "write stream limiter closed; will retry".into(),

@@ -50,6 +50,23 @@ impl Drop for WriteStreamPermit {
     }
 }
 
+impl WriteStreamPermit {
+    /// Split off a single permit into a new guard.
+    ///
+    /// Returns `None` if this guard currently holds zero permits.
+    /// The total number of permits held by both guards remains unchanged.
+    pub fn split_one(&mut self) -> Option<WriteStreamPermit> {
+        if self.permits == 0 {
+            return None;
+        }
+        self.permits -= 1;
+        Some(WriteStreamPermit {
+            semaphore: Arc::clone(&self.semaphore),
+            permits: 1,
+        })
+    }
+}
+
 /// Snapshot of the write-stream limiter state.
 #[derive(Clone, Copy, Debug)]
 pub struct WriteStreamSnapshot {
@@ -346,5 +363,35 @@ mod tests {
                 max: 3
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn split_one_divides_guard_into_single_permits() {
+        let limiter = WriteStreamLimiter::new(3);
+        let mut guard = limiter.acquire_many(3, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(limiter.snapshot().available, 0);
+
+        let p1 = guard.split_one().unwrap();
+        let p2 = guard.split_one().unwrap();
+        let p3 = guard.split_one().unwrap();
+        assert!(guard.split_one().is_none());
+
+        // All permits still held; none released yet.
+        assert_eq!(limiter.snapshot().available, 0);
+
+        drop(p1);
+        assert_eq!(limiter.snapshot().available, 1);
+        drop(p2);
+        assert_eq!(limiter.snapshot().available, 2);
+        drop(p3);
+        assert_eq!(limiter.snapshot().available, 3);
+    }
+
+    #[tokio::test]
+    async fn split_one_on_zero_permits_returns_none() {
+        let limiter = WriteStreamLimiter::new(1);
+        let mut guard = limiter.acquire_many(0, Duration::from_secs(1)).await.unwrap();
+        assert!(guard.split_one().is_none());
+        assert_eq!(limiter.snapshot().available, 1);
     }
 }

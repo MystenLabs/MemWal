@@ -397,6 +397,7 @@ pub async fn analyze(
                             return Err(crate::routes::write_stream_saturated("/api/analyze"));
                         }
                         Err(_) => {
+                            crate::observability::record_write_stream_acquired("failure");
                             return Err(AppError::Internal(
                                 "write stream limiter unavailable".into(),
                             ));
@@ -459,10 +460,41 @@ pub async fn analyze(
         ));
     }
 
+    // Acquire write-stream permits before starting prep work. Each fact's
+    // embed + SEAL task will hold one permit until its prep completes, so the
+    // total active prep work is bounded by the write-stream budget alongside
+    // the wallet upload workers.
+    let mut permits = match state
+        .write_stream_limiter
+        .acquire_many(facts.len(), state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permits) => {
+            crate::observability::record_write_stream_acquired_success();
+            permits
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/analyze"));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { requested, max }) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::BadRequest(format!(
+                "Analyze extracted {} facts, exceeding write stream capacity of {}; reduce input",
+                requested, max
+            )));
+        }
+        Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::Internal("write stream limiter unavailable".into()));
+        }
+    };
+
     // Step 2: embed + SEAL encrypt all facts concurrently (no wallet needed yet).
     // This is the fast part (~300-500ms), done in the request handler so:
     //   - No plaintext stored in job payload
     //   - Exact ciphertext size known for quota check
+    // Each fact holds its own permit; the permit drops when that fact's prep
+    // completes, releasing the slot for the next fact or an upload worker.
     let auth_pubkey_base = auth.public_key.clone();
     let prep_tasks: Vec<_> = facts
         .iter()
@@ -470,6 +502,9 @@ pub async fn analyze(
             let state = Arc::clone(&state);
             let owner = owner.clone();
             let fact = fact.clone();
+            let permit = permits
+                .split_one()
+                .expect("acquired permits equal facts.len()");
             async move {
                 let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
@@ -484,12 +519,16 @@ pub async fn analyze(
                 // carry `importance` through the prep tuple so
                 // the job payload below can persist it alongside the
                 // ciphertext + vector.
-                Ok::<_, AppError>((
+                let result = Ok::<_, AppError>((
                     fact.text,
                     fact.importance,
                     vector_result?,
                     encrypted_result?,
-                ))
+                ));
+                // Hold the permit until this fact's prep hands off to the
+                // durable wallet queue (or fails).
+                let _ = permit;
+                result
             }
         })
         .collect();
@@ -506,32 +545,6 @@ pub async fn analyze(
         prepared.push((fact_text, importance, vector, encrypted));
     }
     rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
-
-    // Acquire write-stream permits before inserting rows. Analyze rows are
-    // created with status='pending' and the stale-job sweeper does not clean
-    // them up, so we must not persist them unless the work can actually run.
-    let _permits = match state
-        .write_stream_limiter
-        .acquire_many(facts.len(), state.config.write_stream_acquire_timeout)
-        .await
-    {
-        Ok(permits) => {
-            crate::observability::record_write_stream_acquired_success();
-            permits
-        }
-        Err(crate::services::write_stream::AcquireError::Timeout) => {
-            return Err(crate::routes::write_stream_saturated("/api/analyze"));
-        }
-        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { requested, max }) => {
-            return Err(AppError::BadRequest(format!(
-                "Analyze extracted {} facts, exceeding write stream capacity of {}; reduce input",
-                requested, max
-            )));
-        }
-        Err(_) => {
-            return Err(AppError::Internal("write stream limiter unavailable".into()));
-        }
-    };
 
     // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
     // Round-robin across wallet pool so facts upload in parallel.
