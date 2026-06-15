@@ -520,6 +520,23 @@ async fn main() {
         }
     );
 
+    // Background task: emit write-stream limiter state every 5s.
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let snap = state.write_stream_limiter.snapshot();
+                crate::observability::observe_write_stream_state(
+                    snap.total,
+                    snap.available,
+                    snap.waiters,
+                );
+            }
+        });
+    }
+
     // Sidecar upload-queue saturation monitor. The watchdog above only
     // checks that /health answers; during the 2026-06-10 congestion incident
     // it stayed green while 120 uploads queued and jobs burned their retry

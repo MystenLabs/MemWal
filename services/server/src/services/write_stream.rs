@@ -5,6 +5,7 @@
 //! /walrus/upload call must acquire a permit before starting work and
 //! release it when the active phase ends.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -49,11 +50,20 @@ impl Drop for WriteStreamPermit {
     }
 }
 
+/// Snapshot of the write-stream limiter state.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteStreamSnapshot {
+    pub total: usize,
+    pub available: usize,
+    pub waiters: usize,
+}
+
 /// In-process concurrency limiter for the write stream.
 #[derive(Clone, Debug)]
 pub struct WriteStreamLimiter {
     semaphore: Arc<Semaphore>,
     max_permits: usize,
+    waiters: Arc<AtomicUsize>,
 }
 
 impl WriteStreamLimiter {
@@ -64,6 +74,7 @@ impl WriteStreamLimiter {
         Self {
             semaphore: Arc::new(Semaphore::new(max_permits)),
             max_permits,
+            waiters: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -73,6 +84,15 @@ impl WriteStreamLimiter {
 
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
+    }
+
+    /// Return a point-in-time snapshot of limiter state.
+    pub fn snapshot(&self) -> WriteStreamSnapshot {
+        WriteStreamSnapshot {
+            total: self.max_permits,
+            available: self.semaphore.available_permits(),
+            waiters: self.waiters.load(Ordering::Relaxed),
+        }
     }
 
     /// Acquire a single permit, waiting up to `timeout`.
@@ -99,15 +119,22 @@ impl WriteStreamLimiter {
                 max: self.max_permits,
             });
         }
-        let permit = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
+        self.waiters.fetch_add(1, Ordering::Relaxed);
+        let result = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
             .await
-            .map_err(|_| AcquireError::Timeout)?
-            .map_err(|_| AcquireError::Closed)?;
-        permit.forget();
-        Ok(WriteStreamPermit {
-            semaphore: Arc::clone(&self.semaphore),
-            permits: n,
-        })
+            .map_err(|_| AcquireError::Timeout)
+            .and_then(|res| res.map_err(|_| AcquireError::Closed));
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+        match result {
+            Ok(permit) => {
+                permit.forget();
+                Ok(WriteStreamPermit {
+                    semaphore: Arc::clone(&self.semaphore),
+                    permits: n,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

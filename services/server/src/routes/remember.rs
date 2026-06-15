@@ -652,7 +652,10 @@ pub async fn remember(
         .acquire(state.config.write_stream_acquire_timeout)
         .await
     {
-        Ok(permit) => permit,
+        Ok(permit) => {
+            crate::routes::record_write_stream_acquired_success();
+            permit
+        }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
             return Err(crate::routes::write_stream_saturated("/api/remember"));
         }
@@ -797,7 +800,10 @@ pub async fn remember_bulk(
         .acquire_many(item_count, state.config.write_stream_acquire_timeout)
         .await
     {
-        Ok(permits) => permits,
+        Ok(permits) => {
+            crate::routes::record_write_stream_acquired_success();
+            permits
+        }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
             return Err(crate::routes::write_stream_saturated("/api/remember/bulk"));
         }
@@ -978,7 +984,10 @@ pub async fn remember_manual(
         .acquire(state.config.write_stream_acquire_timeout)
         .await
     {
-        Ok(permit) => permit,
+        Ok(permit) => {
+            crate::routes::record_write_stream_acquired_success();
+            permit
+        }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
             return Err(crate::routes::write_stream_saturated("/api/remember/manual"));
         }

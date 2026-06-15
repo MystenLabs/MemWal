@@ -37,4 +37,4 @@ pub mod consolidator;
 pub use embedder::{Embedder, OpenAiEmbedder};
 pub use extractor::{Extractor, LlmExtractor};
 pub use ranker::{CompositeRanker, Ranker};
-pub use write_stream::{WriteStreamLimiter, WriteStreamPermit};
+pub use write_stream::{WriteStreamLimiter, WriteStreamPermit, WriteStreamSnapshot};

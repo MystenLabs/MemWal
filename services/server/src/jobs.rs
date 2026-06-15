@@ -915,7 +915,10 @@ async fn execute_upload_and_transfer(
         .acquire(std::time::Duration::from_secs(60))
         .await
     {
-        Ok(permit) => permit,
+        Ok(permit) => {
+            crate::routes::record_write_stream_acquired_success();
+            permit
+        }
         Err(_) => {
             // Limiter closed or timeout — leave job in queue for retry.
             return Err(WalletJobError::Transient(

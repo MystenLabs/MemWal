@@ -389,7 +389,10 @@ pub async fn analyze(
                         .acquire(std::time::Duration::from_secs(60))
                         .await
                     {
-                        Ok(permit) => permit,
+                        Ok(permit) => {
+                            crate::routes::record_write_stream_acquired_success();
+                            permit
+                        }
                         Err(crate::services::write_stream::AcquireError::Timeout) => {
                             return Err(crate::routes::write_stream_saturated("/api/analyze"));
                         }
@@ -512,7 +515,10 @@ pub async fn analyze(
         .acquire_many(facts.len(), state.config.write_stream_acquire_timeout)
         .await
     {
-        Ok(permits) => permits,
+        Ok(permits) => {
+            crate::routes::record_write_stream_acquired_success();
+            permits
+        }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
             return Err(crate::routes::write_stream_saturated("/api/analyze"));
         }
