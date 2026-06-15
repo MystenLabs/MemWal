@@ -14,9 +14,12 @@
 //! - [`seal`] — SEAL threshold encrypt/decrypt (+ batch decrypt) via the
 //!   TS sidecar; the `SealCredential` resolution (session > delegate key >
 //!   server fallback) and `DecryptOutcome` classification.
+//! - [`envelope`] — V2 DEK envelope: AES-256-GCM data leg + container/AAD
+//!   format. Seal wraps only the 32-byte DEK; this module owns the blob bytes.
 //! - [`sui`] — Sui RPC: delegate-key on-chain verification, account lookup.
 
 pub mod db;
+pub mod envelope;
 pub mod seal;
 pub mod sui;
 pub mod walrus;
