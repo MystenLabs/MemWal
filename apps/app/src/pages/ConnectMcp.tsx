@@ -14,7 +14,7 @@
  * Flow:
  *   1. Render consent screen — show requested permissions + key fingerprint.
  *   2. User clicks "Connect Sui Wallet" → standard dApp Kit wallet popup.
- *   3. Build + sign `add_delegate_key(account, publicKey, delegateAddress, label, clock)`
+ *   3. Build + sign `add_delegate_key(account, publicKey, delegateAddress, label, perms, clock)`
  *      via useSponsoredTransaction (matches SetupWizard pattern).
  *   4. POST result {accountId, walletAddress, packageId, txDigest, label}
  *      to http://localhost:<port>/callback — the MCP package's listener.
@@ -42,6 +42,7 @@ import { getMoveFields, type DynamicFieldObjectFields, type RegistryObjectFields
 
 // Walrus Memory wordmark (public asset, same one the dashboard nav uses).
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
+const DEFAULT_DELEGATE_PERMS = 3
 
 type Step =
     | 'consent'
@@ -198,6 +199,7 @@ export default function ConnectMcp() {
                     tx.pure('vector<u8>', hexToBytes(publicKey)),
                     tx.pure('address', delegateAddress),
                     tx.pure('string', label),
+                    tx.pure('u8', DEFAULT_DELEGATE_PERMS),
                     tx.object('0x6'),
                 ],
             })

@@ -475,6 +475,8 @@ export interface AddDelegateKeyOpts extends AccountTxOpts {
     publicKey: Uint8Array | string;
     /** Human-readable label (e.g. "MacBook Pro", "Production Server") */
     label: string;
+    /** Delegate permissions bitset. Defaults to READ | WRITE (3). */
+    perms?: number;
 }
 
 /** Result from addDelegateKey() */

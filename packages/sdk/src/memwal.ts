@@ -900,8 +900,8 @@ export class MemWal {
     // Requires `@mysten/seal` and `@mysten/sui` peer dependencies.
     // ============================================================
 
-    private async fetchServerConfig(): Promise<ServerConfig> {
-        if (this.serverConfig) return this.serverConfig;
+    private async fetchServerConfig(forceRefresh = false): Promise<ServerConfig> {
+        if (this.serverConfig && !forceRefresh) return this.serverConfig;
         const res = await fetch(`${this.serverUrl}/config`, { method: "GET" });
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
@@ -919,7 +919,9 @@ export class MemWal {
     }
 
     private async buildSealSessionInner(): Promise<string> {
-        const cfg = await this.fetchServerConfig();
+        // Re-read `/config` whenever the SEAL session is rebuilt so a global
+        // package cutover propagates within the session TTL.
+        const cfg = await this.fetchServerConfig(true);
         const sealMod = (await import("@mysten/seal")) as any;
         const ed25519Mod = (await import("@mysten/sui/keypairs/ed25519")) as any;
         const SessionKey = sealMod.SessionKey;

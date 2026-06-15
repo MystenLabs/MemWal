@@ -33,6 +33,7 @@ import {
 type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
 const MAX_DELEGATE_KEYS = 20
+const DEFAULT_DELEGATE_PERMS = 3
 const MAX_DELEGATE_KEYS_ERROR = `this wallet already has ${MAX_DELEGATE_KEYS} delegate keys. go to the dashboard, remove an old key, then create a new delegate key.`
 
 const AUTH_METHOD_KEY = 'memwal_auth_method'
@@ -196,6 +197,7 @@ export default function SetupWizard() {
                     tx.pure('vector<u8>', pubKeyBytes),
                     tx.pure('address', delegateSuiAddress),
                     tx.pure('string', 'Web App'),
+                    tx.pure('u8', DEFAULT_DELEGATE_PERMS),
                     tx.object('0x6'),
                 ],
             })
@@ -221,7 +223,8 @@ export default function SetupWizard() {
             const createdObj = txDetails.objectChanges?.find(
                 (c) => c.type === 'created' &&
                     'objectType' in c &&
-                    c.objectType.includes('MemWalAccount')
+                    (c.objectType.includes('::account::Account') ||
+                        c.objectType.includes('MemWalAccount'))
             )
             if (createdObj && 'objectId' in createdObj) {
                 knownAccountId = createdObj.objectId
@@ -240,6 +243,7 @@ export default function SetupWizard() {
                     tx2.pure('vector<u8>', pubKeyBytes),
                     tx2.pure('address', delegateSuiAddress),
                     tx2.pure('string', 'Web App'),
+                    tx2.pure('u8', DEFAULT_DELEGATE_PERMS),
                     tx2.object('0x6'),
                 ],
             })

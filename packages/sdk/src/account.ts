@@ -46,6 +46,7 @@ import { bytesToHex, hexToBytes } from "./utils.js";
 // SUI Clock object (shared, always 0x6)
 // ============================================================
 const SUI_CLOCK = "0x0000000000000000000000000000000000000000000000000000000000000006";
+const DEFAULT_DELEGATE_PERMS = 3;
 
 // ============================================================
 // Internal: Build Sui client + signer
@@ -178,7 +179,8 @@ export async function createAccount(
     for (const change of objectChanges) {
         if (
             change.type === "created" &&
-            change.objectType?.includes("::account::MemWalAccount")
+            (change.objectType?.includes("::account::Account") ||
+                change.objectType?.includes("::account::MemWalAccount"))
         ) {
             accountId = change.objectId;
             break;
@@ -210,7 +212,7 @@ export async function createAccount(
 /**
  * Add a delegate key to a MemWalAccount.
  *
- * Calls `{packageId}::account::add_delegate_key(account, public_key, sui_address, label, clock)`.
+ * Calls `{packageId}::account::add_delegate_key(account, public_key, sui_address, label, perms, clock)`.
  * Only the account owner can add delegate keys.
  *
  * @param opts.publicKey - Ed25519 public key (32 bytes Uint8Array or hex string)
@@ -249,6 +251,7 @@ export async function addDelegateKey(
             tx.pure("vector<u8>", Array.from(pkBytes)),
             tx.pure("address", suiAddress),
             tx.pure("string", opts.label),
+            tx.pure("u8", opts.perms ?? DEFAULT_DELEGATE_PERMS),
             tx.object(SUI_CLOCK),
         ],
     });
