@@ -919,10 +919,16 @@ async fn execute_upload_and_transfer(
             crate::routes::record_write_stream_acquired_success();
             permit
         }
-        Err(_) => {
-            // Limiter closed or timeout — leave job in queue for retry.
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            crate::observability::record_write_stream_acquired("timeout");
             return Err(WalletJobError::Transient(
                 "write stream permit unavailable; will retry".into(),
+            ));
+        }
+        Err(_) => {
+            // Limiter closed — leave job in queue for retry.
+            return Err(WalletJobError::Transient(
+                "write stream limiter closed; will retry".into(),
             ));
         }
     };

@@ -63,6 +63,13 @@ struct WaiterGuard {
     waiters: Arc<AtomicUsize>,
 }
 
+impl WaiterGuard {
+    fn new(waiters: Arc<AtomicUsize>) -> Self {
+        waiters.fetch_add(1, Ordering::Relaxed);
+        Self { waiters }
+    }
+}
+
 impl Drop for WaiterGuard {
     fn drop(&mut self) {
         self.waiters.fetch_sub(1, Ordering::Relaxed);
@@ -124,10 +131,7 @@ impl WriteStreamLimiter {
                 max: self.max_permits,
             });
         }
-        self.waiters.fetch_add(1, Ordering::Relaxed);
-        let _waiter_guard = WaiterGuard {
-            waiters: Arc::clone(&self.waiters),
-        };
+        let _waiter_guard = WaiterGuard::new(Arc::clone(&self.waiters));
         let result = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
             .await
             .map_err(|_| AcquireError::Timeout)
@@ -226,15 +230,17 @@ mod tests {
         let limiter = WriteStreamLimiter::new(1);
         let _permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
 
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
             async move {
+                // signal that we are about to acquire
+                let _ = entered_tx.send(());
                 limiter.acquire(Duration::from_millis(200)).await
             }
         });
-
-        // Give the spawned task time to enter the wait.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        entered_rx.await.unwrap();
+        tokio::task::yield_now().await; // let the spawned task reach the semaphore wait
         assert_eq!(limiter.snapshot().waiters, 1);
 
         let result = waiting.await.unwrap();
@@ -247,19 +253,44 @@ mod tests {
         let limiter = WriteStreamLimiter::new(1);
         let _permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
 
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let waiting = tokio::spawn({
             let limiter = limiter.clone();
             async move {
+                let _ = entered_tx.send(());
                 limiter.acquire(Duration::from_millis(50)).await
             }
         });
-
-        // Wait long enough for the spawned task to be awaiting but not time out yet.
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        entered_rx.await.unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(limiter.snapshot().waiters, 1);
 
         let result = waiting.await.unwrap();
         assert!(matches!(result, Err(AcquireError::Timeout)));
+        assert_eq!(limiter.snapshot().waiters, 0);
+    }
+
+    #[tokio::test]
+    async fn waiters_decrements_on_cancellation() {
+        let limiter = WriteStreamLimiter::new(1);
+        let _permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                let _ = entered_tx.send(());
+                limiter.acquire(Duration::from_secs(60)).await
+            }
+        });
+
+        entered_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(limiter.snapshot().waiters, 1);
+
+        handle.abort();
+        // Wait a bit for the abort to propagate.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(limiter.snapshot().waiters, 0);
     }
 
