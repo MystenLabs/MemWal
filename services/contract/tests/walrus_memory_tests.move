@@ -2,10 +2,11 @@
 /// regression + the design §9 attack table), plus core ACL / migration flows.
 #[test_only]
 module walrus_memory::walrus_memory_tests {
+    use std::string;
     use sui::test_scenario::{Self as ts};
     use sui::clock;
     use walrus_memory::account::{Self, Account, AccountRegistry};
-    use walrus_memory::namespace::{Self, MemoryNamespace, MemBlob};
+    use walrus_memory::namespace::{Self, MemoryNamespace, WalrusMemoryBlob};
     use walrus_memory::seal;
 
     const OWNER: address = @0x0A;
@@ -21,6 +22,7 @@ module walrus_memory::walrus_memory_tests {
     const E_WRONG_VERSION: u64 = 7;     // walrus_memory::account
     const E_NO_PERMISSION: u64 = 201;   // walrus_memory::namespace (write path)
     const E_WRONG_NAMESPACE: u64 = 203; // walrus_memory::namespace
+    const E_NAME_TAKEN: u64 = 207;      // walrus_memory::namespace
 
     // --- helpers -------------------------------------------------------------
 
@@ -261,6 +263,31 @@ module walrus_memory::walrus_memory_tests {
         sc.end();
     }
 
+    #[test]
+    fun test_migration_cap_can_record_backfilled_memory() {
+        let mut sc = ts::begin(OWNER);
+        let admin = account::test_mint_admin_cap(sc.ctx());
+        let cap = account::mint_migration_cap(&admin, sc.ctx());
+        let mut ns = namespace::test_create_namespace(OWNER, sc.ctx());
+        namespace::test_set_wrapped_dek(&mut ns, 1, b"wrapped-dek");
+        let clk = clock::create_for_testing(sc.ctx());
+
+        namespace::test_admin_record_memory(&cap, &ns, b"p2-blob", 1, 99, &clk, sc.ctx());
+
+        sc.next_tx(OWNER);
+        let mb = ts::take_from_sender<WalrusMemoryBlob>(&sc);
+        assert!(namespace::mem_namespace_id(&mb) == object::id(&ns), 0);
+        assert!(namespace::mem_key_version(&mb) == 1, 1);
+        assert!(namespace::mem_storage_end_epoch(&mb) == 99, 2);
+
+        transfer::public_transfer(mb, @0x0);
+        clock::destroy_for_testing(clk);
+        transfer::public_transfer(cap, @0x0);
+        transfer::public_transfer(admin, @0x0);
+        transfer::public_transfer(ns, @0x0);
+        sc.end();
+    }
+
     // --- write path (record / delete, delegate-resolved) ---------------------
 
     #[test]
@@ -271,11 +298,12 @@ module walrus_memory::walrus_memory_tests {
         let ns = namespace::test_create_namespace(OWNER, sc.ctx());
         let clk = clock::create_for_testing(sc.ctx());
 
-        namespace::test_record_memory(&acc, &ns, &reg, b"blob-1", &clk, sc.ctx());
+        namespace::test_record_memory(&acc, &ns, &reg, b"blob-1", 42, &clk, sc.ctx());
 
         sc.next_tx(OWNER);
-        let mb = ts::take_from_sender<MemBlob>(&sc);
+        let mb = ts::take_from_sender<WalrusMemoryBlob>(&sc);
         assert!(namespace::mem_namespace_id(&mb) == object::id(&ns), 0);
+        assert!(namespace::mem_storage_end_epoch(&mb) == 42, 1);
         namespace::test_delete_memory(mb, &acc, &ns, &reg, sc.ctx());
 
         clock::destroy_for_testing(clk);
@@ -293,7 +321,7 @@ module walrus_memory::walrus_memory_tests {
 
         sc.next_tx(DELEGATE);
         let clk = clock::create_for_testing(sc.ctx());
-        namespace::test_record_memory(&acc, &ns, &reg, b"blob-d", &clk, sc.ctx());
+        namespace::test_record_memory(&acc, &ns, &reg, b"blob-d", 43, &clk, sc.ctx());
 
         clock::destroy_for_testing(clk);
         dispose(reg, acc, ns);
@@ -312,7 +340,7 @@ module walrus_memory::walrus_memory_tests {
 
         sc.next_tx(DELEGATE);
         let clk = clock::create_for_testing(sc.ctx());
-        namespace::test_record_memory(&acc, &ns, &reg, b"x", &clk, sc.ctx());
+        namespace::test_record_memory(&acc, &ns, &reg, b"x", 44, &clk, sc.ctx());
 
         clock::destroy_for_testing(clk);
         dispose(reg, acc, ns);
@@ -329,15 +357,72 @@ module walrus_memory::walrus_memory_tests {
         let ns_a = namespace::test_create_namespace(OWNER, sc.ctx());
         let ns_b = namespace::test_create_namespace(OWNER, sc.ctx());
         let clk = clock::create_for_testing(sc.ctx());
-        namespace::test_record_memory(&acc, &ns_a, &reg, b"blob", &clk, sc.ctx());
+        namespace::test_record_memory(&acc, &ns_a, &reg, b"blob", 45, &clk, sc.ctx());
 
         sc.next_tx(OWNER);
-        let mb = ts::take_from_sender<MemBlob>(&sc);
+        let mb = ts::take_from_sender<WalrusMemoryBlob>(&sc);
         namespace::test_delete_memory(mb, &acc, &ns_b, &reg, sc.ctx());
 
         clock::destroy_for_testing(clk);
         transfer::public_transfer(ns_a, @0x0);
         dispose(reg, acc, ns_b);
+        sc.end();
+    }
+
+    // --- namespace registry / atomicity -------------------------------------
+
+    #[test]
+    fun test_namespace_registry_create_and_transfer_rekeys() {
+        let mut sc = ts::begin(OWNER);
+        let mut ns_reg = namespace::test_new_namespace_registry(sc.ctx());
+        let mut ns = namespace::test_create_registered_namespace(
+            &mut ns_reg,
+            OWNER,
+            string::utf8(b"default"),
+            sc.ctx(),
+        );
+
+        assert!(namespace::has_namespace(&ns_reg, OWNER, string::utf8(b"default")), 0);
+        assert!(
+            namespace::namespace_id_of(&ns_reg, OWNER, string::utf8(b"default")) == object::id(&ns),
+            1,
+        );
+
+        namespace::test_transfer_registered_ownership(&mut ns, &mut ns_reg, NEWOWNER, sc.ctx());
+        assert!(!namespace::has_namespace(&ns_reg, OWNER, string::utf8(b"default")), 2);
+        assert!(namespace::has_namespace(&ns_reg, NEWOWNER, string::utf8(b"default")), 3);
+        assert!(
+            namespace::namespace_id_of(&ns_reg, NEWOWNER, string::utf8(b"default")) == object::id(&ns),
+            4,
+        );
+        assert!(namespace::namespace_owner(&ns) == NEWOWNER, 5);
+
+        namespace::test_consume_namespace_registry(ns_reg);
+        transfer::public_transfer(ns, @0x0);
+        sc.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = E_NAME_TAKEN, location = walrus_memory::namespace)]
+    fun test_namespace_registry_duplicate_name_denied() {
+        let mut sc = ts::begin(OWNER);
+        let mut ns_reg = namespace::test_new_namespace_registry(sc.ctx());
+        let ns_a = namespace::test_create_registered_namespace(
+            &mut ns_reg,
+            OWNER,
+            string::utf8(b"default"),
+            sc.ctx(),
+        );
+        let ns_b = namespace::test_create_registered_namespace(
+            &mut ns_reg,
+            OWNER,
+            string::utf8(b"default"),
+            sc.ctx(),
+        );
+
+        transfer::public_transfer(ns_a, @0x0);
+        transfer::public_transfer(ns_b, @0x0);
+        namespace::test_consume_namespace_registry(ns_reg);
         sc.end();
     }
 }

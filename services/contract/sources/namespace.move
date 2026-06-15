@@ -25,6 +25,7 @@
 /// - GRANT-delegation depth, multi-owner / co-owners, guests. ACL management here
 ///   is owner-only for now.
 module walrus_memory::namespace {
+    use std::string::String;
     use sui::event;
     use sui::table::{Self, Table};
     use sui::clock::Clock;
@@ -48,6 +49,10 @@ module walrus_memory::namespace {
     const EAlreadyMigrated: u64 = 205;
     /// A wrapped DEK already exists for this key_version (re-key uses a new version)
     const EWrappedDekExists: u64 = 206;
+    /// `(owner, name)` is already registered.
+    const ENameTaken: u64 = 207;
+    /// Registry entry is missing or points at a different namespace.
+    const ENamespaceRegistryMismatch: u64 = 208;
 
     // ============================================================
     // Permission bits (canonical definitions for the whole package)
@@ -73,6 +78,8 @@ module walrus_memory::namespace {
         id: UID,
         /// Current owner principal (implicitly FULL; never stored in `acl`).
         owner: address,
+        /// Client-chosen discovery name, unique per owner via `NamespaceRegistry`.
+        name: String,
         /// principal address -> permission bits.
         acl: Table<address, u8>,
         /// Active Seal key generation for new writes.
@@ -82,9 +89,10 @@ module walrus_memory::namespace {
         created_at: u64,
     }
 
-    /// Thin on-chain pointer to one encrypted memory. Holds NO access-control
-    /// state — authz is always evaluated against the governing namespace.
-    public struct MemBlob has key, store {
+    /// Thin on-chain pointer to one encrypted Walrus memory. Holds NO
+    /// access-control state — authz is always evaluated against the governing
+    /// namespace.
+    public struct WalrusMemoryBlob has key, store {
         id: UID,
         /// Which namespace governs this memory (authz anchor).
         namespace_id: ID,
@@ -92,7 +100,20 @@ module walrus_memory::namespace {
         blob_id: vector<u8>,
         /// Which wrapped DEK decrypts this blob.
         key_version: u32,
+        /// Inner Walrus Blob's storage expiry epoch (cached for renewal policy).
+        storage_end_epoch: u32,
         created_at: u64,
+    }
+
+    /// Shared discovery registry — `(owner, name) -> namespace_id`.
+    public struct NamespaceRegistry has key {
+        id: UID,
+        namespaces: Table<NamespaceKey, ID>,
+    }
+
+    public struct NamespaceKey has copy, drop, store {
+        owner: address,
+        name: String,
     }
 
     // ============================================================
@@ -102,6 +123,7 @@ module walrus_memory::namespace {
     public struct NamespaceCreated has copy, drop {
         namespace_id: ID,
         owner: address,
+        name: String,
         key_version: u32,
     }
 
@@ -127,6 +149,7 @@ module walrus_memory::namespace {
         namespace_id: ID,
         blob_id: vector<u8>,
         key_version: u32,
+        storage_end_epoch: u32,
     }
 
     public struct MemoryDeleted has copy, drop {
@@ -136,8 +159,23 @@ module walrus_memory::namespace {
     }
 
     public struct NamespaceMigrated has copy, drop { namespace_id: ID, to: u64 }
+    public struct NamespaceRegistryMigrated has copy, drop { registry_id: ID, from: u64, to: u64 }
 
     public struct WrappedDekStored has copy, drop { namespace_id: ID, key_version: u32 }
+
+    // ============================================================
+    // Init — runs once at module publish
+    // ============================================================
+
+    /// Create the shared `NamespaceRegistry`.
+    fun init(ctx: &mut TxContext) {
+        let mut registry = NamespaceRegistry {
+            id: object::new(ctx),
+            namespaces: table::new(ctx),
+        };
+        account::stamp_version(&mut registry.id);
+        transfer::share_object(registry);
+    }
 
     // ============================================================
     // Namespace creation
@@ -148,8 +186,15 @@ module walrus_memory::namespace {
     /// namespace object id is known — the seal identity is anchored to
     /// `object::id(namespace)`, so the DEK cannot be wrapped until the namespace
     /// exists (design: DEK Envelope §9, migration §17.10 Phase 3→4).
-    entry fun create_namespace(clock: &Clock, ctx: &mut TxContext) {
-        let ns = new_namespace(ctx.sender(), clock.timestamp_ms(), ctx);
+    entry fun create_namespace(
+        registry: &mut NamespaceRegistry,
+        name: String,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        account::assert_object_version(&registry.id);
+        let ns = new_namespace(ctx.sender(), name, clock.timestamp_ms(), ctx);
+        register_namespace(registry, ctx.sender(), ns.name, object::id(&ns));
         transfer::share_object(ns);
     }
 
@@ -158,11 +203,47 @@ module walrus_memory::namespace {
     /// `wrapped_deks` — the DEK is stored later via `admin_set_wrapped_dek`.
     entry fun admin_create_namespace(
         _cap: &MigrationCap,
+        registry: &mut NamespaceRegistry,
         owner: address,
+        name: String,
         created_at: u64,
         ctx: &mut TxContext,
     ) {
-        let ns = new_namespace(owner, created_at, ctx);
+        account::assert_object_version(&registry.id);
+        let ns = new_namespace(owner, name, created_at, ctx);
+        register_namespace(registry, owner, ns.name, object::id(&ns));
+        transfer::share_object(ns);
+    }
+
+    /// Migration entry that atomically imports the account, creates its default
+    /// namespace, and writes both registries. This is the Phase-3 path from the
+    /// design doc; no transaction can commit an account without its namespace, or
+    /// a namespace without its `(owner, name)` registry entry.
+    entry fun admin_import_account(
+        cap: &MigrationCap,
+        account_registry: &mut AccountRegistry,
+        namespace_registry: &mut NamespaceRegistry,
+        owner: address,
+        legacy_account_id: ID,
+        name: String,
+        created_at: u64,
+        active: bool,
+        ctx: &mut TxContext,
+    ) {
+        account::assert_object_version(&namespace_registry.id);
+        let account = account::import_account_for_migration(
+            cap,
+            account_registry,
+            owner,
+            legacy_account_id,
+            created_at,
+            active,
+            ctx,
+        );
+        let ns = new_namespace(owner, name, created_at, ctx);
+        register_namespace(namespace_registry, owner, ns.name, object::id(&ns));
+
+        transfer::public_share_object(account);
         transfer::share_object(ns);
     }
 
@@ -234,12 +315,15 @@ module walrus_memory::namespace {
     /// bump — deferred §17.0.)
     entry fun transfer_namespace_ownership(
         ns: &mut MemoryNamespace,
+        registry: &mut NamespaceRegistry,
         new_owner: address,
         ctx: &TxContext,
     ) {
         account::assert_object_version(&ns.id);
+        account::assert_object_version(&registry.id);
         assert!(ctx.sender() == ns.owner, ENotNamespaceOwner);
         let previous_owner = ns.owner;
+        rekey_namespace_registry(registry, object::id(ns), previous_owner, ns.name, new_owner);
         ns.owner = new_owner;
         event::emit(NamespaceOwnershipTransferred {
             namespace_id: object::id(ns),
@@ -262,23 +346,67 @@ module walrus_memory::namespace {
         ns: &MemoryNamespace,
         registry: &AccountRegistry,
         blob_id: vector<u8>,
+        storage_end_epoch: u32,
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
         assert_write(account, ns, registry, ctx.sender());
+        mint_memory_record(
+            ns,
+            blob_id,
+            ns.current_key_version,
+            storage_end_epoch,
+            clock.timestamp_ms(),
+            ctx,
+        );
+    }
 
-        let mem_blob = MemBlob {
+    /// Migration-only variant: after the relayer has re-encrypted/re-uploaded a
+    /// legacy blob, mint its V2 `WalrusMemoryBlob` without the user's signature.
+    /// The `MigrationCap` is burned after finalization, removing this forge path.
+    entry fun admin_record_memory(
+        _cap: &MigrationCap,
+        ns: &MemoryNamespace,
+        blob_id: vector<u8>,
+        key_version: u32,
+        storage_end_epoch: u32,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        account::assert_object_version(&ns.id);
+        assert!(ns.wrapped_deks.contains(key_version), ENoPermission);
+        mint_memory_record(
+            ns,
+            blob_id,
+            key_version,
+            storage_end_epoch,
+            clock.timestamp_ms(),
+            ctx,
+        );
+    }
+
+    fun mint_memory_record(
+        ns: &MemoryNamespace,
+        blob_id: vector<u8>,
+        key_version: u32,
+        storage_end_epoch: u32,
+        created_at: u64,
+        ctx: &mut TxContext,
+    ) {
+        let mem_blob = WalrusMemoryBlob {
             id: object::new(ctx),
             namespace_id: object::id(ns),
             blob_id,
-            key_version: ns.current_key_version,
-            created_at: clock.timestamp_ms(),
+            key_version,
+            storage_end_epoch,
+            created_at,
         };
         event::emit(MemoryRecorded {
             mem_blob_id: object::id(&mem_blob),
             namespace_id: mem_blob.namespace_id,
             blob_id: mem_blob.blob_id,
             key_version: mem_blob.key_version,
+            storage_end_epoch: mem_blob.storage_end_epoch,
         });
         transfer::transfer(mem_blob, ctx.sender());
     }
@@ -287,7 +415,7 @@ module walrus_memory::namespace {
     /// off-chain). Requires WRITE in the effective rights and that the blob
     /// belongs to this namespace.
     entry fun delete_memory(
-        mem_blob: MemBlob,
+        mem_blob: WalrusMemoryBlob,
         account: &Account,
         ns: &MemoryNamespace,
         registry: &AccountRegistry,
@@ -297,7 +425,14 @@ module walrus_memory::namespace {
         assert_write(account, ns, registry, ctx.sender());
 
         let mem_blob_id = object::id(&mem_blob);
-        let MemBlob { id, namespace_id, blob_id, key_version: _, created_at: _ } = mem_blob;
+        let WalrusMemoryBlob {
+            id,
+            namespace_id,
+            blob_id,
+            key_version: _,
+            storage_end_epoch: _,
+            created_at: _,
+        } = mem_blob;
         event::emit(MemoryDeleted { mem_blob_id, namespace_id, blob_id });
         object::delete(id);
     }
@@ -336,6 +471,18 @@ module walrus_memory::namespace {
         event::emit(NamespaceMigrated { namespace_id: object::id(ns), to: account::current_version() });
     }
 
+    /// Admin migration of the shared `NamespaceRegistry` to the current VERSION.
+    entry fun admin_migrate_namespace_registry(_admin: &AdminCap, registry: &mut NamespaceRegistry) {
+        let cur = account::object_version(&registry.id);
+        assert!(cur < account::current_version(), EAlreadyMigrated);
+        account::stamp_version(&mut registry.id);
+        event::emit(NamespaceRegistryMigrated {
+            registry_id: object::id(registry),
+            from: cur,
+            to: account::current_version(),
+        });
+    }
+
     // ============================================================
     // Package-internal accessors (used by the seal module)
     // ============================================================
@@ -370,7 +517,17 @@ module walrus_memory::namespace {
     // ============================================================
 
     public fun namespace_owner(ns: &MemoryNamespace): address { ns.owner }
+    public fun namespace_name(ns: &MemoryNamespace): &String { &ns.name }
     public fun key_version(ns: &MemoryNamespace): u32 { ns.current_key_version }
+    public fun has_namespace(registry: &NamespaceRegistry, owner: address, name: String): bool {
+        registry.namespaces.contains(NamespaceKey { owner, name })
+    }
+    public fun namespace_id_of(registry: &NamespaceRegistry, owner: address, name: String): ID {
+        *registry.namespaces.borrow(NamespaceKey { owner, name })
+    }
+    public fun namespace_registry_version(registry: &NamespaceRegistry): u64 {
+        account::object_version(&registry.id)
+    }
     public fun has_acl_entry(ns: &MemoryNamespace, principal: address): bool {
         ns.acl.contains(principal)
     }
@@ -384,9 +541,12 @@ module walrus_memory::namespace {
         ns.wrapped_deks.borrow(v)
     }
 
-    public fun mem_namespace_id(mem_blob: &MemBlob): ID { mem_blob.namespace_id }
-    public fun mem_blob_id(mem_blob: &MemBlob): &vector<u8> { &mem_blob.blob_id }
-    public fun mem_key_version(mem_blob: &MemBlob): u32 { mem_blob.key_version }
+    public fun mem_namespace_id(mem_blob: &WalrusMemoryBlob): ID { mem_blob.namespace_id }
+    public fun mem_blob_id(mem_blob: &WalrusMemoryBlob): &vector<u8> { &mem_blob.blob_id }
+    public fun mem_key_version(mem_blob: &WalrusMemoryBlob): u32 { mem_blob.key_version }
+    public fun mem_storage_end_epoch(mem_blob: &WalrusMemoryBlob): u32 {
+        mem_blob.storage_end_epoch
+    }
 
     // Permission bit getters for off-chain consumers.
     public fun perm_read(): u8 { READ }
@@ -401,12 +561,14 @@ module walrus_memory::namespace {
 
     fun new_namespace(
         owner: address,
+        name: String,
         created_at: u64,
         ctx: &mut TxContext,
     ): MemoryNamespace {
         let mut ns = MemoryNamespace {
             id: object::new(ctx),
             owner,
+            name,
             acl: table::new<address, u8>(ctx),
             current_key_version: 1,
             wrapped_deks: table::new<u32, vector<u8>>(ctx),
@@ -417,9 +579,38 @@ module walrus_memory::namespace {
         event::emit(NamespaceCreated {
             namespace_id: object::id(&ns),
             owner,
+            name: ns.name,
             key_version: 1,
         });
         ns
+    }
+
+    fun register_namespace(
+        registry: &mut NamespaceRegistry,
+        owner: address,
+        name: String,
+        namespace_id: ID,
+    ) {
+        let key = NamespaceKey { owner, name };
+        assert!(!registry.namespaces.contains(key), ENameTaken);
+        registry.namespaces.add(key, namespace_id);
+    }
+
+    fun rekey_namespace_registry(
+        registry: &mut NamespaceRegistry,
+        namespace_id: ID,
+        previous_owner: address,
+        name: String,
+        new_owner: address,
+    ) {
+        let old_key = NamespaceKey { owner: previous_owner, name };
+        assert!(registry.namespaces.contains(old_key), ENamespaceRegistryMismatch);
+        let stored_id = registry.namespaces.remove(old_key);
+        assert!(stored_id == namespace_id, ENamespaceRegistryMismatch);
+
+        let new_key = NamespaceKey { owner: new_owner, name };
+        assert!(!registry.namespaces.contains(new_key), ENameTaken);
+        registry.namespaces.add(new_key, namespace_id);
     }
 
     /// Insert a wrapped DEK for a version (once-only). Shared by the owner and
@@ -436,7 +627,61 @@ module walrus_memory::namespace {
 
     #[test_only]
     public fun test_create_namespace(owner: address, ctx: &mut TxContext): MemoryNamespace {
-        new_namespace(owner, 0, ctx)
+        new_namespace(owner, std::string::utf8(b"default"), 0, ctx)
+    }
+
+    #[test_only]
+    public fun test_new_namespace_registry(ctx: &mut TxContext): NamespaceRegistry {
+        let mut registry = NamespaceRegistry {
+            id: object::new(ctx),
+            namespaces: table::new(ctx),
+        };
+        account::stamp_version(&mut registry.id);
+        registry
+    }
+
+    #[test_only]
+    public fun test_create_registered_namespace(
+        registry: &mut NamespaceRegistry,
+        owner: address,
+        name: String,
+        ctx: &mut TxContext,
+    ): MemoryNamespace {
+        let ns = new_namespace(owner, name, 0, ctx);
+        register_namespace(registry, owner, ns.name, object::id(&ns));
+        ns
+    }
+
+    #[test_only]
+    public fun test_admin_import_account(
+        cap: &MigrationCap,
+        account_registry: &mut AccountRegistry,
+        namespace_registry: &mut NamespaceRegistry,
+        owner: address,
+        legacy_account_id: ID,
+        name: String,
+        created_at: u64,
+        active: bool,
+        ctx: &mut TxContext,
+    ) {
+        let account = account::import_account_for_migration(
+            cap,
+            account_registry,
+            owner,
+            legacy_account_id,
+            created_at,
+            active,
+            ctx,
+        );
+        let ns = new_namespace(owner, name, created_at, ctx);
+        register_namespace(namespace_registry, owner, ns.name, object::id(&ns));
+        transfer::public_transfer(account, @0x0);
+        transfer::public_transfer(ns, @0x0);
+    }
+
+    #[test_only]
+    public fun test_consume_namespace_registry(registry: NamespaceRegistry) {
+        transfer::transfer(registry, @0x0)
     }
 
     #[test_only]
@@ -450,8 +695,18 @@ module walrus_memory::namespace {
     }
 
     #[test_only]
-    public fun test_transfer_ownership(ns: &mut MemoryNamespace, new_owner: address, ctx: &TxContext) {
-        transfer_namespace_ownership(ns, new_owner, ctx);
+    public fun test_transfer_ownership(ns: &mut MemoryNamespace, new_owner: address, _ctx: &TxContext) {
+        ns.owner = new_owner;
+    }
+
+    #[test_only]
+    public fun test_transfer_registered_ownership(
+        ns: &mut MemoryNamespace,
+        registry: &mut NamespaceRegistry,
+        new_owner: address,
+        ctx: &TxContext,
+    ) {
+        transfer_namespace_ownership(ns, registry, new_owner, ctx);
     }
 
     /// Force a downgraded object version to exercise the version guard.
@@ -466,15 +721,29 @@ module walrus_memory::namespace {
         ns: &MemoryNamespace,
         registry: &AccountRegistry,
         blob_id: vector<u8>,
+        storage_end_epoch: u32,
         clock: &Clock,
         ctx: &mut TxContext,
     ) {
-        record_memory(account, ns, registry, blob_id, clock, ctx);
+        record_memory(account, ns, registry, blob_id, storage_end_epoch, clock, ctx);
+    }
+
+    #[test_only]
+    public fun test_admin_record_memory(
+        cap: &MigrationCap,
+        ns: &MemoryNamespace,
+        blob_id: vector<u8>,
+        key_version: u32,
+        storage_end_epoch: u32,
+        clock: &Clock,
+        ctx: &mut TxContext,
+    ) {
+        admin_record_memory(cap, ns, blob_id, key_version, storage_end_epoch, clock, ctx);
     }
 
     #[test_only]
     public fun test_delete_memory(
-        mem_blob: MemBlob,
+        mem_blob: WalrusMemoryBlob,
         account: &Account,
         ns: &MemoryNamespace,
         registry: &AccountRegistry,

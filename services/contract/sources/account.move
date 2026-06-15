@@ -316,23 +316,15 @@ module walrus_memory::account {
         active: bool,
         ctx: &mut TxContext,
     ) {
-        assert_object_version(&registry.id);
-        assert!(!registry.accounts.contains(owner), EAccountAlreadyExists);
-
-        let mut account = Account {
-            id: object::new(ctx),
+        let account = import_account_for_migration(
+            _cap,
+            registry,
             owner,
-            delegate_keys: vector::empty(),
+            legacy_account_id,
             created_at,
             active,
-            legacy_account_id: option::some(legacy_account_id),
-        };
-        stamp_version(&mut account.id);
-
-        let new_id = object::id(&account);
-        registry.accounts.add(owner, new_id);
-
-        event::emit(AccountImported { new_id, legacy_account_id, owner });
+            ctx,
+        );
         transfer::share_object(account);
     }
 
@@ -446,6 +438,39 @@ module walrus_memory::account {
 
     /// Stamp a freshly-minted object's `UID` with the current VERSION.
     public(package) fun stamp_version(id: &mut UID) { set_version(id, VERSION) }
+
+    /// Package-internal migration primitive used by the namespace module's
+    /// atomic account+namespace import entry. It updates `AccountRegistry` and
+    /// emits the same import event, but leaves sharing to the caller so both
+    /// registries can be committed in the same transaction.
+    public(package) fun import_account_for_migration(
+        _cap: &MigrationCap,
+        registry: &mut AccountRegistry,
+        owner: address,
+        legacy_account_id: ID,
+        created_at: u64,
+        active: bool,
+        ctx: &mut TxContext,
+    ): Account {
+        assert_object_version(&registry.id);
+        assert!(!registry.accounts.contains(owner), EAccountAlreadyExists);
+
+        let mut account = Account {
+            id: object::new(ctx),
+            owner,
+            delegate_keys: vector::empty(),
+            created_at,
+            active,
+            legacy_account_id: option::some(legacy_account_id),
+        };
+        stamp_version(&mut account.id);
+
+        let new_id = object::id(&account);
+        registry.accounts.add(owner, new_id);
+
+        event::emit(AccountImported { new_id, legacy_account_id, owner });
+        account
+    }
 
     /// Assert an object is on the current VERSION (the downgrade guard).
     public(package) fun assert_object_version(id: &UID) {
