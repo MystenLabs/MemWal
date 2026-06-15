@@ -400,4 +400,37 @@ mod tests {
         assert!(guard.split_one().is_none());
         assert_eq!(limiter.snapshot().available, 1);
     }
+
+    #[tokio::test]
+    async fn permit_moved_into_spawned_async_block_blocks_acquire() {
+        let limiter = WriteStreamLimiter::new(1);
+        let permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            // This binding must be inside the async move block so the guard is
+            // held until the task completes. If it were dropped at the closure
+            // boundary, the second acquire below would succeed.
+            let _permit = permit;
+            let _ = started_tx.send(());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        // Wait until the spawned task has definitely taken ownership of the permit.
+        started_rx.await.unwrap();
+
+        // The permit is still held, so a concurrent acquire must time out.
+        let err = limiter
+            .acquire(Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcquireError::Timeout));
+
+        handle.await.unwrap();
+
+        // After the task drops the guard, the permit is released.
+        assert_eq!(limiter.snapshot().available, 1);
+        let permit2 = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        drop(permit2);
+    }
 }

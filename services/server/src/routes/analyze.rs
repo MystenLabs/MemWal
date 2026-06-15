@@ -512,6 +512,9 @@ pub async fn analyze(
                 .split_one()
                 .expect("acquired permits equal facts.len()");
             async move {
+                // Hold the permit until this fact's prep hands off to the durable wallet queue.
+                let _permit = _permit;
+
                 let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
@@ -525,15 +528,12 @@ pub async fn analyze(
                 // carry `importance` through the prep tuple so
                 // the job payload below can persist it alongside the
                 // ciphertext + vector.
-                let result = Ok::<_, AppError>((
+                Ok::<_, AppError>((
                     fact.text,
                     fact.importance,
                     vector_result?,
                     encrypted_result?,
-                ));
-                // `_permit` is held until this fact's prep hands off to the
-                // durable wallet queue (or fails).
-                result
+                ))
             }
         })
         .collect();

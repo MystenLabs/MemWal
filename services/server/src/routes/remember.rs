@@ -225,6 +225,9 @@ fn spawn_prepare_bulk_remember_job(
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
                         async move {
+                            // Hold the permit until this item's prep hands off to the durable bulk queue.
+                            let _permit = _permit;
+
                             // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
                             let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
@@ -258,15 +261,12 @@ fn spawn_prepare_bulk_remember_job(
                             );
                             let (vector_result, encrypted_result) =
                                 tokio::join!(embed_fut, encrypt_fut);
-                            let result = Ok::<_, AppError>((
+                            Ok::<_, AppError>((
                                 item.job_id,
                                 item.namespace,
                                 vector_result?,
                                 encrypted_result?,
-                            ));
-                            // `_permit` is held until this item's prep hands off
-                            // to the durable bulk queue (or fails).
-                            result
+                            ))
                         }
                     })
                     .collect();
@@ -795,14 +795,6 @@ pub async fn remember_bulk(
     }
 
     let item_count = body.items.len();
-    if item_count > state.config.write_stream_max_concurrency {
-        crate::observability::record_write_stream_rejected("/api/remember/bulk");
-        crate::observability::record_write_stream_acquired("failure");
-        return Err(AppError::RateLimited(format!(
-            "Bulk request of {} items exceeds write stream capacity; reduce batch size",
-            item_count
-        )));
-    }
 
     let owner = &auth.owner;
     tracing::info!(
