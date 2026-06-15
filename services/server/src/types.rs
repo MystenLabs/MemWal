@@ -351,7 +351,7 @@ pub(crate) fn parse_write_stream_max_concurrency() -> usize {
             }
             match trimmed.parse::<usize>() {
                 Ok(n) => {
-                    if n < 1 || n > 100 {
+                    if !(1..=100).contains(&n) {
                         tracing::warn!(
                             "WRITE_STREAM_MAX_CONCURRENCY={} is out of range; clamping to {}",
                             v,
@@ -382,7 +382,7 @@ pub(crate) fn parse_write_stream_acquire_timeout() -> std::time::Duration {
             }
             match trimmed.parse::<u64>() {
                 Ok(n) => {
-                    if n < 100 || n > 60_000 {
+                    if !(100..=60_000).contains(&n) {
                         tracing::warn!(
                             "WRITE_STREAM_ACQUIRE_TIMEOUT_MS={} is out of range; clamping to {}",
                             v,

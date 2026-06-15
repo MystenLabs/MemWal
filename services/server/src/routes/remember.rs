@@ -102,10 +102,12 @@ fn spawn_prepare_remember_job(
     namespace: String,
     agent_public_key: String,
     // Held until prep completes; releases the permit on drop.
-    _permit: crate::services::write_stream::WriteStreamPermit,
+    permit: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
+        // Hold the permit until prep hands off to the durable wallet queue.
+        let _permit = permit;
         let work = async move {
             let result: Result<(), AppError> = async {
                 // texts beyond the embedder's context window must be
