@@ -137,3 +137,6 @@ claudedocs/
 
 # Temp File
 temp/
+
+# Superpowers brainstorming session files
+.superpowers/
