@@ -618,6 +618,10 @@ pub fn record_write_stream_acquired(result: &str) {
     WRITE_STREAM_ACQUIRED_TOTAL.with_label_values(&[result]).inc();
 }
 
+pub fn record_write_stream_acquired_success() {
+    record_write_stream_acquired("success");
+}
+
 pub fn record_write_stream_rejected(route: &str) {
     WRITE_STREAM_REJECTED_TOTAL.with_label_values(&[route]).inc();
 }

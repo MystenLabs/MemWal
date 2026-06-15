@@ -191,10 +191,6 @@ pub(super) fn write_stream_saturated(route: &str) -> AppError {
     )
 }
 
-pub(super) fn record_write_stream_acquired_success() {
-    crate::observability::record_write_stream_acquired("success");
-}
-
 #[cfg(test)]
 mod tests {
     use super::{collect_bounded_results, truncate_str};

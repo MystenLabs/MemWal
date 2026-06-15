@@ -653,7 +653,7 @@ pub async fn remember(
         .await
     {
         Ok(permit) => {
-            crate::routes::record_write_stream_acquired_success();
+            crate::observability::record_write_stream_acquired_success();
             permit
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
@@ -801,7 +801,7 @@ pub async fn remember_bulk(
         .await
     {
         Ok(permits) => {
-            crate::routes::record_write_stream_acquired_success();
+            crate::observability::record_write_stream_acquired_success();
             permits
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
@@ -985,7 +985,7 @@ pub async fn remember_manual(
         .await
     {
         Ok(permit) => {
-            crate::routes::record_write_stream_acquired_success();
+            crate::observability::record_write_stream_acquired_success();
             permit
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {

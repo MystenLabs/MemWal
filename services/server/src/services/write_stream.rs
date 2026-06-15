@@ -240,8 +240,13 @@ mod tests {
             }
         });
         entered_rx.await.unwrap();
-        tokio::task::yield_now().await; // let the spawned task reach the semaphore wait
-        assert_eq!(limiter.snapshot().waiters, 1);
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while limiter.snapshot().waiters != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter count should reach 1");
 
         let result = waiting.await.unwrap();
         assert!(matches!(result, Err(AcquireError::Timeout)));
@@ -262,8 +267,13 @@ mod tests {
             }
         });
         entered_rx.await.unwrap();
-        tokio::task::yield_now().await;
-        assert_eq!(limiter.snapshot().waiters, 1);
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while limiter.snapshot().waiters != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter count should reach 1");
 
         let result = waiting.await.unwrap();
         assert!(matches!(result, Err(AcquireError::Timeout)));
@@ -285,12 +295,16 @@ mod tests {
         });
 
         entered_rx.await.unwrap();
-        tokio::task::yield_now().await;
-        assert_eq!(limiter.snapshot().waiters, 1);
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while limiter.snapshot().waiters != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiter count should reach 1");
 
         handle.abort();
-        // Wait a bit for the abort to propagate.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = handle.await;
         assert_eq!(limiter.snapshot().waiters, 0);
     }
 

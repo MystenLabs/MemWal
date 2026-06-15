@@ -916,7 +916,7 @@ async fn execute_upload_and_transfer(
         .await
     {
         Ok(permit) => {
-            crate::routes::record_write_stream_acquired_success();
+            crate::observability::record_write_stream_acquired_success();
             permit
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
