@@ -27,6 +27,7 @@ pub mod embedder;
 pub mod extractor;
 pub mod llm_chat;
 pub mod ranker;
+pub mod write_stream;
 
 // Placeholder module — reserved namespace for the consolidator
 // (linked-memory-ids + supersede logic). Doc-only until a real caller
@@ -36,3 +37,4 @@ pub mod consolidator;
 pub use embedder::{Embedder, OpenAiEmbedder};
 pub use extractor::{Extractor, LlmExtractor};
 pub use ranker::{CompositeRanker, Ranker};
+pub use write_stream::{WriteStreamLimiter, WriteStreamPermit};
