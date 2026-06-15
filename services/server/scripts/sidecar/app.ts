@@ -19,6 +19,7 @@ import {
     stripCorsMiddleware,
 } from "./middleware.js";
 import { registerHealthRoute, registerWalletMetricsRoute } from "./routes/health.js";
+import { registerChainRoutes } from "./routes/chain.js";
 import { registerSealRoutes } from "./routes/seal.js";
 import { registerSponsorRoutes } from "./routes/sponsor.js";
 import { registerWalrusMetadataRoutes } from "./routes/walrus-metadata.js";
@@ -50,6 +51,7 @@ export function createSidecarApp(): Express {
 
     app.use(sharedSecretAuthMiddleware);
 
+    registerChainRoutes(app);
     registerSealRoutes(app);
     registerWalrusUploadRoute(app);
     registerWalrusMetadataRoutes(app);

@@ -141,6 +141,8 @@ export function registerWalrusUploadRoute(app: Express): void {
                 owner,
                 namespace,
                 packageId,
+                keyVersion,
+                protocol,
                 agentId,
                 deferTransfer = false,
                 epochs: rawEpochs = DEFAULT_WALRUS_EPOCHS,
@@ -175,6 +177,9 @@ export function registerWalrusUploadRoute(app: Express): void {
             // Validate owner address format
             if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
                 return res.status(400).json({ error: "Invalid owner address format" });
+            }
+            if (keyVersion !== undefined && (!Number.isInteger(keyVersion) || keyVersion <= 0)) {
+                return res.status(400).json({ error: "Invalid keyVersion" });
             }
 
             phase = "acquire_limit";
@@ -211,16 +216,22 @@ export function registerWalrusUploadRoute(app: Express): void {
             await flow.encode();
 
             phase = "register_build";
+            const v2Metadata = protocol === "p2" || deferTransfer;
             const registerTx = flow.register({
                 epochs,
                 // Server owns the blob initially (needed for certify step)
                 owner: signerAddress,
                 deletable: true,
-                // Store namespace + owner as on-chain metadata (queryable for restore)
+                // Store protocol metadata as on-chain attributes. V2 keeps the
+                // Blob server-owned and uses wm_* tags; legacy keeps memwal_*.
                 attributes: {
-                    ...(namespace ? { memwal_namespace: namespace } : {}),
-                    ...(owner ? { memwal_owner: owner } : {}),
-                    ...(packageId ? { memwal_package_id: packageId } : {}),
+                    ...(v2Metadata && namespace ? { wm_namespace: namespace } : {}),
+                    ...(v2Metadata && keyVersion ? { wm_key_version: String(keyVersion) } : {}),
+                    ...(v2Metadata && packageId ? { wm_package_id: packageId } : {}),
+                    ...(v2Metadata && agentId ? { wm_agent_id: agentId } : {}),
+                    ...(!v2Metadata && namespace ? { memwal_namespace: namespace } : {}),
+                    ...(!v2Metadata && owner ? { memwal_owner: owner } : {}),
+                    ...(!v2Metadata && packageId ? { memwal_package_id: packageId } : {}),
                 },
             });
 
