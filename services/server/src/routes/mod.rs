@@ -182,6 +182,16 @@ pub(super) fn zip_search_hit_fields_onto_hydrated(
     }
 }
 
+use crate::services::write_stream::AcquireError;
+
+/// Convert a write-stream permit acquisition timeout into a 429 response.
+pub(super) fn write_stream_saturated(route: &str) -> AppError {
+    crate::observability::record_write_stream_rejected(route);
+    AppError::RateLimited(
+        "Write stream concurrency limit reached; retry after a short delay".into(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{collect_bounded_results, truncate_str};
