@@ -989,10 +989,14 @@ pub async fn remember_manual(
             permit
         }
         Err(crate::services::write_stream::AcquireError::Timeout) => {
-            return Err(crate::routes::write_stream_saturated("/api/remember/manual"));
+            return Err(crate::routes::write_stream_saturated(
+                "/api/remember/manual",
+            ));
         }
         Err(_) => {
-            return Err(AppError::Internal("write stream limiter unavailable".into()));
+            return Err(AppError::Internal(
+                "write stream limiter unavailable".into(),
+            ));
         }
     };
 
@@ -1210,5 +1214,25 @@ mod tests {
         assert!(seen.len() > 1);
         assert!(seen.iter().all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
         assert!(seen.iter().all(|len| *len < MAX_REMEMBER_TEXT_BYTES / 4));
+    }
+
+    #[tokio::test]
+    async fn write_stream_limiter_blocks_beyond_capacity() {
+        use crate::services::write_stream::WriteStreamLimiter;
+        use std::time::Duration;
+
+        let limiter = WriteStreamLimiter::test_new(2);
+        let p1 = limiter.acquire(Duration::from_millis(10)).await.unwrap();
+        let p2 = limiter.acquire(Duration::from_millis(10)).await.unwrap();
+        let timeout = limiter
+            .acquire(Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            timeout,
+            crate::services::write_stream::AcquireError::Timeout
+        ));
+        drop(p1);
+        drop(p2);
     }
 }

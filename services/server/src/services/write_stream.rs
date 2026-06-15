@@ -86,7 +86,10 @@ pub struct WriteStreamLimiter {
 
 impl WriteStreamLimiter {
     pub fn new(max_permits: usize) -> Self {
-        let max_permits = max_permits.clamp(MIN_WRITE_STREAM_MAX_CONCURRENCY, MAX_WRITE_STREAM_MAX_CONCURRENCY);
+        let max_permits = max_permits.clamp(
+            MIN_WRITE_STREAM_MAX_CONCURRENCY,
+            MAX_WRITE_STREAM_MAX_CONCURRENCY,
+        );
         Self {
             semaphore: Arc::new(Semaphore::new(max_permits)),
             max_permits,
@@ -156,6 +159,13 @@ impl Default for WriteStreamLimiter {
 }
 
 #[cfg(test)]
+impl WriteStreamLimiter {
+    pub fn test_new(max_permits: usize) -> Self {
+        Self::new(max_permits)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -190,7 +200,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AcquireError::Timeout));
         assert_eq!(limiter.snapshot().available, 2);
-        let p23 = limiter.acquire_many(2, Duration::from_secs(1)).await.unwrap();
+        let p23 = limiter
+            .acquire_many(2, Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(limiter.snapshot().available, 0);
         drop(p23);
         assert_eq!(limiter.snapshot().available, 2);
@@ -199,7 +212,10 @@ mod tests {
     #[tokio::test]
     async fn zero_permits_noop() {
         let limiter = WriteStreamLimiter::new(1);
-        let guard = limiter.acquire_many(0, Duration::from_secs(1)).await.unwrap();
+        let guard = limiter
+            .acquire_many(0, Duration::from_secs(1))
+            .await
+            .unwrap();
         assert_eq!(guard.permits, 0);
         assert_eq!(limiter.snapshot().available, 1);
     }
@@ -319,7 +335,16 @@ mod tests {
     #[tokio::test]
     async fn acquire_many_errors_when_requested_exceeds_capacity() {
         let limiter = WriteStreamLimiter::new(3);
-        let err = limiter.acquire_many(5, Duration::from_secs(1)).await.unwrap_err();
-        assert!(matches!(err, AcquireError::WouldExceedCapacity { requested: 5, max: 3 }));
+        let err = limiter
+            .acquire_many(5, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AcquireError::WouldExceedCapacity {
+                requested: 5,
+                max: 3
+            }
+        ));
     }
 }
