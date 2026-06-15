@@ -98,6 +98,15 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `RATE_LIMIT_STORAGE_BYTES` — max storage per user in bytes (default: 1 GB, `1073741824`)
 - `REDIS_URL` — required to track sliding windows for rate limits (default: `redis://localhost:6379`)
 
+### Write-stream concurrency
+
+| Variable | Default | Description |
+|---|---|---|
+| `WRITE_STREAM_MAX_CONCURRENCY` | `8` | Maximum concurrent active write operations (prep + upload) |
+| `WRITE_STREAM_ACQUIRE_TIMEOUT_MS` | `5000` | Handler wait for a write slot before returning `429` |
+
+Tune `WRITE_STREAM_MAX_CONCURRENCY` down to reduce sidecar pressure, or up to increase throughput when the sidecar has headroom. Keep it below `WALRUS_UPLOAD_MAX_CONCURRENCY` so the sidecar safety net remains meaningful.
+
 ### Defaults
 
 - `PORT` defaults to `8000`
