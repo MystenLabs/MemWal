@@ -58,6 +58,17 @@ pub struct WriteStreamSnapshot {
     pub waiters: usize,
 }
 
+/// Decrements the waiter counter on drop, guarding against future cancellation.
+struct WaiterGuard {
+    waiters: Arc<AtomicUsize>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// In-process concurrency limiter for the write stream.
 #[derive(Clone, Debug)]
 pub struct WriteStreamLimiter {
@@ -68,9 +79,7 @@ pub struct WriteStreamLimiter {
 
 impl WriteStreamLimiter {
     pub fn new(max_permits: usize) -> Self {
-        let max_permits = max_permits
-            .max(MIN_WRITE_STREAM_MAX_CONCURRENCY)
-            .min(MAX_WRITE_STREAM_MAX_CONCURRENCY);
+        let max_permits = max_permits.clamp(MIN_WRITE_STREAM_MAX_CONCURRENCY, MAX_WRITE_STREAM_MAX_CONCURRENCY);
         Self {
             semaphore: Arc::new(Semaphore::new(max_permits)),
             max_permits,
@@ -80,10 +89,6 @@ impl WriteStreamLimiter {
 
     pub fn max_permits(&self) -> usize {
         self.max_permits
-    }
-
-    pub fn available_permits(&self) -> usize {
-        self.semaphore.available_permits()
     }
 
     /// Return a point-in-time snapshot of limiter state.
@@ -120,11 +125,13 @@ impl WriteStreamLimiter {
             });
         }
         self.waiters.fetch_add(1, Ordering::Relaxed);
+        let _waiter_guard = WaiterGuard {
+            waiters: Arc::clone(&self.waiters),
+        };
         let result = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
             .await
             .map_err(|_| AcquireError::Timeout)
             .and_then(|res| res.map_err(|_| AcquireError::Closed));
-        self.waiters.fetch_sub(1, Ordering::Relaxed);
         match result {
             Ok(permit) => {
                 permit.forget();
@@ -152,9 +159,9 @@ mod tests {
     async fn acquire_returns_permit_when_available() {
         let limiter = WriteStreamLimiter::new(1);
         let permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(limiter.available_permits(), 0);
+        assert_eq!(limiter.snapshot().available, 0);
         drop(permit);
-        assert_eq!(limiter.available_permits(), 1);
+        assert_eq!(limiter.snapshot().available, 1);
     }
 
     #[tokio::test]
@@ -178,11 +185,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AcquireError::Timeout));
-        assert_eq!(limiter.available_permits(), 2);
+        assert_eq!(limiter.snapshot().available, 2);
         let p23 = limiter.acquire_many(2, Duration::from_secs(1)).await.unwrap();
-        assert_eq!(limiter.available_permits(), 0);
+        assert_eq!(limiter.snapshot().available, 0);
         drop(p23);
-        assert_eq!(limiter.available_permits(), 2);
+        assert_eq!(limiter.snapshot().available, 2);
     }
 
     #[tokio::test]
@@ -190,7 +197,70 @@ mod tests {
         let limiter = WriteStreamLimiter::new(1);
         let guard = limiter.acquire_many(0, Duration::from_secs(1)).await.unwrap();
         assert_eq!(guard.permits, 0);
-        assert_eq!(limiter.available_permits(), 1);
+        assert_eq!(limiter.snapshot().available, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_state() {
+        let limiter = WriteStreamLimiter::new(3);
+        let before = limiter.snapshot();
+        assert_eq!(before.total, 3);
+        assert_eq!(before.available, 3);
+        assert_eq!(before.waiters, 0);
+
+        let permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        let during = limiter.snapshot();
+        assert_eq!(during.total, 3);
+        assert_eq!(during.available, 2);
+        assert_eq!(during.waiters, 0);
+        drop(permit);
+
+        let after = limiter.snapshot();
+        assert_eq!(after.total, 3);
+        assert_eq!(after.available, 3);
+        assert_eq!(after.waiters, 0);
+    }
+
+    #[tokio::test]
+    async fn waiters_increments_while_waiting() {
+        let limiter = WriteStreamLimiter::new(1);
+        let _permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+
+        let waiting = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                limiter.acquire(Duration::from_millis(200)).await
+            }
+        });
+
+        // Give the spawned task time to enter the wait.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(limiter.snapshot().waiters, 1);
+
+        let result = waiting.await.unwrap();
+        assert!(matches!(result, Err(AcquireError::Timeout)));
+        assert_eq!(limiter.snapshot().waiters, 0);
+    }
+
+    #[tokio::test]
+    async fn waiters_decrements_on_timeout() {
+        let limiter = WriteStreamLimiter::new(1);
+        let _permit = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+
+        let waiting = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                limiter.acquire(Duration::from_millis(50)).await
+            }
+        });
+
+        // Wait long enough for the spawned task to be awaiting but not time out yet.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(limiter.snapshot().waiters, 1);
+
+        let result = waiting.await.unwrap();
+        assert!(matches!(result, Err(AcquireError::Timeout)));
+        assert_eq!(limiter.snapshot().waiters, 0);
     }
 
     #[tokio::test]
