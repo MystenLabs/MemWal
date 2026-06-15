@@ -1840,6 +1840,33 @@ pub async fn execute_remember(
         wallet_index_for_upload_attempt(starting_key_index, attempt_info.current, key_pool_len)
             .expect("non-empty key pool must yield wallet index");
 
+    // Acquire a write-stream permit before hitting the sidecar. Legacy
+    // RememberJob rows share the same upload budget as UploadAndTransfer jobs.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(permit) => {
+            crate::observability::record_write_stream_acquired_success();
+            permit
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            crate::observability::record_write_stream_acquired("timeout");
+            return Err(WalletJobError::Transient(
+                "write stream permit unavailable; will retry".into(),
+            )
+            .into_apalis_error());
+        }
+        Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(WalletJobError::Transient(
+                "write stream limiter closed; will retry".into(),
+            )
+            .into_apalis_error());
+        }
+    };
+
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
     let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
