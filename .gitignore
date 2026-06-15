@@ -125,6 +125,9 @@ railway-*.md
 # Personal/internal planning notes — never include in repo
 plans/
 .local-plans/
+# But allow Superpowers plans/specs that are part of the design record.
+!docs/superpowers/plans/
+!docs/superpowers/specs/
 
 # Benchmark archives + working analysis notes
 # Kept locally under
