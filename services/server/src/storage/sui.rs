@@ -265,6 +265,99 @@ pub async fn fetch_account_for_migration(
     })
 }
 
+/// Resolve an owner address to its OLD-contract account object id via the
+/// registry's `accounts: Table<address, ID>` — a direct dynamic-field lookup
+/// (no scan). Used by the account-mirror to recover the legacy account id for
+/// owners missing from the relayer's `accounts` cache. Returns `Ok(None)` when
+/// the owner has no on-chain account.
+pub async fn fetch_account_id_by_owner(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    registry_id: &str,
+    owner: &str,
+) -> Result<Option<String>, OnchainVerifyError> {
+    // Step 1: registry -> accounts Table inner object id.
+    let registry_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_getObject",
+        "params": [registry_id, { "showContent": true }]
+    });
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&registry_body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let registry_resp = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject_registry_owner",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("Failed to fetch registry: {}", e))
+    })?;
+    let status_label = registry_resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject_registry_owner",
+        &status_label,
+        started.elapsed(),
+    );
+    let registry_json: serde_json::Value =
+        parse_json_rpc_response(registry_resp, "sui_getObject registry (owner)").await?;
+    let table_id = registry_json
+        .pointer("/result/data/content/fields/accounts/fields/id/id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OnchainVerifyError::RpcError("Failed to extract accounts table ID from registry".into())
+        })?
+        .to_string();
+
+    // Step 2: direct dynamic-field lookup keyed by the owner address.
+    let field_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "suix_getDynamicFieldObject",
+        "params": [table_id, { "type": "address", "value": owner }]
+    });
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&field_body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let field_resp = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "suix_getDynamicFieldObject_owner",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("Failed to fetch owner field: {}", e))
+    })?;
+    let status_label = field_resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "suix_getDynamicFieldObject_owner",
+        &status_label,
+        started.elapsed(),
+    );
+    let field_json: serde_json::Value =
+        parse_json_rpc_response(field_resp, "suix_getDynamicFieldObject owner").await?;
+
+    // A missing owner yields an RPC error (dynamic field not found) or null data.
+    if field_json.pointer("/error").is_some() {
+        return Ok(None);
+    }
+    let account_id = field_json
+        .pointer("/result/data/content/fields/value")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok(account_id)
+}
+
 /// Scan the AccountRegistry to find which account holds a given delegate key.
 ///
 /// Flow:

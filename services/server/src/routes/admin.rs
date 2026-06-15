@@ -264,8 +264,32 @@ pub async fn migration_v2_import_accounts(
     let mut failed = 0usize;
 
     for c in candidates.iter() {
-        let Some(legacy_account_id) = c.legacy_account_id.as_deref() else {
-            tracing::warn!(owner = %c.owner, namespace = %c.namespace, "account-mirror skip: missing legacy account id");
+        // Cache miss (owner absent from the `accounts` table) → resolve the legacy
+        // account id from the OLD registry on chain so the mirror isn't stuck
+        // re-returning the same un-resolvable candidates forever.
+        let resolved_account_id: Option<String> = match c.legacy_account_id.clone() {
+            Some(id) => Some(id),
+            None => match sui::fetch_account_id_by_owner(
+                &state.http_client,
+                &state.config.sui_rpc_url,
+                &state.config.registry_id,
+                &c.owner,
+            )
+            .await
+            {
+                Ok(Some(id)) => {
+                    tracing::info!(owner = %c.owner, account_id = %id, "account-mirror: resolved legacy account from chain");
+                    Some(id)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(owner = %c.owner, error = %e, "account-mirror: chain account resolve failed");
+                    None
+                }
+            },
+        };
+        let Some(legacy_account_id) = resolved_account_id.as_deref() else {
+            tracing::warn!(owner = %c.owner, namespace = %c.namespace, "account-mirror skip: missing legacy account id (not in cache, not on chain)");
             skipped += 1;
             continue;
         };
