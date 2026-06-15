@@ -1,12 +1,12 @@
 [package]
-name = "memwal"
+name = "walrus_memory"
 edition = "2024"
 authors = ["CommandOSS"]
 
 [dependencies]
 
 [addresses]
-memwal = "0x0"
+walrus_memory = "0x0"
 
 [dev-addresses]
 
