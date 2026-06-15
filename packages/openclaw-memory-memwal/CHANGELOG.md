@@ -1,5 +1,17 @@
 # @mysten-incubation/oc-memwal
 
+## 0.0.5
+
+### Patch Changes
+
+- Fix unresolvable `workspace:*` dependency in the published package. The release
+  workflow used `npm publish`, which ships `package.json` verbatim and cannot
+  rewrite the `workspace:` protocol, so the published artifact carried
+  `"@mysten-incubation/memwal": "workspace:*"` and failed to install outside the
+  monorepo (`Unsupported URL Type 'workspace:'`). Switched the release workflows
+  to `pnpm publish`, which rewrites `workspace:*` to the concrete dependency
+  version at pack time.
+
 ## 0.0.4
 
 ### Patch Changes
