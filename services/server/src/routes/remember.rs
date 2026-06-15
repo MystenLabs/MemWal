@@ -101,6 +101,7 @@ fn spawn_prepare_remember_job(
     owner: String,
     namespace: String,
     agent_public_key: String,
+    _permit: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -202,6 +203,7 @@ fn spawn_prepare_bulk_remember_job(
     owner: String,
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
+    _permits: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -647,6 +649,18 @@ pub async fn remember(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
 
+    // Acquire a write-stream permit before starting prep work.
+    let permit = match state
+        .write_stream_limiter
+        .acquire(state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember"));
+        }
+    };
+
     spawn_prepare_remember_job(
         Arc::clone(&state),
         job_id.clone(),
@@ -654,6 +668,7 @@ pub async fn remember(
         owner_owned,
         namespace_owned,
         auth.public_key.clone(),
+        permit,
     );
 
     tracing::info!(
@@ -784,11 +799,24 @@ pub async fn remember_bulk(
 
     let total = job_ids.len();
 
+    let item_count = pending_items.len();
+    let permits = match state
+        .write_stream_limiter
+        .acquire_many(item_count, state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permits) => permits,
+        Err(_) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember/bulk"));
+        }
+    };
+
     spawn_prepare_bulk_remember_job(
         Arc::clone(&state),
         owner.clone(),
         auth.public_key.clone(),
         pending_items,
+        permits,
     );
 
     tracing::info!("remember_bulk accepted: {} items owner={}", total, owner,);
@@ -1077,6 +1105,8 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            write_stream_max_concurrency: 8,
+            write_stream_acquire_timeout: std::time::Duration::from_millis(5_000),
         }
     }
 
