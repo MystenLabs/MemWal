@@ -971,6 +971,22 @@ pub async fn remember_manual(
     // the engine owns persistence, not policy).
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
 
+    // Gate on write-stream capacity so a saturated stream can't be driven
+    // through the synchronous manual path.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permit) => permit,
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember/manual"));
+        }
+        Err(_) => {
+            return Err(AppError::Internal("write stream limiter unavailable".into()));
+        }
+    };
+
     // Persist via the storage engine: Walrus upload (pool key pays gas,
     // configured storage epochs, immediate transfer to owner) -> Postgres index row.
     // Same logic as before, now in engine/walrus_seal.rs::store_blob.

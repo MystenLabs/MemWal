@@ -384,6 +384,21 @@ pub async fn analyze(
                 let fact = fact.clone();
                 async move {
                     let vector = state.embedder.embed(&fact.text).await?;
+                    let _permit = match state
+                        .write_stream_limiter
+                        .acquire(std::time::Duration::from_secs(60))
+                        .await
+                    {
+                        Ok(permit) => permit,
+                        Err(crate::services::write_stream::AcquireError::Timeout) => {
+                            return Err(crate::routes::write_stream_saturated("/api/analyze"));
+                        }
+                        Err(_) => {
+                            return Err(AppError::Internal(
+                                "write stream limiter unavailable".into(),
+                            ));
+                        }
+                    };
                     // importance is threaded through the engine
                     // (see store_blob signature in engine::MemoryEngine).
                     // The PlaintextEngine persists it on the new
@@ -488,6 +503,29 @@ pub async fn analyze(
         prepared.push((fact_text, importance, vector, encrypted));
     }
     rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
+
+    // Acquire write-stream permits before inserting rows. Analyze rows are
+    // created with status='pending' and the stale-job sweeper does not clean
+    // them up, so we must not persist them unless the work can actually run.
+    let _permits = match state
+        .write_stream_limiter
+        .acquire_many(facts.len(), state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permits) => permits,
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/analyze"));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { requested, max }) => {
+            return Err(AppError::BadRequest(format!(
+                "Analyze extracted {} facts, exceeding write stream capacity of {}; reduce input",
+                requested, max
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::Internal("write stream limiter unavailable".into()));
+        }
+    };
 
     // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
     // Round-robin across wallet pool so facts upload in parallel.
