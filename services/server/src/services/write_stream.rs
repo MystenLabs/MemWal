@@ -41,7 +41,7 @@ impl std::error::Error for AcquireError {}
 #[must_use = "permit releases on drop"]
 pub struct WriteStreamPermit {
     semaphore: Arc<Semaphore>,
-    permits: usize,
+    pub(crate) permits: usize,
 }
 
 impl Drop for WriteStreamPermit {

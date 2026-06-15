@@ -354,7 +354,7 @@ pub(crate) fn parse_write_stream_max_concurrency() -> usize {
                     if !(1..=100).contains(&n) {
                         tracing::warn!(
                             "WRITE_STREAM_MAX_CONCURRENCY={} is out of range; clamping to {}",
-                            v,
+                            trimmed,
                             n.clamp(1, 100)
                         );
                     }
@@ -363,7 +363,7 @@ pub(crate) fn parse_write_stream_max_concurrency() -> usize {
                 Err(_) => {
                     tracing::warn!(
                         "WRITE_STREAM_MAX_CONCURRENCY={} is invalid; using default 8",
-                        v
+                        trimmed
                     );
                     None
                 }
@@ -385,7 +385,7 @@ pub(crate) fn parse_write_stream_acquire_timeout() -> std::time::Duration {
                     if !(100..=60_000).contains(&n) {
                         tracing::warn!(
                             "WRITE_STREAM_ACQUIRE_TIMEOUT_MS={} is out of range; clamping to {}",
-                            v,
+                            trimmed,
                             n.clamp(100, 60_000)
                         );
                     }
@@ -394,7 +394,7 @@ pub(crate) fn parse_write_stream_acquire_timeout() -> std::time::Duration {
                 Err(_) => {
                     tracing::warn!(
                         "WRITE_STREAM_ACQUIRE_TIMEOUT_MS={} is invalid; using default 5000",
-                        v
+                        trimmed
                     );
                     None
                 }

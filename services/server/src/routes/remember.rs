@@ -208,7 +208,7 @@ fn spawn_prepare_bulk_remember_job(
     pending_items: Vec<PendingBulkRememberItem>,
     // One guard per item; each is held until that item's prep completes and
     // releases its own slot.
-    mut permits: Vec<crate::services::write_stream::WriteStreamPermit>,
+    item_permits: Vec<crate::services::write_stream::WriteStreamPermit>,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -220,12 +220,10 @@ fn spawn_prepare_bulk_remember_job(
             let result: Result<(), AppError> = async {
                 let prep_tasks: Vec<_> = pending_items
                     .into_iter()
-                    .map(|item| {
+                    .zip(item_permits)
+                    .map(|(item, _permit)| {
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
-                        let _permit = permits
-                            .pop()
-                            .expect("permits length matches pending_items length");
                         async move {
                             // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
