@@ -41,7 +41,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         seal::test_seal_approve(seal_id(&ns), &account, &ns, &reg, sc.ctx());
 
@@ -55,7 +55,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let mut account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         account::test_add_delegate(&mut account, DELEGATE, READ, 1);
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         // Signed by the delegate key, not the owner.
         sc.next_tx(DELEGATE);
@@ -72,7 +72,7 @@ module walrus_memory::walrus_memory_tests {
         let owner_account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         // Guest has their OWN canonical account.
         let guest_account = account::test_register_account(&mut reg, GUEST, true, sc.ctx());
-        let mut ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let mut ns = namespace::test_create_namespace(OWNER, sc.ctx());
         namespace::test_set_acl(&mut ns, GUEST, READ, sc.ctx());
 
         sc.next_tx(GUEST);
@@ -89,7 +89,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let owner_account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         let new_owner_account = account::test_register_account(&mut reg, NEWOWNER, true, sc.ctx());
-        let mut ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let mut ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         let id_before = seal_id(&ns);
         namespace::test_transfer_ownership(&mut ns, NEWOWNER, sc.ctx()); // sender = OWNER
@@ -118,8 +118,8 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let mut attacker_account = account::test_register_account(&mut reg, ATTACKER, true, sc.ctx());
         account::test_add_delegate(&mut attacker_account, ATTACKER, READ, 9); // self-delegate
-        let attacker_ns = namespace::test_create_namespace(ATTACKER, b"atk", sc.ctx());
-        let victim_ns = namespace::test_create_namespace(OWNER, b"victim", sc.ctx());
+        let attacker_ns = namespace::test_create_namespace(ATTACKER, sc.ctx());
+        let victim_ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         // id targets the VICTIM namespace; account+namespace are the attacker's.
         let victim_id = seal::namespace_seal_id(object::id(&victim_ns), 1);
@@ -139,7 +139,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(ATTACKER);
         let mut reg = account::test_new_registry(sc.ctx());
         let attacker_account = account::test_register_account(&mut reg, ATTACKER, true, sc.ctx());
-        let victim_ns = namespace::test_create_namespace(OWNER, b"victim", sc.ctx());
+        let victim_ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         seal::test_seal_approve(seal_id(&victim_ns), &attacker_account, &victim_ns, &reg, sc.ctx());
 
@@ -155,7 +155,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let mut account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         account::test_add_delegate(&mut account, DELEGATE, WRITE, 2); // WRITE only
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         sc.next_tx(DELEGATE);
         seal::test_seal_approve(seal_id(&ns), &account, &ns, &reg, sc.ctx());
@@ -172,7 +172,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         sc.next_tx(ATTACKER);
         seal::test_seal_approve(seal_id(&ns), &account, &ns, &reg, sc.ctx());
@@ -189,7 +189,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let owner_account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         let guest_account = account::test_register_account(&mut reg, GUEST, true, sc.ctx());
-        let mut ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let mut ns = namespace::test_create_namespace(OWNER, sc.ctx());
         namespace::test_set_acl(&mut ns, GUEST, READ, sc.ctx());
         namespace::test_set_acl(&mut ns, GUEST, 0, sc.ctx()); // revoke
 
@@ -208,7 +208,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let account = account::test_register_account(&mut reg, OWNER, false, sc.ctx()); // inactive
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         seal::test_seal_approve(seal_id(&ns), &account, &ns, &reg, sc.ctx());
 
@@ -223,7 +223,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let account = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
-        let mut ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let mut ns = namespace::test_create_namespace(OWNER, sc.ctx());
         namespace::test_force_version(&mut ns, 1); // simulate legacy (pre-upgrade)
 
         seal::test_seal_approve(seal_id(&ns), &account, &ns, &reg, sc.ctx());
@@ -268,7 +268,7 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let acc = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
         let clk = clock::create_for_testing(sc.ctx());
 
         namespace::test_record_memory(&acc, &ns, &reg, b"blob-1", &clk, sc.ctx());
@@ -289,7 +289,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let mut acc = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         account::test_add_delegate(&mut acc, DELEGATE, WRITE, 3);
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         sc.next_tx(DELEGATE);
         let clk = clock::create_for_testing(sc.ctx());
@@ -308,7 +308,7 @@ module walrus_memory::walrus_memory_tests {
         let mut reg = account::test_new_registry(sc.ctx());
         let mut acc = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
         account::test_add_delegate(&mut acc, DELEGATE, READ, 4);
-        let ns = namespace::test_create_namespace(OWNER, b"wrapped-dek", sc.ctx());
+        let ns = namespace::test_create_namespace(OWNER, sc.ctx());
 
         sc.next_tx(DELEGATE);
         let clk = clock::create_for_testing(sc.ctx());
@@ -326,8 +326,8 @@ module walrus_memory::walrus_memory_tests {
         let mut sc = ts::begin(OWNER);
         let mut reg = account::test_new_registry(sc.ctx());
         let acc = account::test_register_account(&mut reg, OWNER, true, sc.ctx());
-        let ns_a = namespace::test_create_namespace(OWNER, b"a", sc.ctx());
-        let ns_b = namespace::test_create_namespace(OWNER, b"b", sc.ctx());
+        let ns_a = namespace::test_create_namespace(OWNER, sc.ctx());
+        let ns_b = namespace::test_create_namespace(OWNER, sc.ctx());
         let clk = clock::create_for_testing(sc.ctx());
         namespace::test_record_memory(&acc, &ns_a, &reg, b"blob", &clk, sc.ctx());
 

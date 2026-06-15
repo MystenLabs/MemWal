@@ -46,6 +46,8 @@ module walrus_memory::namespace {
     const EOwnerNotInAcl: u64 = 204;
     /// Object version does not match the current package VERSION
     const EAlreadyMigrated: u64 = 205;
+    /// A wrapped DEK already exists for this key_version (re-key uses a new version)
+    const EWrappedDekExists: u64 = 206;
 
     // ============================================================
     // Permission bits (canonical definitions for the whole package)
@@ -135,32 +137,59 @@ module walrus_memory::namespace {
 
     public struct NamespaceMigrated has copy, drop { namespace_id: ID, to: u64 }
 
+    public struct WrappedDekStored has copy, drop { namespace_id: ID, key_version: u32 }
+
     // ============================================================
     // Namespace creation
     // ============================================================
 
-    /// Create a namespace owned by the caller, seeding `wrapped_deks[1]` with the
-    /// initial Seal-wrapped DEK (generated server-side).
-    entry fun create_namespace(
-        initial_wrapped_dek: vector<u8>,
-        clock: &Clock,
-        ctx: &mut TxContext,
-    ) {
-        let ns = new_namespace(ctx.sender(), initial_wrapped_dek, clock.timestamp_ms(), ctx);
+    /// Create a namespace owned by the caller, with an EMPTY `wrapped_deks`.
+    /// The wrapped DEK is stored in a SEPARATE step (`set_wrapped_dek`) once the
+    /// namespace object id is known — the seal identity is anchored to
+    /// `object::id(namespace)`, so the DEK cannot be wrapped until the namespace
+    /// exists (design: DEK Envelope §9, migration §17.10 Phase 3→4).
+    entry fun create_namespace(clock: &Clock, ctx: &mut TxContext) {
+        let ns = new_namespace(ctx.sender(), clock.timestamp_ms(), ctx);
         transfer::share_object(ns);
     }
 
     /// Create a namespace on behalf of `owner` without their signature. Gated by
-    /// `MigrationCap` (Phase 3: one namespace per imported account).
+    /// `MigrationCap` (Phase 3: one namespace per imported account). Empty
+    /// `wrapped_deks` — the DEK is stored later via `admin_set_wrapped_dek`.
     entry fun admin_create_namespace(
         _cap: &MigrationCap,
         owner: address,
-        initial_wrapped_dek: vector<u8>,
         created_at: u64,
         ctx: &mut TxContext,
     ) {
-        let ns = new_namespace(owner, initial_wrapped_dek, created_at, ctx);
+        let ns = new_namespace(owner, created_at, ctx);
         transfer::share_object(ns);
+    }
+
+    /// Store the Seal-wrapped DEK for `key_version` after the namespace exists
+    /// (two-phase with creation). Owner/ADMIN-gated. A version's DEK can only be
+    /// set once — re-key allocates a new version.
+    entry fun set_wrapped_dek(
+        ns: &mut MemoryNamespace,
+        key_version: u32,
+        wrapped: vector<u8>,
+        ctx: &TxContext,
+    ) {
+        account::assert_object_version(&ns.id);
+        assert!(acl_bits_for(ns, ctx.sender()) & ADMIN != 0, ENoPermission);
+        store_wrapped_dek(ns, key_version, wrapped);
+    }
+
+    /// `MigrationCap`-gated variant: the relayer stores the wrapped DEK
+    /// server-side (no user signature) — first V2 write / Phase 4 backfill.
+    entry fun admin_set_wrapped_dek(
+        _cap: &MigrationCap,
+        ns: &mut MemoryNamespace,
+        key_version: u32,
+        wrapped: vector<u8>,
+    ) {
+        account::assert_object_version(&ns.id);
+        store_wrapped_dek(ns, key_version, wrapped);
     }
 
     // ============================================================
@@ -372,19 +401,15 @@ module walrus_memory::namespace {
 
     fun new_namespace(
         owner: address,
-        initial_wrapped_dek: vector<u8>,
         created_at: u64,
         ctx: &mut TxContext,
     ): MemoryNamespace {
-        let mut wrapped_deks = table::new<u32, vector<u8>>(ctx);
-        wrapped_deks.add(1, initial_wrapped_dek);
-
         let mut ns = MemoryNamespace {
             id: object::new(ctx),
             owner,
             acl: table::new<address, u8>(ctx),
             current_key_version: 1,
-            wrapped_deks,
+            wrapped_deks: table::new<u32, vector<u8>>(ctx),
             created_at,
         };
         account::stamp_version(&mut ns.id);
@@ -397,17 +422,26 @@ module walrus_memory::namespace {
         ns
     }
 
+    /// Insert a wrapped DEK for a version (once-only). Shared by the owner and
+    /// `MigrationCap` paths.
+    fun store_wrapped_dek(ns: &mut MemoryNamespace, key_version: u32, wrapped: vector<u8>) {
+        assert!(!ns.wrapped_deks.contains(key_version), EWrappedDekExists);
+        ns.wrapped_deks.add(key_version, wrapped);
+        event::emit(WrappedDekStored { namespace_id: object::id(ns), key_version });
+    }
+
     // ============================================================
     // Test helpers
     // ============================================================
 
     #[test_only]
-    public fun test_create_namespace(
-        owner: address,
-        initial_wrapped_dek: vector<u8>,
-        ctx: &mut TxContext,
-    ): MemoryNamespace {
-        new_namespace(owner, initial_wrapped_dek, 0, ctx)
+    public fun test_create_namespace(owner: address, ctx: &mut TxContext): MemoryNamespace {
+        new_namespace(owner, 0, ctx)
+    }
+
+    #[test_only]
+    public fun test_set_wrapped_dek(ns: &mut MemoryNamespace, key_version: u32, wrapped: vector<u8>) {
+        store_wrapped_dek(ns, key_version, wrapped);
     }
 
     #[test_only]
