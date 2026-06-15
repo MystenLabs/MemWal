@@ -1,9 +1,15 @@
 /**
  * SEAL encrypt / decrypt endpoints.
  *
- *   POST /seal/encrypt        → { data, owner, packageId } → { encryptedData }
- *   POST /seal/decrypt        → { data, packageId, accountId } → { decryptedData }
- *   POST /seal/decrypt-batch  → { items[], packageId, accountId } → { results[], errors[] }
+ *   POST /seal/encrypt        → { data, owner?, packageId, namespaceId?, keyVersion? } → { encryptedData }
+ *   POST /seal/decrypt        → { data, packageId, accountId, namespaceId?, registryId? } → { decryptedData }
+ *   POST /seal/decrypt-batch  → { items[], packageId, accountId, namespaceId?, registryId? } → { results[], errors[] }
+ *
+ * V2 (namespace-anchored) vs V1 (legacy, owner-anchored) is selected per request:
+ * encrypt uses `namespaceId`+`keyVersion` (id = bcs(namespace_id)‖bcs(key_version))
+ * when present, else `owner`; decrypt/-batch target `seal::seal_approve(id, account,
+ * namespace, registry)` when `namespaceId`+`registryId` are present, else the legacy
+ * `account::seal_approve(id, account)`. Omitting the V2 fields = unchanged V1 behavior.
  */
 
 import { randomUUID } from "crypto";
@@ -94,22 +100,67 @@ async function resolveSessionKey(
     });
 }
 
-/** Build the seal_approve PTB for a set of SEAL key IDs. */
-async function buildSealApproveTxBytes(packageId: string, accountId: string, ids: string[]): Promise<Uint8Array> {
+/**
+ * V2 seal id: `bcs(namespace_id) ‖ bcs(key_version)` — owner-free,
+ * namespace-anchored. Must byte-match Move `walrus_memory::seal::namespace_seal_id`
+ * (validated on-chain): the 32-byte object id, then `key_version` as a u32
+ * little-endian. Returns lowercase hex (no `0x`).
+ */
+function computeNamespaceSealId(namespaceId: string, keyVersion: number): string {
+    const idHex = (namespaceId.startsWith("0x") ? namespaceId.slice(2) : namespaceId).toLowerCase();
+    if (idHex.length !== 64 || !/^[0-9a-f]+$/.test(idHex)) {
+        throw new Error("namespaceId must be a 32-byte Sui object id (0x + 64 hex)");
+    }
+    const le = Buffer.alloc(4);
+    le.writeUInt32LE(keyVersion >>> 0, 0); // u32 LE, matches bcs(u32)
+    return idHex + le.toString("hex");
+}
+
+/**
+ * V2 PTB target objects. When provided, the PTB targets the V2 contract's
+ * `seal::seal_approve(id, account, namespace, registry)` (4 refs). When omitted,
+ * it falls back to the legacy V1 `account::seal_approve(id, account)` (2 refs) so
+ * existing/legacy-namespace blobs keep decrypting unchanged.
+ */
+interface SealApproveV2 {
+    namespaceId: string;
+    registryId: string;
+}
+
+/** Build the seal_approve PTB for a set of SEAL key IDs (V1 legacy or V2). */
+async function buildSealApproveTxBytes(
+    packageId: string,
+    accountId: string,
+    ids: string[],
+    v2?: SealApproveV2,
+): Promise<Uint8Array> {
     const tx = new Transaction();
     for (const id of ids) {
         // Convert hex ID to byte array for PTB
         const idBytes = Array.from(
             Uint8Array.from(id.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
         );
-        // Pass MemWalAccount (owned object) instead of AccountRegistry
-        tx.moveCall({
-            target: `${packageId}::account::seal_approve`,
-            arguments: [
-                tx.pure("vector<u8>", idBytes),
-                tx.object(accountId),
-            ],
-        });
+        if (v2) {
+            // V2: walrus_memory::seal::seal_approve(id, account, namespace, registry)
+            tx.moveCall({
+                target: `${packageId}::seal::seal_approve`,
+                arguments: [
+                    tx.pure("vector<u8>", idBytes),
+                    tx.object(accountId),
+                    tx.object(v2.namespaceId),
+                    tx.object(v2.registryId),
+                ],
+            });
+        } else {
+            // V1 (legacy): account::seal_approve(id, account)
+            tx.moveCall({
+                target: `${packageId}::account::seal_approve`,
+                arguments: [
+                    tx.pure("vector<u8>", idBytes),
+                    tx.object(accountId),
+                ],
+            });
+        }
     }
     return await tx.build({ client: suiClient as any, onlyTransactionKind: true });
 }
@@ -121,9 +172,21 @@ export function registerSealRoutes(app: Express): void {
     app.post("/seal/encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
         let phase = "validate";
         try {
-            const { data, owner, packageId } = req.body;
-            if (!data || !owner || !packageId) {
-                return res.status(400).json({ error: "Missing required fields: data, owner, packageId" });
+            const { data, owner, packageId, namespaceId, keyVersion } = req.body;
+            if (!data || !packageId) {
+                return res.status(400).json({ error: "Missing required fields: data, packageId" });
+            }
+            // V2: namespace-anchored id (bcs(namespace_id) ‖ key_version).
+            // V1 (legacy): owner-anchored id. At least one must be provided.
+            // In V2 `data` is the 32-byte DEK (the data leg is AES-GCM in Rust);
+            // the sidecar just Seal-wraps whatever bytes it is given.
+            let sealId: string;
+            if (namespaceId !== undefined && namespaceId !== null) {
+                sealId = computeNamespaceSealId(namespaceId, keyVersion ?? 1);
+            } else if (owner) {
+                sealId = owner;
+            } else {
+                return res.status(400).json({ error: "Provide namespaceId (V2) or owner (V1 legacy)" });
             }
 
             phase = "encrypt";
@@ -131,7 +194,7 @@ export function registerSealRoutes(app: Express): void {
             const result = await sealClient.encrypt({
                 threshold: SEAL_THRESHOLD,
                 packageId,
-                id: owner,
+                id: sealId,
                 data: new Uint8Array(plaintext),
             });
 
@@ -145,7 +208,7 @@ export function registerSealRoutes(app: Express): void {
     app.post("/seal/decrypt", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT }), async (req, res) => {
         let phase = "validate";
         try {
-            const { data, packageId, accountId } = req.body;
+            const { data, packageId, accountId, namespaceId, registryId } = req.body;
             if (!data || !packageId || !accountId) {
                 return res.status(400).json({ error: "Missing required fields: data, packageId, accountId" });
             }
@@ -167,7 +230,9 @@ export function registerSealRoutes(app: Express): void {
             const fullId = parsed.id;
 
             phase = "build_ptb";
-            const txBytes = await buildSealApproveTxBytes(packageId, accountId, [fullId]);
+            // V2 when the caller names a namespace + registry; else V1 legacy.
+            const v2 = namespaceId && registryId ? { namespaceId, registryId } : undefined;
+            const txBytes = await buildSealApproveTxBytes(packageId, accountId, [fullId], v2);
 
             phase = "fetch_keys";
             // Fetch keys from key servers
@@ -199,7 +264,7 @@ export function registerSealRoutes(app: Express): void {
     app.post("/seal/decrypt-batch", express.json({ limit: JSON_LIMIT_SEAL_DECRYPT_BATCH }), async (req, res) => {
         let phase = "validate";
         try {
-            const { items, packageId, accountId } = req.body;
+            const { items, packageId, accountId, namespaceId, registryId } = req.body;
             if (!items || !Array.isArray(items) || items.length === 0) {
                 return res.status(400).json({ error: "Missing required field: items (array of base64 encrypted data)" });
             }
@@ -243,9 +308,12 @@ export function registerSealRoutes(app: Express): void {
             }
 
             phase = "build_ptb";
-            // Build ONE PTB with seal_approve for ALL unique IDs
+            // Build ONE PTB with seal_approve for ALL unique IDs. V2 when the
+            // caller names a namespace + registry; else V1 legacy. (One namespace
+            // per batch for now; per-blob namespace selection is a later slice.)
             const allIds = [...new Set(parsedItems.map(p => p.fullId))];
-            const txBytes = await buildSealApproveTxBytes(packageId, accountId, allIds);
+            const v2 = namespaceId && registryId ? { namespaceId, registryId } : undefined;
+            const txBytes = await buildSealApproveTxBytes(packageId, accountId, allIds, v2);
 
             phase = "fetch_keys";
             // ONE fetchKeys call for ALL IDs
