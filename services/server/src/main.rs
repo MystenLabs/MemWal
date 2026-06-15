@@ -32,7 +32,9 @@ use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
     WalletJobStorage,
 };
-use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
+use services::{
+    CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker, WriteStreamLimiter,
+};
 use storage::db::VectorDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
@@ -439,6 +441,15 @@ async fn main() {
     // Wrap the immutable config so the MemoryEngine + handlers share it.
     let config = Arc::new(config);
 
+    let write_stream_limiter = Arc::new(WriteStreamLimiter::new(
+        config.write_stream_max_concurrency,
+    ));
+    tracing::info!(
+        "  write stream limiter: max_concurrency={} acquire_timeout_ms={}",
+        write_stream_limiter.max_permits(),
+        config.write_stream_acquire_timeout.as_millis(),
+    );
+
     // Select the persistence engine. Production = WalrusSealEngine (SEAL
     // encrypt happens in the handler/client; the engine uploads the
     // ciphertext to Walrus and indexes the row, with the Redis blob
@@ -497,6 +508,7 @@ async fn main() {
         blob_cache_ttl,
         blob_cache_max_bytes,
         embedding_cache_ttl,
+        write_stream_limiter,
     });
 
     tracing::info!(

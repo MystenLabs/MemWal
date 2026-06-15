@@ -5,7 +5,7 @@ use crate::alerts::AlertManager;
 use crate::engine::MemoryEngine;
 use crate::jobs::{BulkRememberJobStorage, RememberJobStorage, WalletJobStorage};
 use crate::rate_limit::RateLimitConfig;
-use crate::services::{Embedder, Extractor, Ranker};
+use crate::services::{Embedder, Extractor, Ranker, WriteStreamLimiter};
 use crate::storage::db::VectorDb;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -125,6 +125,8 @@ pub struct AppState {
     pub blob_cache_max_bytes: usize,
     /// Redis TTL for recall query embedding cache entries.
     pub embedding_cache_ttl: std::time::Duration,
+    /// In-process concurrency limiter for write operations.
+    pub write_stream_limiter: Arc<WriteStreamLimiter>,
 }
 
 // ============================================================
@@ -229,6 +231,10 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// Maximum concurrent active write-stream operations (prep + upload).
+    pub write_stream_max_concurrency: usize,
+    /// How long a handler waits for a write-stream permit before returning 429.
+    pub write_stream_acquire_timeout: std::time::Duration,
 }
 
 impl Config {
@@ -299,6 +305,8 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            write_stream_max_concurrency: parse_write_stream_max_concurrency(),
+            write_stream_acquire_timeout: parse_write_stream_acquire_timeout(),
         }
     }
 }
@@ -331,6 +339,23 @@ fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<S
     }
 
     urls
+}
+
+pub(crate) fn parse_write_stream_max_concurrency() -> usize {
+    std::env::var("WRITE_STREAM_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.clamp(1, 100))
+        .unwrap_or(8)
+}
+
+pub(crate) fn parse_write_stream_acquire_timeout() -> std::time::Duration {
+    let millis = std::env::var("WRITE_STREAM_ACQUIRE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(100, 60_000))
+        .unwrap_or(5_000);
+    std::time::Duration::from_millis(millis)
 }
 
 // ============================================================
