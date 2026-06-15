@@ -18,6 +18,7 @@ const MAX_WRITE_STREAM_MAX_CONCURRENCY: usize = 100;
 pub enum AcquireError {
     Timeout,
     Closed,
+    WouldExceedCapacity { requested: usize, max: usize },
 }
 
 impl std::fmt::Display for AcquireError {
@@ -25,6 +26,10 @@ impl std::fmt::Display for AcquireError {
         match self {
             AcquireError::Timeout => write!(f, "write stream concurrency limit reached"),
             AcquireError::Closed => write!(f, "write stream limiter closed"),
+            AcquireError::WouldExceedCapacity { requested, max } => write!(
+                f,
+                "write stream request for {requested} permits exceeds capacity of {max}"
+            ),
         }
     }
 }
@@ -92,7 +97,12 @@ impl WriteStreamLimiter {
                 permits: 0,
             });
         }
-        let n = n.min(self.max_permits);
+        if n > self.max_permits {
+            return Err(AcquireError::WouldExceedCapacity {
+                requested: n,
+                max: self.max_permits,
+            });
+        }
         let permit = tokio::time::timeout(timeout, self.semaphore.acquire_many(n as u32))
             .await
             .map_err(|_: Elapsed| AcquireError::Timeout)?
@@ -160,5 +170,12 @@ mod tests {
         assert_eq!(low.max_permits(), MIN_WRITE_STREAM_MAX_CONCURRENCY);
         let high = WriteStreamLimiter::new(10_000);
         assert_eq!(high.max_permits(), MAX_WRITE_STREAM_MAX_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn acquire_many_errors_when_requested_exceeds_capacity() {
+        let limiter = WriteStreamLimiter::new(3);
+        let err = limiter.acquire_many(5, Duration::from_secs(1)).await.unwrap_err();
+        assert!(matches!(err, AcquireError::WouldExceedCapacity { requested: 5, max: 3 }));
     }
 }
