@@ -174,7 +174,7 @@ function DelegateKeySkeletonList() {
                     <tr>
                         <th scope="col" className="dashboard-key-table-select">Select</th>
                         <th scope="col">Key name</th>
-                        <th scope="col">Public key</th>
+                        <th scope="col">Public key (Agent ID)</th>
                         <th scope="col">Created</th>
                         <th scope="col" className="dashboard-key-table-actions">Actions</th>
                     </tr>
@@ -977,7 +977,7 @@ const result = await generateText({
 
                         <div className="dashboard-credential-row">
                             <div className="dashboard-credential-main">
-                                <div className="dashboard-credential-label">Delegate public key</div>
+                                <div className="dashboard-credential-label">Delegate public key (Agent ID)</div>
                                 <code className="dashboard-credential-value">{delegatePublicKey}</code>
                             </div>
                             <div className="dashboard-credential-actions">
@@ -1208,7 +1208,7 @@ const result = await generateText({
                                     <tr>
                                         <th scope="col" className="dashboard-key-table-select">Select</th>
                                         <th scope="col">Key name</th>
-                                        <th scope="col">Public key</th>
+                                        <th scope="col">Public key (Agent ID)</th>
                                         <th scope="col">Created</th>
                                         <th scope="col" className="dashboard-key-table-actions">Actions</th>
                                     </tr>
@@ -1241,7 +1241,7 @@ const result = await generateText({
                                                         {isCurrentKey && <span className="dashboard-key-current-badge">current</span>}
                                                     </div>
                                                 </td>
-                                                <td data-label="Public key">
+                                                <td data-label="Public key (Agent ID)">
                                                     <code className="dashboard-key-public" title={k.publicKey}>
                                                         {compactPublicKey(k.publicKey)}
                                                     </code>
@@ -1254,8 +1254,8 @@ const result = await generateText({
                                                         <button
                                                             className={`btn btn-secondary btn-sm dashboard-key-icon-action${copied === copyPublicKeyLabel ? ' dashboard-key-icon-action--copied' : ''}`}
                                                             onClick={() => copyToClipboard(k.publicKey, copyPublicKeyLabel)}
-                                                            aria-label={copied === copyPublicKeyLabel ? 'Public key copied' : 'Copy public key'}
-                                                            title={copied === copyPublicKeyLabel ? 'Copied' : 'Copy public key'}
+                                                            aria-label={copied === copyPublicKeyLabel ? 'Agent ID copied' : 'Copy Agent ID (public key)'}
+                                                            title={copied === copyPublicKeyLabel ? 'Copied' : 'Copy Agent ID (public key)'}
                                                         >
                                                             <Copy size={14} />
                                                         </button>
