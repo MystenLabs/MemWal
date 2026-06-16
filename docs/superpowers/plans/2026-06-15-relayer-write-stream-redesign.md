@@ -1,4 +1,4 @@
-# Relayer Write-Stream Redesign Implementation Plan
+## Relayer write-stream redesign implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -381,7 +381,7 @@ git commit -m "feat(write-stream): wire WriteStreamLimiter into AppState and Con
 
 ---
 
-### Task 3: Add Prometheus Metrics for the Limiter
+### Task 3: Add Prometheus metrics for the limiter
 
 **Files:**
 - Modify: `services/server/src/observability.rs`
@@ -472,7 +472,7 @@ git commit -m "feat(write-stream): add Prometheus metrics for limiter state"
 
 ---
 
-### Task 4: Add Shared Helper to Translate Permit Timeout to `AppError`
+### Task 4: Add shared helper to translate permit timeout to `AppError`
 
 **Files:**
 - Modify: `services/server/src/routes/mod.rs`
@@ -567,7 +567,7 @@ fn spawn_prepare_remember_job(
 ) {
 ```
 
-The permit will be dropped when the spawned task finishes, which is after the wallet job is enqueued. This is intentional: prep work is gated, and the permit is released once prep hands off to durable queue.
+The permit drops when the spawned task finishes, which is after the wallet job is enqueued. This is intentional: prep work is gated, and the permit is released once prep hands off to durable queue.
 
 - [ ] **Step 3: Modify `remember_bulk` handler**
 
@@ -741,7 +741,7 @@ git commit -m "feat(write-stream): gate remember/manual and analyze with limiter
 
 ---
 
-### Task 7: Gate Wallet Worker Upload Path
+### Task 7: Gate wallet worker upload path
 
 **Files:**
 - Modify: `services/server/src/jobs.rs`
@@ -795,7 +795,7 @@ git commit -m "feat(write-stream): gate wallet worker upload with limiter"
 
 ---
 
-### Task 8: Add Snapshot Method and Wire Metric Emission
+### Task 8: Add snapshot method and wire metric emission
 
 **Files:**
 - Modify: `services/server/src/services/write_stream.rs`
@@ -961,7 +961,7 @@ git commit -m "feat(write-stream): emit limiter state and acquisition metrics"
 
 ---
 
-### Task 9: Update Sidecar Safety-Net Configuration
+### Task 9: Update sidecar safety-net configuration
 
 **Files:**
 - Modify: `services/server/scripts/sidecar/config.ts`
@@ -1010,7 +1010,7 @@ git commit -m "feat(sidecar): raise default upload concurrency safety net"
 
 ---
 
-### Task 10: Add Integration Test for Saturation Behavior
+### Task 10: Add integration test for saturation behavior
 
 **Files:**
 - Modify: `services/server/src/routes/remember.rs` (add tests at the bottom)
@@ -1066,7 +1066,7 @@ git commit -m "test(write-stream): add saturation unit test"
 
 ---
 
-### Task 11: Full Test Suite and Lint
+### Task 11: Full test suite and lint
 
 **Files:**
 - All modified files
@@ -1107,7 +1107,7 @@ git commit -m "chore(write-stream): clippy fixes and test cleanup"
 
 ---
 
-### Task 12: Documentation Updates
+### Task 12: Documentation updates
 
 **Files:**
 - Modify: `docs/relayer/self-hosting.md`

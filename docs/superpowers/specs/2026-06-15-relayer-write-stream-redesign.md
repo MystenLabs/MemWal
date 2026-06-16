@@ -1,4 +1,4 @@
-# Relayer Write-Stream Redesign
+## Relayer write-stream redesign
 
 | | |
 |---|---|
@@ -7,7 +7,7 @@
 | **Owner** | Max Mai |
 | **Date** | 2026-06-15 |
 
-## 1. Problem Statement
+## 1. Problem statement
 
 The relayer write stream (`/api/remember`, `/api/remember/bulk`, `/api/remember/manual`, and the store path inside `/api/analyze`) can overload the TypeScript sidecar's Walrus upload path.
 
@@ -36,11 +36,11 @@ Move the effective upload-slot budget into the Rust relayer so that:
 - It does **not** redesign the read stream (`/api/recall`, `/api/ask`).
 - It does **not** remove the Apalis job queue; it only gates when work enters and leaves the queue.
 
-## 4. Design Overview
+## 4. Design overview
 
 Add a `WriteStreamLimiter` to `AppState`. It is a thin wrapper around `tokio::sync::Semaphore` with `WRITE_STREAM_MAX_CONCURRENCY` permits.
 
-Every memory item that will result in a sidecar `/walrus/upload` call must acquire one permit before starting prep work, and must release it when the active work phase ends. The same permit pool is shared between prep tasks and upload workers, so the total number of active writes is always bounded.
+Every memory item that results in a sidecar `/walrus/upload` call must acquire one permit before starting prep work, and must release it when the active work phase ends. The same permit pool is shared between prep tasks and upload workers, so the total number of active writes is always bounded.
 
 ```mermaid
 flowchart LR
@@ -115,7 +115,7 @@ Initialize in `main.rs` after config load.
 
 1. Validate request and insert `remember_jobs` row (`status='running'`).
 2. Acquire one permit from `write_stream_limiter` with a bounded timeout.
-3. If acquisition times out, return `429 Too Many Requests` immediately. The row remains `running`; the stale-job sweeper will mark it failed after `STALE_REMEMBER_JOB_AFTER`.
+3. If acquisition times out, return `429 Too Many Requests` immediately. The row remains `running`; the stale-job sweeper marks it failed after `STALE_REMEMBER_JOB_AFTER`.
 4. Pass the permit to `spawn_prepare_remember_job`.
 5. The prep task releases the permit after enqueueing the wallet job (or on failure).
 
@@ -143,7 +143,7 @@ Initialize in `main.rs` after config load.
 
 `execute_wallet_job` acquires one permit before calling `upload_blob`, and releases it after the sidecar call completes (success or terminal failure).
 
-If permit acquisition times out, the job is left in the Apalis queue and will be retried. Because permits are only held by active work, retries naturally back off until slots free up.
+If permit acquisition times out, the job is left in the Apalis queue and is retried. Because permits are only held by active work, retries naturally back off until slots free up.
 
 ### 5.5 Sidecar safety net
 
@@ -163,7 +163,7 @@ WALRUS_UPLOAD_PER_WALLET_CONCURRENCY = 1
 
 The sidecar limit should be higher than the Rust limit so it only fires if Rust leaks a slot or if another caller (MCP, direct) bypasses Rust.
 
-## 6. Data Flow
+## 6. Data flow
 
 ### 6.1 Single `/api/remember`
 
@@ -199,7 +199,7 @@ Client POST /api/remember/bulk with N items
   ← return 202 + job_ids
 ```
 
-## 7. Error Handling
+## 7. Error handling
 
 | Scenario | Behavior |
 |---|---|
@@ -273,7 +273,7 @@ Logs:
 
 Run a targeted benchmark that previously produced `queuedWalrusUploads > 20`. Verify the metric stays near zero and p95 `/api/remember` latency is stable.
 
-## 11. Risks & Mitigations
+## 11. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -282,12 +282,12 @@ Run a targeted benchmark that previously produced `queuedWalrusUploads > 20`. Ve
 | Slot leak due to a bug. | Permit guard uses `Drop`; add metrics for available permits to detect leaks; sidecar safety net catches overflow. |
 | Retry storm after a crash. | Bounded by in-flight jobs at crash time; Apalis retry budget still applies. |
 
-## 12. Future Work
+## 12. Future work
 
 - **Distributed limiter**: If the relayer scales horizontally, replace the in-process semaphore with a Redis-backed semaphore so instances share the budget.
 - **Two-tier slots**: If throughput measurements show prep is the bottleneck, split into prep-slot and upload-slot pools.
 - **Admission by account**: Consider per-account write slots to prevent one noisy neighbor from consuming the global budget.
 
-## 13. Open Questions
+## 13. Open questions
 
 None. Design approved for implementation planning.
