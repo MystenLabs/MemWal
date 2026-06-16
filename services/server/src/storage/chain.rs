@@ -154,6 +154,50 @@ pub async fn admin_add_delegate_key(
     .await
 }
 
+/// Add every delegate key in `delegates` to `account_id` in a SINGLE transaction
+/// (one PTB with N `admin_add_delegate_key` move calls). Keeps the account-mirror
+/// to 2 txns/owner regardless of delegate count (the cap is 20), instead of
+/// 1 + N txns — which made high-delegate owners time out the HTTP gateway.
+/// Caller must ensure `delegates` is non-empty.
+#[allow(clippy::too_many_arguments)]
+pub async fn admin_add_delegate_keys(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    key_index: usize,
+    package_id: &str,
+    migration_cap_id: &str,
+    account_id: &str,
+    delegates: &[crate::storage::sui::OnchainDelegateKey],
+) -> Result<ChainTxResponse, AppError> {
+    let delegates_json: Vec<serde_json::Value> = delegates
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "publicKeyHex": d.public_key_hex,
+                "label": d.label,
+                "perms": d.perms,
+                "createdAt": d.created_at,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "keyIndex": key_index,
+        "packageId": package_id,
+        "migrationCapId": migration_cap_id,
+        "accountId": account_id,
+        "delegates": delegates_json,
+    });
+    post_chain_route(
+        client,
+        sidecar_url,
+        sidecar_secret,
+        "/chain/admin-add-delegate-keys",
+        &body,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn admin_set_wrapped_dek(
     client: &reqwest::Client,

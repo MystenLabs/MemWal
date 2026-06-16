@@ -215,6 +215,48 @@ export function registerChainRoutes(app: Express): void {
         }
     });
 
+    // Batch variant: add every delegate in `delegates[]` to one account in a
+    // single PTB (N move calls). Keeps high-delegate owners under the gateway
+    // timeout (1 tx instead of N).
+    app.post("/chain/admin-add-delegate-keys", express.json({ limit: JSON_LIMIT_CHAIN }), async (req, res) => {
+        const traceId = requestIdFor(req);
+        try {
+            const signer = signerForKeyIndex(req.body.keyIndex);
+            const packageId = requireObjectId(req.body.packageId, "packageId");
+            const migrationCapId = requireObjectId(req.body.migrationCapId, "migrationCapId");
+            const accountId = requireObjectId(req.body.accountId, "accountId");
+            const delegates = Array.isArray(req.body.delegates) ? req.body.delegates : [];
+            if (delegates.length === 0) {
+                throw new Error("admin-add-delegate-keys requires a non-empty delegates array");
+            }
+            const tx = new Transaction();
+            const capRef = tx.object(migrationCapId);
+            const accRef = tx.object(accountId);
+            for (const d of delegates) {
+                const publicKeyHex = requireString(d.publicKeyHex, "publicKeyHex");
+                const suiAddress = typeof d.suiAddress === "string"
+                    ? requireAddress(d.suiAddress, "suiAddress")
+                    : deriveSuiAddressFromPublicKeyHex(publicKeyHex);
+                tx.moveCall({
+                    target: `${packageId}::account::admin_add_delegate_key`,
+                    arguments: [
+                        capRef,
+                        accRef,
+                        tx.pure("vector<u8>", bytesFromHex(publicKeyHex, "publicKeyHex")),
+                        tx.pure.address(suiAddress),
+                        tx.pure("string", requireString(d.label ?? "Migrated delegate", "label")),
+                        tx.pure.u8(Number(d.perms ?? 3)),
+                        tx.pure.u64(Number(d.createdAt ?? Date.now())),
+                    ],
+                });
+            }
+            const executed = await executeTx(tx, signer, traceId, "admin-add-delegate-keys");
+            res.json({ digest: executed.digest, added: delegates.length });
+        } catch (err) {
+            sendError(res, traceId, "admin-add-delegate-keys", err);
+        }
+    });
+
     app.post("/chain/admin-set-wrapped-dek", express.json({ limit: JSON_LIMIT_CHAIN }), async (req, res) => {
         const traceId = requestIdFor(req);
         try {

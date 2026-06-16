@@ -354,24 +354,21 @@ pub async fn migration_v2_import_accounts(
                 let namespace_id = tx.namespace_id.ok_or_else(|| {
                     AppError::Internal("admin_import_account returned no namespace id".into())
                 })?;
-                let mut delegates = 0usize;
-                for dk in legacy.delegate_keys.iter() {
-                    let ki = state.config.migration_key_index;
-                    chain::admin_add_delegate_key(
+                // Add all delegates in ONE tx (batched PTB) so owners near the
+                // 20-delegate cap don't run 20 sequential txns and time out.
+                let delegates = legacy.delegate_keys.len();
+                if delegates > 0 {
+                    chain::admin_add_delegate_keys(
                         &state.http_client,
                         &state.config.sidecar_url,
                         state.config.sidecar_secret.as_deref(),
-                        ki,
+                        state.config.migration_key_index,
                         p2_package_id,
                         migration_cap_id,
                         &account_id,
-                        &dk.public_key_hex,
-                        &dk.label,
-                        dk.perms,
-                        dk.created_at,
+                        &legacy.delegate_keys,
                     )
                     .await?;
-                    delegates += 1;
                 }
                 Ok((account_id, namespace_id, delegates))
             }
