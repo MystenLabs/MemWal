@@ -44,6 +44,17 @@ const NAMESPACE_TOOLS = new Set([
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",
+    // soft-delete: clears a namespace's memories from recall. Like restore,
+    // its upstream schema requires `namespace`; registered here so a
+    // configured default is injected when the agent omits one. (The tool
+    // DEFINITION itself lives in the MCP sidecar.)
+    "memwal_clear_namespace",
+    // list a namespace's memories (metadata + per-row id, for auditing /
+    // feeding memwal_forget). Namespace-scoped → default injection applies.
+    "memwal_list",
+    // NOTE: memwal_forget is intentionally NOT here — it takes a memory `id`,
+    // not a `namespace`, so there's nothing to inject. (Tool DEFINITION for
+    // both lives in the MCP sidecar.)
 ]);
 
 /**

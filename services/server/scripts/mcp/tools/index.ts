@@ -6,6 +6,9 @@ import { registerRememberBulkTool } from "./remember-bulk.js";
 import { registerRecallTool } from "./recall.js";
 import { registerAnalyzeTool } from "./analyze.js";
 import { registerRestoreTool } from "./restore.js";
+import { registerClearNamespaceTool } from "./clear-namespace.js";
+import { registerListTool } from "./list.js";
+import { registerForgetTool } from "./forget.js";
 import { registerHealthTool } from "./health.js";
 
 /**
@@ -20,6 +23,9 @@ export function registerTools(server: McpServer, session: MemWalSession): void {
     registerRecallTool(server, session);
     registerAnalyzeTool(server, session);
     registerRestoreTool(server, session);
+    registerClearNamespaceTool(server, session);
+    registerListTool(server, session);
+    registerForgetTool(server, session);
     registerHealthTool(server, session);
 }
 
@@ -29,5 +35,8 @@ export {
     registerRecallTool,
     registerAnalyzeTool,
     registerRestoreTool,
+    registerClearNamespaceTool,
+    registerListTool,
+    registerForgetTool,
     registerHealthTool,
 };
