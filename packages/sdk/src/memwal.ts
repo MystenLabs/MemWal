@@ -45,6 +45,9 @@ import type {
     RecallManualOptions,
     RecallManualResult,
     RestoreResult,
+    ClearNamespaceResult,
+    ListResult,
+    ForgetResult,
     RememberBulkItem,
     RememberBulkOptions,
     RememberBulkResult,
@@ -801,6 +804,117 @@ export class MemWal {
         return this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
+        });
+    }
+
+    /**
+     * Clear a namespace — soft-delete every memory in it so it stops surfacing
+     * in `recall()`. Use this to reset an agent's memory between iterations
+     * (replaces the namespace-rotation workaround).
+     *
+     * Soft-delete clears *retrievability*: the memories no longer come back
+     * from recall, but the underlying Walrus blobs are user-owned and persist
+     * until you delete them on-chain or their storage epoch expires. "Cleared"
+     * here means "un-recallable", not "cryptographically erased".
+     *
+     * Owner-scoped — only the caller's own memories are affected. The
+     * namespace is matched EXACTLY (case- and whitespace-sensitive).
+     *
+     * `cleared = 0` is a safe no-op, NOT a failure — it means the namespace was
+     * already empty/cleared (or never existed). Don't branch on `cleared > 0`;
+     * verify the end-state with `list()` if you need confirmation.
+     *
+     * **Ordering caveat:** this clears what exists at call time. A `remember()`
+     * still in flight (its upload not yet durable when this runs) can land
+     * *after* the clear and survive it. For a guaranteed-clean reset, wait for
+     * outstanding remember job ids to finish before clearing.
+     *
+     * @param namespace - Namespace to clear (exact match; no prefix/hierarchy)
+     * @returns ClearNamespaceResult with the count of memories cleared
+     *
+     * @example
+     * ```typescript
+     * const result = await memwal.clearNamespace("my-app");
+     * console.log(`cleared=${result.cleared}`);
+     * ```
+     */
+    async clearNamespace(namespace: string): Promise<ClearNamespaceResult> {
+        return this.signedRequest<ClearNamespaceResult>("POST", "/api/clear-namespace", {
+            namespace,
+        });
+    }
+
+    /**
+     * List the memories stored in a namespace — metadata only (id, blob_id,
+     * created_at, importance), newest first. Decrypt-free, so it's cheap to
+     * call for auditing what's stored. Each item's `id` is the handle you pass
+     * to `forget(id)` to delete that specific memory.
+     *
+     * Note: this returns metadata, NOT the memory text — surfacing the text
+     * would require recall-grade decryption. Use `recall()` to read content.
+     *
+     * Owner-scoped; soft-deleted memories are omitted. Namespace matched
+     * EXACTLY (case- and whitespace-sensitive).
+     *
+     * **Pagination:** `result.returned` is THIS page's size (capped by `limit`,
+     * 1–500), NOT the namespace total. When `result.has_more` is true, pass
+     * `result.next_cursor` back as `opts.cursor` to fetch the next page. The
+     * cursor is stable under concurrent deletes (forgotten rows just drop out).
+     *
+     * @param namespace - Namespace to list (exact match)
+     * @param opts - `limit` (default 50, capped 1–500) and `cursor` (from a
+     *   previous `next_cursor`); a bare `number` is also accepted as `limit`.
+     * @returns ListResult with the memories' metadata + ids + pagination fields
+     *
+     * @example
+     * ```typescript
+     * let cursor: string | undefined;
+     * do {
+     *   const page = await memwal.list("my-app", { limit: 100, cursor });
+     *   for (const m of page.memories) console.log(m.id, m.created_at);
+     *   cursor = page.has_more ? page.next_cursor : undefined;
+     * } while (cursor);
+     * ```
+     */
+    async list(
+        namespace: string,
+        opts: number | { limit?: number; cursor?: string } = {},
+    ): Promise<ListResult> {
+        // Accept a bare number as `limit` for ergonomics; otherwise an options object.
+        const { limit = 50, cursor } =
+            typeof opts === "number" ? { limit: opts, cursor: undefined } : opts;
+        return this.signedRequest<ListResult>("POST", "/api/list", {
+            namespace,
+            limit,
+            ...(cursor ? { cursor } : {}),
+        });
+    }
+
+    /**
+     * Forget (soft-delete) a single memory by its `id` (from `list()`). The
+     * memory stops surfacing in `recall()`; an identical-text memory stored
+     * separately is unaffected (deletion is per-memory, not per-content).
+     *
+     * Like `clearNamespace`, this clears *retrievability* — the underlying
+     * Walrus blob is yours and persists until on-chain deletion / epoch expiry.
+     *
+     * Owner-scoped. `forgotten = 0` is a safe no-op, NOT a failure — the id
+     * never existed, isn't yours, or was already forgotten. Don't branch on
+     * `forgotten > 0` (a retry of a successful forget correctly returns 0);
+     * verify the end-state with `list()` if needed.
+     *
+     * @param id - The memory id from a `list()` entry
+     * @returns ForgetResult; `forgotten` is 1 on success, 0 if nothing matched
+     *
+     * @example
+     * ```typescript
+     * const { memories } = await memwal.list("my-app");
+     * await memwal.forget(memories[0].id);
+     * ```
+     */
+    async forget(id: string): Promise<ForgetResult> {
+        return this.signedRequest<ForgetResult>("POST", "/api/memories/forget", {
+            id,
         });
     }
 
