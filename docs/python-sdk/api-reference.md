@@ -149,6 +149,45 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental.
 RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: str)
 ```
 
+### `clear_namespace(namespace) -> ClearNamespaceResult`
+
+Soft-delete every memory in a namespace so it stops surfacing in `recall` — the reset primitive. Clears retrievability; the Walrus blob is user-owned and persists (un-recallable, not erased). Owner-scoped; namespace matched exactly.
+
+- `cleared` is the count newly soft-deleted; `0` is a safe no-op (already empty/cleared)
+
+```python
+ClearNamespaceResult(cleared: int, namespace: str, owner: str)
+```
+
+### `list(namespace, limit=50, cursor=None) -> ListResult`
+
+Enumerate the memories in a namespace — metadata only (no decrypted text), newest first, decrypt-free. Each item's `id` is the handle for `forget`. Use `recall` to read content.
+
+- `limit` defaults to `50` (capped 1–500); omit `cursor` for the first page
+- Paginate: when `has_more` is `True`, pass `next_cursor` back as `cursor`
+- `returned` is this page's size, not the namespace total
+
+```python
+ListResult(
+    memories: list[MemoryListItem],  # MemoryListItem(id, blob_id, created_at, importance)
+    returned: int,
+    has_more: bool,
+    next_cursor: Optional[str],
+    namespace: str,
+    owner: str,
+)
+```
+
+### `forget(memory_id) -> ForgetResult`
+
+Soft-delete a single memory by its `id` (from `list`). An identical-text memory stored separately is unaffected (per-memory). Owner-scoped.
+
+- `forgotten` is `1` on success; `0` is a safe no-op (not found / not yours / already gone)
+
+```python
+ForgetResult(forgotten: int, id: str, owner: str)
+```
+
 ### `health() -> HealthResult`
 
 Check relayer health. No authentication. Raises `MemWalError` on non-200.

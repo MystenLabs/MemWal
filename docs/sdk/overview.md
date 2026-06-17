@@ -12,7 +12,7 @@ Use this first.
 
 - relayer-backed
 - best path for most teams
-- main methods: `remember`, `recall`, `analyze`, `restore`, `health`
+- main methods: `remember`, `recall`, `analyze`, `restore`, `clearNamespace`, `list`, `forget`, `health`
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
@@ -67,7 +67,7 @@ memwal = MemWal.create(
 )
 ```
 
-Main methods: `remember`, `recall`, `analyze`, `ask`, `restore`, `health`
+Main methods: `remember`, `recall`, `analyze`, `ask`, `restore`, `clear_namespace`, `list`, `forget`, `health`
 
 Middleware: `with_memwal_langchain`, `with_memwal_openai`
 
