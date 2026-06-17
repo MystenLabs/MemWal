@@ -58,6 +58,15 @@ const EMBED_TIMEOUT_MS: u64 = 800;
 const SEARCH_TIMEOUT_MS: u64 = 300;
 const FETCH_TIMEOUT_MS: u64 = 500;
 
+// The pre-extraction namespace-existence check. The
+// `deleted_at IS NULL` filter is SEPARATE from the one in `search_similar` —
+// reverting only this one would let a fully-cleared namespace still read as
+// "has memories" (wasted embed+search) and is the second of the two read-path
+// filters that are load-bearing. Named so a unit test
+// (`mod tests`) pins the filter even though the query needs a live DB to run.
+const NAMESPACE_EXISTENCE_SQL: &str =
+    "SELECT 1 FROM vector_entries WHERE owner = $1 AND namespace = $2 AND deleted_at IS NULL LIMIT 1";
+
 /// POST /api/analyze
 ///
 /// AI fact extraction flow:
@@ -124,9 +133,11 @@ pub async fn analyze(
     let mut pre_extract_seal_ms: u128 = 0;
     let mut pre_extract_dropped: usize = 0;
 
-    let namespace_has_memories: bool = sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM vector_entries WHERE owner = $1 AND namespace = $2 LIMIT 1",
-    )
+    // `deleted_at IS NULL` (migration 010): a fully soft-deleted / cleared
+    // namespace must read as empty here, so analyze takes the
+    // skip-pre-extraction fast path instead of embedding + searching against
+    // tombstoned rows that search_similar would filter out anyway.
+    let namespace_has_memories: bool = sqlx::query_scalar::<_, i32>(NAMESPACE_EXISTENCE_SQL)
     .bind(owner)
     .bind(namespace)
     .fetch_optional(state.db.pool())
@@ -568,7 +579,7 @@ pub async fn analyze(
 
 #[cfg(test)]
 mod tests {
-    use super::{ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES};
+    use super::{ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES, NAMESPACE_EXISTENCE_SQL};
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
 
@@ -608,5 +619,26 @@ mod tests {
         // Additional weight is exactly fact_count
         assert_eq!(analyze_additional_weight(0), 0);
         assert_eq!(analyze_additional_weight(20), 20);
+    }
+
+    // ── pre-extraction filter keeps deleted_at ──
+    //
+    // The namespace-existence check is the SECOND of the two read-path
+    // tombstone filters (search_similar is the first). Reverting only this one
+    // would let a fully-cleared namespace still read as "has memories" and pull
+    // tombstoned rows into the extractor's dedup context. The query needs a
+    // live DB to run, so pin the filter on the SQL string itself.
+
+    #[test]
+    fn pre_extraction_existence_check_filters_soft_deleted() {
+        assert!(
+            NAMESPACE_EXISTENCE_SQL.contains("deleted_at IS NULL"),
+            "analyze namespace-existence check must exclude soft-deleted rows: {NAMESPACE_EXISTENCE_SQL}"
+        );
+        assert!(
+            NAMESPACE_EXISTENCE_SQL.contains("owner = $1")
+                && NAMESPACE_EXISTENCE_SQL.contains("namespace = $2"),
+            "existence check must stay owner+namespace scoped: {NAMESPACE_EXISTENCE_SQL}"
+        );
     }
 }

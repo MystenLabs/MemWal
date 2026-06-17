@@ -763,6 +763,13 @@ async fn main() {
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
+        // user-facing soft-delete (clearNamespace) — tombstones rows so they
+        // stop surfacing in recall; distinct from /api/forget (hard delete).
+        .route("/api/clear-namespace", post(routes::clear_namespace))
+        // user-facing memory management: list a namespace (metadata + per-row
+        // id) and soft-delete a single memory by that id.
+        .route("/api/list", post(routes::list))
+        .route("/api/memories/forget", post(routes::forget_by_id))
         .route("/api/stats", post(routes::stats))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
