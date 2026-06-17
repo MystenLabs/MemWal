@@ -64,6 +64,10 @@ from .types import (
     RememberManualResult,
     RememberResult,
     RestoreResult,
+    ClearNamespaceResult,
+    ListResult,
+    MemoryListItem,
+    ForgetResult,
 )
 from .utils import (
     build_seal_session_personal_message,
@@ -816,6 +820,116 @@ class MemWal:
             owner=data["owner"],
         )
 
+    async def clear_namespace(self, namespace: str) -> ClearNamespaceResult:
+        """Clear a namespace — soft-delete every memory in it so it stops
+        surfacing in :meth:`recall`. Use to reset an agent's memory between
+        iterations (replaces the namespace-rotation workaround).
+
+        Soft-delete clears *retrievability*: the memories no longer come back
+        from recall, but the underlying Walrus blobs are user-owned and persist
+        until deleted on-chain or their storage epoch expires — "cleared" means
+        "un-recallable", not "cryptographically erased". Owner-scoped; namespace
+        matched EXACTLY (case- and whitespace-sensitive).
+
+        ``cleared == 0`` is a safe no-op, NOT a failure — the namespace was
+        already empty/cleared (or never existed). Don't branch on ``cleared >
+        0``; verify the end-state with :meth:`list` if you need confirmation.
+
+        Ordering caveat: this clears what exists at call time. A :meth:`remember`
+        still in flight (its upload not yet durable when this runs) can land
+        *after* the clear and survive it. For a guaranteed-clean reset, wait for
+        outstanding remember job ids to finish before clearing.
+
+        Args:
+            namespace: Namespace to clear. Exact match — no prefix/hierarchy.
+
+        Returns:
+            :class:`ClearNamespaceResult` with the count of memories cleared.
+        """
+        data = await self._signed_request("POST", "/api/clear-namespace", {
+            "namespace": namespace,
+        })
+        return ClearNamespaceResult(
+            cleared=data["cleared"],
+            namespace=data["namespace"],
+            owner=data["owner"],
+        )
+
+    async def list(
+        self, namespace: str, limit: int = 50, cursor: Optional[str] = None
+    ) -> ListResult:
+        """List one page of memories stored in ``namespace`` — metadata only
+        (id, blob_id, created_at, importance), newest first. Decrypt-free, so
+        it's cheap to call for auditing what's stored.
+
+        Each item's ``id`` is the handle to pass to :meth:`forget` to delete
+        that specific memory. This does NOT return the memory text — surfacing
+        it would require recall-grade decryption; use :meth:`recall` to read
+        content. Owner-scoped; soft-deleted memories are omitted. Namespace
+        matched EXACTLY (case- and whitespace-sensitive).
+
+        Pagination: ``result.returned`` is THIS page's size (capped by
+        ``limit``), NOT the namespace total. When ``result.has_more`` is True,
+        pass ``result.next_cursor`` back as ``cursor`` to fetch the next page.
+        The cursor is stable under concurrent deletes (forgotten rows drop out).
+
+        Args:
+            namespace: Namespace to list. Exact match — no prefix/hierarchy.
+            limit: Max memories per page (default 50, capped server-side at 500).
+            cursor: Opaque cursor from a previous response's ``next_cursor``;
+                omit for the first page.
+
+        Returns:
+            :class:`ListResult` with this page's metadata + ids + pagination fields.
+        """
+        payload: Dict[str, Any] = {"namespace": namespace, "limit": limit}
+        if cursor is not None:
+            payload["cursor"] = cursor
+        data = await self._signed_request("POST", "/api/list", payload)
+        return ListResult(
+            memories=[
+                MemoryListItem(
+                    id=m["id"],
+                    blob_id=m["blob_id"],
+                    created_at=m["created_at"],
+                    importance=m["importance"],
+                )
+                for m in data["memories"]
+            ],
+            returned=data["returned"],
+            has_more=data["has_more"],
+            next_cursor=data.get("next_cursor"),
+            namespace=data["namespace"],
+            owner=data["owner"],
+        )
+
+    async def forget(self, memory_id: str) -> ForgetResult:
+        """Forget (soft-delete) a single memory by its ``id`` (from
+        :meth:`list`). The memory stops surfacing in :meth:`recall`; an
+        identical-text memory stored separately is unaffected (deletion is
+        per-memory, not per-content).
+
+        Like :meth:`clear_namespace`, this clears retrievability — the Walrus
+        blob is user-owned and persists. Owner-scoped. ``forgotten == 0`` is a
+        safe no-op, NOT a failure — the id never existed, isn't yours, or was
+        already forgotten. Don't branch on ``forgotten > 0`` (a retry of a
+        successful forget correctly returns 0); verify with :meth:`list` if needed.
+
+        Args:
+            memory_id: The memory id from a :meth:`list` entry.
+
+        Returns:
+            :class:`ForgetResult`; ``forgotten`` is 1 on success, 0 if nothing matched.
+        """
+        data = await self._signed_request("POST", "/api/memories/forget", {
+            "id": memory_id,
+        })
+        return ForgetResult(
+            forgotten=data["forgotten"],
+            id=data["id"],
+            owner=data["owner"],
+        )
+
     async def health(self) -> HealthResult:
         """Check server health. No authentication required.
 
@@ -1392,6 +1506,21 @@ class MemWalSync:
         """Synchronous version of :meth:`MemWal.restore`. Default limit is 10
         (matches server + TypeScript SDK)."""
         return self._run(self._inner.restore(namespace, limit))
+
+    def clear_namespace(self, namespace: str) -> ClearNamespaceResult:
+        """Synchronous version of :meth:`MemWal.clear_namespace`."""
+        return self._run(self._inner.clear_namespace(namespace))
+
+    def list(
+        self, namespace: str, limit: int = 50, cursor: Optional[str] = None
+    ) -> ListResult:
+        """Synchronous version of :meth:`MemWal.list`. Default limit is 50;
+        pass ``cursor`` from a prior result's ``next_cursor`` to page."""
+        return self._run(self._inner.list(namespace, limit, cursor))
+
+    def forget(self, memory_id: str) -> ForgetResult:
+        """Synchronous version of :meth:`MemWal.forget`."""
+        return self._run(self._inner.forget(memory_id))
 
     def health(self) -> HealthResult:
         """Synchronous version of :meth:`MemWal.health`."""
