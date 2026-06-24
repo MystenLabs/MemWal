@@ -81,8 +81,8 @@ Submit a bulk remember request and wait until every job reaches a terminal state
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
-- `limit` defaults to `10`; `topK` is an alias and wins when both are set
+- Preferred form: `recall({ query, limit?, namespace?, maxDistance? })`
+- The result-count parameter is **`limit`** (defaults to `10`). `topK` is accepted as a camelCase alias and wins when both are set, but `limit` is canonical — prefer it.
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 

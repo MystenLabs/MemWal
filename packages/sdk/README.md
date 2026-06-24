@@ -51,7 +51,7 @@ await memwal.rememberAndWait(
 );
 const memories = await memwal.recall({
   query: "What are the user's preferences?",
-  topK: 10,
+  limit: 10,
   maxDistance: 0.7,
 });
 await memwal.restore("demo");

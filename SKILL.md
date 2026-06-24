@@ -204,8 +204,8 @@ interface RecallResult {
 }
 
 interface RecallOptions {
-  limit?: number;
-  topK?: number;
+  limit?: number;   // canonical result count (default 10)
+  topK?: number;    // camelCase alias for `limit`
   namespace?: string;
   maxDistance?: number;
 }
