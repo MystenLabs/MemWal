@@ -206,6 +206,17 @@
         ]
       },
       {
+        "tab": "Troubleshooting",
+        "groups": [
+          {
+            "group": "Troubleshooting",
+            "pages": [
+              "troubleshooting/overview"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Contributing",
         "groups": [
           {
