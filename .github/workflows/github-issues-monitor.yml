@@ -1,0 +1,47 @@
+name: GitHub Issues Monitor
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  comment:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add Comment to New Issue
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # pin@v7.0.1
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: "Thank you for opening this issue, a team member will review it shortly."
+            })
+
+  notify-slack:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack channel
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL secret not set — skipping Slack notification."
+            exit 0
+          fi
+          payload=$(jq -n \
+            --arg text ":new: New issue in *$REPO* by *$ISSUE_AUTHOR*: <$ISSUE_URL|#$ISSUE_NUMBER — $ISSUE_TITLE>" \
+            '{text: $text}')
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "$payload" "$SLACK_WEBHOOK_URL"
