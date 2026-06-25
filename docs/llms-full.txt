@@ -462,5 +462,5 @@ MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75
 
 - **Docs**: https://docs.wal.app/walrus-memory/getting-started/what-is-memwal
 - **SDK on npm**: https://www.npmjs.com/package/@mysten-incubation/memwal
-- **GitHub**: https://github.com/CommandOSSLabs/MemWal
+- **GitHub**: https://github.com/MystenLabs/MemWal
 - **Dashboard**: https://memory.walrus.xyz
