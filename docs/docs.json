@@ -64,6 +64,7 @@
             "pages": [
               "fundamentals/architecture/core-components",
               "fundamentals/architecture/how-storage-works",
+              "fundamentals/architecture/funding-storage",
               "fundamentals/architecture/data-flow-security-model"
             ]
           }
