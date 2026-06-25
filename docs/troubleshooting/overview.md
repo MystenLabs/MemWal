@@ -15,7 +15,7 @@ sdk/api-reference, mcp/reference, getting-started/quick-start.
 
 This page collects the support questions that come up most often and the fastest way to resolve each one. Every entry lists the symptom you observe, the cause behind it, and the fix to apply.
 
-If your issue is not here, set `MEMWAL_MCP_DEBUG=1` for the Model Context Protocol (MCP) server, or enable `debug` in the SDK configuration, to get verbose logs, then open an issue on the repository with that output.
+If your issue is not here, set `MEMWAL_MCP_DEBUG=1` for the Model Context Protocol (MCP) server, or, if you use the `withMemWal()` AI middleware, pass `debug: true` in its options, to get verbose logs, then open an issue on the repository with that output.
 
 ## How authentication works
 
@@ -64,7 +64,7 @@ This section covers problems that appear before the memory tools work.
 
 **Symptom:** After you connect the MCP server, the agent sees only `memwal_login`, or the memory tools return an authentication-required error.
 
-**Cause:** No credentials file exists at `~/.memwal/credentials.json`. When an MCP host launches the package without credentials, it starts in an authentication-required mode that exposes `memwal_login` first.
+**Cause:** No credentials file exists at `~/.memwal/credentials.json`. When an MCP host launches the package without credentials, it starts in an authentication-required mode. The tool list still advertises all the `memwal_*` tools, but only `memwal_login` runs until you authenticate; the other tools return an authentication-required error when called, which is why it can look like `memwal_login` is the only tool available.
 
 **Fix:** Ask the agent to call `memwal_login`, which returns a one-time sign-in URL valid for 5 minutes, or run `npx -y @mysten-incubation/memwal-mcp login --prod` in your terminal. Sign in to the wallet you intend to use before you open the URL. If the URL expires, call the tool again to get a fresh one.
 
@@ -96,7 +96,7 @@ A client-side timeout does not mean the save failed. The relayer accepts the wor
 2. Match the tool to the task. To save one discrete fact, such as a milestone, use `memwal_remember`, which performs a single write. Reserve `memwal_analyze` for longer passages where you want several facts extracted, and keep those passages a reasonable size.
 3. Confirm connectivity first. Run `memwal_health`, which calls the unauthenticated health endpoint and is the fastest way to confirm the relayer is reachable.
 4. Wait correctly in the SDK. The `remember` and `analyze` methods return immediately with job IDs, so wait with `waitForRememberJob` or `analyzeAndWait` and a sensible timeout, or poll the job status, rather than wrapping the whole operation in one short blocking call.
-5. Collect logs if the problem persists. Set `MEMWAL_MCP_DEBUG=1` for the MCP server, or `debug: true` in the SDK, and capture the per-request output.
+5. Collect logs if the problem persists. Set `MEMWAL_MCP_DEBUG=1` for the MCP server, or pass `debug: true` to the `withMemWal()` AI middleware, and capture the per-request output. The core SDK (`MemWal.create()`) has no built-in debug flag.
 
 ### Recall returns no results immediately after a save
 
@@ -113,7 +113,7 @@ Use these values for quick configuration and triage:
 | **Item** | **Value** |
 | --- | --- |
 | Production relayer | `https://relayer.memory.walrus.xyz` |
-| Staging relayer (testnet) | `https://relayer-staging.memory.walrus.xyz` |
+| Staging relayer (Testnet) | `https://relayer-staging.memory.walrus.xyz` |
 | Dashboard for accounts and delegate keys | `https://memory.walrus.xyz` |
 | MCP environment presets | `--prod`, `--staging`, `--local` |
 | Local credentials file | `~/.memwal/credentials.json` |
@@ -134,7 +134,7 @@ Yes. Generating a delegate key creates the key pair, and it works only after the
 
 The cause is almost always one of 3 things: the key is not registered on the account yet or is still settling, your account ID does not match the account that owns the key, or your client points at a different network than the one where you created the account. Check those in that order. A skewed system clock can also cause it, because each request carries a timestamp with a 5-minute window.
 
-### Is my testnet account the same as my production account?
+### Is my Testnet account the same as my production account?
 
 No. Accounts and delegate keys are specific to each network. A key created on staging does not authenticate against the production relayer, and the reverse is also true. Confirm that your relayer environment matches where you created the account.
 
