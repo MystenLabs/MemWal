@@ -64,7 +64,7 @@ This section covers problems that appear before the memory tools work.
 
 **Symptom:** After you connect the MCP server, the agent sees only `memwal_login`, or the memory tools return an authentication-required error.
 
-**Cause:** No credentials file exists at `~/.memwal/credentials.json`. When an MCP host launches the package without credentials, it starts in an authentication-required mode. The tool list still advertises all the `memwal_*` tools, but only `memwal_login` runs until you authenticate; the other tools return an authentication-required error when called, which is why it can look like `memwal_login` is the only tool available.
+**Cause:** No credentials file exists at `~/.memwal/credentials.json`. When an MCP host launches the package without credentials, it starts in an authentication-required mode. The tool list still advertises the core memory tools alongside `memwal_login`, but only `memwal_login` runs until you authenticate; the other tools return an authentication-required error when called, which is why it can look like `memwal_login` is the only tool available.
 
 **Fix:** Ask the agent to call `memwal_login`, which returns a one-time sign-in URL valid for 5 minutes, or run `npx -y @mysten-incubation/memwal-mcp login --prod` in your terminal. Sign in to the wallet you intend to use before you open the URL. If the URL expires, call the tool again to get a fresh one.
 
@@ -84,7 +84,7 @@ This section covers slow or timed-out writes.
 
 **Symptom:** Recall returns quickly, but a save through `memwal_analyze` times out, sometimes on repeated attempts.
 
-**Cause:** Recall is a single search request, so it is fast. A save is heavier, and `memwal_analyze` is the heaviest save: it runs a large language model (LLM) extraction over your text, then enqueues each extracted fact as its own background job that embeds, encrypts, uploads to Walrus, and indexes the result. Under load, this fan-out can exceed the MCP host's tool-call timeout even though the relayer keeps working normally.
+**Cause:** Recall is a single search request, so it is fast. A save is heavier, and `memwal_analyze` is the heaviest save: it runs a large language model (LLM) extraction over your text, then embeds and encrypts each extracted fact and enqueues each as its own background job that uploads to Walrus and indexes the result. Under load, this fan-out can exceed the MCP host's tool-call timeout even though the relayer keeps working normally.
 
 <Warning>
 A client-side timeout does not mean the save failed. The relayer accepts the work as background jobs and keeps processing after the client stops waiting. Running the same `memwal_analyze` call again can create duplicate memories, so confirm the result before you retry.
