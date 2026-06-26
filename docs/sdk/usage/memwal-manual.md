@@ -130,7 +130,7 @@ for (const memory of hits.results) {
 }
 ```
 
-The agent holds two distinct secrets, and it is worth keeping their roles clear:
+The agent holds two distinct secrets:
 
 - The **delegate key** (`key`) authenticates the agent to the relayer.
 - The **Sui key** (`suiPrivateKey`) signs the Seal and Walrus operations that encrypt and store the data.
