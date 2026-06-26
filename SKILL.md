@@ -581,6 +581,6 @@ If you're writing user-facing copy, prefer "Walrus Memory". If you're writing an
 
 - **Docs**: https://memory.walrus.xyz
 - **SDK on npm**: https://www.npmjs.com/package/@mysten-incubation/memwal
-- **GitHub**: https://github.com/CommandOSSLabs/MemWal
+- **GitHub**: https://github.com/MystenLabs/MemWal
 - **Dashboard**: https://memory.walrus.xyz
 - **llms.txt**: https://docs.wal.app/walrus-memory/llms.txt
