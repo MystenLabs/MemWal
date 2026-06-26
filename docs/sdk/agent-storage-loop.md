@@ -79,7 +79,7 @@ All blobs on Walrus are public, so private agent state must be encrypted. There 
 
 1. **Relayer-managed encryption (default):** With the standard `MemWal` client used above, the relayer encrypts every item with Seal before it reaches Walrus. You do not manage keys, and this is the right default for most agents.
 
-**Client-managed encryption.** When the agent must hold its own keys and never delegate decryption to the relayer, use the manual entry point. `MemWalManual` performs SEAL encryption client-side, so plaintext never leaves the agent process.
+2. **Client-managed encryption.** When the agent must hold its own keys and never delegate decryption to the relayer, use the manual entry point. `MemWalManual` performs Seal encryption client-side, so plaintext never leaves the agent process.
 
 ```ts
 import { MemWalManual } from "@mysten-incubation/memwal/manual";
