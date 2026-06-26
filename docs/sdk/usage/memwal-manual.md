@@ -133,7 +133,7 @@ for (const memory of hits.results) {
 The agent holds two distinct secrets, and it is worth keeping their roles clear:
 
 - The **delegate key** (`key`) authenticates the agent to the relayer.
-- The **Sui key** (`suiPrivateKey`) signs the SEAL and Walrus operations that encrypt and store the data.
+- The **Sui key** (`suiPrivateKey`) signs the Seal and Walrus operations that encrypt and store the data.
 
 <Warning>
 With client-managed encryption the agent owns its key material. If the Sui key is lost, the encrypted memories cannot be recovered, so treat it as a production secret and rotate the delegate key through the dashboard if it may be exposed.
