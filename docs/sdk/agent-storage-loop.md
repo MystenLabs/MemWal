@@ -77,7 +77,7 @@ Keep each batch at 20 items or fewer. If you have more, chunk the array and call
 
 All blobs on Walrus are public, so private agent state must be encrypted. There are two models, and which one you want depends on who should hold the keys.
 
-**Relayer-managed encryption (default).** With the standard `MemWal` client used above, the relayer SEAL-encrypts every item before it reaches Walrus. You do not manage keys, and this is the right default for most agents.
+1. **Relayer-managed encryption (default):** With the standard `MemWal` client used above, the relayer encrypts every item with Seal before it reaches Walrus. You do not manage keys, and this is the right default for most agents.
 
 **Client-managed encryption.** When the agent must hold its own keys and never delegate decryption to the relayer, use the manual entry point. `MemWalManual` performs SEAL encryption client-side, so plaintext never leaves the agent process.
 
