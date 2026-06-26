@@ -126,7 +126,7 @@ if (failed.length > 0) {
 ```
 
 <Note>
-A dedicated `verify()` helper that reconstructs a memory from its on-chain blob object is on the roadmap. Until it ships, a job reaching `done` is the durability signal to gate on, and the memory's Walrus blob object on Sui is the on-chain record of the write.
+A dedicated `verify()` helper that reconstructs a memory from its onchain blob object is on the roadmap. Until it ships, a job reaching `done` is the durability signal to gate on, and the memory's Walrus blob object on Sui is the onchain record of the write.
 </Note>
 
 ## Recall the stored context
