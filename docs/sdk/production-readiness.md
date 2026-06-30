@@ -10,7 +10,7 @@ Several of these are patterns you implement around the client today. Where a cap
 
 ## Make writes idempotent
 
-The relayer does not deduplicate writes. A `remember` call that is retried after a network blip, or fired twice by an at-least-once job queue, stores the same text twice and pollutes later recall. Until content-based deduplication is available natively, gate writes on a key your agent controls so a repeat is a no-op.
+The relayer does not deduplicate writes. A `remember` call that retries after a network blip, or fired twice by an at-least-once job queue, stores the same text twice and pollutes later recall. Until content-based deduplication is available natively, gate writes on a key your agent controls so a repeat is a no-op.
 
 ```ts
 import { createHash } from "crypto";
@@ -33,7 +33,7 @@ Persist the idempotency set outside the process (Redis, a database row, a Sui ob
 
 ## Retry with backoff, but only retryable failures
 
-The client does not retry for you. Wrap calls in exponential backoff, and be careful to retry only failures that a retry can fix. A transient network error or relayer timeout is worth retrying. A `401 AUTH_REJECTED` is a configuration problem that will fail identically on every attempt, so retrying it just delays the real fix.
+The client does not retry for you. Wrap calls in exponential backoff, and be careful to retry only failures that a retry can fix. A transient network error or relayer timeout is worth retrying. A `401 AUTH_REJECTED` is a configuration problem that fails identically on every attempt, so retrying it just delays the real fix.
 
 ```ts
 async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
@@ -63,7 +63,7 @@ Built-in retry and backoff inside the client is on the roadmap. When it ships, y
 
 ## Confirm durability before acting on a memory
 
-An autonomous agent should not make a decision that assumes a write persisted until it has confirmed the write reached a terminal state. The `*AndWait` helpers block until each job reports `done`; when you write without blocking, capture the job IDs and wait on them before depending on the data.
+An autonomous agent should not make a decision that assumes a write persisted until it confirms the write reached a terminal state. The `*AndWait` helpers block until each job reports `done`; when you write without blocking, capture the job IDs and wait on them before depending on the data.
 
 ```ts
 const accepted = await memwal.rememberBulkAsync(items);
@@ -76,7 +76,7 @@ if (settled.failed > 0) {
 ```
 
 <Warning>
-A job reaching `done` confirms the memory was stored, but the vector index can briefly lag behind that signal, so a `recall` fired in the same instant may not return the memory yet. For read-after-write critical paths, tolerate a short delay or re-query rather than treating an empty first result as a missing memory.
+A job reaching `done` confirms that the relayer stored the memory, but the vector index can briefly lag behind that signal, so a `recall` fired in the same instant might not return the memory yet. For read-after-write critical paths, tolerate a short delay or re-query rather than treating an empty first result as a missing memory.
 </Warning>
 
 For the full write, confirm, and recall sequence in context, see [Agent Storage Loop](/sdk/agent-storage-loop).
@@ -86,7 +86,7 @@ For the full write, confirm, and recall sequence in context, see [Agent Storage 
 Every write registers storage on Walrus and costs gas and WAL. An agent in a tight loop can run up spend quickly, so put ceilings in the agent, not just in your head.
 
 - **Batch with Quilt.** `rememberBulkAndWait` (up to 20 items) collapses many small writes into far fewer transactions. Buffer small state blobs and flush them as a batch instead of writing one at a time.
-- **Do not store what you will never recall.** Ephemeral scratch state that never feeds a future `recall` does not belong in durable storage. Keep it in process memory.
+- **Do not store what you never recall.** Ephemeral scratch state that never feeds a future `recall` does not belong in durable storage. Keep it in process memory.
 - **Cap writes per cycle.** Give the agent loop a budget, for example a maximum number of memories per run or per hour, and have it drop or summarize past the cap rather than write unbounded.
 
 ```ts
@@ -103,12 +103,12 @@ async function budgetedRemember(memwal: MemWal, text: string) {
 
 ## Custody the agent's keys
 
-A headless agent holds secrets no human will rotate by hand, so treat them with production discipline.
+A headless agent holds secrets no human rotates by hand, so treat them with production discipline.
 
 - The **delegate key** authenticates the agent to the relayer.
-- For client-managed encryption, the **Sui key** signs the SEAL and Walrus operations. See [holding your own keys](/sdk/usage/memwal-manual#agent-state-holding-your-own-keys).
+- For client-managed encryption, the **Sui key** signs the Seal and Walrus operations. See [holding your own keys](/sdk/usage/memwal-manual#agent-state-holding-your-own-keys).
 
-Load both from a secret manager, never from source or logs. Scope each agent to its own delegate key so you can revoke one without taking down the rest, and rotate through the dashboard if a key may be exposed. If the Sui key behind client-managed encryption is lost, the encrypted memories cannot be recovered, so back it up with the same care as any data-encryption key.
+Load both from a secret manager, never from source or logs. Scope each agent to its own delegate key so you can revoke one without taking down the rest, and rotate through the dashboard if a key might be exposed. If the Sui key behind client-managed encryption is lost, you cannot recover the encrypted memories, so back it up with the same care as any data-encryption key.
 
 ## Degrade gracefully when memory is unavailable
 
@@ -134,7 +134,7 @@ This is the same defensive pattern the [Cloudflare Workers guide](/sdk/cloudflar
 
 ## Mind the recall result cap
 
-`recall` returns up to `limit` results, defaulting to `10`. When more memories match than the cap, the extra results are simply not returned, with no signal that the set was truncated. If a decision depends on seeing every match, set `limit` explicitly to a value above what you expect, and treat a result count equal to `limit` as a sign there may be more.
+`recall` returns up to `limit` results, defaulting to `10`. When more memories match than the cap, the relayer does not return the extra results, with no signal that it truncated the set. If a decision depends on seeing every match, set `limit` explicitly to a value above what you expect, and treat a result count equal to `limit` as a sign there might be more.
 
 ```ts
 const result = await memwal.recall({ query: "open incidents", limit: 50 });

@@ -56,7 +56,7 @@ The `MemWal.create` config takes four fields:
 
 Agents tend to produce many small state blobs: observations, intermediate results, per-step notes. Writing them one at a time means a separate round trip and Sui transaction set for each. The SDK batches them instead, backed by Walrus Quilt under the hood.
 
-`rememberBulk` accepts up to 20 items per call. The relayer embeds and SEAL-encrypts every item concurrently, uploads the blobs to Walrus in parallel, and collapses what would be `N` separate transaction sets into roughly `2N + K`, where `K` is bounded by the relayer wallet pool. For an agent writing dozens of small memories a minute, that is the difference between a workable cost profile and an unworkable one.
+`rememberBulk` accepts up to 20 items per call. The relayer embeds and Seal-encrypts every item concurrently and uploads them to Walrus in parallel, so the whole batch shares far fewer Sui transactions than writing each item on its own would. For an agent writing dozens of small memories a minute, that is the difference between a workable cost profile and an unworkable one.
 
 ```ts
 const items = [
@@ -75,7 +75,7 @@ Keep each batch at 20 items or fewer. If you have more, chunk the array and call
 
 ## Encrypt agent state
 
-All blobs on Walrus are public, so private agent state must be encrypted. There are two models, and which one you want depends on who should hold the keys.
+All blobs on Walrus are public, so you must encrypt private agent state. There are two models, and which one you want depends on who should hold the keys.
 
 1. **Relayer-managed encryption (default):** With the standard `MemWal` client used above, the relayer encrypts every item with Seal before it reaches Walrus. You do not manage keys, and this is the right default for most agents.
 
@@ -101,16 +101,16 @@ await manual.rememberManual("Private: internal risk score for account 0xabc is 0
 ```
 
 <Warning>
-Client-managed encryption means the agent is responsible for its key material. If the delegate key is lost, the encrypted memories cannot be recovered. Treat the key as you would any production secret, and rotate it through the dashboard if it may be exposed.
+Client-managed encryption means the agent is responsible for its key material. If the delegate key is lost, you cannot recover the encrypted memories. Treat the key as you would any production secret, and rotate it through the dashboard if it might be exposed.
 </Warning>
 
 For the full client-managed flow, including local embeddings and recall, see [MemWalManual](/sdk/usage/memwal-manual).
 
 ## Confirm a write before depending on it
 
-An autonomous agent should not act on a memory it only believes it wrote. Before the agent reads state back or makes a decision that assumes the write persisted, confirm the write reached a durable state.
+An autonomous agent should not act on a memory it only believes it wrote. Before the agent reads state back or makes a decision that assumes the write persisted, confirm that the write reached a durable state.
 
-The `*AndWait` helpers already block until the relayer reports each job `done`, which is the signal that the memory was embedded, encrypted, and uploaded to Walrus. When you need to write without blocking and confirm later, capture the job IDs and wait on them explicitly:
+The `*AndWait` helpers already block until the relayer reports each job `done`, which is the signal that the relayer embedded, encrypted, and uploaded the memory to Walrus. When you need to write without blocking and confirm later, capture the job IDs and wait on them explicitly:
 
 ```ts
 const accepted = await memwal.rememberBulkAsync(items);
@@ -131,7 +131,7 @@ A dedicated `verify()` helper that reconstructs a memory from its onchain blob o
 
 ## Recall the stored context
 
-With writes confirmed, recall pulls the relevant memories back by semantic similarity. The relayer verifies the request, embeds the query, searches, downloads from Walrus, decrypts, and returns plaintext.
+After you confirm the writes, recall pulls the relevant memories back by semantic similarity. The relayer verifies the request, embeds the query, searches, downloads from Walrus, decrypts, and returns plaintext.
 
 ```ts
 const recalled = await memwal.recall({
