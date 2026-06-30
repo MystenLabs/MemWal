@@ -88,6 +88,8 @@
               },
               "sdk/cookbook-multi-tenant",
               "sdk/cloudflare-workers",
+              "sdk/agent-storage-loop",
+              "sdk/production-readiness",
               "sdk/versioned-datasets",
               "sdk/api-reference",
               "sdk/changelog"
