@@ -15,9 +15,7 @@ sdk/api-reference, mcp/reference, getting-started/quick-start.
 
 This page collects the support questions that come up most often and the fastest way to resolve each one. Every entry lists the symptom you observe, the cause behind it, and the fix to apply.
 
-
 If your issue is not here, set `MEMWAL_MCP_DEBUG=1` for the Model Context Protocol (MCP) server, or, if you use the `withMemWal()` AI middleware, pass `debug: true` in its options, to get verbose logs, then open an issue on the repository with that output.
-
 
 ## How authentication works
 
@@ -86,9 +84,7 @@ This section covers slow or timed-out writes.
 
 **Symptom:** Recall returns quickly, but a save through `memwal_analyze` times out, sometimes on repeated attempts.
 
-
 **Cause:** Recall is a single search request, so it is fast. A save is heavier, and `memwal_analyze` is the heaviest save: it runs a large language model (LLM) extraction over your text, then embeds and encrypts each extracted fact and enqueues each as its own background job that uploads to Walrus and indexes the result. Under load, this fan-out can exceed the MCP host's tool-call timeout even though the relayer keeps working normally.
-
 
 <Warning>
 A client-side timeout does not mean the save failed. The relayer accepts the work as background jobs and keeps processing after the client stops waiting. Running the same `memwal_analyze` call again can create duplicate memories, so confirm the result before you retry.
@@ -100,9 +96,7 @@ A client-side timeout does not mean the save failed. The relayer accepts the wor
 2. Match the tool to the task. To save one discrete fact, such as a milestone, use `memwal_remember`, which performs a single write. Reserve `memwal_analyze` for longer passages where you want several facts extracted, and keep those passages a reasonable size.
 3. Confirm connectivity first. Run `memwal_health`, which calls the unauthenticated health endpoint and is the fastest way to confirm the relayer is reachable.
 4. Wait correctly in the SDK. The `remember` and `analyze` methods return immediately with job IDs, so wait with `waitForRememberJob` or `analyzeAndWait` and a sensible timeout, or poll the job status, rather than wrapping the whole operation in one short blocking call.
-
 5. Collect logs if the problem persists. Set `MEMWAL_MCP_DEBUG=1` for the MCP server, or pass `debug: true` to the `withMemWal()` AI middleware, and capture the per-request output. The core SDK (`MemWal.create()`) has no built-in debug flag.
-
 
 ### Recall returns no results immediately after a save
 

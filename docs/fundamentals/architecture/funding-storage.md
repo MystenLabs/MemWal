@@ -1,6 +1,7 @@
 ---
 title: "How an Agent Funds Walrus Storage"
 description: "How an autonomous agent pays for Walrus storage, either by holding WAL directly or through sponsored storage such as the relayer."
+keywords: [funding, WAL, SUI, gas, sponsored storage, publisher, storage resources, upload relay, blob lifecycle, autonomous agent, MemWal, Walrus]
 ---
 
 Walrus Memory writes your encrypted memories to Walrus as blobs, as described in [How Storage Works](/fundamentals/architecture/how-storage-works). Someone has to pay for that storage. This page explains who, and the trade-offs between an agent holding WAL itself and having a third party sponsor the cost.
@@ -125,5 +126,5 @@ Walrus reserves a portion of WAL supply as subsidies that supplement storage-nod
 - [Self-hosting the relayer](/relayer/self-hosting)
 - [Walrus storage costs](https://docs.wal.app/docs/system-overview/storage-costs)
 - [Walrus network reference](https://docs.wal.app/docs/network-reference)
-- [Walrus upload relay](https://docs.wal.app/operator-guide/upload-relay.html)
+- [Walrus upload relay](https://docs.wal.app/docs/operator-guide/upload-relay)
 - [Walrus TypeScript SDK](https://sdk.mystenlabs.com/walrus)
