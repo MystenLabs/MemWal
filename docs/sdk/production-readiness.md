@@ -1,6 +1,6 @@
 ---
 title: Production Readiness for Agent Storage
-description: Patterns for running Walrus Memory in a production agent: idempotent writes, retries with backoff, confirming durability, bounding cost, key custody, and graceful degradation.
+description: "Patterns for running Walrus Memory in a production agent: idempotent writes, retries with backoff, confirming durability, bounding cost, key custody, and graceful degradation."
 keywords: [production, hardening, idempotency, retries, backoff, cost caps, key custody, failure handling, graceful degradation, agent, reliability, MemWal, SDK]
 ---
 

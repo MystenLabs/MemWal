@@ -1,7 +1,7 @@
 ---
 title: Agent Storage Loop
-description: A full headless agent storage loop on Testnet: set up the SDK with no interactive steps, batch writes with Quilt, encrypt with SEAL, confirm the write landed, then recall.
-keywords: [agent, headless, autonomous, storage loop, Testnet, rememberBulk, Quilt, SEAL, encryption, recall, verify, MemWal, SDK]
+description: "A full headless agent storage loop on Testnet: set up the SDK with no interactive steps, batch writes with Quilt, encrypt with Seal, confirm the write landed, then recall."
+keywords: [agent, headless, autonomous, storage loop, Testnet, rememberBulk, Quilt, Seal, encryption, recall, verify, MemWal, SDK]
 ---
 
 This guide walks an autonomous agent through the complete storage loop on Testnet: set up the client with no interactive steps, batch many small writes, encrypt agent state, confirm each write landed before depending on it, then recall. Every step uses the real SDK surface, so you can lift the final script straight into a server or agent runtime.
