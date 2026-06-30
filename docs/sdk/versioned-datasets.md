@@ -73,6 +73,12 @@ class VersionedDataset {
   }
 }
 
+// A configured client — see the SDK setup for how to supply credentials.
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+});
+
 const dataset = new VersionedDataset(memwal);
 const v1 = await dataset.commit({ rows: 100, schema: "v1" });
 const v2 = await dataset.commit({ rows: 142, schema: "v1" });
@@ -84,7 +90,7 @@ const v2 = await dataset.commit({ rows: 142, schema: "v1" });
 Because each `blobId` permanently and verifiably addresses one exact revision, an agent (or an auditor reviewing it later) can point to the precise dataset a decision was made against, and confirm it has not changed since.
 
 <Note>
-Keep the lineage index wherever your agent already keeps durable state. Storing it as a memory, as shown here, keeps everything inside Walrus Memory. A database row or a Sui object works equally well, since the blob IDs are the durable handles either way.
+Keep the lineage index wherever your agent already keeps durable state. Storing it as a memory, as shown here, keeps everything inside Walrus Memory. A database row or a Sui object works equally well, because the blob IDs are the durable handles either way.
 </Note>
 
 ## When this pattern fits
