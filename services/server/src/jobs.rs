@@ -1511,6 +1511,9 @@ async fn maybe_alert_walrus_upload_exhausted(
 ///
 /// Mapping rules (enforced at the point of error origination):
 /// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
+/// - Walrus register `0x2::coin::destroy_zero` ENonZero → `Transient` (WAL
+///   payment over-funded from a stale cached price; the sidecar refreshes the
+///   client so the retry re-reads the live price and splits the exact amount)
 /// - Enoki dry-run `0x2::balance::split` ENotEnough → `GasPoolExhausted`
 ///   (abort: pool SUI gas coins are fragmented/insufficient; retrying rotates
 ///   to the next starved wallet — needs ops gas consolidation/top-up)
@@ -1602,6 +1605,20 @@ impl WalletJobError {
             && lower.contains("split")
     }
 
+    /// True if `msg` is the Walrus register PTB's `0x2::coin::destroy_zero`
+    /// abort (ENonZero). The `@mysten/walrus` `#withWal` helper splits an exact
+    /// WAL payment from the client's cached storage/write price and asserts the
+    /// coin is empty afterwards; when mainnet price drops between the cached read
+    /// and execution the contract deducts less WAL, leaving change that trips
+    /// `destroy_zero`. Recoverable: retrying against a client that re-read the
+    /// live price splits the correct amount, so this is Transient — never a
+    /// Permanent MoveAbort.
+    pub fn is_walrus_wal_payment_price_abort(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        (lower.contains("moveabort") || lower.contains("move abort"))
+            && lower.contains("destroy_zero")
+    }
+
     /// Heuristic classification from the sidecar's error string. The sidecar
     /// surfaces Sui execution errors verbatim (Move abort codes, lock errors).
     /// Until the sidecar emits structured error codes, we match on substrings.
@@ -1644,6 +1661,17 @@ impl WalletJobError {
         if (lower.contains("moveabort") || lower.contains("move abort"))
             && (lower.contains("::system::inner_mut") || lower.contains("ewrongversion"))
         {
+            return WalletJobError::Transient(msg.to_string());
+        }
+        // Walrus register PTB `0x2::coin::destroy_zero` abort (ENonZero). The
+        // `@mysten/walrus` `#withWal` helper pre-funds an exact WAL payment from
+        // the client's cached storage price, then asserts the coin is empty. When
+        // the on-chain price drops between the cached read and execution the
+        // contract deducts less WAL, leaving change that trips `destroy_zero`.
+        // Not input-specific: the sidecar recreates the client on this error, so
+        // classifying Transient lets Apalis retry against the refreshed (live)
+        // price instead of Dead-marking a job the next attempt will succeed on.
+        if Self::is_walrus_wal_payment_price_abort(msg) {
             return WalletJobError::Transient(msg.to_string());
         }
         // Sui owned-object lock / equivocation. The referenced object+version
@@ -2393,6 +2421,22 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             WalletJobError::classify_sidecar_error(ewrong),
             WalletJobError::Transient(_)
         ));
+    }
+
+    #[test]
+    fn walrus_register_destroy_zero_is_transient() {
+        // Verbatim prod error (issue #351): the register PTB over-funds the WAL
+        // payment from a stale cached price and `coin::destroy_zero` aborts with
+        // ENonZero. Must be Transient (retry re-reads the live price), NOT swept
+        // into the MoveAbort→Permanent catch that would Dead-mark every write.
+        let destroy_zero = "walrus upload failed: Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed, could not automatically determine a budget: MoveAbort(MoveLocation { module: ModuleId { address: 0000000000000000000000000000000000000000000000000000000000000002, name: Identifier(\\\"balance\\\") }, function: 9, instruction: 8, function_name: Some(\\\"destroy_zero\\\") }, 0) in command 2\"}]}";
+        assert!(WalletJobError::is_walrus_wal_payment_price_abort(
+            destroy_zero
+        ));
+        let classified = WalletJobError::classify_sidecar_error(destroy_zero);
+        assert!(matches!(classified, WalletJobError::Transient(_)));
+        assert!(!classified.is_permanent());
+        assert!(!classified.aborts_retries());
     }
 
     #[test]
