@@ -133,9 +133,16 @@ export function clampWalrusEpochs(rawEpochs: unknown): number {
     return Math.min(Math.floor(parsed), MAX_WALRUS_EPOCHS);
 }
 
+// The cached WalrusClient snapshots `systemState` (storage/write price,
+// committee) at creation and reuses it for its whole lifetime. The register
+// PTB pre-funds an *exact* WAL payment from that cached price, so when mainnet
+// price drifts the split leaves change and `coin::destroy_zero` aborts. Keep
+// the client young so the cached price tracks the live price closely; the
+// register-path `destroy_zero` handler also recreates it on demand. Was 30 min,
+// which let the cached price fall far behind a live-drifting mainnet price.
 export const WALRUS_CLIENT_MAX_AGE_MS = (() => {
     const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 1000;
 })();
 
 // Mirror of services/server/src/alerts.rs SIDECAR_WALRUS_DEP_VERSION.
