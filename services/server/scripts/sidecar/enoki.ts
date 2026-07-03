@@ -127,6 +127,14 @@ async function executeSponsoredTransactionOnce(
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
 ): Promise<string> {
+    // Resolve owned-object inputs against the correct sender. The gRPC client
+    // validates object ownership against the tx sender during build/resolution;
+    // the Walrus `certify` tx is built WITHOUT a sender (0x0) — register sets its
+    // own, certify does not — so gRPC rejects it ("Transaction was not signed by
+    // the correct sender ... given owner/signer 0x0"). Enoki still sponsors with
+    // its own sender and `onlyTransactionKind` excludes the sender from the
+    // bytes, so this only fixes resolution (no-op on the JSON-RPC path).
+    tx.setSenderIfNotSet(signer.toSuiAddress());
     const txKindBytes = await tx.build({
         client: suiClient as any,
         onlyTransactionKind: true,
