@@ -30,7 +30,11 @@ export function parsePositiveIntEnv(
 // ============================================================
 
 export const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-export const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
+// Honor an explicit SUI_RPC_URL override (e.g. a dedicated / premium RPC) so we
+// can move off the public fullnode when its pool degrades — the public endpoint
+// has served stale reads (a certified blob read back as "does not exist"),
+// which fails uploads at get_blob / certify. Falls back to the network default.
+export const SUI_RPC_URL = process.env.SUI_RPC_URL?.trim() || getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 // gRPC base URL for the core/upload path. Sui sunsets JSON-RPC on 2026-07-31 in
 // favour of gRPC + GraphQL, so the write path must move off JSON-RPC. When set,
