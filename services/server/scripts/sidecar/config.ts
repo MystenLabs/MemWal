@@ -30,7 +30,11 @@ export function parsePositiveIntEnv(
 // ============================================================
 
 export const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-export const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
+// Honor an explicit SUI_RPC_URL override (e.g. a dedicated / premium RPC) so we
+// can move off the public fullnode when its pool degrades — the public endpoint
+// has served stale reads (a certified blob read back as "does not exist"),
+// which fails uploads at get_blob / certify. Falls back to the network default.
+export const SUI_RPC_URL = process.env.SUI_RPC_URL?.trim() || getJsonRpcFullnodeUrl(SUI_NETWORK);
 export const SUI_TYPE = "0x2::sui::SUI";
 
 // ============================================================
