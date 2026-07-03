@@ -5,7 +5,11 @@
 
 import express, { type Express } from "express";
 import { JSON_LIMIT_METADATA, WALRUS_PACKAGE_ID } from "../config.js";
-import { suiClient, suiRpc } from "../clients.js";
+// Query/restore path uses JSON-RPC index methods (getOwnedObjects,
+// getDynamicFieldObject, suix_queryTransactionBlocks) that gRPC does not expose,
+// so it stays on the JSON-RPC client even when the write path moves to gRPC.
+// Migrating this path to GraphQL is stage 2 before the 2026-07-31 sunset.
+import { suiJsonRpcClient, suiRpc } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
@@ -187,7 +191,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 let hasMore = true;
 
                 while (hasMore) {
-                    const result = await suiClient.getOwnedObjects({
+                    const result = await suiJsonRpcClient.getOwnedObjects({
                         owner,
                         filter: { StructType: WALRUS_BLOB_TYPE },
                         options: { showContent: true },
@@ -235,7 +239,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 try {
                     const dynField = await withRpcRetry(
                         `[query-blobs] getDynamicField ${obj.objectId}`,
-                        () => suiClient.getDynamicFieldObject({
+                        () => suiJsonRpcClient.getDynamicFieldObject({
                             parentId: obj.objectId,
                             name: METADATA_FIELD_NAME,
                         }),

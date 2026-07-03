@@ -9,11 +9,13 @@
 
 import { randomUUID } from "crypto";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { SealClient } from "@mysten/seal";
 import { WalrusClient } from "@mysten/walrus";
 import {
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_SERVER_CONFIGS,
+    SUI_GRPC_URL,
     SUI_NETWORK,
     SUI_RPC_URL,
     SUI_TYPE,
@@ -23,10 +25,22 @@ import {
 } from "./config.js";
 import { shortAddress } from "./util.js";
 
-export const suiClient = new SuiJsonRpcClient({
+// JSON-RPC client. Still required by the blob query/restore path, which uses
+// index methods (getOwnedObjects, getDynamicFieldObject, suix_queryTransaction-
+// Blocks) that gRPC does not expose — migrating that path to GraphQL is stage 2.
+export const suiJsonRpcClient = new SuiJsonRpcClient({
     url: SUI_RPC_URL,
     network: SUI_NETWORK,
 });
+
+// Shared core client for the write path (Walrus register/certify, SEAL, the
+// Enoki sponsor build). Sui sunsets JSON-RPC on 2026-07-31, so this moves to
+// gRPC when SUI_GRPC_URL is set; otherwise it stays on JSON-RPC so enabling gRPC
+// is an explicit, reversible opt-in. Only the core API is used here, which both
+// clients implement (WalrusClient/SealClient take `ClientWithCoreApi`).
+export const suiClient = SUI_GRPC_URL
+    ? new SuiGrpcClient({ network: SUI_NETWORK, baseUrl: SUI_GRPC_URL })
+    : suiJsonRpcClient;
 
 export const sealClient = new SealClient({
     suiClient: suiClient as any,
@@ -203,8 +217,10 @@ export async function suiRpc<T>(method: string, params: unknown[]): Promise<T> {
 
 export async function getSuiBalanceMist(owner: string): Promise<string | null> {
     try {
-        const balance = await (suiClient as any).getBalance({ owner, coinType: SUI_TYPE });
-        return typeof balance?.totalBalance === "string" ? balance.totalBalance : null;
+        const res: any = await (suiClient as any).getBalance({ owner, coinType: SUI_TYPE });
+        // JSON-RPC returns { totalBalance }, gRPC returns { balance: { balance } }.
+        const total = res?.totalBalance ?? res?.balance?.balance ?? res?.balance?.coinBalance;
+        return total != null ? String(total) : null;
     } catch (err: any) {
         console.warn(`[wallet] balance lookup failed for ${shortAddress(owner)}: ${err?.message || err}`);
         return null;
