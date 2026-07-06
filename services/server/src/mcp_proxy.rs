@@ -76,25 +76,25 @@ fn build_forwarded_headers(inbound: &HeaderMap) -> reqwest::header::HeaderMap {
 
 /// Inject the real client IP into the upstream request as `x-forwarded-for`
 /// so the sidecar's per-IP MCP rate limiter buckets per actual caller and
-/// not per loopback. We honor an inbound `x-forwarded-for` (if the relayer
-/// itself is behind a real proxy / load balancer) by appending the relayer's
-/// observed peer address; otherwise we set the header to that peer alone.
+/// not per loopback.
+///
+/// We must NOT pass the inbound `x-forwarded-for` through verbatim: its
+/// leftmost value is client-controlled, and the sidecar keys its rate limiter
+/// on the IP we forward. Instead we resolve the real client IP through the
+/// configured number of trusted proxies (`trusted_hops`) and forward exactly
+/// that single, sanitized value. The sidecar is reachable only over loopback
+/// from us, so it treats this one value as authoritative. Forwarding a
+/// client-controlled chain here is exactly the spoofing bug in issue #360.
 fn inject_forwarded_for(
     headers: &mut reqwest::header::HeaderMap,
     inbound: &HeaderMap,
     peer: SocketAddr,
+    trusted_hops: usize,
 ) {
-    let peer_ip = peer.ip().to_string();
-    let value = match inbound
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        Some(existing) => format!("{}, {}", existing, peer_ip),
-        None => peer_ip,
-    };
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(&value) {
+    let xff = inbound.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let client_ip = crate::client_ip::resolve_client_ip(xff, Some(peer.ip()), trusted_hops)
+        .unwrap_or_else(|| peer.ip().to_string());
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&client_ip) {
         out_set(headers, "x-forwarded-for", v);
     }
 }
@@ -127,7 +127,7 @@ pub async fn sse_proxy(
     // open until the client itself closes it. `read_timeout` keeps a
     // per-chunk watchdog (heartbeats fire every 3s, so 60s is plenty).
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    inject_forwarded_for(&mut forwarded, &headers, peer, state.config.trusted_proxy_hops);
     let req = state
         .http_client
         .get(&url)
@@ -218,7 +218,7 @@ pub async fn messages_proxy(
     );
 
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    inject_forwarded_for(&mut forwarded, &headers, peer, state.config.trusted_proxy_hops);
     let upstream = state
         .http_client
         .post(&url)
@@ -316,7 +316,7 @@ pub async fn streamable_proxy(
         req = req.body(body.to_vec());
     }
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    inject_forwarded_for(&mut forwarded, &headers, peer, state.config.trusted_proxy_hops);
     req = req.headers(forwarded);
 
     // Same 24h request timeout as the SSE proxy — a streamable response
@@ -436,23 +436,37 @@ mod tests {
         let inbound = axum_headers(&[]);
         let peer: SocketAddr = "203.0.113.7:54321".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        // No XFF: the single trusted edge hop reduces to the socket peer.
+        inject_forwarded_for(&mut out, &inbound, peer, 1);
 
         assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
-    fn inject_forwarded_for_appends_peer_to_existing_chain() {
+    fn inject_forwarded_for_forwards_single_resolved_client_ip() {
+        // Attacker prepends a spoofed IP; the edge appends the real client
+        // (203.0.113.9); our socket peer is the edge's internal address.
+        // With one trusted hop we must forward ONLY the real client, never
+        // the spoofed leftmost value and never a pass-through chain.
         let mut out = reqwest::header::HeaderMap::new();
-        let inbound = axum_headers(&[("x-forwarded-for", "198.51.100.4, 10.0.0.1")]);
-        let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let inbound = axum_headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]);
+        let peer: SocketAddr = "10.0.0.1:9000".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        inject_forwarded_for(&mut out, &inbound, peer, 1);
 
-        assert_eq!(
-            xff(&out).as_deref(),
-            Some("198.51.100.4, 10.0.0.1, 127.0.0.1")
-        );
+        assert_eq!(xff(&out).as_deref(), Some("203.0.113.9"));
+    }
+
+    #[test]
+    fn inject_forwarded_for_zero_hops_ignores_client_xff() {
+        // Directly-exposed relayer: never trust a client-supplied header.
+        let mut out = reqwest::header::HeaderMap::new();
+        let inbound = axum_headers(&[("x-forwarded-for", "1.2.3.4")]);
+        let peer: SocketAddr = "203.0.113.7:5000".parse().unwrap();
+
+        inject_forwarded_for(&mut out, &inbound, peer, 0);
+
+        assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
@@ -461,7 +475,7 @@ mod tests {
         let inbound = axum_headers(&[("x-forwarded-for", "   ")]);
         let peer: SocketAddr = "203.0.113.7:1".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        inject_forwarded_for(&mut out, &inbound, peer, 1);
 
         assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
     }
@@ -472,7 +486,7 @@ mod tests {
         let inbound = axum_headers(&[]);
         let peer: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        inject_forwarded_for(&mut out, &inbound, peer, 1);
 
         assert_eq!(xff(&out).as_deref(), Some("2001:db8::1"));
     }

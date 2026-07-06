@@ -1073,6 +1073,7 @@ mod tests {
             registry_id: "0xregistry".to_string(),
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
+            trusted_proxy_hops: 1,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),

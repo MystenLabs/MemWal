@@ -860,20 +860,23 @@ pub async fn sponsor_rate_limit_middleware(
         return next.run(request).await;
     }
 
-    // Extract client IP from X-Forwarded-For (set by reverse proxy) or
-    // fall back to the direct connection address stored by axum.
-    let ip: Option<String> = request
+    // Resolve the real client IP through the configured number of trusted
+    // proxies. We must NOT take the leftmost `X-Forwarded-For` value — it is
+    // client-controlled and would let a single host forge unlimited rate-limit
+    // buckets (GitHub issue #360). `resolve_client_ip` counts `trusted_hops`
+    // in from the socket end and returns the first address the client could
+    // not have forged, falling back to the socket peer when no proxy is
+    // configured or no header is present.
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let xff = request
         .headers()
         .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string())
-        });
+        .and_then(|v| v.to_str().ok());
+    let ip: Option<String> =
+        crate::client_ip::resolve_client_ip(xff, peer, state.config.trusted_proxy_hops);
 
     let ip = match ip {
         Some(ip) => ip,
