@@ -176,6 +176,70 @@ class MockHTTPRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"jsonrpc": "2.0", "result": result, "id": req_id}).encode())
                 return
 
+            elif method == "suix_getOwnedObjects":
+                # Native Rust walrus::query_blobs_by_owner (WALM-184) scans
+                # owned objects instead of calling the old sidecar
+                # /walrus/query-blobs endpoint. Mirror that endpoint's data
+                # (state.blobs) as Move objects here.
+                with state.lock:
+                    data = [
+                        {
+                            "data": {
+                                "objectId": state.blob_object_ids.get(b_id, f"0xmock-object-{b_id}"),
+                                "content": {
+                                    "dataType": "moveObject",
+                                    "fields": {"blob_id": b_id},
+                                },
+                            }
+                        }
+                        for b_id in state.blobs
+                    ]
+                result = {"data": data, "nextCursor": None, "hasNextPage": False}
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"jsonrpc": "2.0", "result": result, "id": req_id}).encode())
+                return
+
+            elif method == "suix_getDynamicFieldObject":
+                # Metadata dynamic field for a blob object queried above.
+                # PACKAGE_ID here matches e2e_runner.py's PACKAGE_ID env var
+                # so the native package_id filter in query_blobs_by_owner
+                # actually matches, exercising a real restore round-trip.
+                parent_id = params[0] if params else ""
+                with state.lock:
+                    blob_id = next(
+                        (b_id for b_id, obj_id in state.blob_object_ids.items() if obj_id == parent_id),
+                        None,
+                    )
+                    namespace = state.blob_namespaces.get(blob_id, "default") if blob_id else "default"
+                result = None
+                if blob_id is not None:
+                    def kv(key, value):
+                        return {"fields": {"key": key, "value": value}}
+                    result = {
+                        "data": {
+                            "content": {
+                                "dataType": "moveObject",
+                                "fields": {
+                                    "value": {
+                                        "fields": {
+                                            "metadata": {
+                                                "fields": {
+                                                    "contents": [
+                                                        kv("memwal_namespace", namespace),
+                                                        kv("memwal_package_id", "0xpackage123"),
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"jsonrpc": "2.0", "result": result, "id": req_id}).encode())
+                return
+
         # 3. OpenAI Embeddings Mock
         if path == "/v1/embeddings":
             with state.lock:
