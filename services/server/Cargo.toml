@@ -41,6 +41,11 @@ sui-rpc = "0.3"
 # feature, which would pull the full Sui monorepo and conflict with this
 # server's own sqlx/pgvector pins (see WALM-184 investigation notes).
 walrus-core = { git = "https://github.com/MystenLabs/walrus", tag = "walrus_v1.52.0_1783366984_main_ci", default-features = false }
+# Same rev walrus-core itself resolves to (see Cargo.lock) — pinned
+# explicitly, not left to re-resolve, so there's only ever one fastcrypto
+# in the dependency graph. Needed for ConfirmationCertificate.signature's
+# ToFromBytes::as_bytes() (storage::walrus_write).
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
 
 # Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }

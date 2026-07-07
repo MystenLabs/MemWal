@@ -63,34 +63,29 @@ impl SuiSignerContext {
     }
 }
 
-/// Build, sign, and submit a single-Move-call transaction paid for by this
-/// signer's gas coin. Gas coin selection and gas price are resolved
-/// automatically via RPC (see `TransactionBuilder::build`).
+/// Build, sign, and submit an arbitrary PTB (any number of chained Move
+/// calls) paid for by this signer's gas coin. Gas coin selection and gas
+/// price are resolved automatically via RPC (see
+/// `TransactionBuilder::build`).
 ///
-/// `add_inputs` receives the in-progress builder so the caller can add
-/// pure/object inputs before the call arguments are assembled; it returns
-/// the `Argument`s to pass to the Move function, in order.
-pub async fn execute_move_call(
+/// `build_ptb` receives the in-progress builder and does all of its own
+/// `tx.object()`/`tx.pure()`/`tx.move_call()` calls — e.g. chaining a
+/// `reserve_space` call's returned `Argument` directly into a following
+/// `register_blob` call within the same transaction, with no extra object
+/// lookup in between, exactly like `walrus-sui`'s own PTB builder does.
+///
+/// THIS FUNCTION SIGNS AND SUBMITS A REAL TRANSACTION. Callers must treat
+/// invoking it as a fund-moving action requiring the same care as any other
+/// on-chain transaction — see the "Executing actions with care" guidance
+/// this server's development follows.
+pub async fn execute_ptb(
     client: &mut sui_rpc::Client,
     signer: &SuiSignerContext,
-    package: Address,
-    module: &str,
-    function: &str,
-    type_args: Vec<TypeTag>,
-    add_inputs: impl FnOnce(&mut TransactionBuilder) -> Vec<Argument>,
+    build_ptb: impl FnOnce(&mut TransactionBuilder),
     gas_budget: u64,
 ) -> Result<sui_rpc::proto::sui::rpc::v2::ExecutedTransaction, SuiTxError> {
     let mut tx = TransactionBuilder::new();
-    let arguments = add_inputs(&mut tx);
-
-    let module: Identifier = module
-        .parse()
-        .map_err(|e| SuiTxError::Build(format!("invalid module name {module:?}: {e}")))?;
-    let function_ident: Identifier = function
-        .parse()
-        .map_err(|e| SuiTxError::Build(format!("invalid function name {function:?}: {e}")))?;
-    let f = Function::new(package, module, function_ident).with_type_args(type_args);
-    tx.move_call(f, arguments);
+    build_ptb(&mut tx);
     tx.set_sender(signer.address);
     tx.set_gas_budget(gas_budget);
 
@@ -117,6 +112,42 @@ pub async fn execute_move_call(
         .into_inner()
         .transaction
         .ok_or_else(|| SuiTxError::Rpc("response missing executed transaction".into()))
+}
+
+/// Build, sign, and submit a single-Move-call transaction. Convenience
+/// wrapper over [`execute_ptb`] for the common one-call case.
+///
+/// `add_inputs` receives the in-progress builder so the caller can add
+/// pure/object inputs before the call arguments are assembled; it returns
+/// the `Argument`s to pass to the Move function, in order.
+pub async fn execute_move_call(
+    client: &mut sui_rpc::Client,
+    signer: &SuiSignerContext,
+    package: Address,
+    module: &str,
+    function: &str,
+    type_args: Vec<TypeTag>,
+    add_inputs: impl FnOnce(&mut TransactionBuilder) -> Vec<Argument>,
+    gas_budget: u64,
+) -> Result<sui_rpc::proto::sui::rpc::v2::ExecutedTransaction, SuiTxError> {
+    let module: Identifier = module
+        .parse()
+        .map_err(|e| SuiTxError::Build(format!("invalid module name {module:?}: {e}")))?;
+    let function_ident: Identifier = function
+        .parse()
+        .map_err(|e| SuiTxError::Build(format!("invalid function name {function:?}: {e}")))?;
+
+    execute_ptb(
+        client,
+        signer,
+        |tx| {
+            let arguments = add_inputs(tx);
+            let f = Function::new(package, module, function_ident).with_type_args(type_args);
+            tx.move_call(f, arguments);
+        },
+        gas_budget,
+    )
+    .await
 }
 
 #[cfg(test)]

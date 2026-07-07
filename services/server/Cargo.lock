@@ -1938,6 +1938,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "ed25519-dalek",
+ "fastcrypto",
  "futures",
  "hex",
  "opentelemetry",
