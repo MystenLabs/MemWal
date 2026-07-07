@@ -206,114 +206,132 @@ async fn main() {
         tracing::warn!("⚠️  Unset RATE_LIMIT_DISABLED to restore protection.");
     }
 
-    // Start TS sidecar HTTP server (SEAL + Walrus operations)
-    let sidecar_url = config.sidecar_url.clone();
-    tracing::info!("  sidecar: starting at {}", sidecar_url);
-    // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
-    let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    let mcp_relayer_url = std::env::var("MEMWAL_RELAYER_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
-    let mut sidecar_child = tokio::process::Command::new("npx")
-        .args(["tsx", "sidecar-server.ts"])
-        .current_dir(&scripts_dir)
-        .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("Failed to start TS sidecar. Is Node.js installed?");
-
-    // Wait for sidecar to be ready (health check with retry)
     // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
-    let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
+
+    // Start TS sidecar HTTP server (SEAL + Walrus operations)
+    // Set SIDECAR_DISABLED=true to skip the Node.js sidecar (WALM-184: native Rust migration).
+    let sidecar_disabled = std::env::var("SIDECAR_DISABLED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+
+    let mut sidecar_child: Option<tokio::process::Child> = None;
+    // health_url is used both by the sidecar watchdog and the saturation monitor
+    let health_url = format!("{}/health", config.sidecar_url);
+
+    if sidecar_disabled {
+        tracing::warn!("⚠️  SIDECAR_DISABLED=true — Node.js sidecar will NOT be started.");
+        tracing::warn!("⚠️  Walrus upload and SEAL encrypt/decrypt require native Rust implementations.");
+        tracing::warn!("⚠️  Only use this in environments where native Rust integrations are fully wired.");
+    } else {
+        let sidecar_url = config.sidecar_url.clone();
+        tracing::info!("  sidecar: starting at {}", sidecar_url);
+        // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
+        let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
+        let mcp_relayer_url = std::env::var("MEMWAL_RELAYER_URL")
+            .unwrap_or_else(|_| format!("http://127.0.0.1:{}", config.port));
+        let child = tokio::process::Command::new("npx")
+            .args(["tsx", "sidecar-server.ts"])
+            .current_dir(&scripts_dir)
+            .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("Failed to start TS sidecar. Is Node.js installed? (Or set SIDECAR_DISABLED=true)");
+        sidecar_child = Some(child);
+
+        // Wait for sidecar to be ready (health check with retry)
+        let mut ready = false;
+        for attempt in 1..=30 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            match http_client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("  sidecar: ready (attempt {})", attempt);
+                    ready = true;
+                    break;
+                }
+                _ => {
+                    if attempt % 5 == 0 {
+                        tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
+                    }
                 }
             }
         }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
-        panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
-    }
+        if !ready {
+            if let Some(ref mut child) = sidecar_child {
+                child.kill().await.ok();
+            }
+            panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
+        }
 
-    // Keep a cheap heartbeat in the Rust logs so operators can distinguish
-    // Enoki/Walrus failures from the sidecar process becoming unavailable.
-    // If the sidecar remains unhealthy, exit the relayer so Railway restarts
-    // the whole container and brings up a fresh sidecar process.
-    let sidecar_watch_interval_secs = parse_env_u64("SIDECAR_WATCHDOG_INTERVAL_SECS", 30, 5, 300);
-    let sidecar_watch_timeout_secs = parse_env_u64("SIDECAR_WATCHDOG_TIMEOUT_SECS", 2, 1, 30);
-    let sidecar_watch_max_failures = parse_env_u32("SIDECAR_WATCHDOG_MAX_FAILURES", 6, 1, 100);
-    tracing::info!(
-        "  sidecar watchdog: interval={}s timeout={}s max_failures={}",
-        sidecar_watch_interval_secs,
-        sidecar_watch_timeout_secs,
-        sidecar_watch_max_failures
-    );
-    let sidecar_watch_client = http_client.clone();
-    let sidecar_watch_url = health_url.clone();
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
-        let mut consecutive_failures = 0u32;
-        loop {
-            interval.tick().await;
-            match sidecar_watch_client
-                .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "  sidecar: health recovered after {} failed check(s)",
+        // Keep a cheap heartbeat in the Rust logs so operators can distinguish
+        // Enoki/Walrus failures from the sidecar process becoming unavailable.
+        // If the sidecar remains unhealthy, exit the relayer so Railway restarts
+        // the whole container and brings up a fresh sidecar process.
+        let sidecar_watch_interval_secs = parse_env_u64("SIDECAR_WATCHDOG_INTERVAL_SECS", 30, 5, 300);
+        let sidecar_watch_timeout_secs = parse_env_u64("SIDECAR_WATCHDOG_TIMEOUT_SECS", 2, 1, 30);
+        let sidecar_watch_max_failures = parse_env_u32("SIDECAR_WATCHDOG_MAX_FAILURES", 6, 1, 100);
+        tracing::info!(
+            "  sidecar watchdog: interval={}s timeout={}s max_failures={}",
+            sidecar_watch_interval_secs,
+            sidecar_watch_timeout_secs,
+            sidecar_watch_max_failures
+        );
+        let sidecar_watch_client = http_client.clone();
+        let sidecar_watch_url = health_url.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
+            let mut consecutive_failures = 0u32;
+            loop {
+                interval.tick().await;
+                match sidecar_watch_client
+                    .get(&sidecar_watch_url)
+                    .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                "  sidecar: health recovered after {} failed check(s)",
+                                consecutive_failures
+                            );
+                        }
+                        consecutive_failures = 0;
+                    }
+                    Ok(resp) => {
+                        consecutive_failures += 1;
+                        tracing::error!(
+                            "  sidecar: health check failed status={} consecutive_failures={}",
+                            resp.status(),
                             consecutive_failures
                         );
                     }
-                    consecutive_failures = 0;
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::error!(
+                            "  sidecar: health check error consecutive_failures={} error={}",
+                            consecutive_failures,
+                            e
+                        );
+                    }
                 }
-                Ok(resp) => {
-                    consecutive_failures += 1;
+                if consecutive_failures >= sidecar_watch_max_failures {
                     tracing::error!(
-                        "  sidecar: health check failed status={} consecutive_failures={}",
-                        resp.status(),
+                        "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
                         consecutive_failures
                     );
-                }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check error consecutive_failures={} error={}",
-                        consecutive_failures,
-                        e
-                    );
+                    std::process::exit(1);
                 }
             }
-            if consecutive_failures >= sidecar_watch_max_failures {
-                tracing::error!(
-                    "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
-                    consecutive_failures
-                );
-                std::process::exit(1);
-            }
-        }
-    });
+        });
+    }
 
     // Initialize database (PostgreSQL + pgvector).
     // `Arc` so the MemoryEngine impl shares the same pool as the handlers.
@@ -929,7 +947,9 @@ async fn main() {
     .expect("Server failed");
 
     // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
-    tracing::info!("sidecar stopped");
+    if let Some(mut child) = sidecar_child {
+        child.kill().await.ok();
+        tracing::info!("sidecar stopped");
+    }
     telemetry.shutdown();
 }
