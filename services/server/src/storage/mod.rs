@@ -15,8 +15,12 @@
 //!   TS sidecar; the `SealCredential` resolution (session > delegate key >
 //!   server fallback) and `DecryptOutcome` classification.
 //! - [`sui`] — Sui RPC: delegate-key on-chain verification, account lookup.
+//! - [`sui_tx`] — native Sui transaction building/signing/submission
+//!   (WALM-184: foundation for migrating the Walrus write path off the
+//!   sidecar; not yet wired into any business logic).
 
 pub mod db;
 pub mod seal;
 pub mod sui;
+pub mod sui_tx;
 pub mod walrus;
