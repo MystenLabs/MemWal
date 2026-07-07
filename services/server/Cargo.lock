@@ -384,6 +384,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcs"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350f2b5fa7b76b498158ec1079dc0ea842c5b622b6b3f675005fddd889f2c9a7"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "bech32"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1008,7 +1017,7 @@ dependencies = [
  "ark-serialize",
  "auto_ops",
  "base64ct",
- "bcs",
+ "bcs 0.1.6",
  "bech32",
  "bincode",
  "blake2",
@@ -1925,6 +1934,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bcs 0.2.1",
  "chrono",
  "dotenvy",
  "ed25519-dalek",
@@ -2484,7 +2494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3532,7 +3542,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00a313a63f07ada0be04c03e9d6e8c1d176e5a469ee6e3b6f973dee525667311"
 dependencies = [
  "base64",
- "bcs",
+ "bcs 0.1.6",
  "bytes",
  "futures",
  "http",
@@ -3556,7 +3566,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f800c4c3539246ba94a825f6afe7faab0bc8fc4dda56c6cfa493ea2a32ecbd"
 dependencies = [
  "base64ct",
- "bcs",
+ "bcs 0.1.6",
  "blake2",
  "bnum",
  "bs58 0.5.1",
@@ -3578,7 +3588,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58530d23db8328c97b4cd2dec73af501f76fc7b3d538629ca32ec011efdc3cf8"
 dependencies = [
  "async-trait",
- "bcs",
+ "bcs 0.1.6",
  "futures",
  "serde",
  "sui-rpc",
@@ -4163,7 +4173,7 @@ version = "1.52.0"
 source = "git+https://github.com/MystenLabs/walrus?tag=walrus_v1.52.0_1783366984_main_ci#fdce2cca42dde1266ba776896404d9917affacff"
 dependencies = [
  "base64",
- "bcs",
+ "bcs 0.1.6",
  "enum_dispatch",
  "fastcrypto",
  "hex",

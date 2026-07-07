@@ -25,3 +25,4 @@ pub mod sui;
 pub mod sui_tx;
 pub mod walrus;
 pub mod walrus_encode;
+pub mod walrus_tx;
