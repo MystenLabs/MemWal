@@ -6,6 +6,16 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 import threading
 
+_MOCK_SEAL_PREFIX = b"MOCK_SEAL_ENCRYPTED:"
+
+
+def _seal_strip(data_bytes: bytes) -> bytes:
+    """Remove the mock SEAL encryption header, if present."""
+    if data_bytes.startswith(_MOCK_SEAL_PREFIX):
+        return data_bytes[len(_MOCK_SEAL_PREFIX):]
+    return data_bytes
+
+
 class MockState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -123,29 +133,9 @@ class MockHTTPRequestHandler(BaseHTTPRequestHandler):
                                 }
                             }
                         }
-                    elif obj_id == state.account_id:
-                        # Actual account object containing delegate keys
-                        result = {
-                            "data": {
-                                "objectId": state.account_id,
-                                "content": {
-                                    "dataType": "moveObject",
-                                    "fields": {
-                                        "owner": state.owner_address,
-                                        "active": True,
-                                        "delegate_keys": [
-                                            {
-                                                "fields": {
-                                                    "public_key": state.public_key_bytes
-                                                }
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
                     else:
-                        # Generic account object fallback
+                        # Covers state.account_id and any other account object —
+                        # both produce an identical fields payload.
                         result = {
                             "data": {
                                 "objectId": obj_id,
@@ -294,7 +284,7 @@ class MockHTTPRequestHandler(BaseHTTPRequestHandler):
             data_b64 = req_json.get("data", "")
             data_bytes = base64.b64decode(data_b64)
             # Prepend a mock signature/encryption header
-            encrypted_bytes = b"MOCK_SEAL_ENCRYPTED:" + data_bytes
+            encrypted_bytes = _MOCK_SEAL_PREFIX + data_bytes
             encrypted_b64 = base64.b64encode(encrypted_bytes).decode('utf-8')
             response = {
                 "encryptedData": encrypted_b64
@@ -307,11 +297,7 @@ class MockHTTPRequestHandler(BaseHTTPRequestHandler):
         if path == "/seal/decrypt":
             data_b64 = req_json.get("data", "")
             data_bytes = base64.b64decode(data_b64)
-            # Remove mock signature/encryption header
-            if data_bytes.startswith(b"MOCK_SEAL_ENCRYPTED:"):
-                decrypted_bytes = data_bytes[len(b"MOCK_SEAL_ENCRYPTED:"):]
-            else:
-                decrypted_bytes = data_bytes
+            decrypted_bytes = _seal_strip(data_bytes)
             decrypted_b64 = base64.b64encode(decrypted_bytes).decode('utf-8')
             response = {
                 "decryptedData": decrypted_b64
@@ -326,10 +312,7 @@ class MockHTTPRequestHandler(BaseHTTPRequestHandler):
             results = []
             for i, data_b64 in enumerate(items):
                 data_bytes = base64.b64decode(data_b64)
-                if data_bytes.startswith(b"MOCK_SEAL_ENCRYPTED:"):
-                    decrypted_bytes = data_bytes[len(b"MOCK_SEAL_ENCRYPTED:"):]
-                else:
-                    decrypted_bytes = data_bytes
+                decrypted_bytes = _seal_strip(data_bytes)
                 decrypted_b64 = base64.b64encode(decrypted_bytes).decode('utf-8')
                 results.append({
                     "index": i,

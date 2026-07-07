@@ -33,4 +33,7 @@ pub enum Error {
 
     #[error("Compatibility error: {0}")]
     Compatibility(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }

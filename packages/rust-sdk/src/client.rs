@@ -14,6 +14,7 @@ pub struct MemWalClient {
     namespace: String,
     client: reqwest::Client,
     session_cache: Mutex<Option<CachedSession>>,
+    compatibility_checked: Mutex<bool>,
 }
 
 struct CachedSession {
@@ -38,6 +39,7 @@ impl MemWalClient {
             namespace: namespace.to_string(),
             client,
             session_cache: Mutex::new(None),
+            compatibility_checked: Mutex::new(false),
         }
     }
 
@@ -232,6 +234,11 @@ impl MemWalClient {
         if self.server_url.contains("relayer.memwal.ai") {
             return Ok(());
         }
+        // The API version can't change within a process's lifetime, so a
+        // successful check never needs to be repeated.
+        if *self.compatibility_checked.lock().unwrap() {
+            return Ok(());
+        }
         let url = format!("{}/version", self.server_url);
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
@@ -252,6 +259,7 @@ impl MemWalClient {
                 version_info.api_version
             )));
         }
+        *self.compatibility_checked.lock().unwrap() = true;
         Ok(())
     }
 
@@ -435,7 +443,7 @@ impl MemWalClient {
             "POST" => reqwest::Method::POST,
             "PUT" => reqwest::Method::PUT,
             "DELETE" => reqwest::Method::DELETE,
-            _ => return Err(Error::Crypto(format!("Unsupported HTTP method: {}", method))),
+            _ => return Err(Error::Internal(format!("Unsupported HTTP method: {}", method))),
         };
 
         let mut req = self.client.request(req_method, &url);

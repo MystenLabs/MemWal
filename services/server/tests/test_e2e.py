@@ -2,15 +2,19 @@
 import os
 import time
 import uuid
-import hashlib
 import base64
 import pytest
 import requests
 from nacl.signing import SigningKey
-from nacl.encoding import RawEncoder
+
+from signing import sign_request
 
 BASE_URL = os.environ.get("TEST_BASE_URL", "http://localhost:3001").rstrip("/")
 MOCK_SERVER_URL = os.environ.get("MOCK_SERVER_URL", "http://localhost:8080").rstrip("/")
+
+# Reused across all ~115 test cases so requests keep-alive instead of opening
+# a fresh TCP connection per call.
+SESSION = requests.Session()
 
 # Global keys for tests
 DEFAULT_ACCOUNT_ID = "0xaccount123"
@@ -22,10 +26,10 @@ def register_keys():
     # Generate stable key for happy path
     key = SigningKey.generate()
     pk_bytes = list(key.verify_key.encode())
-    
+
     # Register with mock server
     try:
-        resp = requests.post(f"{MOCK_SERVER_URL}/mock/register", json={
+        resp = SESSION.post(f"{MOCK_SERVER_URL}/mock/register", json={
             "public_key": pk_bytes,
             "account_id": DEFAULT_ACCOUNT_ID,
             "owner": DEFAULT_OWNER
@@ -33,22 +37,8 @@ def register_keys():
         resp.raise_for_status()
     except Exception as e:
         print(f"[warning] Failed to register key with mock server: {e}")
-        
-    return key
 
-def _sign(
-    signing_key: SigningKey,
-    method: str,
-    path: str,
-    body_bytes: bytes,
-    timestamp: str,
-    nonce: str,
-    account_id: str,
-) -> str:
-    body_hash = hashlib.sha256(body_bytes).hexdigest()
-    message = f"{timestamp}.{method}.{path}.{body_hash}.{nonce}.{account_id}".encode()
-    signed = signing_key.sign(message, encoder=RawEncoder)
-    return signed.signature.hex()
+    return key
 
 def make_signed_request(
     method: str,
@@ -61,7 +51,7 @@ def make_signed_request(
     body_bytes = b"" if method == "GET" else json_dumps(body or {})
     timestamp = str(int(time.time()))
     nonce = str(uuid.uuid4())
-    signature_hex = _sign(
+    signature_hex = sign_request(
         signing_key, method, path, body_bytes, timestamp, nonce, account_id or ""
     )
     public_key_hex = signing_key.verify_key.encode().hex()
@@ -78,11 +68,11 @@ def make_signed_request(
 
     url = f"{BASE_URL}{path}"
     if method == "GET":
-        return requests.get(url, headers=headers, timeout=10)
+        return SESSION.get(url, headers=headers, timeout=10)
     elif method == "POST":
-        return requests.post(url, data=body_bytes, headers=headers, timeout=10)
+        return SESSION.post(url, data=body_bytes, headers=headers, timeout=10)
     else:
-        return requests.request(method, url, data=body_bytes, headers=headers, timeout=10)
+        return SESSION.request(method, url, data=body_bytes, headers=headers, timeout=10)
 
 def json_dumps(d: dict) -> bytes:
     import json
@@ -95,12 +85,12 @@ def json_dumps(d: dict) -> bytes:
 # --- Feature 1: Health & Version API (/health, /version) ---
 @pytest.mark.parametrize("case_id", [1, 2, 3, 4, 5])
 def test_t1_health_and_version(case_id):
-    resp = requests.get(f"{BASE_URL}/health")
+    resp = SESSION.get(f"{BASE_URL}/health")
     assert resp.status_code == 200
     data = resp.json()
     assert data.get("status") == "ok"
     
-    resp_v = requests.get(f"{BASE_URL}/version")
+    resp_v = SESSION.get(f"{BASE_URL}/version")
     assert resp_v.status_code == 200
     data_v = resp_v.json()
     assert "relayerVersion" in data_v
@@ -109,7 +99,7 @@ def test_t1_health_and_version(case_id):
 # --- Feature 2: Configuration API (/config) ---
 @pytest.mark.parametrize("case_id", [1, 2, 3, 4, 5])
 def test_t1_config(case_id):
-    resp = requests.get(f"{BASE_URL}/config")
+    resp = SESSION.get(f"{BASE_URL}/config")
     assert resp.status_code == 200
     data = resp.json()
     assert "suiNetwork" in data or "sui_network" in data or "registryId" in data or "registry_id" in data
@@ -254,7 +244,7 @@ def test_t1_sponsor(case_id):
         "sender": "0x" + "a" * 64,
         "transactionBlockKindBytes": base64.b64encode(b"\x00" * 20).decode('utf-8')
     }
-    resp = requests.post(f"{BASE_URL}/sponsor", json=body_sponsor, timeout=5)
+    resp = SESSION.post(f"{BASE_URL}/sponsor", json=body_sponsor, timeout=5)
     assert resp.status_code == 200
     data = resp.json()
     assert "txBytes" in data or "transactionBlockKindBytes" in data or "signature" in data
@@ -264,7 +254,7 @@ def test_t1_sponsor(case_id):
         "digest": "1" * 43,
         "signature": base64.b64encode(b"\x00" * 65).decode('utf-8')
     }
-    resp_execute = requests.post(f"{BASE_URL}/sponsor/execute", json=body_execute, timeout=5)
+    resp_execute = SESSION.post(f"{BASE_URL}/sponsor/execute", json=body_execute, timeout=5)
     assert resp_execute.status_code == 200
     data_execute = resp_execute.json()
     assert "digest" in data_execute
@@ -282,7 +272,7 @@ def test_t1_sponsor(case_id):
     ("PATCH", "/health", 405),
 ])
 def test_t2_health_version_invalid_methods(method, path, expected_code):
-    resp = requests.request(method, f"{BASE_URL}{path}")
+    resp = SESSION.request(method, f"{BASE_URL}{path}")
     assert resp.status_code == expected_code
 
 # --- Feature 2: Configuration API ---
@@ -294,7 +284,7 @@ def test_t2_health_version_invalid_methods(method, path, expected_code):
     ("OPTIONS", "/config", 200),
 ])
 def test_t2_config_invalid_methods(method, path, expected_code):
-    resp = requests.request(method, f"{BASE_URL}{path}")
+    resp = SESSION.request(method, f"{BASE_URL}{path}")
     assert resp.status_code == expected_code or resp.status_code == 204 # OPTIONS might return 204
 
 # --- Feature 3: Remember (Standard Ingestion) ---
@@ -390,7 +380,7 @@ def test_t2_restore_invalid_payloads(register_keys, case):
     ("/sponsor/execute", {"digest": "too_short_digest", "signature": "base64"}),                 # Bad digest length
 ])
 def test_t2_sponsor_invalid_payloads(endpoint, case):
-    resp = requests.post(f"{BASE_URL}{endpoint}", json=case, timeout=5)
+    resp = SESSION.post(f"{BASE_URL}{endpoint}", json=case, timeout=5)
     assert resp.status_code == 400
 
 # ==============================================================================
@@ -688,7 +678,7 @@ def test_t4_scen5_sponsored_gas_remember_flow(register_keys):
         "sender": "0x" + "f" * 64,
         "transactionBlockKindBytes": base64.b64encode(b"\x00" * 30).decode('utf-8')
     }
-    resp_sponsor = requests.post(f"{BASE_URL}/sponsor", json=body_sponsor, timeout=5)
+    resp_sponsor = SESSION.post(f"{BASE_URL}/sponsor", json=body_sponsor, timeout=5)
     assert resp_sponsor.status_code == 200
     data = resp_sponsor.json()
     
@@ -697,7 +687,7 @@ def test_t4_scen5_sponsored_gas_remember_flow(register_keys):
         "digest": "2" * 43,
         "signature": data.get("signature") or base64.b64encode(b"\x00" * 65).decode('utf-8')
     }
-    resp_execute = requests.post(f"{BASE_URL}/sponsor/execute", json=body_execute, timeout=5)
+    resp_execute = SESSION.post(f"{BASE_URL}/sponsor/execute", json=body_execute, timeout=5)
     assert resp_execute.status_code == 200
     
     # 3. Ingest memory

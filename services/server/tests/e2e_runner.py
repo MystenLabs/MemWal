@@ -53,34 +53,28 @@ def main():
     env["PACKAGE_ID"] = "0xpackage123"
     env["REGISTRY_ID"] = "0xregistry123"
     
-    # We specify RUSTC pointing directly to stable binary to help rustup bypass wrapper checks if run unsandboxed
-    env["RUSTC"] = "/Users/harryphan/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
+    # To bypass rustup wrapper checks in a sandboxed/unsandboxed CI runner, point
+    # RUSTC directly at a toolchain binary via E2E_RUSTC_PATH. Unset by default so
+    # `rustc`/`cargo` resolve normally from PATH on a regular dev machine.
+    rustc_path = os.environ.get("E2E_RUSTC_PATH")
+    if rustc_path:
+        env["RUSTC"] = rustc_path
 
-    # Start Axum relayer
+    # Start Axum relayer. E2E_CARGO_PATH overrides the cargo binary when the
+    # toolchain isn't on PATH (e.g. a pinned rustup toolchain in CI).
     relayer_cmd = [
-        "/Users/harryphan/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+        os.environ.get("E2E_CARGO_PATH", "cargo"),
         "run",
         "--manifest-path", "services/server/Cargo.toml"
     ]
-    
-    try:
-        relayer_process = subprocess.Popen(
-            relayer_cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-    except FileNotFoundError:
-        # Fall back to cargo in path if direct toolchain cargo is not there
-        relayer_cmd[0] = "cargo"
-        relayer_process = subprocess.Popen(
-            relayer_cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+
+    relayer_process = subprocess.Popen(
+        relayer_cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
 
     # Monitor output for server startup
     print("[*] Waiting for Relayer Server to boot on port 3001...")
@@ -124,8 +118,13 @@ def main():
     pytest_env = os.environ.copy()
     pytest_env["TEST_BASE_URL"] = f"http://localhost:{relayer_port}"
     pytest_env["MOCK_SERVER_URL"] = f"http://localhost:{mock_port}"
-    # Add our local pip packages to python path
-    pytest_env["PYTHONPATH"] = "/Users/harryphan/Documents/dev/MemWal/.pip_packages"
+    # Vendored pip packages (.pip_packages/ at repo root), if present.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    pip_packages_dir = os.path.join(repo_root, ".pip_packages")
+    if os.path.isdir(pip_packages_dir):
+        pytest_env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [pip_packages_dir, pytest_env.get("PYTHONPATH")])
+        )
     
     pytest_cmd = [
         "python3", "-m", "pytest", "services/server/tests/test_e2e.py", "-v"
