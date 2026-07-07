@@ -12,11 +12,7 @@
 //! `contract_ident!(fn system::register_blob)`), not guessed from the old TS
 //! sidecar's naming.
 //!
-//! `certify_blob` is not here yet — it needs the confirmation
-//! signature/bitmap/message the Upload Relay's response provides, which
-//! hasn't been wired up (see module doc on the not-yet-written upload_relay
-//! client).
-
+use std::num::NonZeroU16;
 use sui_sdk_types::Address;
 use sui_transaction_builder::{Argument, ObjectInput, TransactionBuilder};
 
@@ -113,6 +109,133 @@ pub fn register_blob_inputs(
     ]
 }
 
+/// Build the PTB inputs/arguments for `walrus::system::certify_blob`:
+/// `certify_blob(self: &System, blob: &mut Blob, signature: vector<u8>,
+/// signers_bitmap: vector<u8>, message: vector<u8>)`.
+///
+/// Note `self: &System` is an *immutable* shared reference here (unlike
+/// `reserve_space`/`register_blob`'s `&mut System`) — `mutable: false` on
+/// the `ObjectInput::shared` call reflects that.
+///
+/// `blob_arg` is the PTB `Argument` for the `Blob` object `register_blob`
+/// returned — typically chained from the same PTB's earlier command, not a
+/// fresh object lookup, since a freshly-registered `Blob` has no separate
+/// on-chain object ref to look up yet within the same transaction.
+///
+/// `signature`/`signers_bitmap`/`message` come from the Upload Relay's
+/// confirmation response once the blob's slivers have been stored by a
+/// quorum of storage nodes — not built by this server. Wiring the Upload
+/// Relay client that produces these is a separate, not-yet-done step (see
+/// `crates/walrus-upload-relay/upload_relay_openapi.yaml` in the walrus
+/// repo for the wire protocol).
+pub fn certify_blob_inputs(
+    tx: &mut TransactionBuilder,
+    system_object_id: Address,
+    system_initial_shared_version: u64,
+    blob_arg: Argument,
+    signature: Vec<u8>,
+    signers_bitmap: Vec<u8>,
+    message: Vec<u8>,
+) -> Vec<Argument> {
+    let system_arg = tx.object(ObjectInput::shared(
+        system_object_id,
+        system_initial_shared_version,
+        false,
+    ));
+    let signature_arg = tx.pure(&signature);
+    let signers_bitmap_arg = tx.pure(&signers_bitmap);
+    let message_arg = tx.pure(&message);
+    vec![system_arg, blob_arg, signature_arg, signers_bitmap_arg, message_arg]
+}
+
+/// Read the current Walrus committee's shard count from the on-chain
+/// `staking::Staking` object.
+///
+/// `n_shards` isn't a direct field on the `Staking` object — it lives in a
+/// `StakingInnerV1` value stored behind a `u64`-keyed dynamic field (the
+/// same "inner state behind a dynamic field, bump the key to migrate"
+/// pattern `system.move`'s own `System`/`SystemStateInnerV1` uses — see
+/// `storage::sui::verify_delegate_key_onchain`'s doc for the analogous
+/// MemWalAccount case). Two RPC round-trips: `suix_getDynamicFields` to
+/// find the current inner-state object, then `sui_getObject` on it to read
+/// `value.fields.n_shards`.
+///
+/// Also returns `committee_size` (the number of distinct committee member
+/// entries in `committee.pos0.contents`) — needed by
+/// [`signers_to_bitmap`], which mirrors `walrus-sui`'s own
+/// `committee_size()` (`self.inner.committee.members.len()` there; the same
+/// value, read from the JSON field path instead of a typed BCS struct).
+///
+/// Cross-checked live against Walrus testnet (`staking_object` from
+/// `setup/client_config_testnet.yaml`): returned n_shards=1000 (matching
+/// that config's separately-published static value) and committee_size=101
+/// at the time this was written.
+pub async fn fetch_n_shards_and_committee_size(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    staking_object_id: &str,
+) -> Result<(NonZeroU16, u16), String> {
+    let fields = super::sui::raw_rpc_call(
+        client,
+        rpc_url,
+        "suix_getDynamicFields",
+        serde_json::json!([staking_object_id, serde_json::Value::Null, 1]),
+    )
+    .await?;
+    let inner_object_id = fields
+        .pointer("/data/0/objectId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "staking object has no StakingInnerV1 dynamic field".to_string())?;
+
+    let inner = super::sui::raw_rpc_call(
+        client,
+        rpc_url,
+        "sui_getObject",
+        serde_json::json!([inner_object_id, { "showContent": true }]),
+    )
+    .await?;
+    let value_fields = inner
+        .pointer("/data/content/fields/value/fields")
+        .ok_or_else(|| "StakingInnerV1 object has no value.fields".to_string())?;
+
+    let n_shards = value_fields
+        .get("n_shards")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .ok_or_else(|| "StakingInnerV1 has no n_shards field".to_string())?;
+    let n_shards = u16::try_from(n_shards)
+        .ok()
+        .and_then(NonZeroU16::new)
+        .ok_or_else(|| format!("n_shards {n_shards} is not a valid non-zero u16"))?;
+
+    let committee_size = value_fields
+        .pointer("/committee/fields/pos0/fields/contents")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "StakingInnerV1 has no committee.pos0.contents".to_string())?
+        .len();
+    let committee_size = u16::try_from(committee_size)
+        .map_err(|_| format!("committee_size {committee_size} does not fit in u16"))?;
+
+    Ok((n_shards, committee_size))
+}
+
+/// Pack a list of signer indices (0-based, into the committee) into the
+/// bit-packed `signers_bitmap: vector<u8>` `certify_blob` expects.
+///
+/// Verbatim port of `walrus-sui`'s own
+/// `SuiContractClient::signers_to_bitmap` (`crates/walrus-sui/src/client/
+/// transaction_builder/owned_blob_ops.rs`): one bit per committee member,
+/// packed LSB-first within each byte, `committee_size.div_ceil(8)` bytes
+/// total.
+pub fn signers_to_bitmap(signers: &[u16], committee_size: u16) -> Vec<u8> {
+    let mut bitmap = vec![0u8; (committee_size as usize).div_ceil(8)];
+    for &signer in signers {
+        let byte_index = (signer / 8) as usize;
+        let bit_index = signer % 8;
+        bitmap[byte_index] |= 1 << bit_index;
+    }
+    bitmap
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +293,64 @@ mod tests {
         let encoded = bcs::to_bytes(&bytes).unwrap();
         assert_eq!(encoded.len(), 32);
         assert_eq!(encoded, bytes.to_vec());
+    }
+
+    #[test]
+    fn certify_blob_inputs_produces_expected_argument_count() {
+        // certify_blob takes 5 PTB arguments (system, blob, signature,
+        // signers_bitmap, message).
+        let mut tx = TransactionBuilder::new();
+        let blob_arg = tx.object(ObjectInput::new(dummy_address(3)));
+        let args = certify_blob_inputs(
+            &mut tx,
+            dummy_address(1),
+            100,
+            blob_arg,
+            vec![1, 2, 3],
+            vec![4, 5],
+            vec![6, 7, 8, 9],
+        );
+        assert_eq!(args.len(), 5);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live Sui testnet fullnode — run explicitly with `cargo test -- --ignored`"]
+    async fn fetch_n_shards_and_committee_size_reads_the_real_testnet_values() {
+        // Live read-only check against the official Mysten testnet staking
+        // object. No signing, no funds — just confirms this module's RPC
+        // navigation (suix_getDynamicFields -> sui_getObject -> field path)
+        // actually matches the real on-chain StakingInnerV1 layout, not
+        // just the JSON shape I read once by hand while writing this.
+        let client = reqwest::Client::new();
+        let (n_shards, committee_size) = fetch_n_shards_and_committee_size(
+            &client,
+            "https://fullnode.testnet.sui.io:443",
+            testnet::STAKING_OBJECT,
+        )
+        .await
+        .unwrap();
+        // n_shards=1000 and committee_size=101 as of writing (n_shards
+        // matches setup/client_config_testnet.yaml's separately-published
+        // static value) — both can change across epochs, so this asserts
+        // sane ranges rather than exact figures, in case they move before
+        // this test is next run.
+        assert!(n_shards.get() >= 100, "n_shards={n_shards} looks implausibly small");
+        assert!(committee_size >= 10, "committee_size={committee_size} looks implausibly small");
+    }
+
+    #[test]
+    fn signers_to_bitmap_matches_hand_computed_expected_bytes() {
+        // committee_size=10 -> ceil(10/8) = 2 bytes.
+        // signer 0 -> byte 0, bit 0 -> 0b0000_0001
+        // signer 3 -> byte 0, bit 3 -> 0b0000_1000
+        // signer 9 -> byte 1, bit 1 -> 0b0000_0010
+        let bitmap = signers_to_bitmap(&[0, 3, 9], 10);
+        assert_eq!(bitmap, vec![0b0000_1001, 0b0000_0010]);
+    }
+
+    #[test]
+    fn signers_to_bitmap_empty_signers_gives_zeroed_bitmap() {
+        let bitmap = signers_to_bitmap(&[], 20);
+        assert_eq!(bitmap, vec![0u8; 3]); // ceil(20/8) = 3
     }
 }
