@@ -36,6 +36,12 @@ sui-crypto = { version = "0.3", features = ["ed25519"] }
 sui-transaction-builder = "0.3"
 sui-rpc = "0.3"
 
+# Walrus RedStuff erasure-coding (compute blob_id/root_hash locally before
+# register_blob) — default-features = false skips the optional `sui-types`
+# feature, which would pull the full Sui monorepo and conflict with this
+# server's own sqlx/pgvector pins (see WALM-184 investigation notes).
+walrus-core = { git = "https://github.com/MystenLabs/walrus", tag = "walrus_v1.52.0_1783366984_main_ci", default-features = false }
+
 # Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }
 apalis-sql = { version = "0.7", features = ["postgres", "migrate"] }
