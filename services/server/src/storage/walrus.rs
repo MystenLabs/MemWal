@@ -420,43 +420,18 @@ fn decimal_str_to_le_bytes_32(decimal: &str) -> Option<[u8; 32]> {
     }
 }
 
+/// Thin `AppError`-flavored wrapper around the shared low-level RPC caller
+/// in `storage::sui` — see that function's doc for the wire-format details
+/// (request-id header, `observe_external` metrics) it applies uniformly.
 async fn sui_rpc_call(
     client: &reqwest::Client,
     rpc_url: &str,
     method: &'static str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    });
-    let started = std::time::Instant::now();
-    let resp = client
-        .post(rpc_url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&body)
-        .send()
+    super::sui::raw_rpc_call(client, rpc_url, method, params)
         .await
-        .map_err(|e| {
-            crate::observability::observe_external("sui_rpc", method, "transport_error", started.elapsed());
-            AppError::Internal(format!("Sui RPC {} failed: {}", method, e))
-        })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external("sui_rpc", method, &status_label, started.elapsed());
-
-    let value: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sui RPC {} returned invalid JSON: {}", method, e)))?;
-    if let Some(error) = value.get("error") {
-        return Err(AppError::Internal(format!("Sui RPC {} error: {}", method, error)));
-    }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| AppError::Internal(format!("Sui RPC {} response missing 'result'", method)))
+        .map_err(AppError::Internal)
 }
 
 /// Query the user's Walrus Blob objects directly from the Sui chain (native
@@ -481,6 +456,12 @@ pub async fn query_blobs_by_owner(
 ) -> Result<Vec<OnChainBlob>, AppError> {
     let blob_type = format!("{}::blob::Blob", walrus_package_id);
     let want = limit.unwrap_or(usize::MAX);
+    // Constant dynamic-field lookup key for every blob's `memwal_*` metadata —
+    // computed once, not rebuilt per object/page.
+    let metadata_name = serde_json::json!({
+        "type": "vector<u8>",
+        "value": "metadata".bytes().map(u32::from).collect::<Vec<_>>(),
+    });
 
     let mut blobs = Vec::new();
     let mut cursor: serde_json::Value = serde_json::Value::Null;
@@ -508,6 +489,12 @@ pub async fn query_blobs_by_owner(
             break;
         }
 
+        // Collect candidates synchronously first, then fetch each one's
+        // `memwal_*` metadata dynamic field concurrently — a page can hold
+        // up to 50 objects, and these were previously fetched one at a time
+        // (sequential round-trips dominate restore latency for accounts
+        // with many blobs).
+        let mut candidates = Vec::with_capacity(data.len());
         for entry in &data {
             scanned += 1;
             let obj = entry.get("data");
@@ -526,21 +513,28 @@ pub async fn query_blobs_by_owner(
             let Some(raw_blob_id) = raw_blob_id else {
                 continue;
             };
+            candidates.push((object_id.to_string(), raw_blob_id));
+        }
 
-            // Fetch the `memwal_*` metadata dynamic field attached to this blob.
-            let (mut blob_namespace, mut blob_package_id) = ("default".to_string(), String::new());
-            let metadata_name = serde_json::json!({
-                "type": "vector<u8>",
-                "value": "metadata".bytes().map(u32::from).collect::<Vec<_>>(),
+        let mut metadata_lookups = FuturesUnordered::new();
+        for (object_id, raw_blob_id) in candidates {
+            let metadata_name = metadata_name.clone();
+            metadata_lookups.push(async move {
+                let dyn_field = sui_rpc_call(
+                    client,
+                    rpc_url,
+                    "suix_getDynamicFieldObject",
+                    serde_json::json!([object_id, metadata_name]),
+                )
+                .await
+                .ok();
+                (object_id, raw_blob_id, dyn_field)
             });
-            if let Ok(dyn_field) = sui_rpc_call(
-                client,
-                rpc_url,
-                "suix_getDynamicFieldObject",
-                serde_json::json!([object_id, metadata_name]),
-            )
-            .await
-            {
+        }
+
+        while let Some((object_id, raw_blob_id, dyn_field)) = metadata_lookups.next().await {
+            let (mut blob_namespace, mut blob_package_id) = ("default".to_string(), String::new());
+            if let Some(dyn_field) = dyn_field {
                 let contents = dyn_field
                     .pointer("/data/content/fields/value/fields/metadata/fields/contents")
                     .and_then(|v| v.as_array());
@@ -572,7 +566,7 @@ pub async fn query_blobs_by_owner(
             };
             blobs.push(OnChainBlob {
                 blob_id,
-                object_id: object_id.to_string(),
+                object_id,
                 namespace: blob_namespace,
                 package_id: blob_package_id,
             });

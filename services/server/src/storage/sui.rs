@@ -336,6 +336,50 @@ pub async fn find_account_by_delegate_key(
     ))
 }
 
+/// Low-level Sui JSON-RPC POST, shared by this module's own call sites'
+/// underlying wire format and by `storage::walrus`'s on-chain blob queries
+/// (which don't share `OnchainVerifyError`, hence returning `String` here
+/// rather than that enum). Applies the request-id header and records
+/// `observability::observe_external` the same way every call site in this
+/// file already does. Returns the `result` value on success.
+pub(crate) async fn raw_rpc_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    method: &'static str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let request = client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    let started = std::time::Instant::now();
+    let resp = request.send().await.map_err(|e| {
+        crate::observability::observe_external("sui_rpc", method, "transport_error", started.elapsed());
+        format!("Sui RPC {} failed: {}", method, e)
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external("sui_rpc", method, &status_label, started.elapsed());
+
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Sui RPC {} returned invalid JSON: {}", method, e))?;
+    if let Some(error) = value.get("error") {
+        return Err(format!("Sui RPC {} error: {}", method, error));
+    }
+    value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| format!("Sui RPC {} response missing 'result'", method))
+}
+
 // ============================================================
 // Types for JSON-RPC response parsing
 // ============================================================
