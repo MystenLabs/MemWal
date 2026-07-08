@@ -60,6 +60,41 @@ function hexToBytes(hex: string): number[] {
     return out
 }
 
+/**
+ * Prove the request came from a Walrus Memory MCP bridge running on THIS
+ * machine before we register a delegate key on-chain (issue #368).
+ *
+ * The bridge mints a single-use `connectState` token, keeps it in memory, and
+ * only puts it in the `/connect/mcp` URL it opens itself. We hand that token
+ * back to the bridge's localhost `/handshake`; it answers `{ ok: true }` only
+ * when the token matches the one it minted. A phishing link opened from an
+ * email carries an attacker-chosen token and reaches no local bridge (or a
+ * bridge whose token differs), so this returns false and we refuse to sign.
+ *
+ * Any failure — no listener, wrong token, CORS/PNA block, non-bridge process
+ * on the port — is treated as "not verified". False negatives are safe: they
+ * only ask a legitimate user to restart the MCP login command.
+ */
+/** Compare two relayer URLs ignoring trailing slashes and case. */
+function sameRelayer(a: string, b: string): boolean {
+    const norm = (s: string) => s.replace(/\/+$/, '').toLowerCase()
+    return norm(a) === norm(b)
+}
+
+async function verifyLocalBridge(port: string, state: string): Promise<boolean> {
+    try {
+        const res = await fetch(
+            `http://127.0.0.1:${port}/handshake?state=${encodeURIComponent(state)}`,
+            { method: 'GET' },
+        )
+        if (!res.ok) return false
+        const data = (await res.json().catch(() => null)) as { ok?: unknown } | null
+        return data?.ok === true
+    } catch {
+        return false
+    }
+}
+
 async function resolveAccountId(
     suiClient: ReturnType<typeof useSuiClient>,
     ownerAddress: string,
@@ -129,7 +164,17 @@ export default function ConnectMcp() {
     const [walletPickerOpen, setWalletPickerOpen] = useState(false)
     const [callbackPayload, setCallbackPayload] = useState<McpCallbackPayload | null>(null)
     const [callbackDelivered, setCallbackDelivered] = useState<boolean | null>(null)
+    // Bridge binding (issue #368): null = still checking, true = a local bridge
+    // confirmed it issued this request, false = could not confirm (a phishing
+    // link opened from elsewhere, or the local bridge has exited). We refuse to
+    // sign `add_delegate_key` unless this is true.
+    const [bridgeVerified, setBridgeVerified] = useState<boolean | null>(null)
     const invalidRequestTrackedRef = useRef(false)
+    // True once the user actively started the flow (clicked the consent button).
+    // Gates the wallet-picker auto-proceed effect so a pre-connected wallet does
+    // NOT skip straight past the consent screen on mount — the user must read
+    // and click through the disclosure first (issue #368).
+    const initiatedRef = useRef(false)
 
     // Validate query string up-front.
     const paramsValid = useMemo(() => {
@@ -166,6 +211,9 @@ export default function ConnectMcp() {
     )
 
     const handleConnect = useCallback(async () => {
+        // Mark the flow as user-initiated so the auto-proceed effect below is
+        // allowed to run after the wallet picker closes (issue #368).
+        initiatedRef.current = true
         if (!paramsValid) {
             trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
             setErrorMsg('Invalid query parameters from MCP client.')
@@ -179,6 +227,30 @@ export default function ConnectMcp() {
         }
 
         trackEvent('mcp_connect_start', { wallet_connected: true })
+
+        // Bind this on-chain write to the local bridge (issue #368). Never sign
+        // add_delegate_key for a request we can't prove a bridge on this port
+        // issued — this is what blocks a consent-phishing link opened from an
+        // email/chat, where no local bridge (or a bridge with a different token)
+        // answers the handshake. Re-checked here right before signing even
+        // though the page already probed on load, in case the bridge exited in
+        // between.
+        const bridgeOk = await verifyLocalBridge(port, state)
+        setBridgeVerified(bridgeOk)
+        if (!bridgeOk) {
+            trackEvent('mcp_connect_failed', { error_type: 'bridge_unverified' })
+            setErrorMsg(
+                'Could not confirm this request came from a Walrus Memory MCP login running on this computer, ' +
+                'so nothing was registered on-chain. ' +
+                'If you did NOT start this yourself — for example you opened a link from an email or chat message — ' +
+                'close this tab: approving would grant someone else ongoing access to all your memories. ' +
+                'If you DID start this, make sure you are running the latest MCP client ' +
+                '(e.g. `npx @mysten-incubation/memwal-mcp@latest login`) and restart the login command, then try again.'
+            )
+            setStep('error')
+            return
+        }
+
         setStep('signing')
         try {
             // Resolve the user's Walrus Memory account object.
@@ -257,6 +329,7 @@ export default function ConnectMcp() {
         publicKey,
         delegateAddress,
         label,
+        port,
         state,
         postCallback,
     ])
@@ -266,6 +339,22 @@ export default function ConnectMcp() {
         invalidRequestTrackedRef.current = true
         trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
     }, [paramsValid])
+
+    // Probe the local bridge as soon as the request looks well-formed, so the
+    // consent screen can warn — and disable Approve — before the user ever
+    // connects a wallet if this link did not come from a bridge on this machine
+    // (issue #368). handleConnect re-checks right before signing.
+    useEffect(() => {
+        setBridgeVerified(null)
+        if (!paramsValid) return
+        let cancelled = false
+        void verifyLocalBridge(port, state).then((ok) => {
+            if (!cancelled) setBridgeVerified(ok)
+        })
+        return () => {
+            cancelled = true
+        }
+    }, [paramsValid, port, state])
 
     // Persist the connect request so it survives the Google OAuth redirect.
     // Enoki's redirect_uri is pinned to the app root (App.tsx), so signing in
@@ -282,8 +371,10 @@ export default function ConnectMcp() {
     }, [paramsValid, port, publicKey, delegateAddress, label, relayer, state])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
+    // Gated on initiatedRef so a wallet that was ALREADY connected on mount does
+    // not skip the consent screen — the user must click through it first (#368).
     useEffect(() => {
-        if (!walletPickerOpen && currentAccount && step === 'consent') {
+        if (initiatedRef.current && !walletPickerOpen && currentAccount && step === 'consent') {
             // user picked a wallet — kick off the connect flow.
             void handleConnect()
         }
@@ -325,8 +416,11 @@ export default function ConnectMcp() {
                         <ConsentCard
                             label={label}
                             delegateAddress={delegateAddress}
+                            publicKey={publicKey}
                             relayer={relayer}
+                            relayerIsDefault={sameRelayer(relayer, config.memwalServerUrl)}
                             wallet={currentAccount?.address ?? null}
+                            bridgeVerified={bridgeVerified}
                             onConnect={handleConnect}
                         />
                     )}
@@ -406,33 +500,83 @@ export default function ConnectMcp() {
 function ConsentCard({
     label,
     delegateAddress,
+    publicKey,
     relayer,
+    relayerIsDefault,
     wallet,
+    bridgeVerified,
     onConnect,
 }: {
     label: string
     delegateAddress: string
+    publicKey: string
     relayer: string
+    relayerIsDefault: boolean
     wallet: string | null
+    bridgeVerified: boolean | null
     onConnect: () => void
 }) {
+    // We only enable the on-chain action once a local bridge has confirmed it
+    // issued this request (issue #368). `null` = still probing.
+    const blocked = bridgeVerified !== true
+
+    let buttonText: string
+    if (bridgeVerified === null) buttonText = 'Checking this request…'
+    else if (bridgeVerified === false) buttonText = 'Request could not be verified'
+    else buttonText = wallet ? 'Approve in wallet' : 'Connect Sui wallet'
+
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">
-                {label} wants access to your Walrus Memory
+                Authorize an MCP client to access your Walrus Memory
             </h2>
             <p className="setup-classic-description">
-                Review the permissions below, then connect your Sui wallet to register this delegate key on-chain.
+                Something is asking to register a <strong>delegate key</strong> on your Walrus Memory
+                account. Read what this grants before you approve — the request below is not verified by
+                Walrus Memory, only by you.
             </p>
 
+            {/* Bridge-binding status. This is the anti-phishing signal: a request
+                that did not originate from a bridge on this machine cannot pass. */}
+            {bridgeVerified === false && (
+                <div style={dangerBoxStyle}>
+                    <strong>⚠ This request did not come from an MCP login on this computer.</strong>
+                    <p style={{ margin: '6px 0 0' }}>
+                        Walrus Memory could not reach a local Walrus Memory MCP login for this request, so
+                        approving is disabled. If a link was sent to you by someone else,{' '}
+                        <strong>close this tab</strong> — it may be trying to trick you into granting them
+                        access. If you started this yourself, your MCP client may be out of date — update to
+                        the latest and restart the login command.
+                    </p>
+                </div>
+            )}
+            {bridgeVerified === true && (
+                <div style={okBoxStyle}>
+                    ✓ Verified this request came from a Walrus Memory MCP login running on this computer.
+                </div>
+            )}
+
             <div className="card setup-classic-feature-card">
-                <p style={cardLabelStyle}>Permissions requested</p>
+                <p style={cardLabelStyle}>What approving grants</p>
                 <ul style={permListStyle}>
-                    <li>✓ Read your memories (<code style={codeStyle}>memwal_recall</code>)</li>
-                    <li>✓ Save new memories (<code style={codeStyle}>memwal_remember</code>)</li>
-                    <li>✓ Extract facts from text (<code style={codeStyle}>memwal_analyze</code>)</li>
-                    <li>✓ Re-index from Walrus (<code style={codeStyle}>memwal_restore</code>)</li>
+                    <li>✓ Read <strong>and decrypt</strong> every memory in this account — all namespaces</li>
+                    <li>✓ Create, update, and overwrite memories</li>
+                    <li>✓ Extract facts from text and re-index from Walrus storage</li>
                 </ul>
+                <p style={scaryNoteStyle}>
+                    This gives a third party <strong>persistent read, decrypt, and write access to
+                    everything in this account</strong> — through the relayer below — and it lasts until you
+                    revoke the key from your dashboard. It is not limited to one session.
+                </p>
+
+                <div style={dividerStyle} />
+
+                <p style={cardLabelStyle}>The client identifies itself as</p>
+                <div style={untrustedLabelStyle}>{label}</div>
+                <p style={untrustedHintStyle}>
+                    This name is supplied by the requester and is <strong>not verified</strong>. Anyone can
+                    claim any name.
+                </p>
 
                 <div style={dividerStyle} />
 
@@ -440,10 +584,20 @@ function ConsentCard({
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Relayer</span>
                     <span style={detailValueStyle}>{relayer}</span>
+                    {!relayerIsDefault && (
+                        <span style={relayerWarnStyle}>
+                            ⚠ Non-default relayer — your memories would be served through this host. Only
+                            proceed if you recognize it.
+                        </span>
+                    )}
                 </div>
                 <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Delegate address</span>
-                    <span style={detailValueStyle}>{delegateAddress.slice(0, 16)}…{delegateAddress.slice(-6)}</span>
+                    <span style={detailLabelStyle}>Delegate address (full)</span>
+                    <span style={detailValueStyle}>{delegateAddress}</span>
+                </div>
+                <div style={detailRowStyle}>
+                    <span style={detailLabelStyle}>Delegate public key (full)</span>
+                    <span style={detailValueStyle}>{publicKey}</span>
                 </div>
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Connected wallet</span>
@@ -453,9 +607,20 @@ function ConsentCard({
                 </div>
             </div>
 
+            <div style={safetyNoteStyle}>
+                Only continue if <strong>you</strong> just started this from your own machine. Approving hands
+                the key above ongoing access to all your memories.
+            </div>
+
             <div className="setup-classic-actions">
-                <button onClick={onConnect} className="lp-btn-yellow">
-                    {wallet ? 'Approve in wallet' : 'Connect Sui wallet'}
+                <button
+                    onClick={onConnect}
+                    className="lp-btn-yellow"
+                    disabled={blocked}
+                    aria-disabled={blocked}
+                    style={blocked ? disabledBtnStyle : undefined}
+                >
+                    {buttonText}
                 </button>
             </div>
         </div>
@@ -567,4 +732,73 @@ const detailValueStyle: React.CSSProperties = {
 
 const errorTextStyle: React.CSSProperties = {
     color: '#ff6b6b',
+}
+
+// Red alert box — shown when the request can't be tied to a local bridge.
+const dangerBoxStyle: React.CSSProperties = {
+    background: 'rgba(239, 68, 68, 0.12)',
+    border: '1px solid #ef4444',
+    borderRadius: 8,
+    padding: '12px 14px',
+    margin: '0 0 18px',
+    fontSize: '0.88rem',
+    color: '#ffb4b4',
+}
+
+// Green confirmation box — shown when the bridge handshake succeeded.
+const okBoxStyle: React.CSSProperties = {
+    background: 'rgba(34, 197, 94, 0.12)',
+    border: '1px solid #22c55e',
+    borderRadius: 8,
+    padding: '10px 14px',
+    margin: '0 0 18px',
+    fontSize: '0.85rem',
+    color: '#86efac',
+}
+
+// The blunt "what you're really granting" paragraph inside the card.
+const scaryNoteStyle: React.CSSProperties = {
+    margin: '14px 0 0',
+    fontSize: '0.84rem',
+    lineHeight: 1.5,
+    color: '#f0a3a3',
+}
+
+// Attacker-controlled label — rendered as untrusted free text, never as a
+// verified identity in the heading.
+const untrustedLabelStyle: React.CSSProperties = {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.9rem',
+    color: '#faf8f5',
+    background: '#1c1e20',
+    border: '1px solid #2a2c2e',
+    borderRadius: 6,
+    padding: '8px 10px',
+    wordBreak: 'break-all',
+}
+
+const untrustedHintStyle: React.CSSProperties = {
+    margin: '6px 0 0',
+    fontSize: '0.78rem',
+    color: '#8f9294',
+}
+
+const relayerWarnStyle: React.CSSProperties = {
+    marginTop: 4,
+    fontSize: '0.78rem',
+    color: '#f0a3a3',
+    lineHeight: 1.45,
+}
+
+const safetyNoteStyle: React.CSSProperties = {
+    margin: '18px 0 0',
+    fontSize: '0.82rem',
+    lineHeight: 1.5,
+    color: '#c7b48a',
+    textAlign: 'center',
+}
+
+const disabledBtnStyle: React.CSSProperties = {
+    opacity: 0.45,
+    cursor: 'not-allowed',
 }

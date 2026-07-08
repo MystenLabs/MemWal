@@ -4,10 +4,12 @@
  *   1. Generate Ed25519 keypair locally.
  *   2. Start an HTTP listener on a random localhost port.
  *   3. Open the user's browser at the configured web URL with the public
- *      key + callback port in the query string.
- *   4. Web page asks user to connect Sui wallet → signs `add_delegate_key`
- *      on-chain → POSTs the resulting {accountId, walletAddress, packageId,
- *      txDigest, ...} to `http://localhost:<port>/callback`.
+ *      key + callback port + single-use state token in the query string.
+ *   4. Web page fetches `GET /handshake?state=` first to confirm a real local
+ *      bridge issued this request (binds the on-chain write to this process —
+ *      see issue #368), then asks the user to connect their Sui wallet → signs
+ *      `add_delegate_key` on-chain → POSTs the resulting {accountId,
+ *      walletAddress, packageId, txDigest, ...} to `http://localhost:<port>/callback`.
  *   5. Listener receives the callback, returns 200 + a friendly success
  *      page, then shuts down. We resolve with `MemWalCredentials`.
  *
@@ -227,10 +229,10 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         void timer;
 
         server.on("request", async (req: IncomingMessage, res: ServerResponse) => {
-            // CORS — only the dashboard origin we control may POST. `*` would
-            // let any web page on the internet talk to this localhost port.
+            // CORS — only the dashboard origin we control may talk to us. `*`
+            // would let any web page on the internet reach this localhost port.
             res.setHeader("access-control-allow-origin", expectedOrigin);
-            res.setHeader("access-control-allow-methods", "POST, OPTIONS");
+            res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
             res.setHeader("access-control-allow-headers", "content-type");
             res.setHeader("vary", "origin");
             if (req.method === "OPTIONS") {
@@ -263,6 +265,26 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             }
 
             const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+
+            // Pre-sign handshake. The consent page fetches this BEFORE it will
+            // sign `add_delegate_key` on chain, to prove a real local bridge
+            // owns this port AND issued the `connectState` carried in its URL.
+            // We answer `{ ok: true }` only when the supplied state matches the
+            // single-use token we minted for this flow. A phishing link (issue
+            // #368) carries an attacker-chosen state and reaches no local bridge
+            // — or a victim bridge whose token differs — so it fails here and
+            // the page never signs. This lifts the existing state-token defense
+            // (previously guarding only the callback) to also gate the on-chain
+            // write. The Origin/Host/PNA checks above already apply.
+            if (url.pathname === "/handshake" && req.method === "GET") {
+                const qState = url.searchParams.get("state") ?? "";
+                const ok = stateEquals(qState, stateToken);
+                if (!ok) log.warn("login.handshake_bad_state", {});
+                res.writeHead(ok ? 200 : 403, { "content-type": "application/json" });
+                res.end(JSON.stringify({ ok }));
+                return;
+            }
+
             if (url.pathname !== "/callback" || req.method !== "POST") {
                 res.writeHead(404, { "content-type": "text/plain" });
                 res.end("Not found");
