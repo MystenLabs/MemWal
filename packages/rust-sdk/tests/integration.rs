@@ -1,9 +1,7 @@
 //! Integration tests against a mock relayer (no network / credentials needed).
 
+use memwal::{Error, RecallManualOptions, RecallParams, RememberManualOptions, WalrusMemory};
 use serde_json::json;
-use walrus_memory::{
-    Error, RecallManualOptions, RecallParams, RememberManualOptions, WalrusMemory,
-};
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

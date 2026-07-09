@@ -12,12 +12,12 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use walrus_memory::{RecallParams, WaitOptions, WalrusMemory};
+//! use memwal::{RecallParams, WaitOptions, WalrusMemory};
 //!
-//! # async fn run() -> walrus_memory::Result<()> {
+//! # async fn run() -> memwal::Result<()> {
 //! let client = WalrusMemory::builder(
 //!     "<your-ed25519-delegate-key-hex>",
-//!     "<your-walrus-memory-account-id>",
+//!     "<your-memwal-account-id>",
 //! )
 //! .server_url("https://relayer.memory.walrus.xyz")
 //! .namespace("demo")

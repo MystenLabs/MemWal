@@ -17,7 +17,7 @@
 
 use std::env;
 
-use walrus_memory::{Env, RecallParams, WaitOptions, WalrusMemory};
+use memwal::{Env, RecallParams, WaitOptions, WalrusMemory};
 
 fn parse_env(raw: &str) -> Option<Env> {
     match raw.to_ascii_lowercase().as_str() {

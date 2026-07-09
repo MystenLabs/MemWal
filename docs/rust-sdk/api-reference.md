@@ -8,12 +8,12 @@ See also:
 - [Configuration](/reference/configuration)
 - [Relayer API](/relayer/api-reference)
 
-All client methods are `async` and return `walrus_memory::Result<T>` (an alias for `Result<T, walrus_memory::Error>`).
+All client methods are `async` and return `memwal::Result<T>` (an alias for `Result<T, memwal::Error>`).
 
 ## Constructing a client
 
 ```rust
-use walrus_memory::{Env, WalrusMemory};
+use memwal::{Env, WalrusMemory};
 
 // Builder (recommended)
 let client = WalrusMemory::builder(private_key, account_id)
@@ -66,7 +66,7 @@ let client = WalrusMemory::create(private_key, account_id)?;
 variants, or poll manually:
 
 ```rust
-use walrus_memory::WaitOptions;
+use memwal::WaitOptions;
 
 let accepted = client.remember("note", None).await?;
 let status = client
@@ -79,7 +79,7 @@ sensible starting point).
 
 ## Errors
 
-Methods return `walrus_memory::Error`, a `thiserror` enum:
+Methods return `memwal::Error`, a `thiserror` enum:
 
 | Variant | Meaning |
 |---------|---------|

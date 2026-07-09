@@ -1,4 +1,4 @@
-# walrus-memory — Walrus Memory Rust SDK
+# memwal — Walrus Memory Rust SDK
 
 Privacy-first AI memory for Rust agents and server-side integrations — [memory.walrus.xyz](https://memory.walrus.xyz).
 
@@ -12,7 +12,7 @@ SEAL session for decrypt-needing calls. It mirrors the TypeScript and Python SDK
 ```toml
 # Cargo.toml
 [dependencies]
-walrus-memory = "0.1"
+memwal = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -27,10 +27,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ## Quick Start
 
 ```rust
-use walrus_memory::{WalrusMemory, RecallParams, WaitOptions};
+use memwal::{WalrusMemory, RecallParams, WaitOptions};
 
 #[tokio::main]
-async fn main() -> walrus_memory::Result<()> {
+async fn main() -> memwal::Result<()> {
     let client = WalrusMemory::builder(
         std::env::var("WALRUS_MEMORY_PRIVATE_KEY").unwrap(),
         std::env::var("WALRUS_MEMORY_ACCOUNT_ID").unwrap(),
@@ -83,7 +83,7 @@ Instead of a full URL, select an environment with `.env(...)`. An explicit
 | `Env::Local`    | `http://127.0.0.1:8000`                      |
 
 ```rust
-use walrus_memory::{Env, WalrusMemory};
+use memwal::{Env, WalrusMemory};
 let client = WalrusMemory::builder(key, account_id).env(Env::Staging).build()?;
 ```
 
@@ -114,7 +114,7 @@ methods are `async`.
 | `public_key_hex()` | The delegate public key (hex) |
 | `destroy(self)` | Zero the delegate key's seed material and drop the cached SEAL session |
 
-Errors are returned as [`walrus_memory::Error`] (`AuthRejected`, `Server { status, .. }`,
+Errors are returned as [`memwal::Error`] (`AuthRejected`, `Server { status, .. }`,
 `JobFailed`, `JobTimeout`, `InvalidKey`, `Compatibility`, `SealSession`, …).
 
 ## Authentication
