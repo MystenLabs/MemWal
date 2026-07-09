@@ -68,6 +68,13 @@ pub struct OnChainBlob {
     pub package_id: String,
 }
 
+/// Response from sidecar query-blobs endpoint
+#[derive(Debug, serde::Deserialize)]
+struct QueryBlobsResponse {
+    blobs: Vec<OnChainBlob>,
+    total: usize,
+}
+
 /// Request/response types for sidecar HTTP API
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,226 +382,74 @@ pub async fn set_metadata_batch(
 /// This enables restore-from-zero: even if the local DB is empty,
 /// we can discover all blob_ids by querying the user's on-chain objects
 /// and reading the `memwal_namespace` metadata attribute.
-/// Convert a Walrus `blob_id` as read off-chain (a decimal-string U256) into
-/// the base64url form Walrus aggregators expect. Mirrors
-/// `blobIdFromRaw` in the old `scripts/sidecar/routes/walrus-query.ts`:
-/// decimal U256 -> 32-byte big-endian -> reversed to little-endian -> base64url.
-/// Values that aren't a >20-digit decimal string (already base64url, or a
-/// small placeholder in tests) are passed through unchanged.
-fn blob_id_from_raw(raw: &str) -> Option<String> {
-    if raw.is_empty() {
-        return None;
-    }
-    if raw.len() > 20 && raw.bytes().all(|b| b.is_ascii_digit()) {
-        let le_bytes = decimal_str_to_le_bytes_32(raw)?;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        return Some(URL_SAFE_NO_PAD.encode(le_bytes));
-    }
-    Some(raw.to_string())
-}
-
-/// Grade-school long division: convert a base-10 digit string into 32
-/// little-endian bytes (a U256). Returns `None` if the value doesn't fit
-/// in 256 bits.
-fn decimal_str_to_le_bytes_32(decimal: &str) -> Option<[u8; 32]> {
-    let mut digits: Vec<u8> = decimal.bytes().map(|b| b - b'0').collect();
-    let mut out = [0u8; 32];
-    for byte_slot in out.iter_mut() {
-        let mut remainder: u32 = 0;
-        let mut next_digits = Vec::with_capacity(digits.len());
-        for &d in &digits {
-            let cur = remainder * 10 + d as u32;
-            next_digits.push((cur / 256) as u8);
-            remainder = cur % 256;
-        }
-        while next_digits.len() > 1 && next_digits[0] == 0 {
-            next_digits.remove(0);
-        }
-        digits = next_digits;
-        *byte_slot = remainder as u8;
-    }
-    if digits == [0] {
-        Some(out)
-    } else {
-        None // didn't fit in 256 bits
-    }
-}
-
-/// Thin `AppError`-flavored wrapper around the shared low-level RPC caller
-/// in `storage::sui` — see that function's doc for the wire-format details
-/// (request-id header, `observe_external` metrics) it applies uniformly.
-async fn sui_rpc_call(
-    client: &reqwest::Client,
-    rpc_url: &str,
-    method: &'static str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, AppError> {
-    super::sui::raw_rpc_call(client, rpc_url, method, params)
-        .await
-        .map_err(AppError::Internal)
-}
-
-/// Query the user's Walrus Blob objects directly from the Sui chain (native
-/// Rust — no sidecar). Enables restore-from-zero: even if the local DB is
-/// empty, we can discover all blob_ids by scanning the owner's on-chain
-/// objects and reading the `memwal_namespace` dynamic-field metadata.
-///
-/// This is the direct-RPC equivalent of the old sidecar's
-/// `POST /walrus/query-blobs` (see `scripts/sidecar/routes/walrus-query.ts`).
-/// It uses the full-scan path (`suix_getOwnedObjects` + per-object dynamic
-/// field lookup); the sidecar's "recent transactions" fast-path optimization
-/// is not ported — this is a correctness-first baseline, not yet
-/// latency-optimized for accounts with many blobs.
 pub async fn query_blobs_by_owner(
     client: &reqwest::Client,
-    rpc_url: &str,
-    walrus_package_id: &str,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
     owner_address: &str,
     namespace: Option<&str>,
     package_id: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Vec<OnChainBlob>, AppError> {
-    let blob_type = format!("{}::blob::Blob", walrus_package_id);
-    let want = limit.unwrap_or(usize::MAX);
-    // Constant dynamic-field lookup key for every blob's `memwal_*` metadata —
-    // computed once, not rebuilt per object/page.
-    let metadata_name = serde_json::json!({
-        "type": "vector<u8>",
-        "value": "metadata".bytes().map(u32::from).collect::<Vec<_>>(),
-    });
+    let url = format!("{}/walrus/query-blobs", sidecar_url);
 
-    let mut blobs = Vec::new();
-    let mut cursor: serde_json::Value = serde_json::Value::Null;
-    let mut scanned = 0usize;
-
-    loop {
-        let result = sui_rpc_call(
-            client,
-            rpc_url,
-            "suix_getOwnedObjects",
-            serde_json::json!([
-                owner_address,
-                {
-                    "filter": { "StructType": blob_type },
-                    "options": { "showContent": true }
-                },
-                cursor,
-                50
-            ]),
-        )
-        .await?;
-
-        let data = result.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
-        if data.is_empty() {
-            break;
-        }
-
-        // Collect candidates synchronously first, then fetch each one's
-        // `memwal_*` metadata dynamic field concurrently — a page can hold
-        // up to 50 objects, and these were previously fetched one at a time
-        // (sequential round-trips dominate restore latency for accounts
-        // with many blobs).
-        let mut candidates = Vec::with_capacity(data.len());
-        for entry in &data {
-            scanned += 1;
-            let obj = entry.get("data");
-            let object_id = obj.and_then(|o| o.get("objectId")).and_then(|v| v.as_str());
-            let fields = obj
-                .and_then(|o| o.get("content"))
-                .filter(|c| c.get("dataType").and_then(|d| d.as_str()) == Some("moveObject"))
-                .and_then(|c| c.get("fields"));
-            let (Some(object_id), Some(fields)) = (object_id, fields) else {
-                continue;
-            };
-            let raw_blob_id = fields
-                .get("blob_id")
-                .or_else(|| fields.get("blobId"))
-                .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_u64().map(|n| n.to_string())));
-            let Some(raw_blob_id) = raw_blob_id else {
-                continue;
-            };
-            candidates.push((object_id.to_string(), raw_blob_id));
-        }
-
-        let mut metadata_lookups = FuturesUnordered::new();
-        for (object_id, raw_blob_id) in candidates {
-            let metadata_name = metadata_name.clone();
-            metadata_lookups.push(async move {
-                let dyn_field = sui_rpc_call(
-                    client,
-                    rpc_url,
-                    "suix_getDynamicFieldObject",
-                    serde_json::json!([object_id, metadata_name]),
-                )
-                .await
-                .ok();
-                (object_id, raw_blob_id, dyn_field)
-            });
-        }
-
-        while let Some((object_id, raw_blob_id, dyn_field)) = metadata_lookups.next().await {
-            let (mut blob_namespace, mut blob_package_id) = ("default".to_string(), String::new());
-            if let Some(dyn_field) = dyn_field {
-                let contents = dyn_field
-                    .pointer("/data/content/fields/value/fields/metadata/fields/contents")
-                    .and_then(|v| v.as_array());
-                if let Some(contents) = contents {
-                    for entry in contents {
-                        let key = entry.pointer("/fields/key").and_then(|v| v.as_str());
-                        let value = entry.pointer("/fields/value").and_then(|v| v.as_str());
-                        match (key, value) {
-                            (Some("memwal_namespace"), Some(v)) => blob_namespace = v.to_string(),
-                            (Some("memwal_package_id"), Some(v)) => blob_package_id = v.to_string(),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            if let Some(ns) = namespace {
-                if blob_namespace != ns {
-                    continue;
-                }
-            }
-            if let Some(pkg) = package_id {
-                if blob_package_id != pkg {
-                    continue;
-                }
-            }
-            let Some(blob_id) = blob_id_from_raw(&raw_blob_id) else {
-                continue;
-            };
-            blobs.push(OnChainBlob {
-                blob_id,
-                object_id,
-                namespace: blob_namespace,
-                package_id: blob_package_id,
-            });
-            if blobs.len() >= want {
-                break;
-            }
-        }
-
-        if blobs.len() >= want {
-            break;
-        }
-        let has_next = result.get("hasNextPage").and_then(|v| v.as_bool()).unwrap_or(false);
-        let next_cursor = result.get("nextCursor").cloned();
-        match (has_next, next_cursor) {
-            (true, Some(c)) if !c.is_null() => cursor = c,
-            _ => break,
-        }
+    let mut body = serde_json::json!({ "owner": owner_address });
+    if let Some(ns) = namespace {
+        body["namespace"] = serde_json::json!(ns);
+    }
+    if let Some(pkg) = package_id {
+        body["packageId"] = serde_json::json!(pkg);
+    }
+    if let Some(limit) = limit {
+        body["limit"] = serde_json::json!(limit);
     }
 
-    tracing::info!(
-        "walrus query-blobs ok (native): {} blobs for owner={}, ns={:?} (scanned {} objects)",
-        blobs.len(),
-        owner_address,
-        namespace,
-        scanned
+    let mut req = client.post(&url).json(&body);
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "walrus_query_blobs",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("walrus_query_blobs", "transport_error");
+        AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_query_blobs",
+        &status_label,
+        started.elapsed(),
     );
 
-    Ok(blobs)
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_query_blobs", "http_error");
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "walrus query-blobs failed: {}",
+            body
+        )));
+    }
+
+    let result: QueryBlobsResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse query-blobs response: {}", e)))?;
+
+    tracing::info!(
+        "walrus query-blobs ok: {} blobs for owner={}, ns={:?}",
+        result.total,
+        owner_address,
+        namespace
+    );
+
+    Ok(result.blobs)
 }
 
 /// Download a blob from one or more Walrus aggregators.
@@ -833,39 +688,8 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_download_errors, blob_id_from_raw};
+    use super::aggregate_download_errors;
     use crate::types::AppError;
-
-    #[test]
-    fn blob_id_from_raw_matches_reference_conversion() {
-        // Cross-checked against the original TS `blobIdFromRaw`
-        // (decimal U256 -> 32-byte big-endian hex -> reversed to
-        // little-endian -> base64url) via an independent Python
-        // implementation of the same algorithm.
-        let raw = "123456789012345678901234567890123456789012345678901234";
-        let expected = "8q-WftgSTQKWAybeSl3AgKZPG5D4SQEAAAAAAAAAAAA";
-        assert_eq!(blob_id_from_raw(raw), Some(expected.to_string()));
-    }
-
-    #[test]
-    fn blob_id_from_raw_passes_through_non_decimal_and_short_values() {
-        // Already-encoded blob ids and short numeric placeholders (as used
-        // in tests/mocks) are not decimal U256s — pass through unchanged.
-        assert_eq!(
-            blob_id_from_raw("abc123_-XYZ"),
-            Some("abc123_-XYZ".to_string())
-        );
-        assert_eq!(blob_id_from_raw("12345"), Some("12345".to_string()));
-        assert_eq!(blob_id_from_raw(""), None);
-    }
-
-    #[test]
-    fn blob_id_from_raw_rejects_values_that_overflow_u256() {
-        // 78 nines is far larger than 2^256 (~1.16e77) and must not silently
-        // truncate.
-        let too_big = "9".repeat(78);
-        assert_eq!(blob_id_from_raw(&too_big), None);
-    }
 
     #[test]
     fn aggregate_download_errors_preserves_not_found_cleanup_signal() {

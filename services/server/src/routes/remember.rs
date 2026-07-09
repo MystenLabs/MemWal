@@ -1070,7 +1070,6 @@ mod tests {
             sui_private_key: None,
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
-            walrus_package_id: "0xwalruspackage".to_string(),
             registry_id: "0xregistry".to_string(),
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,

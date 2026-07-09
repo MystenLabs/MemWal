@@ -213,10 +213,6 @@ pub struct Config {
     /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
     pub sui_private_keys: Vec<String>,
     pub package_id: String,
-    /// Move package ID that publishes `walrus::blob::Blob` on this network —
-    /// distinct from `package_id` (MemWal's own package). Used for native
-    /// on-chain Walrus blob queries (see `storage::walrus::query_blobs_by_owner`).
-    pub walrus_package_id: String,
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
@@ -291,13 +287,6 @@ impl Config {
             },
             package_id: std::env::var("MEMWAL_PACKAGE_ID")
                 .expect("MEMWAL_PACKAGE_ID must be set"),
-            walrus_package_id: std::env::var("WALRUS_PACKAGE_ID").unwrap_or_else(|_| {
-                if network == "testnet" {
-                    "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66".to_string()
-                } else {
-                    "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77".to_string()
-                }
-            }),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
