@@ -22,6 +22,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
 type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -53,57 +54,26 @@ function hexToBytes(hex: string): Uint8Array {
     )
 }
 
-function addressToBytes32(address: string): Uint8Array {
-    const clean = address.replace(/^0x/i, '').padStart(64, '0')
-    return hexToBytes(clean)
-}
-
-// App-wide client is now gRPC for testnet (see App.tsx createClientForNetwork).
-// gRPC's `.json` representation is flatter than JSON-RPC's `.fields` shape
-// (verified live against the real testnet registry object: `accounts.id`
-// directly, no nested `accounts.fields.id.id`, and delegate key `public_key`
-// is a base64 string, not a `number[]`) — do not reuse getMoveFields'
-// JSON-RPC-shaped assumptions here.
-function base64ToBytes(b64: string): number[] {
-    return Array.from(atob(b64), (c) => c.charCodeAt(0))
-}
-
 async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
     try {
-        const registryRes = await (suiClient as any).getObject({
-            objectId: config.memwalRegistryId,
-            include: { json: true },
-        })
-        const json = registryRes.object.json as { accounts?: { id?: string } } | null
-        const tableId = json?.accounts?.id
-        if (!tableId) return null
-
-        const dynFieldRes = await (suiClient as any).getDynamicField({
-            parentId: tableId,
-            name: { type: 'address', bcs: addressToBytes32(ownerAddress) },
-        })
-        const valueBytes = dynFieldRes.dynamicField.value.bcs
-        if (!valueBytes || valueBytes.length !== 32) return null
-        return '0x' + bytesToHex(valueBytes)
+        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
     } catch (err) {
-        console.warn('[getAccountObjectId/grpc-patch] lookup failed, treating as no-account', err)
+        console.warn('[getAccountObjectId] lookup failed, treating as no-account', err)
         return null
     }
 }
 
-type GrpcAccountJson = { delegate_keys?: { public_key?: string }[] }
+type AccountJson = { delegate_keys?: { public_key?: unknown }[] }
 
 async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<number> {
-    const res = await (suiClient as any).getObject({ objectId: accountId, include: { json: true } })
-    const json = res.object.json as GrpcAccountJson | null
+    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
     return json?.delegate_keys?.length ?? 0
 }
 
 async function getRegisteredDelegatePublicKeys(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<string[]> {
-    const res = await (suiClient as any).getObject({ objectId: accountId, include: { json: true } })
-    const json = res.object.json as GrpcAccountJson | null
+    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
     if (json?.delegate_keys) {
-        return json.delegate_keys.map((k) => bytesToHex(k.public_key ? base64ToBytes(k.public_key) : []))
+        return json.delegate_keys.map((k) => publicKeyToHex(k.public_key))
     }
 
     return []
