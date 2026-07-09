@@ -55,11 +55,8 @@ AI agents today lose context between sessions — every conversation starts from
 ### Ownership & Access Control
 
 <CardGroup cols={2}>
-  <Card title="End-to-End Encryption" icon="lock">
-    All content is encrypted via SEAL before it reaches Walrus. Only the owner and authorized delegates can decrypt it.
-  </Card>
   <Card title="Decentralized Storage" icon="globe">
-    Encrypted blobs stored on Walrus — no single point of failure, no central operator holding your data.
+    Blobs stored on Walrus — no single point of failure, no central operator holding your data.
   </Card>
   <Card title="Programmable Permissions" icon="key">
     Ownership and access rules are enforced by Sui smart contracts, giving you explicit, programmable control over who can read and write.
@@ -83,7 +80,7 @@ AI agents today lose context between sessions — every conversation starts from
 ## What's Included
 
 - **TypeScript SDK**: integrate memory into any app with a few lines of code
-- **Relayer**: handles encryption, storage, and retrieval behind a simple API
+- **Relayer**: handles storage and retrieval behind a simple API
 - **Smart Contract**: enforces ownership and delegate access onchain
 - **Indexer**: keeps onchain state synced for fast lookups
 - **Dashboard**: manage accounts, memory, and delegate keys visually
