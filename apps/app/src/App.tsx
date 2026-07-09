@@ -16,7 +16,8 @@ import {
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
-import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
+import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
+import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
@@ -39,6 +40,20 @@ const { networkConfig } = createNetworkConfig({
   testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
   mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
 })
+
+// TEMPORARY LOCAL PATCH (not for upstream): testnet's public JSON-RPC endpoint
+// is currently returning HTTP 404 (confirmed live), which breaks every
+// useSuiClient() consumer app-wide (account lookups, tx build, sign+execute).
+// SuiClientProvider's createClient override lets us swap in a gRPC client for
+// testnet only, against the same host, while mainnet (still JSON-RPC-healthy)
+// is untouched. A real fix belongs in the shared network config alongside the
+// sidecar's PR #355 migration, not as a local override like this.
+function createClientForNetwork(name: string, cfg: any) {
+  if (name === 'testnet') {
+    return new SuiGrpcClient({ network: 'testnet', baseUrl: 'https://fullnode.testnet.sui.io' }) as unknown as SuiJsonRpcClient
+  }
+  return new SuiJsonRpcClient(cfg)
+}
 
 const queryClient = new QueryClient()
 
@@ -282,7 +297,7 @@ export default function App() {
     <BrowserRouter>
       <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
+        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork} createClient={createClientForNetwork}>
           <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <DelegateKeyProvider>

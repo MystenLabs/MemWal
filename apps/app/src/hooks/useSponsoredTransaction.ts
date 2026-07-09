@@ -17,19 +17,59 @@ import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, us
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
 
+// dapp-kit's default useSignAndExecuteTransaction() execute step calls the
+// legacy client.executeTransactionBlock(), which only exists on
+// SuiJsonRpcClient — SuiGrpcClient's core API only has executeTransaction(),
+// with a different request/response shape (union {Transaction:{digest}} |
+// {FailedTransaction:{digest}}, same union already handled for the sidecar's
+// direct-sign fallback). Detect at runtime and branch so this works under
+// either client the app's SuiClientProvider hands out per network.
+async function executeTransactionCompat(
+    client: any,
+    { bytes, signature }: { bytes: string; signature: string },
+) {
+    if (typeof client.executeTransactionBlock === 'function') {
+        const res = await client.executeTransactionBlock({
+            transactionBlock: bytes,
+            signature,
+            options: { showRawEffects: true },
+        })
+        return { digest: res.digest, rawEffects: res.rawEffects }
+    }
+
+    const txBytes = Uint8Array.from(atob(bytes), (c) => c.charCodeAt(0))
+    const res = await client.executeTransaction({ transaction: txBytes, signatures: [signature] })
+    const digest = res?.Transaction?.digest ?? res?.FailedTransaction?.digest
+    if (!digest) throw new Error('executeTransaction: could not resolve digest from result')
+    return { digest }
+}
+
 export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
-    const { mutateAsync: directSignAndExecute } = useSignAndExecuteTransaction()
+    const { mutateAsync: directSignAndExecute } = useSignAndExecuteTransaction({
+        execute: (args) => executeTransactionCompat(suiClient, args),
+    })
 
     const mutateAsync = async ({ transaction }: { transaction: Transaction }): Promise<{ digest: string }> => {
         const sender = currentAccount?.address
         if (!sender) throw new Error('No wallet connected')
 
+        // Track the already-built TransactionKind bytes so the catch block can
+        // rebuild a FRESH Transaction (Transaction.fromKind) instead of reusing
+        // `transaction` itself. `transaction.build({onlyTransactionKind:true})`
+        // resolves/caches the plan with no sender attached (transaction-kind
+        // bytes exclude sender by design); reusing that same already-built
+        // object in directSignAndExecute below does not correctly re-resolve
+        // against the real signer, which silently executed as ENotOwner in
+        // testing (assert! account.owner == ctx.sender() in add_delegate_key)
+        // instead of the connected wallet's actual address.
+        let kindBytes: Uint8Array | undefined
+
         try {
             // 1. Build TransactionKind bytes (without gas data)
-            const kindBytes = await transaction.build({
+            kindBytes = await transaction.build({
                 client: suiClient,
                 onlyTransactionKind: true,
             })
@@ -76,9 +116,15 @@ export function useSponsoredTransaction() {
             console.log(`[sponsored-tx] success, digest=${result.digest}`)
             return { digest: result.digest }
         } catch (err) {
-            // Fallback: try direct signing if sponsor fails
+            // Fallback: try direct signing if sponsor fails.
+            // Rebuild a fresh Transaction from the TransactionKind bytes (if we
+            // got that far) instead of reusing the original `transaction` — it
+            // was already built with onlyTransactionKind:true (no sender), and
+            // reusing that resolved/cached plan here does not correctly
+            // re-resolve ownership against the actual connected signer.
             console.warn('[sponsored-tx] sponsor failed, falling back to direct signing:', err)
-            const result = await directSignAndExecute({ transaction })
+            const fallbackTx = kindBytes ? Transaction.fromKind(kindBytes) : transaction
+            const result = await directSignAndExecute({ transaction: fallbackTx })
             return { digest: result.digest }
         }
     }

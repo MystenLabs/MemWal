@@ -26,13 +26,6 @@ import { Card } from '../components/Card'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import {
-    getDelegateKeyFields,
-    getMoveFields,
-    type AccountObjectFields,
-    type DynamicFieldObjectFields,
-    type RegistryObjectFields,
-} from '../utils/suiFields'
 
 function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
     return (
@@ -147,6 +140,24 @@ function normalizeLabelForSubmit(raw: string): string {
 
 function bytesToHex(bytes: Uint8Array | number[]): string {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// gRPC's `.json` object representation is flatter than JSON-RPC's `.fields`
+// shape (verified live against real testnet objects while fixing the same
+// bug in SetupWizard.tsx) — accounts.id directly, no nested
+// accounts.fields.id.id, and delegate key public_key is a base64 string, not
+// a number[]. suiClient.getObject/getDynamicFieldObject below used the
+// JSON-RPC-only method shapes, which throw RpcError: INVALID_ARGUMENT once
+// the app's testnet client is gRPC (see App.tsx createClientForNetwork).
+function addressToBytes32(address: string): Uint8Array {
+    const clean = address.replace(/^0x/i, '').padStart(64, '0')
+    return new Uint8Array(
+        Array.from({ length: clean.length / 2 }, (_, i) => parseInt(clean.slice(i * 2, i * 2 + 2), 16))
+    )
+}
+
+function base64ToBytes(b64: string): number[] {
+    return Array.from(atob(b64), (c) => c.charCodeAt(0))
 }
 
 function hexToByteArray(hex: string): number[] {
@@ -327,20 +338,20 @@ export default function Dashboard({
         setAccountLookupComplete(false)
         setLoadingAccount(true)
         try {
-            const registryObj = await suiClient.getObject({
-                id: config.memwalRegistryId,
-                options: { showContent: true },
+            const registryRes = await (suiClient as any).getObject({
+                objectId: config.memwalRegistryId,
+                include: { json: true },
             })
-            const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
-            if (fields) {
-                const tableId = fields?.accounts?.fields?.id?.id
-                if (tableId) {
-                    const dynField = await suiClient.getDynamicFieldObject({
-                        parentId: tableId,
-                        name: { type: 'address', value: address },
-                    })
-                    const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
-                    if (dynFields?.value) setResolvedAccountObjectId(dynFields.value)
+            const json = registryRes.object.json as { accounts?: { id?: string } } | null
+            const tableId = json?.accounts?.id
+            if (tableId) {
+                const dynFieldRes = await (suiClient as any).getDynamicField({
+                    parentId: tableId,
+                    name: { type: 'address', bcs: addressToBytes32(address) },
+                })
+                const valueBytes = dynFieldRes.dynamicField.value.bcs
+                if (valueBytes && valueBytes.length === 32) {
+                    setResolvedAccountObjectId('0x' + bytesToHex(valueBytes))
                 }
             }
         } catch (err) {
@@ -421,24 +432,15 @@ export default function Dashboard({
         if (!effectiveAccountObjectId) return
         setLoadingKeys(true)
         try {
-            const obj = await suiClient.getObject({
-                id: effectiveAccountObjectId,
-                options: { showContent: true },
-            })
-            const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
-            if (fields) {
-                const keys = fields.delegate_keys ?? []
-                const parsed: OnChainDelegateKey[] = keys.map((k) => {
-                    const f = getDelegateKeyFields(k)
-                    const pkBytes: number[] = f.public_key ?? []
-                    const pkHex = pkBytes.map((b: number) => b.toString(16).padStart(2, '0')).join('')
-                    return {
-                        publicKey: pkHex,
-                        suiAddress: f.sui_address ?? '',
-                        label: f.label ?? '',
-                        createdAt: Number(f.created_at ?? 0),
-                    }
-                })
+            const res = await (suiClient as any).getObject({ objectId: effectiveAccountObjectId, include: { json: true } })
+            const json = res.object.json as { delegate_keys?: { public_key?: string; sui_address?: string; label?: string; created_at?: string }[] } | null
+            if (json?.delegate_keys) {
+                const parsed: OnChainDelegateKey[] = json.delegate_keys.map((f) => ({
+                    publicKey: bytesToHex(f.public_key ? base64ToBytes(f.public_key) : []),
+                    suiAddress: f.sui_address ?? '',
+                    label: f.label ?? '',
+                    createdAt: Number(f.created_at ?? 0),
+                }))
                 setOnChainKeys(parsed)
             } else {
                 setOnChainKeys([])
