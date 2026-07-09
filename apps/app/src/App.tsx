@@ -41,16 +41,16 @@ const { networkConfig } = createNetworkConfig({
   mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
 })
 
-// TEMPORARY LOCAL PATCH (not for upstream): testnet's public JSON-RPC endpoint
-// is currently returning HTTP 404 (confirmed live), which breaks every
-// useSuiClient() consumer app-wide (account lookups, tx build, sign+execute).
-// SuiClientProvider's createClient override lets us swap in a gRPC client for
-// testnet only, against the same host, while mainnet (still JSON-RPC-healthy)
-// is untouched. A real fix belongs in the shared network config alongside the
-// sidecar's PR #355 migration, not as a local override like this.
+// Opt-in gRPC client for the active network (VITE_SUI_GRPC_URL), mirroring the
+// sidecar's SUI_GRPC_URL migration (services/server/scripts/sidecar/config.ts)
+// for the same JSON-RPC sunset (2026-07-31; testnet's public JSON-RPC endpoint
+// already returns 404 today). Empty keeps the existing JSON-RPC client
+// unchanged. Every useSuiClient() consumer (account lookups, tx build,
+// sign+execute) must handle both client shapes — see utils/suiClientCompat.ts
+// and useSponsoredTransaction.ts's executeTransactionCompat.
 function createClientForNetwork(name: string, cfg: any) {
-  if (name === 'testnet') {
-    return new SuiGrpcClient({ network: 'testnet', baseUrl: 'https://fullnode.testnet.sui.io' }) as unknown as SuiJsonRpcClient
+  if (name === config.suiNetwork && config.suiGrpcUrl) {
+    return new SuiGrpcClient({ network: name, baseUrl: config.suiGrpcUrl }) as unknown as SuiJsonRpcClient
   }
   return new SuiJsonRpcClient(cfg)
 }
