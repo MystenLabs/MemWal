@@ -1,13 +1,20 @@
 [package]
-name = "memwal-client"
+name = "walrus-memory"
 version = "0.1.0"
 edition = "2021"
+description = "Rust SDK for Walrus Memory — privacy-first AI memory with Ed25519-signed requests and SEAL session auth"
+license = "Apache-2.0"
+readme = "README.md"
+homepage = "https://memory.walrus.xyz"
+documentation = "https://docs.rs/walrus-memory"
+repository = "https://github.com/MystenLabs/MemWal"
+keywords = ["walrus", "ai", "memory", "ed25519"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 # Async & HTTP
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 reqwest = { version = "0.12", features = ["json"] }
-futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +30,13 @@ base64 = "0.22"
 blake2 = "0.10"
 percent-encoding = "2"
 rand = "0.8"
+zeroize = "1"
 
 # Error Handling
 thiserror = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+
+[[example]]
+name = "quick_start"

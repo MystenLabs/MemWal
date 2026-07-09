@@ -1,782 +1,912 @@
-use crate::error::Error;
-use crate::types::*;
-use ed25519_dalek::Signer;
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Duration;
+//! The async [`WalrusMemory`] client and its builder.
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use reqwest::{Client, Method};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub struct MemWalClient {
-    signing_key: ed25519_dalek::SigningKey,
+use crate::error::{Error, Result};
+use crate::signing::{
+    blake2b_256, canonical_message, encode_suiprivkey, encode_uleb128, sha256_hex, Signer,
+};
+use crate::types::*;
+
+const DEFAULT_SERVER_URL: &str = "https://relayer.memory.walrus.xyz";
+const DEFAULT_NAMESPACE: &str = "default";
+const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 60;
+/// SEAL session lifetime; cached sessions are refreshed 30s before expiry.
+const SEAL_SESSION_TTL_MIN: i64 = 10;
+
+/// Builder for [`WalrusMemory`]. Obtain one via [`WalrusMemory::builder`].
+#[derive(Debug, Clone)]
+pub struct WalrusMemoryBuilder {
+    key: String,
     account_id: String,
-    server_url: String,
-    namespace: String,
-    client: reqwest::Client,
-    session_cache: Mutex<Option<CachedSession>>,
-    compatibility_checked: Mutex<bool>,
+    server_url: Option<String>,
+    namespace: Option<String>,
+    env: Option<Env>,
+    http: Option<Client>,
 }
 
+impl WalrusMemoryBuilder {
+    /// Override the relayer base URL (takes precedence over [`Self::env`]).
+    pub fn server_url(mut self, url: impl Into<String>) -> Self {
+        self.server_url = Some(url.into());
+        self
+    }
+
+    /// Select a relayer environment preset (used only when `server_url` is unset).
+    pub fn env(mut self, env: Env) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// Set the default namespace (defaults to `"default"`).
+    pub fn namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = Some(ns.into());
+        self
+    }
+
+    /// Provide a pre-configured `reqwest::Client` (e.g. with a proxy or custom
+    /// timeout). If omitted, a client with a 60s timeout is created.
+    pub fn http_client(mut self, client: Client) -> Self {
+        self.http = Some(client);
+        self
+    }
+
+    /// Validate the key and construct the client.
+    pub fn build(self) -> Result<WalrusMemory> {
+        let signer = Signer::from_hex_seed(&self.key)?;
+
+        let server_url = self
+            .server_url
+            .or_else(|| self.env.map(|e| e.server_url().to_string()))
+            .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
+        let server_url = normalize_server_url(&server_url)?;
+
+        let namespace = self
+            .namespace
+            .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+
+        let http = match self.http {
+            Some(c) => c,
+            None => Client::builder()
+                .timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+                .build()?,
+        };
+
+        Ok(WalrusMemory {
+            http,
+            signer,
+            account_id: self.account_id,
+            server_url,
+            namespace,
+            session_cache: Arc::new(Mutex::new(None)),
+            compatibility_checked: Arc::new(Mutex::new(false)),
+        })
+    }
+}
+
+/// Strip a single trailing slash and reject obviously malformed URLs.
+fn normalize_server_url(url: &str) -> Result<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err(Error::InvalidUrl(format!(
+            "server url must start with http:// or https:// (got {url:?})"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// True when `server_url` is a known mainnet relayer domain (current
+/// `memory.walrus.xyz` or the legacy pre-WALM-86 `memwal.ai`), in which case
+/// [`WalrusMemory::build_seal_session`] can skip the `/config` round trip and
+/// [`WalrusMemory::compatibility`] never needs to re-check.
+fn is_known_mainnet_relayer(server_url: &str) -> bool {
+    server_url.contains("relayer.memory.walrus.xyz") || server_url.contains("relayer.memwal.ai")
+}
+
+#[derive(Debug, Clone)]
 struct CachedSession {
     session_header_value: String,
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl MemWalClient {
-    /// Create a new MemWal client instance.
-    pub fn new(
-        key: &[u8; 32],
-        account_id: &str,
-        server_url: &str,
-        namespace: &str,
-    ) -> Self {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(key);
-        let client = reqwest::Client::new();
-        Self {
-            signing_key,
-            account_id: account_id.to_string(),
-            server_url: server_url.trim().trim_end_matches('/').to_string(),
-            namespace: namespace.to_string(),
-            client,
-            session_cache: Mutex::new(None),
-            compatibility_checked: Mutex::new(false),
+/// Async client for the Walrus Memory relayer.
+///
+/// Cloning is cheap: the `reqwest::Client`, delegate key, and cached SEAL
+/// session are all reference-counted, so every clone shares the same session
+/// cache and can be handed to independent tasks.
+#[derive(Debug, Clone)]
+pub struct WalrusMemory {
+    http: Client,
+    signer: Signer,
+    account_id: String,
+    server_url: String,
+    namespace: String,
+    session_cache: Arc<Mutex<Option<CachedSession>>>,
+    compatibility_checked: Arc<Mutex<bool>>,
+}
+
+impl WalrusMemory {
+    /// Start building a client from a hex delegate key and account id.
+    pub fn builder(key: impl Into<String>, account_id: impl Into<String>) -> WalrusMemoryBuilder {
+        WalrusMemoryBuilder {
+            key: key.into(),
+            account_id: account_id.into(),
+            server_url: None,
+            namespace: None,
+            env: None,
+            http: None,
         }
     }
 
-    /// Submit a remember request and return as soon as the server accepts the job.
-    pub async fn remember(
-        &self,
-        text: &str,
-        namespace: Option<&str>,
-    ) -> Result<RememberAcceptedResult, Error> {
-        let ns = namespace.unwrap_or(&self.namespace);
-        let body = serde_json::json!({
-            "text": text,
-            "namespace": ns,
-        });
-
-        self.signed_request(
-            "POST",
-            "/api/remember",
-            &body,
-            &[reqwest::StatusCode::OK, reqwest::StatusCode::ACCEPTED],
-            true,
-        )
-        .await
+    /// Convenience constructor using all defaults
+    /// (`server_url = https://relayer.memory.walrus.xyz`, `namespace = "default"`).
+    pub fn create(key: impl Into<String>, account_id: impl Into<String>) -> Result<Self> {
+        Self::builder(key, account_id).build()
     }
 
-    /// Poll an accepted remember job until it reaches a terminal state.
+    /// The configured relayer base URL (trailing slash stripped).
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
+    /// The default namespace.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Hex-encoded delegate public key.
+    pub fn public_key_hex(&self) -> &str {
+        self.signer.public_key_hex()
+    }
+
+    /// Zero the delegate key's seed material and drop the cached SEAL
+    /// session. The client must not be used after calling this — it exists
+    /// for callers holding key material in long-lived processes who want to
+    /// scrub it from memory as soon as it's no longer needed (heap-dump
+    /// hardening), mirroring the TypeScript SDK's `destroy()`.
+    pub fn destroy(mut self) {
+        self.signer.zeroize();
+        *self.session_cache.lock().unwrap() = None;
+    }
+
+    fn ns<'a>(&'a self, ns: Option<&'a str>) -> &'a str {
+        ns.unwrap_or(&self.namespace)
+    }
+
+    // ── core signed-request plumbing ───────────────────────────────────────
+
+    /// Send a signed request and return `(status, body_bytes)`. Only transport
+    /// failures produce an `Err`; HTTP status interpretation is the caller's job.
+    async fn send_raw(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        include_seal_session: bool,
+    ) -> Result<(u16, Vec<u8>)> {
+        let is_get = method == Method::GET;
+        let body_str = if is_get {
+            String::new()
+        } else {
+            serde_json::to_string(&body.cloned().unwrap_or_else(|| json!({})))?
+        };
+        let body_sha = sha256_hex(body_str.as_bytes());
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let nonce = Uuid::new_v4().to_string();
+        let message = canonical_message(
+            &timestamp,
+            method.as_str(),
+            path,
+            &body_sha,
+            &nonce,
+            &self.account_id,
+        );
+        let signature = self.signer.sign_hex(message.as_bytes());
+
+        let url = format!("{}{}", self.server_url, path);
+        let mut req = self
+            .http
+            .request(method, &url)
+            .header("x-public-key", self.signer.public_key_hex())
+            .header("x-signature", signature)
+            .header("x-timestamp", timestamp)
+            .header("x-nonce", nonce)
+            .header("x-account-id", &self.account_id);
+
+        if !is_get {
+            req = req
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str);
+        }
+        if include_seal_session {
+            let session = self.build_seal_session().await?;
+            req = req.header("x-seal-session", session);
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await?.to_vec();
+        Ok((status, bytes))
+    }
+
+    /// Signed request that parses the body into `T` when the status is accepted.
+    async fn request<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        accepted: &[u16],
+        include_seal_session: bool,
+    ) -> Result<T> {
+        let (status, bytes) = self
+            .send_raw(method, path, body.as_ref(), include_seal_session)
+            .await?;
+        decode(status, &bytes, accepted)
+    }
+
+    // ── remember ───────────────────────────────────────────────────────────
+
+    /// Submit one memory. Returns immediately with a `job_id`; embedding,
+    /// encryption, Walrus upload, and indexing continue in the background.
+    pub async fn remember(&self, text: &str, namespace: Option<&str>) -> Result<RememberAccepted> {
+        let body = json!({ "text": text, "namespace": self.ns(namespace) });
+        self.request(Method::POST, "/api/remember", Some(body), &[200, 202], true)
+            .await
+    }
+
+    /// Fetch the current status of a remember job.
+    pub async fn get_remember_status(&self, job_id: &str) -> Result<RememberJobStatus> {
+        let encoded =
+            percent_encoding::utf8_percent_encode(job_id, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/api/remember/{encoded}");
+        let (status, bytes) = self.send_raw(Method::GET, &path, None, true).await?;
+        match status {
+            200 => decode(status, &bytes, &[200]),
+            404 => Ok(RememberJobStatus {
+                job_id: job_id.to_string(),
+                status: "not_found".to_string(),
+                owner: None,
+                namespace: None,
+                blob_id: None,
+                error: None,
+            }),
+            _ => Err(error_from_body(status, &bytes)),
+        }
+    }
+
+    /// Poll a remember job until it reaches `done` (or fails / times out).
     pub async fn wait_for_remember_job(
         &self,
         job_id: &str,
-        poll_interval_ms: Option<u64>,
-        timeout_ms: Option<u64>,
-    ) -> Result<RememberResult, Error> {
-        let poll_interval = poll_interval_ms.unwrap_or(1500);
-        let timeout = timeout_ms.unwrap_or(60_000);
-        let start = std::time::Instant::now();
-        let mut attempt = 0;
-
-        while start.elapsed() < Duration::from_millis(timeout) {
-            tokio::time::sleep(polling_delay(poll_interval, attempt)).await;
-            attempt += 1;
-
-            let encoded_job_id = percent_encoding::utf8_percent_encode(job_id, percent_encoding::NON_ALPHANUMERIC).to_string();
-            let path = format!("/api/remember/{}", encoded_job_id);
-            let res = self.signed_request::<RememberJobStatus>(
-                "GET",
-                &path,
-                &serde_json::Value::Null,
-                &[reqwest::StatusCode::OK],
-                true,
-            )
-            .await;
-
-            match res {
-                Ok(status) => {
-                    if status.status == "not_found" {
-                        return Err(Error::JobNotFound { job_id: job_id.to_string() });
-                    }
-                    if status.status == "done" {
-                        return Ok(RememberResult {
-                            id: status.job_id.clone(),
-                            job_id: Some(status.job_id),
-                            blob_id: status.blob_id.unwrap_or_default(),
-                            owner: status.owner.unwrap_or_default(),
-                            namespace: status.namespace.unwrap_or_else(|| self.namespace.clone()),
-                        });
-                    }
-                    if status.status == "failed" {
-                        return Err(Error::JobFailed {
-                            job_id: job_id.to_string(),
-                            message: status.error.unwrap_or_else(|| "unknown error".to_string()),
-                        });
-                    }
+        opts: WaitOptions,
+    ) -> Result<RememberResult> {
+        let start = Instant::now();
+        let mut attempt: u32 = 0;
+        loop {
+            let st = self.get_remember_status(job_id).await?;
+            match st.status.as_str() {
+                "done" => {
+                    return Ok(RememberResult {
+                        id: st.job_id.clone(),
+                        job_id: Some(st.job_id),
+                        blob_id: st.blob_id.unwrap_or_default(),
+                        owner: st.owner.unwrap_or_default(),
+                        namespace: st.namespace.unwrap_or_else(|| self.namespace.clone()),
+                    });
                 }
-                Err(Error::Request { status: reqwest::StatusCode::NOT_FOUND, .. }) => {
-                    return Err(Error::JobNotFound { job_id: job_id.to_string() });
+                "failed" => {
+                    return Err(Error::JobFailed {
+                        job_id: job_id.to_string(),
+                        message: st.error.unwrap_or_else(|| "job failed".to_string()),
+                    });
                 }
-                Err(err) => {
-                    if let Error::Request { status, .. } = &err {
-                        let code = status.as_u16();
-                        if code == 429 || code >= 500 {
-                            continue;
-                        }
-                    }
-                    return Err(err);
+                "not_found" => {
+                    return Err(Error::JobNotFound {
+                        job_id: job_id.to_string(),
+                    });
                 }
+                _ => {} // pending | running | uploaded → keep polling
             }
+            if start.elapsed() >= Duration::from_millis(opts.timeout_ms) {
+                return Err(Error::JobTimeout {
+                    job_id: job_id.to_string(),
+                    timeout_ms: opts.timeout_ms,
+                });
+            }
+            tokio::time::sleep(backoff(opts.poll_interval_ms, attempt)).await;
+            attempt = attempt.saturating_add(1);
         }
-
-        Err(Error::JobTimeout { job_id: job_id.to_string() })
     }
 
-    /// Remember something and wait for the background job to complete.
+    /// Submit a memory and wait for it to finish.
     pub async fn remember_and_wait(
         &self,
         text: &str,
         namespace: Option<&str>,
-    ) -> Result<RememberResult, Error> {
+        opts: WaitOptions,
+    ) -> Result<RememberResult> {
         let accepted = self.remember(text, namespace).await?;
-        self.wait_for_remember_job(&accepted.job_id, None, None).await
+        self.wait_for_remember_job(&accepted.job_id, opts).await
     }
 
-    /// Recall memories similar to a query.
-    pub async fn recall(&self, params: RecallParams) -> Result<RecallResult, Error> {
-        let limit = params.top_k.or(params.limit).unwrap_or(10);
-        let ns = params.namespace.as_deref().unwrap_or(&self.namespace);
-        let body = serde_json::json!({
-            "query": params.query,
-            "limit": limit,
-            "namespace": ns,
-        });
+    // ── recall / embed / analyze / ask / restore ───────────────────────────
 
-        let mut result: RecallResult = self.signed_request(
-            "POST",
-            "/api/recall",
-            &body,
-            &[reqwest::StatusCode::OK],
-            true,
-        )
-        .await?;
-
-        if let Some(max_distance) = params.max_distance {
-            result.results.retain(|m| m.distance < max_distance);
-            result.total = result.results.len();
+    /// Semantic search over `owner + namespace`.
+    pub async fn recall(&self, params: impl Into<RecallParams>) -> Result<RecallResult> {
+        let params = params.into();
+        if params.query.trim().is_empty() {
+            return Err(Error::InvalidArgument("recall query is empty".into()));
         }
-
+        let mut body = json!({
+            "query": params.query,
+            "limit": params.limit.unwrap_or(10),
+            "namespace": params.namespace.as_deref().unwrap_or(&self.namespace),
+        });
+        if let Some(w) = &params.scoring_weights {
+            body["scoring_weights"] = serde_json::to_value(w)?;
+        }
+        let mut result: RecallResult = self
+            .request(Method::POST, "/api/recall", Some(body), &[200], true)
+            .await?;
+        // Client-side max_distance filter (mirrors the TS/Python SDKs).
+        if let Some(md) = params.max_distance {
+            result.results.retain(|m| m.distance < md);
+            result.total = result.results.len() as u64;
+        }
         Ok(result)
     }
 
-    /// Generate an embedding vector for text (no storage).
-    pub async fn embed(&self, text: &str) -> Result<EmbedResult, Error> {
-        let body = serde_json::json!({
-            "text": text,
-        });
-
-        self.signed_request(
-            "POST",
-            "/api/embed",
-            &body,
-            &[reqwest::StatusCode::OK],
-            false, // embed endpoint does not need decryption, keep private key client-side
-        )
-        .await
+    /// Generate an embedding vector for `text` without storing anything.
+    ///
+    /// Note: this calls `POST /api/embed`, which mirrors the TS/Python SDKs.
+    /// Some relayer deployments embed internally and do not expose this route;
+    /// against those it returns a 404 [`Error::Server`].
+    pub async fn embed(&self, text: &str) -> Result<EmbedResult> {
+        let body = json!({ "text": text });
+        // No decryption needed — nothing is stored — so no SEAL session.
+        self.request(Method::POST, "/api/embed", Some(body), &[200], false)
+            .await
     }
 
-    /// Analyze conversation text and return as soon as the facts are accepted.
-    pub async fn analyze(
+    /// Extract memorable facts from `text` and enqueue a remember job per fact.
+    pub async fn analyze(&self, text: &str, opts: AnalyzeOptions) -> Result<AnalyzeResult> {
+        let mut body = json!({
+            "text": text,
+            "namespace": opts.namespace.as_deref().unwrap_or(&self.namespace),
+        });
+        if let Some(ts) = opts.occurred_at {
+            body["occurred_at"] = json!(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        }
+        self.request(Method::POST, "/api/analyze", Some(body), &[200, 202], true)
+            .await
+    }
+
+    /// Analyze, then wait for every extracted-fact remember job to finish.
+    pub async fn analyze_and_wait(
         &self,
         text: &str,
-        namespace: Option<&str>,
-    ) -> Result<AnalyzeResult, Error> {
-        let ns = namespace.unwrap_or(&self.namespace);
-        let body = serde_json::json!({
-            "text": text,
-            "namespace": ns,
-        });
-
-        self.signed_request(
-            "POST",
-            "/api/analyze",
-            &body,
-            &[reqwest::StatusCode::OK, reqwest::StatusCode::ACCEPTED],
-            true,
-        )
-        .await
+        opts: AnalyzeOptions,
+        wait: WaitOptions,
+    ) -> Result<AnalyzeWaitResult> {
+        let ns = opts
+            .namespace
+            .clone()
+            .unwrap_or_else(|| self.namespace.clone());
+        let analyzed = self.analyze(text, opts).await?;
+        let namespaces = vec![ns; analyzed.job_ids.len()];
+        let bulk = self
+            .wait_for_remember_jobs(&analyzed.job_ids, &namespaces, wait)
+            .await?;
+        Ok(AnalyzeWaitResult {
+            facts: analyzed.facts,
+            owner: analyzed.owner,
+            results: bulk.results,
+            total: bulk.total,
+            succeeded: bulk.succeeded,
+            failed: bulk.failed,
+        })
     }
 
-    /// Ask a question answered using memories.
+    /// Retrieval-augmented question answering over stored memories.
     pub async fn ask(
         &self,
         question: &str,
+        limit: Option<u32>,
         namespace: Option<&str>,
-    ) -> Result<AskResponse, Error> {
-        let ns = namespace.unwrap_or(&self.namespace);
-        let body = serde_json::json!({
+    ) -> Result<AskResult> {
+        if question.trim().is_empty() {
+            return Err(Error::InvalidArgument("ask question is empty".into()));
+        }
+        let body = json!({
             "question": question,
-            "limit": 5, // Default limit
-            "namespace": ns,
+            "limit": limit.unwrap_or(5),
+            "namespace": self.ns(namespace),
         });
+        self.request(Method::POST, "/api/ask", Some(body), &[200], true)
+            .await
+    }
 
-        self.signed_request(
-            "POST",
-            "/api/ask",
-            &body,
-            &[reqwest::StatusCode::OK],
+    /// Rebuild the local index for a namespace from on-chain Walrus blobs.
+    pub async fn restore(&self, namespace: &str, limit: Option<u32>) -> Result<RestoreResult> {
+        if namespace.trim().is_empty() {
+            return Err(Error::InvalidArgument("restore namespace is empty".into()));
+        }
+        let body = json!({ "namespace": namespace, "limit": limit.unwrap_or(10) });
+        self.request(Method::POST, "/api/restore", Some(body), &[200], true)
+            .await
+    }
+
+    // ── manual ──────────────────────────────────────────────────────────────
+
+    /// Search with a pre-computed query vector. Returns blob ids + distances
+    /// only (no server-side decryption, so no SEAL session is requested).
+    pub async fn recall_manual(&self, opts: RecallManualOptions) -> Result<RecallManualResult> {
+        if opts.vector.is_empty() {
+            return Err(Error::InvalidArgument(
+                "recall_manual vector is empty".into(),
+            ));
+        }
+        let mut body = json!({
+            "vector": opts.vector,
+            "limit": opts.limit.unwrap_or(10),
+            "namespace": opts.namespace.as_deref().unwrap_or(&self.namespace),
+        });
+        if let Some(w) = &opts.scoring_weights {
+            body["scoring_weights"] = serde_json::to_value(w)?;
+        }
+        self.request(
+            Method::POST,
+            "/api/recall/manual",
+            Some(body),
+            &[200],
+            false,
+        )
+        .await
+    }
+
+    /// Index a memory the caller has already embedded, SEAL-encrypted, and
+    /// uploaded to Walrus themselves. No server-side decryption happens, so
+    /// no SEAL session is requested.
+    pub async fn remember_manual(
+        &self,
+        opts: RememberManualOptions,
+    ) -> Result<RememberManualResult> {
+        if opts.blob_id.trim().is_empty() {
+            return Err(Error::InvalidArgument(
+                "remember_manual blob_id is empty".into(),
+            ));
+        }
+        if opts.vector.is_empty() {
+            return Err(Error::InvalidArgument(
+                "remember_manual vector is empty".into(),
+            ));
+        }
+        let body = json!({
+            "blob_id": opts.blob_id,
+            "vector": opts.vector,
+            "namespace": opts.namespace.as_deref().unwrap_or(&self.namespace),
+        });
+        self.request(
+            Method::POST,
+            "/api/remember/manual",
+            Some(body),
+            &[200, 201],
+            false,
+        )
+        .await
+    }
+
+    // ── bulk ──────────────────────────────────────────────────────────────
+
+    /// Submit up to 20 memories in one request.
+    pub async fn remember_bulk(&self, items: &[RememberBulkItem]) -> Result<RememberBulkAccepted> {
+        if items.is_empty() {
+            return Err(Error::InvalidArgument(
+                "remember_bulk items is empty".into(),
+            ));
+        }
+        let wire: Vec<Value> = items
+            .iter()
+            .map(|i| json!({ "text": i.text, "namespace": i.namespace.as_deref().unwrap_or(&self.namespace) }))
+            .collect();
+        let body = json!({ "items": wire });
+        self.request(
+            Method::POST,
+            "/api/remember/bulk",
+            Some(body),
+            &[200, 202],
             true,
         )
         .await
     }
 
-    /// Check that the relayer's API version is compatible.
-    pub async fn check_compatibility(&self) -> Result<(), Error> {
-        if self.server_url.contains("relayer.memwal.ai") {
+    /// Fetch the status of a batch of remember jobs.
+    pub async fn get_remember_bulk_status(
+        &self,
+        job_ids: &[String],
+    ) -> Result<RememberBulkStatusResult> {
+        if job_ids.is_empty() {
+            return Err(Error::InvalidArgument("job_ids is empty".into()));
+        }
+        let body = json!({ "job_ids": job_ids });
+        self.request(
+            Method::POST,
+            "/api/remember/bulk/status",
+            Some(body),
+            &[200],
+            true,
+        )
+        .await
+    }
+
+    /// Poll a batch of remember jobs until all reach a terminal state.
+    /// `namespaces` is index-aligned with `job_ids` (falls back to the client
+    /// namespace when shorter/empty). Output order matches `job_ids`.
+    pub async fn wait_for_remember_jobs(
+        &self,
+        job_ids: &[String],
+        namespaces: &[String],
+        opts: WaitOptions,
+    ) -> Result<RememberBulkResult> {
+        if job_ids.is_empty() {
+            return Ok(RememberBulkResult {
+                results: vec![],
+                total: 0,
+                succeeded: 0,
+                failed: 0,
+            });
+        }
+        let ns_for = |i: usize| -> String {
+            namespaces
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| self.namespace.clone())
+        };
+
+        let start = Instant::now();
+        let mut attempt: u32 = 0;
+        loop {
+            let status = self.get_remember_bulk_status(job_ids).await?;
+            let by_id: std::collections::HashMap<&str, &RememberBulkStatusItem> = status
+                .results
+                .iter()
+                .map(|r| (r.job_id.as_str(), r))
+                .collect();
+            let all_terminal = job_ids.iter().all(|id| {
+                matches!(
+                    by_id.get(id.as_str()).map(|r| r.status.as_str()),
+                    Some("done") | Some("failed") | Some("not_found")
+                )
+            });
+            let timed_out = start.elapsed() >= Duration::from_millis(opts.timeout_ms);
+
+            if all_terminal || timed_out {
+                let mut results = Vec::with_capacity(job_ids.len());
+                let (mut succeeded, mut failed) = (0u64, 0u64);
+                for (i, id) in job_ids.iter().enumerate() {
+                    let item = by_id.get(id.as_str());
+                    let (status, blob_id, error) = match item.map(|r| r.status.as_str()) {
+                        Some("done") => {
+                            succeeded += 1;
+                            ("done", item.and_then(|r| r.blob_id.clone()), None)
+                        }
+                        Some("failed") | Some("not_found") => {
+                            failed += 1;
+                            ("failed", None, item.and_then(|r| r.error.clone()))
+                        }
+                        _ => {
+                            failed += 1;
+                            ("timeout", None, None)
+                        }
+                    };
+                    results.push(RememberBulkItemResult {
+                        id: id.clone(),
+                        blob_id,
+                        status: status.to_string(),
+                        namespace: ns_for(i),
+                        error,
+                    });
+                }
+                return Ok(RememberBulkResult {
+                    total: results.len() as u64,
+                    succeeded,
+                    failed,
+                    results,
+                });
+            }
+
+            tokio::time::sleep(backoff(opts.poll_interval_ms, attempt)).await;
+            attempt = attempt.saturating_add(1);
+        }
+    }
+
+    /// Submit a bulk batch and wait for all jobs to finish.
+    pub async fn remember_bulk_and_wait(
+        &self,
+        items: &[RememberBulkItem],
+        opts: WaitOptions,
+    ) -> Result<RememberBulkResult> {
+        let accepted = self.remember_bulk(items).await?;
+        let namespaces: Vec<String> = items
+            .iter()
+            .map(|i| {
+                i.namespace
+                    .clone()
+                    .unwrap_or_else(|| self.namespace.clone())
+            })
+            .collect();
+        self.wait_for_remember_jobs(&accepted.job_ids, &namespaces, opts)
+            .await
+    }
+
+    // ── unauthenticated ────────────────────────────────────────────────────
+
+    /// Relayer health (no authentication).
+    pub async fn health(&self) -> Result<HealthResult> {
+        let url = format!("{}/health", self.server_url);
+        let (status, bytes) = self.unsigned_get(&url).await?;
+        decode(status, &bytes, &[200])
+    }
+
+    /// Relayer version + compatibility metadata (no authentication).
+    pub async fn version(&self) -> Result<VersionInfo> {
+        let url = format!("{}/version", self.server_url);
+        let (status, bytes) = self.unsigned_get(&url).await?;
+        decode(status, &bytes, &[200])
+    }
+
+    async fn unsigned_get(&self, url: &str) -> Result<(u16, Vec<u8>)> {
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await?.to_vec();
+        Ok((status, bytes))
+    }
+
+    /// Check that the relayer's advertised API version is one this SDK
+    /// supports. The check result is cached for the client's lifetime (the
+    /// API version can't change mid-process), and skipped entirely against a
+    /// known mainnet relayer domain.
+    pub async fn compatibility(&self) -> Result<()> {
+        if is_known_mainnet_relayer(&self.server_url) {
             return Ok(());
         }
-        // The API version can't change within a process's lifetime, so a
-        // successful check never needs to be repeated.
         if *self.compatibility_checked.lock().unwrap() {
             return Ok(());
         }
-        let url = format!("{}/version", self.server_url);
-        let resp = self.client.get(&url).send().await?;
-        if !resp.status().is_success() {
+        let info = self
+            .version()
+            .await
+            .map_err(|e| Error::Compatibility(format!("failed to query /version: {e}")))?;
+        if !info.api_version.starts_with("1.") {
             return Err(Error::Compatibility(format!(
-                "Failed to query version endpoint: {}",
-                resp.status()
-            )));
-        }
-        #[derive(serde::Deserialize)]
-        struct VersionResp {
-            #[serde(rename = "apiVersion")]
-            api_version: String,
-        }
-        let version_info: VersionResp = resp.json().await?;
-        if !version_info.api_version.starts_with("1.") {
-            return Err(Error::Compatibility(format!(
-                "Incompatible API version: {}",
-                version_info.api_version
+                "incompatible relayer API version: {}",
+                info.api_version
             )));
         }
         *self.compatibility_checked.lock().unwrap() = true;
         Ok(())
     }
 
-    pub async fn build_seal_session(&self) -> Result<String, Error> {
+    // ── SEAL session ────────────────────────────────────────────────────────
+
+    /// Build (or return the cached) SEAL session header value: a base64 JSON
+    /// envelope containing an ephemeral Ed25519 session key, signed by the
+    /// delegate key as a Sui "personal message". The relayer uses this to
+    /// derive SEAL decrypt keys without ever seeing the delegate private key
+    /// itself. Cached for `SEAL_SESSION_TTL_MIN` minutes minus a 30s margin.
+    async fn build_seal_session(&self) -> Result<String> {
         use base64::Engine as _;
 
-        // Check cache first
         {
             let cache = self.session_cache.lock().unwrap();
-            if let Some(ref session) = *cache {
+            if let Some(session) = cache.as_ref() {
                 if session.expires_at > chrono::Utc::now() {
                     return Ok(session.session_header_value.clone());
                 }
             }
         }
 
-        // Cache miss or expired. Build new session.
-        let (package_id, _sui_rpc_url) = if self.server_url.contains("relayer.memwal.ai") {
-            ("0x2::memwal".to_string(), "https://fullnode.mainnet.sui.io:443".to_string())
+        let package_id = if is_known_mainnet_relayer(&self.server_url) {
+            "0x2::memwal".to_string()
         } else {
-            let config_url = format!("{}/config", self.server_url);
-            let resp = self.client.get(&config_url).send().await?;
-            if !resp.status().is_success() {
-                return Err(Error::Crypto(format!("Failed to retrieve config: {}", resp.status())));
-            }
             #[derive(serde::Deserialize)]
             struct ConfigResp {
                 #[serde(rename = "packageId")]
                 package_id: String,
-                #[serde(rename = "suiRpcUrl")]
-                sui_rpc_url: String,
             }
-            let config: ConfigResp = resp.json().await?;
-            (config.package_id, config.sui_rpc_url)
+            let url = format!("{}/config", self.server_url);
+            let resp = self.http.get(&url).send().await?;
+            if !resp.status().is_success() {
+                return Err(Error::SealSession(format!(
+                    "failed to fetch relayer /config: {}",
+                    resp.status()
+                )));
+            }
+            resp.json::<ConfigResp>().await?.package_id
         };
 
-        // Generate ephemeral Ed25519 session keypair (ed25519-dalek v2 uses rand OsRng)
+        // Ephemeral Ed25519 session keypair.
         let ephemeral_signing_key = {
             use rand::RngCore;
             let mut secret_bytes = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
             ed25519_dalek::SigningKey::from_bytes(&secret_bytes)
         };
-        let ephemeral_verifying_key = ephemeral_signing_key.verifying_key();
-        let ephemeral_public_key_bytes = ephemeral_verifying_key.to_bytes();
-        let session_public_key_b64 = base64::prelude::BASE64_STANDARD.encode(&ephemeral_public_key_bytes);
+        let session_public_key_b64 = base64::prelude::BASE64_STANDARD
+            .encode(ephemeral_signing_key.verifying_key().to_bytes());
 
-        // Format personal message
-        let ttl_min = 10;
         let now = chrono::Utc::now();
         let creation_time_utc = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
         let message = format!(
-            "Accessing keys of package {} for {} mins from {}, session key {}",
-            package_id, ttl_min, creation_time_utc, session_public_key_b64
+            "Accessing keys of package {package_id} for {SEAL_SESSION_TTL_MIN} mins from {creation_time_utc}, session key {session_public_key_b64}"
         );
 
-        // Sign personal message following Sui PersonalMessage format
+        // Sui `PersonalMessage` intent-signing: 3-byte intent prefix + uleb128
+        // length + message bytes, blake2b-256 hashed then Ed25519-signed.
         let message_bytes = message.as_bytes();
         let uleb128_len = encode_uleb128(message_bytes.len());
         let mut intent_message = Vec::with_capacity(3 + uleb128_len.len() + message_bytes.len());
         intent_message.extend_from_slice(&[0x03, 0x00, 0x00]);
         intent_message.extend_from_slice(&uleb128_len);
         intent_message.extend_from_slice(message_bytes);
-
         let digest = blake2b_256(&intent_message);
-        let signature = self.signing_key.sign(&digest);
+
+        let signature = self.signer.sign(&digest);
         let mut serialized_sig = Vec::with_capacity(1 + 64 + 32);
-        serialized_sig.push(0x00);
+        serialized_sig.push(0x00); // Ed25519 signature-scheme flag
         serialized_sig.extend_from_slice(&signature.to_bytes());
-        serialized_sig.extend_from_slice(&self.signing_key.verifying_key().to_bytes());
+        serialized_sig.extend_from_slice(&self.signer.verifying_key_bytes());
+        let personal_message_signature = base64::prelude::BASE64_STANDARD.encode(serialized_sig);
 
-        let personal_message_signature = base64::prelude::BASE64_STANDARD.encode(&serialized_sig);
-
-        // Derive delegate's Sui address from main verifying key
+        // Delegate's Sui address, derived from the main verifying key.
         let mut address_input = Vec::with_capacity(33);
         address_input.push(0x00);
-        address_input.extend_from_slice(&self.signing_key.verifying_key().to_bytes());
-        let address_hash = blake2b_256(&address_input);
-        let address = format!("0x{}", hex::encode(address_hash));
+        address_input.extend_from_slice(&self.signer.verifying_key_bytes());
+        let address = format!("0x{}", hex::encode(blake2b_256(&address_input)));
 
-        // Encode ephemeral session private key seed to Sui Bech32 format suiprivkey...
         let session_key = encode_suiprivkey(&ephemeral_signing_key.to_bytes());
-
-        // Construct JSON payload
         let creation_time_ms = now.timestamp_millis();
         let payload = serde_json::json!({
             "address": address,
             "packageId": package_id,
             "mvrName": null,
             "creationTimeMs": creation_time_ms,
-            "ttlMin": 10,
+            "ttlMin": SEAL_SESSION_TTL_MIN,
             "personalMessageSignature": personal_message_signature,
             "sessionKey": session_key,
         });
+        let session_header_value =
+            base64::prelude::BASE64_STANDARD.encode(serde_json::to_string(&payload)?);
 
-        let json_string = serde_json::to_string(&payload)?;
-        let session_header_value = base64::prelude::BASE64_STANDARD.encode(json_string.as_bytes());
-
-        // Cache expiration: now + 10 mins - 30 seconds
-        let expires_at = now + chrono::Duration::seconds(10 * 60 - 30);
-        {
-            let mut cache = self.session_cache.lock().unwrap();
-            *cache = Some(CachedSession {
-                session_header_value: session_header_value.clone(),
-                expires_at,
-            });
-        }
+        let expires_at = now + chrono::Duration::seconds(SEAL_SESSION_TTL_MIN * 60 - 30);
+        *self.session_cache.lock().unwrap() = Some(CachedSession {
+            session_header_value: session_header_value.clone(),
+            expires_at,
+        });
 
         Ok(session_header_value)
     }
+}
 
-    /// Prepares request headers and signs the canonical request message.
-    /// Exposed internally/for testing to verify signature format and payload values.
-    pub async fn prepare_request_headers(
-        &self,
-        method: &str,
-        path: &str,
-        body: &serde_json::Value,
-        include_delegate_key: bool,
-    ) -> Result<(String, HashMap<String, String>), Error> {
-        let timestamp = chrono::Utc::now().timestamp().to_string();
-        let nonce = Uuid::new_v4().to_string();
+/// Jitterless exponential backoff: `min(10s, base * 1.5^min(attempt, 6))`.
+fn backoff(poll_interval_ms: u64, attempt: u32) -> Duration {
+    let base = poll_interval_ms.max(100) as f64;
+    let factor = 1.5_f64.powi(attempt.min(6) as i32);
+    let delay = (base * factor).min(10_000.0);
+    Duration::from_millis(delay as u64)
+}
 
-        let body_hash = if method == "GET" || body.is_null() {
-            let mut hasher = Sha256::new();
-            hasher.update(b"");
-            hex::encode(hasher.finalize())
-        } else {
-            let serialized = serde_json::to_string(body)?;
-            let mut hasher = Sha256::new();
-            hasher.update(serialized.as_bytes());
-            hex::encode(hasher.finalize())
-        };
-
-        // Canonical format:
-        //   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
-        let message = format!(
-            "{}.{}.{}.{}.{}.{}",
-            timestamp,
-            method.to_uppercase(),
-            path,
-            body_hash,
-            nonce,
-            self.account_id
-        );
-
-        let signature = self.signing_key.sign(message.as_bytes());
-        let signature_hex = hex::encode(signature.to_bytes());
-        let public_key_hex = hex::encode(self.signing_key.verifying_key().to_bytes());
-
-        let mut headers = HashMap::new();
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
-        headers.insert("x-public-key".to_string(), public_key_hex);
-        headers.insert("x-signature".to_string(), signature_hex);
-        headers.insert("x-timestamp".to_string(), timestamp);
-        headers.insert("x-nonce".to_string(), nonce);
-        headers.insert("x-account-id".to_string(), self.account_id.clone());
-
-        if include_delegate_key {
-            let session_b64 = self.build_seal_session().await?;
-            headers.insert("x-seal-session".to_string(), session_b64);
-        }
-
-        Ok((message, headers))
-    }
-
-    /// Helper for making signed HTTP requests to the relayer.
-    async fn signed_request<T: serde::de::DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        body: &serde_json::Value,
-        accepted_statuses: &[reqwest::StatusCode],
-        include_delegate_key: bool,
-    ) -> Result<T, Error> {
-        let (_message, headers) = self.prepare_request_headers(method, path, body, include_delegate_key).await?;
-
-        let url = format!("{}{}", self.server_url, path);
-        let req_method = match method.to_uppercase().as_str() {
-            "GET" => reqwest::Method::GET,
-            "POST" => reqwest::Method::POST,
-            "PUT" => reqwest::Method::PUT,
-            "DELETE" => reqwest::Method::DELETE,
-            _ => return Err(Error::Internal(format!("Unsupported HTTP method: {}", method))),
-        };
-
-        let mut req = self.client.request(req_method, &url);
-        for (k, v) in headers {
-            req = req.header(&k, &v);
-        }
-
-        if method != "GET" && !body.is_null() {
-            req = req.json(body);
-        }
-
-        let resp = req.send().await?;
-        let status = resp.status();
-
-        if !accepted_statuses.contains(&status) {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::Request {
-                status,
-                message: body_text,
-            });
-        }
-
-        let res = resp.json::<T>().await?;
-        Ok(res)
+/// Decode an accepted response or map a non-accepted status to an [`Error`].
+fn decode<T: DeserializeOwned>(status: u16, bytes: &[u8], accepted: &[u16]) -> Result<T> {
+    if accepted.contains(&status) {
+        Ok(serde_json::from_slice(bytes)?)
+    } else {
+        Err(error_from_body(status, bytes))
     }
 }
 
-// ============================================================
-// Cryptography / Encoding Helpers
-// ============================================================
+/// Build a typed [`Error`] from a non-success response body (`{"error": ...}`).
+fn error_from_body(status: u16, bytes: &[u8]) -> Error {
+    let parsed: Option<Value> = serde_json::from_slice(bytes).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(|v| {
+            v.get("error")
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str())
+        })
+        .map(truncate)
+        .unwrap_or_else(|| truncate(&String::from_utf8_lossy(bytes)));
+    let code = parsed
+        .as_ref()
+        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(String::from));
 
-fn blake2b_256(data: &[u8]) -> [u8; 32] {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
-    let mut hasher = Blake2bVar::new(32).expect("32 bytes output size is valid");
-    hasher.update(data);
-    let mut output = [0u8; 32];
-    hasher.finalize_variable(&mut output).expect("digest output");
-    output
+    match status {
+        401 => Error::AuthRejected {
+            message: if message.is_empty() {
+                "delegate key not authorized for this account, clock skew (>5min), or replayed nonce".into()
+            } else {
+                message
+            },
+        },
+        426 => Error::Incompatible { message },
+        _ => Error::Server {
+            status,
+            code,
+            message,
+        },
+    }
 }
 
-fn encode_uleb128(mut value: usize) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        bytes.push(byte);
-        if value == 0 {
-            break;
-        }
+fn truncate(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    if cleaned.chars().count() > 300 {
+        let head: String = cleaned.chars().take(300).collect();
+        format!("{head}…")
+    } else {
+        cleaned
     }
-    bytes
-}
-
-fn bech32_polymod(values: &[u8]) -> u32 {
-    let mut generator: u32 = 1;
-    for &value in values {
-        let top = generator >> 25;
-        generator = ((generator & 0x1ffffff) << 5) ^ (value as u32);
-        for (i, &g) in [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
-            .iter()
-            .enumerate()
-        {
-            if (top >> i) & 1 != 0 {
-                generator ^= g;
-            }
-        }
-    }
-    generator
-}
-
-fn bech32_hrp_expand(hrp: &str) -> Vec<u8> {
-    let mut v = Vec::new();
-    for c in hrp.bytes() {
-        v.push(c >> 5);
-    }
-    v.push(0);
-    for c in hrp.bytes() {
-        v.push(c & 31);
-    }
-    v
-}
-
-fn bech32_create_checksum(hrp: &str, data: &[u8]) -> Vec<u8> {
-    let mut combined = bech32_hrp_expand(hrp);
-    combined.extend_from_slice(data);
-    combined.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-    let polymod = bech32_polymod(&combined) ^ 1;
-    let mut checksum = Vec::with_capacity(6);
-    for i in 0..6 {
-        checksum.push(((polymod >> (5 * (5 - i))) & 31) as u8);
-    }
-    checksum
-}
-
-fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Result<Vec<u8>, &'static str> {
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    let mut ret = Vec::new();
-    let maxv: u32 = (1 << to) - 1;
-    let max_acc: u32 = (1 << (from + to - 1)) - 1;
-    for &value in data {
-        let v = value as u32;
-        if (v >> from) != 0 {
-            return Err("Invalid value");
-        }
-        acc = ((acc << from) | v) & max_acc;
-        bits += from;
-        while bits >= to {
-            bits -= to;
-            ret.push(((acc >> bits) & maxv) as u8);
-        }
-    }
-    if pad {
-        if bits > 0 {
-            ret.push(((acc << (to - bits)) & maxv) as u8);
-        }
-    } else if bits >= from || ((acc << (to - bits)) & maxv) != 0 {
-        return Err("Invalid padding");
-    }
-    Ok(ret)
-}
-
-fn encode_suiprivkey(seed: &[u8; 32]) -> String {
-    let mut payload = Vec::with_capacity(33);
-    payload.push(0x00);
-    payload.extend_from_slice(seed);
-
-    let data_5bit = convert_bits(&payload, 8, 5, true).unwrap();
-    let checksum = bech32_create_checksum("suiprivkey", &data_5bit);
-
-    let mut combined = data_5bit;
-    combined.extend_from_slice(&checksum);
-
-    let charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-    let encoded: String = combined
-        .iter()
-        .map(|&b| charset.chars().nth(b as usize).unwrap())
-        .collect();
-
-    format!("suiprivkey1{}", encoded)
-}
-
-/// Calculate the polling delay with exponential backoff and jitter.
-fn polling_delay(base_ms: u64, attempt: u32) -> Duration {
-    let base = base_ms.max(100) as f64;
-    let capped = (base * 1.5_f64.powi(attempt.min(6) as i32)).min(10000.0);
-    // Simple pseudo-random jitter based on the current time's milliseconds
-    let ms = chrono::Utc::now().timestamp_millis() as u64;
-    let jitter_pct = 0.75 + ((ms % 1000) as f64 / 2000.0); // 0.75 to 1.25
-    Duration::from_millis((capped * jitter_pct) as u64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Verifier, VerifyingKey};
 
-    fn test_client() -> MemWalClient {
-        let key: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-            0x1d, 0x1e, 0x1f, 0x20,
-        ];
-        MemWalClient::new(
-            &key,
-            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-            "https://relayer.memwal.ai/",
-            "my_test_namespace",
-        )
+    const SEED: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+
+    fn test_client() -> WalrusMemory {
+        WalrusMemory::builder(SEED, "0xacct")
+            .server_url("https://relayer.memory.walrus.xyz")
+            .namespace("demo")
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn test_client_construction() {
-        let client = test_client();
-        assert_eq!(client.account_id, "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-        assert_eq!(client.server_url, "https://relayer.memwal.ai");
-        assert_eq!(client.namespace, "my_test_namespace");
+    fn is_known_mainnet_relayer_matches_current_and_legacy_domain() {
+        assert!(is_known_mainnet_relayer(
+            "https://relayer.memory.walrus.xyz"
+        ));
+        assert!(is_known_mainnet_relayer("https://relayer.memwal.ai"));
+        assert!(!is_known_mainnet_relayer("https://relayer.dev.memwal.ai"));
+        assert!(!is_known_mainnet_relayer("http://127.0.0.1:8000"));
     }
 
     #[tokio::test]
-    async fn test_signature_message_generation_format() {
-        let client = test_client();
-        let body = serde_json::json!({
-            "text": "Hello, Walrus Memory!"
-        });
+    async fn build_seal_session_produces_decodable_envelope() {
+        use base64::Engine as _;
 
-        let (message, headers) = client
-            .prepare_request_headers("POST", "/api/remember", &body, true)
-            .await
-            .unwrap();
-
-        // 1. Verify message format contains 6 fields: timestamp, method, path, body_sha256, nonce, account_id
-        let parts: Vec<&str> = message.split('.').collect();
-        assert_eq!(parts.len(), 6);
-        assert_eq!(parts[1], "POST");
-        assert_eq!(parts[2], "/api/remember");
-        assert_eq!(parts[5], client.account_id);
-
-        // Verify body hash is correct SHA-256 hex
-        let mut hasher = Sha256::new();
-        hasher.update(serde_json::to_string(&body).unwrap().as_bytes());
-        let expected_hash = hex::encode(hasher.finalize());
-        assert_eq!(parts[3], expected_hash);
-
-        // 2. Verify headers are correctly set
-        assert_eq!(headers.get("x-account-id").unwrap(), &client.account_id);
-        assert!(headers.get("x-public-key").is_some());
-        assert!(headers.get("x-signature").is_some());
-        assert!(headers.get("x-timestamp").is_some());
-        assert!(headers.get("x-nonce").is_some());
-        assert!(headers.get("x-seal-session").is_some());
-        assert!(headers.get("x-delegate-key").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_cryptographic_signature_roundtrip() {
-        let client = test_client();
-        let body = serde_json::json!({
-            "query": "find matching files",
-            "limit": 5
-        });
-
-        let (message, headers) = client
-            .prepare_request_headers("POST", "/api/recall", &body, false)
-            .await
-            .unwrap();
-
-        let public_key_hex = headers.get("x-public-key").unwrap();
-        let signature_hex = headers.get("x-signature").unwrap();
-
-        // Decode public key and signature
-        let pk_bytes = hex::decode(public_key_hex).unwrap();
-        let verifying_key = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap()).unwrap();
-
-        let sig_bytes = hex::decode(signature_hex).unwrap();
-        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes.try_into().unwrap());
-
-        // Verify cryptographic signature passes
-        assert!(verifying_key.verify(message.as_bytes(), &signature).is_ok());
-
-        // Tamper with the message and ensure it fails verification
-        let tampered_message = format!("{}x", message);
-        assert!(verifying_key.verify(tampered_message.as_bytes(), &signature).is_err());
-    }
-
-    #[test]
-    fn test_types_serialization_deserialization() {
-        let recall_result = RecallResult {
-            results: vec![
-                RecallMemory {
-                    blob_id: "blob-1".to_string(),
-                    text: "Test memory 1".to_string(),
-                    distance: 0.123,
-                },
-                RecallMemory {
-                    blob_id: "blob-2".to_string(),
-                    text: "Test memory 2".to_string(),
-                    distance: 0.456,
-                },
-            ],
-            total: 2,
-        };
-
-        // Serialize
-        let serialized = serde_json::to_string(&recall_result).unwrap();
-        assert!(serialized.contains("blob-1"));
-        assert!(serialized.contains("0.123"));
-
-        // Deserialize
-        let deserialized: RecallResult = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.total, 2);
-        assert_eq!(deserialized.results[0].blob_id, "blob-1");
-        assert_eq!(deserialized.results[1].distance, 0.456);
-    }
-
-    #[test]
-    fn test_uleb128_encoding() {
-        assert_eq!(encode_uleb128(0), vec![0]);
-        assert_eq!(encode_uleb128(127), vec![127]);
-        assert_eq!(encode_uleb128(128), vec![128, 1]);
-        assert_eq!(encode_uleb128(145), vec![0x91, 0x01]);
-    }
-
-    #[test]
-    fn test_sui_address_derivation() {
-        let main_key_bytes: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-            0x1d, 0x1e, 0x1f, 0x20,
-        ];
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&main_key_bytes);
-        let verifying_key = signing_key.verifying_key();
-        
-        let mut address_input = Vec::new();
-        address_input.push(0x00);
-        address_input.extend_from_slice(&verifying_key.to_bytes());
-        let address_hash = blake2b_256(&address_input);
-        let address = format!("0x{}", hex::encode(address_hash));
-        
-        assert!(address.starts_with("0x"));
-        assert_eq!(address.len(), 66);
-    }
-
-    #[test]
-    fn test_suiprivkey_bech32_encoding() {
-        let seed: [u8; 32] = [1; 32];
-        let encoded = encode_suiprivkey(&seed);
-        assert!(encoded.starts_with("suiprivkey1"));
-        
-        let data_part = &encoded["suiprivkey1".len()..];
-        for c in data_part.chars() {
-            assert!("qpzry9x8gf2tvdw0s3jn54khce6mua7l".contains(c), "Character {} not in charset", c);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_session_json_construction() {
         let client = test_client();
         let session_b64 = client.build_seal_session().await.unwrap();
-        
-        use base64::Engine as _;
-        let decoded_json = base64::prelude::BASE64_STANDARD.decode(&session_b64).unwrap();
-        let payload: serde_json::Value = serde_json::from_slice(&decoded_json).unwrap();
-        
-        assert!(payload.get("address").unwrap().is_string());
-        assert_eq!(payload.get("packageId").unwrap().as_str().unwrap(), "0x2::memwal");
-        assert!(payload.get("creationTimeMs").unwrap().is_number());
-        assert_eq!(payload.get("ttlMin").unwrap().as_u64().unwrap(), 10);
-        assert!(payload.get("personalMessageSignature").unwrap().is_string());
-        assert!(payload.get("sessionKey").unwrap().as_str().unwrap().starts_with("suiprivkey1"));
+        let decoded = base64::prelude::BASE64_STANDARD
+            .decode(&session_b64)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+
+        assert!(payload["address"].is_string());
+        assert_eq!(payload["packageId"], "0x2::memwal");
+        assert_eq!(payload["ttlMin"], SEAL_SESSION_TTL_MIN);
+        assert!(payload["personalMessageSignature"].is_string());
+        assert!(payload["sessionKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("suiprivkey1"));
+    }
+
+    #[tokio::test]
+    async fn build_seal_session_is_cached() {
+        let client = test_client();
+        let a = client.build_seal_session().await.unwrap();
+        let b = client.build_seal_session().await.unwrap();
+        assert_eq!(
+            a, b,
+            "second call within TTL should reuse the cached session"
+        );
     }
 }
