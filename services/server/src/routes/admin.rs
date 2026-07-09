@@ -430,8 +430,8 @@ pub async fn restore(
     );
     let on_chain_blobs = walrus::query_blobs_by_owner(
         &state.http_client,
-        &state.config.sidecar_url,
-        state.config.sidecar_secret.as_deref(),
+        &state.config.sui_rpc_url,
+        &state.config.walrus_package_id,
         owner,
         Some(namespace),
         Some(&state.config.package_id),

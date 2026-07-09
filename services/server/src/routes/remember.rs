@@ -1070,6 +1070,7 @@ mod tests {
             sui_private_key: None,
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
+            walrus_package_id: "0xwalruspackage".to_string(),
             registry_id: "0xregistry".to_string(),
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
@@ -1077,6 +1078,9 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            walrus_native_write: false,
+            walrus_upload_relay_url: "http://localhost:9004".to_string(),
+            walrus_native_gas_budget: 500_000_000,
         }
     }
 
