@@ -21,6 +21,7 @@
 //! today via `seal::SealCredential::from_auth_or_fallback`.
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use redis::AsyncCommands;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,7 @@ use std::time::Duration;
 use crate::storage::db::VectorDb;
 use crate::storage::seal::{self, DecryptOutcome, SealCredential};
 use crate::storage::walrus;
+use crate::storage::{sui_tx, walrus_write};
 use crate::types::{AppError, AuthInfo, Config, KeyPool};
 
 use super::{FetchTimings, HydratedMemory, MemoryEngine, MemoryRef};
@@ -179,6 +181,52 @@ impl WalrusSealEngine {
         }
     }
 
+    /// WALM-184: native Rust replacement for `walrus::upload_blob`'s
+    /// sidecar HTTP call — same on-chain effect (register + certify +
+    /// metadata-stamp + transfer to `owner`), no Node.js sidecar involved.
+    /// Only called when `config.walrus_native_write` is true.
+    async fn store_blob_native(
+        &self,
+        owner: &str,
+        namespace: &str,
+        bytes: &[u8],
+        key_index: usize,
+        agent_public_key: Option<&str>,
+    ) -> Result<walrus::UploadResult, AppError> {
+        let key_hex = self
+            .key_pool
+            .key_at(key_index)
+            .ok_or_else(|| AppError::Internal(format!("no Sui key at pool index {key_index}")))?;
+        let signer = sui_tx::SuiSignerContext::from_hex_key(key_hex)
+            .map_err(|e| AppError::Internal(format!("invalid Sui signing key: {e}")))?;
+        let mut rpc_client = sui_rpc::Client::new(self.config.sui_rpc_url.clone())
+            .map_err(|e| AppError::Internal(format!("failed to build Sui RPC client: {e}")))?;
+
+        let result = walrus_write::store_blob_and_finalize(
+            &mut rpc_client,
+            &self.http_client,
+            &signer,
+            &self.config.sui_rpc_url,
+            &self.config.walrus_upload_relay_url,
+            &self.config.walrus_package_id,
+            owner,
+            namespace,
+            Some(&self.config.package_id),
+            agent_public_key,
+            self.config.walrus_storage_epochs,
+            false,
+            self.config.walrus_native_gas_budget,
+            bytes,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("native Walrus store_blob failed: {e}")))?;
+
+        Ok(walrus::UploadResult {
+            blob_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.blob_id),
+            object_id: Some(result.blob_object_id),
+        })
+    }
+
     /// Fetch a blob's ciphertext: cache → Walrus (+ cache write-back).
     /// Returns `Some((ciphertext, was_cached))` — `was_cached` is `true` on
     /// a Redis hit, `false` on a cold fetch from Walrus. Returns `None` if
@@ -239,24 +287,30 @@ impl MemoryEngine for WalrusSealEngine {
             )
         })?;
 
-        // Upload the prepared ciphertext to Walrus via the relay sidecar
-        // (pool key pays gas). `defer_transfer = false` — the blob is
-        // transferred to `owner` immediately, same as the inlined
-        // `remember_manual` path.
-        let upload = walrus::upload_blob(
-            &self.http_client,
-            &self.config.sidecar_url,
-            self.config.sidecar_secret.as_deref(),
-            bytes,
-            self.config.walrus_storage_epochs as u64,
-            owner,
-            key_index,
-            namespace,
-            &self.config.package_id,
-            agent_public_key,
-            None,
-        )
-        .await?;
+        // Upload the prepared ciphertext to Walrus — WALM-184: native Rust
+        // write path when opted in (WALRUS_NATIVE_WRITE=true), else the TS
+        // sidecar HTTP call (pool key pays gas either way). `defer_transfer
+        // = false` — the blob is transferred to `owner` immediately, same
+        // as the inlined `remember_manual` path.
+        let upload = if self.config.walrus_native_write {
+            self.store_blob_native(owner, namespace, bytes, key_index, agent_public_key)
+                .await?
+        } else {
+            walrus::upload_blob(
+                &self.http_client,
+                &self.config.sidecar_url,
+                self.config.sidecar_secret.as_deref(),
+                bytes,
+                self.config.walrus_storage_epochs as u64,
+                owner,
+                key_index,
+                namespace,
+                &self.config.package_id,
+                agent_public_key,
+                None,
+            )
+            .await?
+        };
         let blob_id = upload.blob_id;
         tracing::info!("engine.store_blob: walrus upload ok blob_id={}", blob_id);
 

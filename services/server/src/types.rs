@@ -166,6 +166,15 @@ impl KeyPool {
         }
     }
 
+    /// Returns the raw hex private key at `index` (the same index
+    /// `next_index()` returned earlier) — for callers that need to sign
+    /// with that specific pool slot's key directly (WALM-184: native Walrus
+    /// write path), rather than just passing the index to the TS sidecar
+    /// (which owns the keys itself via its own env vars).
+    pub fn key_at(&self, index: usize) -> Option<&str> {
+        self.keys.get(index).map(|s| s.as_str())
+    }
+
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
@@ -213,6 +222,10 @@ pub struct Config {
     /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
     pub sui_private_keys: Vec<String>,
     pub package_id: String,
+    /// Move package ID that publishes `walrus::blob::Blob` on this network —
+    /// distinct from `package_id` (MemWal's own package). Used for native
+    /// on-chain Walrus blob queries (see `storage::walrus::query_blobs_by_owner`).
+    pub walrus_package_id: String,
     pub registry_id: String,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
@@ -229,6 +242,19 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// WALM-184: when true, `engine::store_blob` calls
+    /// `storage::walrus_write::store_blob_and_finalize` (native Rust Walrus
+    /// write path) instead of `storage::walrus::upload_blob` (TS sidecar
+    /// HTTP call). Testnet-only for now (see that function's doc). Off by
+    /// default — set `WALRUS_NATIVE_WRITE=true` to opt in.
+    pub walrus_native_write: bool,
+    /// Upload Relay HTTP endpoint for the native Walrus write path. Only
+    /// read when `walrus_native_write` is true.
+    pub walrus_upload_relay_url: String,
+    /// Gas budget (MIST) for each of the three native-write-path
+    /// transactions (register+reserve, certify, metadata+transfer). Only
+    /// read when `walrus_native_write` is true.
+    pub walrus_native_gas_budget: u64,
 }
 
 impl Config {
@@ -287,6 +313,13 @@ impl Config {
             },
             package_id: std::env::var("MEMWAL_PACKAGE_ID")
                 .expect("MEMWAL_PACKAGE_ID must be set"),
+            walrus_package_id: std::env::var("WALRUS_PACKAGE_ID").unwrap_or_else(|_| {
+                if network == "testnet" {
+                    "0xd84704c17fc870b8764832c535aa6b11f21a95cd6f5bb38a9b07d2cf42220c66".to_string()
+                } else {
+                    "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77".to_string()
+                }
+            }),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
             sidecar_url: std::env::var("SIDECAR_URL")
@@ -299,6 +332,13 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            walrus_native_write: env_bool("WALRUS_NATIVE_WRITE"),
+            walrus_upload_relay_url: std::env::var("WALRUS_UPLOAD_RELAY_URL")
+                .unwrap_or_else(|_| "https://upload-relay.testnet.walrus.space".to_string()),
+            walrus_native_gas_budget: std::env::var("WALRUS_NATIVE_GAS_BUDGET")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(500_000_000),
         }
     }
 }

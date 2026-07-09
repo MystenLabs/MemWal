@@ -19,8 +19,33 @@ ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 
-# SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
-# (no Rust crypto deps needed)
+# SEAL encryption is still handled by TS sidecar scripts (@mysten/seal) —
+# no viable Rust crate exists yet (the only community SEAL SDK,
+# gfusee/seal-sdk-rs, currently fails to build: it pins a `sui` monorepo
+# revision that transitively depends on `core2 = "^0.4.0"`, which is the
+# only version of `core2` ever published and has been permanently yanked
+# upstream). Walrus/SEAL transaction *signing* below is unrelated to this
+# and does not depend on that broken crate.
+
+# Native Sui transaction building/signing (WALM-184: migrating the
+# Walrus write path — register/upload/certify — off the Node sidecar).
+# Mysten's lightweight, actively maintained SDK (github.com/mystenlabs/sui-rust-sdk),
+# not the full node monorepo — builds cleanly, no yanked transitive deps.
+sui-sdk-types = "0.3"
+sui-crypto = { version = "0.3", features = ["ed25519"] }
+sui-transaction-builder = "0.3"
+sui-rpc = "0.3"
+
+# Walrus RedStuff erasure-coding (compute blob_id/root_hash locally before
+# register_blob) — default-features = false skips the optional `sui-types`
+# feature, which would pull the full Sui monorepo and conflict with this
+# server's own sqlx/pgvector pins (see WALM-184 investigation notes).
+walrus-core = { git = "https://github.com/MystenLabs/walrus", tag = "walrus_v1.52.0_1783366984_main_ci", default-features = false }
+# Same rev walrus-core itself resolves to (see Cargo.lock) — pinned
+# explicitly, not left to re-resolve, so there's only ever one fastcrypto
+# in the dependency graph. Needed for ConfirmationCertificate.signature's
+# ToFromBytes::as_bytes() (storage::walrus_write).
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", rev = "4db0e90c732bbf7420ca20de808b698883148d9c" }
 
 # Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }
@@ -58,3 +83,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 percent-encoding = "2"
+
+[dev-dependencies]
+bcs = "0.2.1"
