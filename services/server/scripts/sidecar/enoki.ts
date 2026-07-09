@@ -26,6 +26,19 @@ type EnokiDataWrapper<T> = { data: T };
 export type EnokiSponsorResponse = { bytes: string; digest: string };
 export type EnokiExecuteResponse = { digest: string };
 
+// SuiJsonRpcClient.signAndExecuteTransaction resolves to a flat
+// SuiTransactionBlockResponse (`.digest`). SuiGrpcClient's core API resolves to
+// the discriminated union `{Transaction: {digest}} | {FailedTransaction: {digest}}`
+// instead — no top-level `.digest`. Direct-sign fallback reads this result on
+// both clients, so it must handle both shapes or `.digest` is silently
+// `undefined` once SUI_GRPC_URL is set.
+function extractTransactionDigest(result: any): string {
+    if (typeof result?.digest === "string") return result.digest;
+    const digest = result?.Transaction?.digest ?? result?.FailedTransaction?.digest;
+    if (typeof digest === "string") return digest;
+    throw new Error("signAndExecuteTransaction: could not resolve digest from result");
+}
+
 export function redactEnokiPath(path: string): string {
     return path.replace(/\/transaction-blocks\/sponsor\/[^/?]+/, "/transaction-blocks/sponsor/<digest>");
 }
@@ -179,7 +192,7 @@ export async function executeWithEnokiSponsor(
             signer,
             transaction: tx,
         });
-        return direct.digest;
+        return extractTransactionDigest(direct);
     }
 
     let sponsorError: unknown;
@@ -211,6 +224,6 @@ export async function executeWithEnokiSponsor(
             signer,
             transaction: tx,
         });
-        return direct.digest;
+        return extractTransactionDigest(direct);
     }
 }
