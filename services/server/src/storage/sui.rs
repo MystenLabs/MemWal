@@ -4,22 +4,28 @@ use serde::Deserialize;
 /// Verify that a given public key is registered as a delegate key
 /// in the onchain MemWalAccount object.
 ///
-/// Routes through gRPC when `grpc_url` is set (opt-in, mirrors the sidecar's
-/// SUI_GRPC_URL write-path migration — JSON-RPC sunsets 2026-07-31, and
-/// testnet's public JSON-RPC endpoint already returns 404 today), otherwise
-/// falls back to the original Sui JSON-RPC `sui_getObject` call below.
+/// Routes through gRPC when `grpc_client` is provided (opt-in via
+/// SUI_GRPC_URL, mirrors the sidecar's write-path migration — JSON-RPC
+/// sunsets 2026-07-31, and testnet's public JSON-RPC endpoint already
+/// returns 404 today), otherwise falls back to the original Sui JSON-RPC
+/// `sui_getObject` call below. The gRPC client is built once at startup
+/// (AppState) and cloned here — clones share the underlying tonic channel.
 ///
 /// Returns `Ok(owner_address)` if the key is found, `Err` otherwise.
 pub async fn verify_delegate_key_onchain(
     http_client: &reqwest::Client,
     rpc_url: &str,
-    grpc_url: Option<&str>,
+    grpc_client: Option<&sui_rpc::Client>,
     account_object_id: &str,
     public_key_bytes: &[u8],
 ) -> Result<String, OnchainVerifyError> {
-    if let Some(grpc_url) = grpc_url {
-        return verify_delegate_key_onchain_grpc(grpc_url, account_object_id, public_key_bytes)
-            .await;
+    if let Some(grpc_client) = grpc_client {
+        return verify_delegate_key_onchain_grpc(
+            grpc_client.clone(),
+            account_object_id,
+            public_key_bytes,
+        )
+        .await;
     }
 
     // Build JSON-RPC request
@@ -181,13 +187,10 @@ fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
 /// byte-array) — verified live against real testnet objects while migrating
 /// the sidecar and web app to gRPC for this same JSON-RPC sunset.
 async fn verify_delegate_key_onchain_grpc(
-    grpc_url: &str,
+    mut client: sui_rpc::Client,
     account_object_id: &str,
     public_key_bytes: &[u8],
 ) -> Result<String, OnchainVerifyError> {
-    let mut client = sui_rpc::Client::new(grpc_url)
-        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC client init failed: {}", e)))?;
-
     let address: sui_sdk_types::Address = account_object_id
         .parse()
         .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
@@ -797,9 +800,8 @@ mod tests {
         let account_id = "0xfba86e31b07ce36748ffe46de494bd4a2fa0058a5851ec4006141abcc5498fe2";
         let wrong_key = [0u8; 32];
 
-        let result =
-            verify_delegate_key_onchain_grpc("https://fullnode.testnet.sui.io", account_id, &wrong_key)
-                .await;
+        let client = sui_rpc::Client::new("https://fullnode.testnet.sui.io").unwrap();
+        let result = verify_delegate_key_onchain_grpc(client, account_id, &wrong_key).await;
 
         // The account genuinely exists and gRPC parses it correctly — a
         // non-matching key must fail with KeyNotFound, not RpcError. Getting
@@ -816,12 +818,8 @@ mod tests {
     async fn test_verify_delegate_key_onchain_grpc_missing_object() {
         // Object that doesn't exist onchain — must surface as an error, not panic.
         let fake_id = "0x0000000000000000000000000000000000000000000000000000000000000001";
-        let result = verify_delegate_key_onchain_grpc(
-            "https://fullnode.testnet.sui.io",
-            fake_id,
-            &[0u8; 32],
-        )
-        .await;
+        let client = sui_rpc::Client::new("https://fullnode.testnet.sui.io").unwrap();
+        let result = verify_delegate_key_onchain_grpc(client, fake_id, &[0u8; 32]).await;
         assert!(result.is_err());
     }
 }

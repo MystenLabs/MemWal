@@ -16,33 +16,7 @@
 import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
-
-// dapp-kit's default useSignAndExecuteTransaction() execute step calls the
-// legacy client.executeTransactionBlock(), which only exists on
-// SuiJsonRpcClient — SuiGrpcClient's core API only has executeTransaction(),
-// with a different request/response shape (union {Transaction:{digest}} |
-// {FailedTransaction:{digest}}, same union already handled for the sidecar's
-// direct-sign fallback). Detect at runtime and branch so this works under
-// either client the app's SuiClientProvider hands out per network.
-async function executeTransactionCompat(
-    client: any,
-    { bytes, signature }: { bytes: string; signature: string },
-) {
-    if (typeof client.executeTransactionBlock === 'function') {
-        const res = await client.executeTransactionBlock({
-            transactionBlock: bytes,
-            signature,
-            options: { showRawEffects: true },
-        })
-        return { digest: res.digest, rawEffects: res.rawEffects }
-    }
-
-    const txBytes = Uint8Array.from(atob(bytes), (c) => c.charCodeAt(0))
-    const res = await client.executeTransaction({ transaction: txBytes, signatures: [signature] })
-    const digest = res?.Transaction?.digest ?? res?.FailedTransaction?.digest
-    if (!digest) throw new Error('executeTransaction: could not resolve digest from result')
-    return { digest }
-}
+import { executeTransactionCompat } from '../utils/suiClientCompat'
 
 export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
