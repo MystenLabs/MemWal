@@ -11269,3 +11269,66 @@ h1, h2, h3 {
     height: 16px;
   }
 }
+
+/* ============================================================
+   Delete old memories card (WALM-264) — mirrors the Delegate
+   keys card; order places it last in the dash-shell flex flow.
+   ============================================================ */
+
+/* The install card zeroes its bottom margin (it used to be the last card
+   on the page), so the cleanup card supplies its own top gap to keep the
+   56px card rhythm — and, as the new last card, zeroes its own bottom. */
+.dash-page .dashboard-cleanup-card {
+  order: 7;
+  margin-top: 56px;
+  margin-bottom: 0 !important;
+}
+
+/* Header delete button matches the card-header pill spec (52px, radius 26,
+   px-30, 18px label — same as Refresh/Add key) in danger colors. */
+.dash-page .dashboard-cleanup-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  height: 52px;
+  padding: 10px 30px;
+  border-radius: 26px;
+  font-size: 1.125rem;
+  letter-spacing: 0.72px;
+}
+
+/* Text scale mirrors the final card-subtitle scale (0.82rem / 1.35). */
+.dash-page .dashboard-cleanup-warning {
+  background: rgba(232, 255, 117, 0.08);
+  border: 1px solid rgba(232, 255, 117, 0.35);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  margin: 0 0 14px;
+  color: #b8bbbe;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.dash-page .dashboard-cleanup-warning strong {
+  color: #e8ff75;
+}
+
+.dash-page .dashboard-cleanup-error {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  margin: 0 0 14px;
+  color: var(--danger);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.dash-page .dashboard-cleanup-status {
+  margin: 0 0 14px;
+  color: #b8bbbe;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}

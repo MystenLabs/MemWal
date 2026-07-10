@@ -229,6 +229,11 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// WALM-264: gate for `POST /api/delete-memories` (permanent V1 memory
+    /// deletion). Off by default so nothing is user-reachable until the
+    /// feature is tested and a rollout is agreed; set
+    /// `ENABLE_MEMORY_DELETION=true` to enable.
+    pub enable_memory_deletion: bool,
 }
 
 impl Config {
@@ -299,6 +304,7 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            enable_memory_deletion: env_bool("ENABLE_MEMORY_DELETION"),
         }
     }
 }
@@ -857,6 +863,42 @@ pub struct ForgetResponse {
     pub deleted: u64,
     pub namespace: String,
     pub owner: String,
+}
+
+/// POST /api/delete-memories — permanently delete V1 memories (WALM-264).
+///
+/// The frontend builds the `system::delete_blob` PTB over the user's own
+/// Walrus Blob objects, gets it sponsored (`POST /sponsor`), and has the
+/// user sign it. This endpoint then owns the whole side-effect: it submits
+/// the signed transaction and, only after on-chain success, deletes the
+/// matching `vector_entries` rows — so chain and DB can't drift apart on
+/// a frontend that submits but never cleans up.
+#[derive(Debug, Deserialize)]
+pub struct DeleteMemoriesRequest {
+    /// Digest of the sponsored transaction (from `POST /sponsor`).
+    pub digest: String,
+    /// User signature over the sponsored transaction bytes (base64).
+    pub signature: String,
+    /// Walrus blob IDs (base64url) whose DB rows to delete after the
+    /// transaction lands. Must be the same blobs the PTB deletes.
+    #[serde(rename = "blobIds")]
+    pub blob_ids: Vec<String>,
+}
+
+/// POST /api/memory-blob-ids — the owner's indexed Walrus blob ids
+/// (WALM-264). Used by the delete-memories UI to scope the on-chain blob
+/// list to actual V1 memories.
+#[derive(Debug, Serialize)]
+pub struct MemoryBlobIdsResponse {
+    #[serde(rename = "blobIds")]
+    pub blob_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteMemoriesResponse {
+    pub digest: String,
+    #[serde(rename = "deletedRows")]
+    pub deleted_rows: u64,
 }
 
 /// POST /api/stats — count + stored bytes for a namespace.

@@ -391,6 +391,27 @@ impl VectorDb {
     /// Delete a vector entry by blob_id (used for expired blob cleanup).
     /// Called reactively when Walrus returns 404 during blob download.
     /// Requires owner to prevent cross-user blob deletion.
+    /// All distinct blob ids indexed for `owner`, across every namespace.
+    /// WALM-264: lets the delete-memories UI scope the on-chain blob list to
+    /// actual V1 memories (the DB is the authoritative V1 list), so unrelated
+    /// or V2 blobs the wallet owns are never offered for deletion.
+    pub async fn list_blob_ids_by_owner(&self, owner: &str) -> Result<Vec<String>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
+            "SELECT DISTINCT blob_id FROM vector_entries WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to list blob ids by owner: {}", e)));
+        crate::observability::observe_db(
+            "vector.list_blob_ids_by_owner",
+            db_status(&result),
+            started.elapsed(),
+        );
+        Ok(result?.into_iter().map(|(blob_id,)| blob_id).collect())
+    }
+
     pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
         let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")

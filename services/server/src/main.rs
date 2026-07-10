@@ -763,6 +763,10 @@ async fn main() {
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
+        // WALM-264: permanent V1 memory deletion (submit signed PTB +
+        // delete DB rows). Gated by ENABLE_MEMORY_DELETION (404 when off).
+        .route("/api/delete-memories", post(routes::delete_memories))
+        .route("/api/memory-blob-ids", post(routes::memory_blob_ids))
         .route("/api/stats", post(routes::stats))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
