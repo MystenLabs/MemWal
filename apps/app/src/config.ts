@@ -19,6 +19,10 @@ export const config = {
         '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437',
     memwalServerUrl: import.meta.env.VITE_MEMWAL_SERVER_URL as string || 'http://localhost:8000',
     suiNetwork: (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') as 'testnet' | 'mainnet',
+    // gRPC endpoint for the app's Sui client. Opt-in, mirrors the sidecar's
+    // SUI_GRPC_URL (services/server/scripts/sidecar/config.ts) — empty keeps
+    // the existing JSON-RPC client unchanged for that network.
+    suiGrpcUrl: import.meta.env.VITE_SUI_GRPC_URL as string || '',
     sealKeyServers: (import.meta.env.VITE_SEAL_KEY_SERVERS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',

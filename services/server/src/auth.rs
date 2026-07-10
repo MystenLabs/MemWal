@@ -295,6 +295,7 @@ async fn resolve_account(
         match verify_delegate_key_onchain(
             &state.http_client,
             &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
             &cached_account_id,
             pk_bytes,
         )
@@ -331,6 +332,7 @@ async fn resolve_account(
         let owner = verify_delegate_key_onchain(
             &state.http_client,
             &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
             exact_account_id,
             pk_bytes,
         )

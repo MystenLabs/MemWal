@@ -74,6 +74,13 @@ pub struct AppState {
     /// `Arc` so the engine + handlers share one immutable config.
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
+    /// Shared Sui gRPC client for onchain delegate-key verification, built
+    /// once at startup when `SUI_GRPC_URL` is set (`None` keeps the JSON-RPC
+    /// path). Constructing `sui_rpc::Client` parses the OS root-cert store
+    /// and opens a fresh TLS channel, so it must NOT be rebuilt per request —
+    /// it is `Clone` (shares the underlying tonic channel), mirroring how
+    /// `http_client` reuses one pooled reqwest client.
+    pub sui_grpc_client: Option<sui_rpc::Client>,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,
@@ -186,6 +193,12 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
+    /// gRPC endpoint for onchain account/delegate-key verification. When set,
+    /// verify_delegate_key_onchain uses gRPC instead of JSON-RPC; empty keeps
+    /// the JSON-RPC path unchanged (mirrors the sidecar's SUI_GRPC_URL opt-in
+    /// from the write-path gRPC migration — JSON-RPC sunsets 2026-07-31, and
+    /// testnet's public JSON-RPC endpoint already returns 404).
+    pub sui_grpc_url: Option<String>,
     /// network name (mainnet/testnet/devnet). Surfaced via
     /// `GET /config` so the SDK can select the matching Sui fullnode
     /// without the user having to configure it.
@@ -257,6 +270,10 @@ impl Config {
                 .expect("DATABASE_URL must be set (e.g. postgresql://memwal:memwal_secret@localhost:5432/memwal)"),
             sui_rpc_url: std::env::var("SUI_RPC_URL")
                 .unwrap_or_else(|_| default_rpc.to_string()),
+            sui_grpc_url: std::env::var("SUI_GRPC_URL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             sui_network: network.clone(),
             memwal_account_id: std::env::var("MEMWAL_ACCOUNT_ID").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
