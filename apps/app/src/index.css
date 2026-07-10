@@ -11291,6 +11291,15 @@ h1, h2, h3 {
   margin-bottom: 40px !important;
 }
 
+/* App-wide mount (T3: once in AppContent, direct child of .app) — pages
+   render their own navbars below it, so keep the page column width and a
+   slim gap instead of the in-shell 48px alert margin. */
+.app > .dash-alert--cleanup {
+  width: min(1240px, calc(100% - 48px));
+  margin: 16px auto;
+  margin-bottom: 16px !important; /* base .dash-alert forces 48px */
+}
+
 .dash-alert--cleanup .dash-alert-dismiss {
   margin-left: auto;
   flex-shrink: 0;

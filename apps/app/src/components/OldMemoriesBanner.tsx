@@ -1,37 +1,58 @@
 /**
  * OldMemoriesBanner (WALM-264 T3) — "You have N old memories — delete them".
  *
- * Rendered at the top of the Dashboard shell (below the navbar, above the
- * page header) so it's the first thing a user sees; links down to the
- * cleanup section on the same page. Shown once per browser (dismissal
- * persisted in localStorage) when the wallet owns deletable V1 Walrus
- * blobs; renders nothing while the feature flag is off or before the
- * count is known.
+ * Mounted twice, exactly one instance visible at a time:
+ *  - AppContent (per the T3 spec: once, inside `.app`) — every page EXCEPT
+ *    the dashboard, where the mount site skips it;
+ *  - Dashboard's shell — below the navbar, above the "Welcome" header
+ *    (`.dash-alert--cleanup` order), linking down to the cleanup section.
+ *
+ * The count is the relayer-scoped deletable set (shared cached scan with
+ * CleanupSection — no duplicate chain walk), so it never inflates with V2
+ * or unrelated blobs; without a delegate-key session the count can't be
+ * scoped, so the banner stays hidden. Dismissal persists per wallet in
+ * localStorage. "Delete them" navigates to /dashboard#cleanup
+ * (CleanupSection scrolls to the hash on mount) or smooth-scrolls when
+ * already on the dashboard.
  */
 
 import { useEffect, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { useCurrentAccount, useSuiClient } from '@mysten/dapp-kit'
 import { TriangleAlert } from 'lucide-react'
 import { config } from '../config'
-import { listOwnedWalrusBlobs } from '../utils/walrusBlobs'
+import { useDelegateKey } from '../App'
+import { listScopedDeletableBlobs } from '../utils/walrusBlobs'
 
-const DISMISS_KEY = 'memwal_cleanup_banner_dismissed'
+const DISMISS_KEY_PREFIX = 'memwal_cleanup_banner_dismissed'
+
+function isDismissed(address: string): boolean {
+    return (
+        localStorage.getItem(`${DISMISS_KEY_PREFIX}:${address}`) === 'true' ||
+        // Legacy global key from the first release of the banner.
+        localStorage.getItem(DISMISS_KEY_PREFIX) === 'true'
+    )
+}
 
 export default function OldMemoriesBanner() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
+    const location = useLocation()
+    const { delegateKey, accountObjectId } = useDelegateKey()
     const address = currentAccount?.address || ''
 
     const [count, setCount] = useState<number | null>(null)
-    const [dismissed, setDismissed] = useState(
-        () => localStorage.getItem(DISMISS_KEY) === 'true',
-    )
+    const [dismissed, setDismissed] = useState(() => (address ? isDismissed(address) : false))
 
     useEffect(() => {
-        if (!config.enableMemoryDeletion || !address || dismissed) return
+        setDismissed(address ? isDismissed(address) : false)
+    }, [address])
+
+    useEffect(() => {
+        if (!config.enableMemoryDeletion || !address || !delegateKey || dismissed) return
         let cancelled = false
-        listOwnedWalrusBlobs(suiClient, address)
-            .then((blobs) => {
+        listScopedDeletableBlobs(suiClient, address, { delegateKey, accountObjectId })
+            .then(({ blobs }) => {
                 if (!cancelled) setCount(blobs.filter((b) => b.deletable).length)
             })
             .catch(() => {
@@ -40,9 +61,9 @@ export default function OldMemoriesBanner() {
         return () => {
             cancelled = true
         }
-    }, [address, suiClient, dismissed])
+    }, [address, suiClient, delegateKey, accountObjectId, dismissed])
 
-    if (!config.enableMemoryDeletion || !address || dismissed || !count) {
+    if (!config.enableMemoryDeletion || !address || !delegateKey || dismissed || !count) {
         return null
     }
 
@@ -51,22 +72,24 @@ export default function OldMemoriesBanner() {
             <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
             <p>
                 You have {count} old memor{count === 1 ? 'y' : 'ies'} stored on Walrus.{' '}
-                <a
-                    href="#cleanup"
+                <Link
+                    to="/dashboard#cleanup"
                     onClick={(event) => {
-                        event.preventDefault()
-                        document.getElementById('cleanup')?.scrollIntoView({ behavior: 'smooth' })
+                        if (location.pathname.replace(/\/+$/, '') === '/dashboard') {
+                            event.preventDefault()
+                            document.getElementById('cleanup')?.scrollIntoView({ behavior: 'smooth' })
+                        }
                     }}
                 >
                     Delete them
-                </a>{' '}
+                </Link>{' '}
                 if you no longer want them — deletion is permanent.
             </p>
             <button
                 type="button"
                 className="btn btn-secondary btn-sm dash-alert-dismiss"
                 onClick={() => {
-                    localStorage.setItem(DISMISS_KEY, 'true')
+                    localStorage.setItem(`${DISMISS_KEY_PREFIX}:${address}`, 'true')
                     setDismissed(true)
                 }}
                 aria-label="Dismiss"

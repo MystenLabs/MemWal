@@ -1,22 +1,21 @@
 /**
- * CleanupSection — permanent V1 memory deletion (WALM-264), rendered as a
- * Dashboard card (id="cleanup", the old-memories banner links here). Styled
- * to match the Delegate keys card (same Card shell + table classes).
+ * CleanupSection — permanent V1 memory deletion (WALM-264). Dashboard card
+ * (id="cleanup"; the old-memories banner links here).
  *
- * The user's ONLY action is signing: the card builds the
- * `system::delete_blob` PTB (batched), gets it Enoki-sponsored via
- * `POST /sponsor`, collects the wallet signature, then hands
- * `{ digest, signature, blobIds }` to `POST /api/delete-memories` — the
- * backend submits the transaction and deletes the matching DB rows in the
- * same call, so chain and DB never drift.
+ * One button deletes ALL deletable blobs — no per-blob picking. Blobs are
+ * deleted in PTB batches of 950 (Sui's 1024-command cap minus headroom),
+ * one wallet signature per batch. The user only signs: the app builds each
+ * PTB, sponsors it via POST /sponsor (Enoki), then hands
+ * {digest, signature, blobIds} to POST /api/delete-memories — the backend
+ * submits on-chain and deletes the matching DB rows in the same call, so
+ * chain and index never drift.
  *
- * Deletion is PERMANENT. A deleted memory is gone from Walrus, from the
- * relayer index, and can never be recovered or migrated. The confirm
- * dialog states this in plain words — per WALM-264 that messaging is the
- * one thing that must be right.
+ * Deletion is permanent: never recoverable, never migrated. The warning
+ * and confirm dialog say so in plain words — per WALM-264 that messaging
+ * is the one thing that must be right.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useCurrentAccount, useSignTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
@@ -24,16 +23,28 @@ import { RefreshCw, Trash2 } from 'lucide-react'
 import { config } from '../config'
 import { useDelegateKey } from '../App'
 import { apiCall } from '../utils/api'
+import { sponsorTransactionKind } from '../utils/sponsor'
 import { Card } from './Card'
-import { getWalrusClient, listOwnedWalrusBlobs, type OwnedWalrusBlob } from '../utils/walrusBlobs'
+import {
+    getWalrusClient,
+    invalidateWalrusBlobScan,
+    listScopedDeletableBlobs,
+    type OwnedWalrusBlob,
+} from '../utils/walrusBlobs'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 
 /**
- * Sui PTB caps: 1024 commands / 2048 inputs / 128 KB. Each delete is one
- * command + one owned input, plus one final transferObjects — so ~1023 is
- * the hard ceiling; 950 leaves size + gas headroom.
+ * The binding limit is NOT Sui's 1024-command PTB cap but the relayer's
+ * /sponsor gates: 7000 bytes of TransactionKind (sponsor.rs) under a 10 KiB
+ * JSON body (main.rs). Each delete costs ~135 bytes of kind BCS, so ~50 is
+ * the ceiling — 40 leaves headroom. VITE_DELETE_BATCH_SIZE overrides for
+ * testing the multi-batch flow with a small wallet (e.g. set to 1 and
+ * delete 3 memories → 3 batches/3 signatures), clamped to the safe cap.
  */
-const DELETE_BATCH_SIZE = 950
+const DELETE_BATCH_SIZE = Math.min(
+    40,
+    Math.max(1, Number(import.meta.env.VITE_DELETE_BATCH_SIZE) || 40),
+)
 
 type Phase =
     | { kind: 'loading' }
@@ -50,7 +61,6 @@ export default function CleanupSection() {
     const address = currentAccount?.address || ''
 
     const [blobs, setBlobs] = useState<OwnedWalrusBlob[]>([])
-    const [selected, setSelected] = useState<Set<string>>(new Set())
     const [scanned, setScanned] = useState(0)
     const [phase, setPhase] = useState<Phase>({ kind: 'loading' })
     const [error, setError] = useState('')
@@ -59,34 +69,23 @@ export default function CleanupSection() {
     const deletableBlobs = useMemo(() => blobs.filter((b) => b.deletable), [blobs])
     const permanentCount = blobs.length - deletableBlobs.length
 
-    const loadBlobs = useCallback(async () => {
+    const loadBlobs = useCallback(async (force = false) => {
         if (!address) return
         setPhase({ kind: 'loading' })
+        setScanned(0)
         setError('')
         try {
-            const owned = await listOwnedWalrusBlobs(suiClient, address, setScanned)
-
-            // §5.2 — the relayer DB is the authoritative V1 memory list: only
-            // offer blobs whose id is indexed there, so unrelated/V2 blobs the
-            // wallet owns are never deletable from this UI. Requires the
-            // delegate-key session (the endpoint is authenticated); without
-            // one the list stays unscoped but the delete button is disabled
-            // anyway.
-            let scoped = owned
-            if (delegateKey) {
-                const res = await apiCall(
-                    delegateKey,
-                    config.memwalServerUrl,
-                    '/api/memory-blob-ids',
-                    {},
-                    accountObjectId ?? undefined,
-                )
-                const known = new Set<string>(res.blobIds ?? [])
-                scoped = owned.filter((b) => known.has(b.blobId))
-            }
-
+            // Scoped to the relayer DB's authoritative V1 memory list, so
+            // unrelated/V2 blobs the wallet owns are never deleted from
+            // here. Without a delegate-key session the list stays unscoped
+            // and the UI shows the setup prompt instead of a count.
+            const { blobs: scoped } = await listScopedDeletableBlobs(suiClient, address, {
+                delegateKey,
+                accountObjectId,
+                onProgress: setScanned,
+                force,
+            })
             setBlobs(scoped)
-            setSelected(new Set(scoped.filter((b) => b.deletable).map((b) => b.objectId)))
             setPhase({ kind: 'ready' })
         } catch (err) {
             setError(err instanceof Error ? err.message : 'failed to list blobs')
@@ -106,28 +105,22 @@ export default function CleanupSection() {
         }
     }, [])
 
-    const toggle = useCallback((objectId: string) => {
-        setSelected((prev) => {
-            const next = new Set(prev)
-            if (next.has(objectId)) next.delete(objectId)
-            else next.add(objectId)
-            return next
-        })
-    }, [])
+    const deleteInFlight = useRef(false)
 
     const executeDelete = useCallback(async () => {
-        if (!address || !delegateKey) return
+        if (!address || !delegateKey || deletableBlobs.length === 0) return
+        // Double-click guard: a second concurrent run would sponsor the same
+        // objects twice and paint a spurious error over a successful delete.
+        if (deleteInFlight.current) return
+        deleteInFlight.current = true
         setConfirming(false)
         setError('')
 
-        const targets = deletableBlobs.filter((b) => selected.has(b.objectId))
-        if (targets.length === 0) return
-
-        trackEvent('memory_delete_start', { blobs: targets.length })
+        trackEvent('memory_delete_start', { blobs: deletableBlobs.length })
 
         const batches: OwnedWalrusBlob[][] = []
-        for (let i = 0; i < targets.length; i += DELETE_BATCH_SIZE) {
-            batches.push(targets.slice(i, i + DELETE_BATCH_SIZE))
+        for (let i = 0; i < deletableBlobs.length; i += DELETE_BATCH_SIZE) {
+            batches.push(deletableBlobs.slice(i, i + DELETE_BATCH_SIZE))
         }
 
         let deletedBlobs = 0
@@ -138,8 +131,8 @@ export default function CleanupSection() {
                 const batch = batches[i]
                 setPhase({ kind: 'deleting', batch: i + 1, totalBatches: batches.length })
 
-                // Build the delete PTB: each delete frees a Storage object,
-                // returned to the user in one final transfer.
+                // Each delete frees a Storage object; return them all to the
+                // user in one final transfer.
                 const tx = new Transaction()
                 tx.setSender(address)
                 const reclaimed = batch.map((blob) =>
@@ -150,18 +143,7 @@ export default function CleanupSection() {
                 const kindBytes = await tx.build({ client: suiClient, onlyTransactionKind: true })
 
                 // Sponsor (Enoki) — gas is covered; the user only signs.
-                const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        transactionBlockKindBytes: uint8ToBase64(kindBytes),
-                        sender: address,
-                    }),
-                })
-                if (!sponsorRes.ok) {
-                    throw new Error(`Sponsor failed (${sponsorRes.status}): ${await sponsorRes.text()}`)
-                }
-                const sponsored = await sponsorRes.json()
+                const sponsored = await sponsorTransactionKind(kindBytes, address)
 
                 const { signature } = await signTransaction({
                     transaction: Transaction.from(sponsored.bytes),
@@ -182,28 +164,33 @@ export default function CleanupSection() {
 
                 deletedBlobs += batch.length
                 deletedRows += result.deletedRows ?? 0
-                // Remove the finished batch so a mid-run failure resumes
-                // with only what's left.
+                // Drop the finished batch so a mid-run failure resumes with
+                // only what's left.
                 const done = new Set(batch.map((b) => b.objectId))
                 setBlobs((prev) => prev.filter((b) => !done.has(b.objectId)))
-                setSelected((prev) => {
-                    const next = new Set(prev)
-                    for (const id of done) next.delete(id)
-                    return next
-                })
             }
             setPhase({ kind: 'done', deletedBlobs, deletedRows })
             trackEvent('memory_delete_complete', { blobs: deletedBlobs })
+            invalidateWalrusBlobScan(address)
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'delete failed')
-            setPhase({ kind: 'ready' })
+            // A failure can land AFTER the on-chain delete succeeded (e.g.
+            // the row-delete call dropped) — re-scan so retry only sees
+            // blobs that still exist, instead of rebuilding a PTB over
+            // deleted objects and failing forever. Error is set after the
+            // reload (loadBlobs clears it on start).
             trackEvent('memory_delete_failed', { error_type: getAnalyticsErrorType(err) })
+            invalidateWalrusBlobScan(address)
+            await loadBlobs(true)
+            setError(
+                `${err instanceof Error ? err.message : 'delete failed'} — the list was refreshed; retrying deletes only what remains.`,
+            )
+        } finally {
+            deleteInFlight.current = false
         }
-    }, [address, delegateKey, accountObjectId, deletableBlobs, selected, suiClient, signTransaction])
+    }, [address, delegateKey, accountObjectId, deletableBlobs, suiClient, signTransaction, loadBlobs])
 
-    const selectedCount = selected.size
+    const count = deletableBlobs.length
     const busy = phase.kind === 'deleting' || phase.kind === 'loading'
-    const allSelected = deletableBlobs.length > 0 && selectedCount === deletableBlobs.length
 
     return (
         <Card
@@ -215,7 +202,7 @@ export default function CleanupSection() {
                 <div className="card-header-actions">
                     <button
                         className="btn btn-secondary dashboard-keys-refresh"
-                        onClick={() => void loadBlobs()}
+                        onClick={() => void loadBlobs(true)}
                         disabled={busy}
                         aria-busy={phase.kind === 'loading'}
                     >
@@ -224,9 +211,9 @@ export default function CleanupSection() {
                     <button
                         className="btn btn-danger dashboard-cleanup-delete"
                         onClick={() => setConfirming(true)}
-                        disabled={busy || selectedCount === 0 || !delegateKey}
+                        disabled={busy || count === 0 || !delegateKey}
                     >
-                        <Trash2 size={16} /> Delete {selectedCount} forever
+                        <Trash2 size={16} /> Delete all{count > 0 ? ` ${count}` : ''} forever
                     </button>
                 </div>
             }
@@ -234,7 +221,7 @@ export default function CleanupSection() {
             <div className="dashboard-cleanup-warning">
                 Deleting is <strong>permanent</strong>: a deleted memory is erased from Walrus and
                 from your memory index. It can never be recovered, and it will never be migrated
-                anywhere. Only delete memories you are sure you no longer want.
+                anywhere. Only delete your old memories if you are sure you no longer want them.
             </div>
 
             {error && (
@@ -263,87 +250,30 @@ export default function CleanupSection() {
                 </p>
             )}
 
-            {phase.kind !== 'loading' && deletableBlobs.length === 0 ? (
-                phase.kind !== 'done' && (
+            {phase.kind === 'ready' && (
+                !delegateKey ? (
+                    // Without the session the list can't be scoped to real
+                    // memories, so a count here would be wrong — prompt for
+                    // setup instead.
+                    <p className="dashboard-cleanup-status">
+                        A delegate key session is required to delete — <Link to="/setup">set one up</Link> first.
+                    </p>
+                ) : count === 0 ? (
                     <div className="dashboard-empty-message">
                         <span>No deletable memories found for this wallet.</span>
                     </div>
-                )
-            ) : phase.kind !== 'loading' && (
-                <>
+                ) : (
                     <p className="dashboard-cleanup-status">
-                        {deletableBlobs.length} deletable memor{deletableBlobs.length === 1 ? 'y' : 'ies'} found
-                        {permanentCount > 0 ? ` (${permanentCount} non-deletable blobs not shown)` : ''}.
-                        {' '}Deletion runs in batches of {DELETE_BATCH_SIZE} — one signature per batch.
+                        You have <strong>{count}</strong> old memor{count === 1 ? 'y' : 'ies'} that can
+                        be deleted
+                        {permanentCount > 0 ? ` (${permanentCount} non-deletable blobs are not included)` : ''}.
+                        {count > DELETE_BATCH_SIZE
+                            ? ` Deletion runs in batches of ${DELETE_BATCH_SIZE} — you will sign ${Math.ceil(count / DELETE_BATCH_SIZE)} times.`
+                            : count === 1
+                                ? ' Deleting it takes one signature.'
+                                : ' Deleting them all takes one signature.'}
                     </p>
-
-                    <div className="dashboard-key-table-wrap">
-                        <table className="dashboard-key-table">
-                            <thead>
-                                <tr>
-                                    <th scope="col" className="dashboard-key-table-select">
-                                        <label className="dashboard-key-checkbox" aria-label="Select all">
-                                            <input
-                                                type="checkbox"
-                                                checked={allSelected}
-                                                onChange={() =>
-                                                    setSelected(
-                                                        allSelected
-                                                            ? new Set()
-                                                            : new Set(deletableBlobs.map((b) => b.objectId)),
-                                                    )
-                                                }
-                                                disabled={busy}
-                                            />
-                                            <span className="dashboard-key-checkbox-box" aria-hidden="true" />
-                                        </label>
-                                    </th>
-                                    <th scope="col">Blob ID</th>
-                                    <th scope="col">Object ID</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {deletableBlobs.map((blob) => {
-                                    const isSelected = selected.has(blob.objectId)
-                                    return (
-                                        <tr
-                                            key={blob.objectId}
-                                            className={`dashboard-key-row${isSelected ? ' dashboard-key-row--selected' : ''}`}
-                                        >
-                                            <td data-label="Select" className="dashboard-key-cell-select">
-                                                <label className="dashboard-key-checkbox" aria-label={`Select blob ${blob.blobId.slice(0, 8)}`}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={isSelected}
-                                                        onChange={() => toggle(blob.objectId)}
-                                                        disabled={busy}
-                                                    />
-                                                    <span className="dashboard-key-checkbox-box" aria-hidden="true" />
-                                                </label>
-                                            </td>
-                                            <td data-label="Blob ID">
-                                                <code className="dashboard-key-public" title={blob.blobId}>
-                                                    {blob.blobId.slice(0, 10)}...{blob.blobId.slice(-6)}
-                                                </code>
-                                            </td>
-                                            <td data-label="Object ID">
-                                                <code className="dashboard-key-public" title={blob.objectId}>
-                                                    {blob.objectId.slice(0, 8)}...{blob.objectId.slice(-6)}
-                                                </code>
-                                            </td>
-                                        </tr>
-                                    )
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    {!delegateKey && (
-                        <p className="dashboard-cleanup-status">
-                            A delegate key session is required to delete — <Link to="/setup">set one up</Link> first.
-                        </p>
-                    )}
-                </>
+                )
             )}
 
             {confirming && (
@@ -362,10 +292,10 @@ export default function CleanupSection() {
                     >
                         <div className="dashboard-confirm-copy">
                             <h3 id="cleanup-confirm-title">
-                                Permanently delete {selectedCount} memor{selectedCount === 1 ? 'y' : 'ies'}?
+                                Permanently delete all {count} old memor{count === 1 ? 'y' : 'ies'}?
                             </h3>
                             <p id="cleanup-confirm-description">
-                                This erases the selected memories from Walrus and from your memory index,
+                                This erases your old memories from Walrus and from your memory index,
                                 forever. They cannot be recovered, restored, or migrated afterwards — by
                                 anyone. There is no undo.
                             </p>
@@ -392,10 +322,4 @@ export default function CleanupSection() {
             )}
         </Card>
     )
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-    let binary = ''
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-    return btoa(binary)
 }
