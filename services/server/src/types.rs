@@ -904,7 +904,15 @@ pub struct DeleteMemoriesRequest {
 
 /// POST /api/memory-blob-ids — the owner's indexed Walrus blob ids
 /// (WALM-264). Used by the delete-memories UI to scope the on-chain blob
-/// list to actual V1 memories.
+/// list to actual V1 memories. Public + rate-limited (plan T1: no
+/// delegate-key gate); blob ownership is on-chain public data, this only
+/// reveals which of a wallet's blobs the relayer indexes.
+#[derive(Debug, Deserialize)]
+pub struct MemoryBlobIdsRequest {
+    /// Wallet address whose indexed blob ids to return.
+    pub owner: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MemoryBlobIdsResponse {
     #[serde(rename = "blobIds")]

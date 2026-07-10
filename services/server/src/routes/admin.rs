@@ -83,24 +83,31 @@ fn validate_blob_id(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=')
 }
 
-/// Upper bound on blob ids per call — one PTB holds ~950 deletes (Sui's
-/// 1024-command cap minus headroom), so anything above that is a client bug.
+/// Upper bound on blob ids per call — a server-side sanity bound (the app
+/// sends ~40 per batch, capped by /sponsor's request size); anything above
+/// this is a client bug.
 const MAX_DELETE_BLOB_IDS: usize = 1000;
 
 /// POST /api/memory-blob-ids (WALM-264)
 ///
-/// Return every Walrus blob id indexed for the verified owner. The
-/// delete-memories UI intersects the wallet's on-chain Blob objects with
-/// this set so only real V1 memories are offered for deletion (a wallet
-/// can also own unrelated or V2 blobs). Same flag gate as delete.
+/// Return every Walrus blob id indexed for `owner`. The delete-memories UI
+/// intersects the wallet's on-chain Blob objects with this set so only
+/// real V1 memories are offered for deletion (a wallet can also own
+/// unrelated or V2 blobs). Public + IP-rate-limited (plan T1: no
+/// delegate-key gate) — blob ownership is public on-chain data, this only
+/// reveals which of those blobs the relayer indexes. Same flag gate as
+/// delete.
 pub async fn memory_blob_ids(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<MemoryBlobIdsRequest>,
 ) -> Result<Json<MemoryBlobIdsResponse>, AppError> {
     if !state.config.enable_memory_deletion {
         return Err(AppError::BlobNotFound("Not found".into()));
     }
-    let blob_ids = state.db.list_blob_ids_by_owner(&auth.owner).await?;
+    if !super::sponsor::validate_sui_address(&body.owner) {
+        return Err(AppError::BadRequest("Invalid owner address".into()));
+    }
+    let blob_ids = state.db.list_blob_ids_by_owner(&body.owner).await?;
     Ok(Json(MemoryBlobIdsResponse { blob_ids }))
 }
 
@@ -108,21 +115,22 @@ pub async fn memory_blob_ids(
 ///
 /// Permanently delete V1 memories: submit the user-signed sponsored
 /// `system::delete_blob` PTB, and — only after it SUCCEEDS on-chain
-/// (sidecar verifies effects status, not just Enoki's 200) and the executed
-/// transaction's sender matches the authenticated owner — delete the
-/// matching `vector_entries` rows. Owner comes from verified auth, never
-/// the body, so a caller can only ever remove their own rows. The blob-id
-/// list itself is client-supplied and NOT cross-checked against the
-/// transaction's deleted objects — a dishonest caller can only desync their
-/// own index rows (same blast radius as `/api/forget`), and
-/// `cleanup_expired_blob` self-heals any drift on the next recall.
+/// (sidecar verifies effects status, not just Enoki's 200) — delete the
+/// matching `vector_entries` rows for the transaction's verified sender.
+/// No delegate-key session (plan T1): the wallet signature over the
+/// sponsored transaction IS the ownership proof, and the owner is read
+/// from the executed transaction on-chain — never from the request. The
+/// blob-id list is client-supplied and NOT cross-checked against the
+/// transaction's deleted objects — a dishonest caller can only desync
+/// rows of the wallet that signed (same blast radius as deleting your own
+/// data), and `cleanup_expired_blob` self-heals any drift on the next
+/// recall. Sponsored digests are single-use upstream, so a replayed call
+/// fails at execute and never reaches the row delete.
 ///
 /// Gated by `ENABLE_MEMORY_DELETION` (off by default) until rollout is
-/// agreed — the route answers 404 when disabled (auth middleware still runs
-/// first, so unauthenticated probes see 401 either way).
+/// agreed — the route answers 404 when disabled.
 pub async fn delete_memories(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthInfo>,
     Json(body): Json<DeleteMemoriesRequest>,
 ) -> Result<Json<DeleteMemoriesResponse>, AppError> {
     if !state.config.enable_memory_deletion {
@@ -149,41 +157,23 @@ pub async fn delete_memories(
         return Err(AppError::BadRequest("Invalid blob id".into()));
     }
 
-    let owner = &auth.owner;
     tracing::info!(
-        "delete-memories: owner={} blobs={} submitting signed PTB",
-        owner,
+        "delete-memories: blobs={} submitting signed PTB",
         body.blob_ids.len()
     );
 
     // Submit first; abort the whole call if the transaction doesn't land —
     // never delete rows for a delete that didn't happen on-chain. The
-    // sidecar verifies effects success and reports the executed sender.
+    // sidecar verifies effects success and reports the executed sender,
+    // which becomes the row-delete owner: only the wallet that signed can
+    // ever have its rows removed.
     let tx_sender = super::sponsor::execute_sponsored_tx(&state, &body.digest, &body.signature)
         .await?;
+    let owner = tx_sender.ok_or_else(|| {
+        AppError::Internal("sponsored execute did not report a sender".into())
+    })?;
 
-    // Bind the executed transaction to the authenticated owner: a signed
-    // tx from a different wallet must never clear this owner's rows.
-    match tx_sender {
-        Some(sender) if sender.eq_ignore_ascii_case(owner) => {}
-        Some(sender) => {
-            tracing::warn!(
-                "delete-memories: tx sender {} does not match owner {} — refusing row delete",
-                sender,
-                owner
-            );
-            return Err(AppError::BadRequest(
-                "transaction sender does not match authenticated owner".into(),
-            ));
-        }
-        None => {
-            return Err(AppError::Internal(
-                "sponsored execute did not report a sender".into(),
-            ));
-        }
-    }
-
-    let deleted_rows = state.db.delete_by_blob_ids(&body.blob_ids, owner).await?;
+    let deleted_rows = state.db.delete_by_blob_ids(&body.blob_ids, &owner).await?;
 
     tracing::info!(
         "delete-memories complete: owner={} blobs={} deleted_rows={}",
