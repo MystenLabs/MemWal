@@ -26,7 +26,6 @@ import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
-import OldMemoriesBanner from './components/OldMemoriesBanner'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
@@ -251,8 +250,6 @@ function AppContent() {
   }
 
   return (
-    <>
-    <OldMemoriesBanner />
     <Routes>
       <Route path="/" element={
         authPending ? <RoutePending /> :
@@ -268,7 +265,6 @@ function AppContent() {
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-    </>
   )
 }
 

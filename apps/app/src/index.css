@@ -11284,6 +11284,18 @@ h1, h2, h3 {
   margin-bottom: 0 !important;
 }
 
+/* Old-memories banner — first thing in the shell: below the navbar,
+   above the "Welcome" header (all other dash-shell orders start at 0). */
+.dash-page .dash-alert--cleanup {
+  order: -1;
+  margin-bottom: 40px !important;
+}
+
+.dash-alert--cleanup .dash-alert-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* Header delete button matches the card-header pill spec (52px, radius 26,
    px-30, 18px label — same as Refresh/Add key) in danger colors. */
 .dash-page .dashboard-cleanup-delete {

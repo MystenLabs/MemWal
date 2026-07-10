@@ -24,6 +24,7 @@ SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
 import CleanupSection from '../components/CleanupSection'
+import OldMemoriesBanner from '../components/OldMemoriesBanner'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -775,6 +776,8 @@ const result = await generateText({
             </nav>
 
             <main className="dash-shell">
+                <OldMemoriesBanner />
+
                 {/* Header */}
                 <div className={`dashboard-header${showDashboardSubtitle ? '' : ' dashboard-header--compact'}`}>
                     <h2>Welcome to your Dashboard</h2>
