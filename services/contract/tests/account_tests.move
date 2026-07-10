@@ -8,8 +8,13 @@ module memwal::account_tests {
 
     const OWNER: address = @0xCAFE;
     const OTHER: address = @0xBEEF;
-    /// Simulated delegate key's Sui address
-    const DELEGATE_ADDR: address = @0xDE1E;
+    /// Real Sui address derived from the `0xAA*32` delegate test key, i.e.
+    /// `account::derive_sui_address(x"aa..aa")`. Used as the delegate's caller
+    /// address in the `seal_approve` tests, so it MUST equal the on-chain derivation
+    /// (F1: addresses are derived from the public key, not caller-supplied).
+    const DELEGATE_ADDR: address = @0x9f89215dc3a091bc288a2ddfb1860f0cb9efc4d39a2bb728944f741a650a7fb1;
+    /// Real Sui address derived from the `0xBB*32` delegate test key.
+    const DELEGATE_ADDR2: address = @0xcbb8c34831749c2416ec0339bfc46f42d696576d08d8621e39ef767c42933d77;
 
     // ============================================================
     // Helper: init + create_account in one go
@@ -124,15 +129,15 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk,
-                DELEGATE_ADDR,
                 string::utf8(b"MacBook Pro"),
                 &clock,
                 scenario.ctx(),
             );
             assert!(account.delegate_count() == 1);
             assert!(account.is_delegate(&pk));
-            assert!(account.is_delegate_address(DELEGATE_ADDR));
-            assert!(account.delegate_address_at(0) == DELEGATE_ADDR);
+            // F1: the stored address is derived from the public key, not caller input.
+            assert!(account.is_delegate_address(account::derive_sui_address(&pk)));
+            assert!(account.delegate_address_at(0) == account::derive_sui_address(&pk));
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -156,7 +161,6 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk1,
-                DELEGATE_ADDR,
                 string::utf8(b"Key 1"),
                 &clock,
                 scenario.ctx(),
@@ -164,7 +168,6 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk2,
-                @0xDE2E,
                 string::utf8(b"Key 2"),
                 &clock,
                 scenario.ctx(),
@@ -173,8 +176,8 @@ module memwal::account_tests {
             assert!(account.delegate_count() == 2);
             assert!(account.is_delegate(&pk1));
             assert!(account.is_delegate(&pk2));
-            assert!(account.is_delegate_address(DELEGATE_ADDR));
-            assert!(account.is_delegate_address(@0xDE2E));
+            assert!(account.is_delegate_address(account::derive_sui_address(&pk1)));
+            assert!(account.is_delegate_address(account::derive_sui_address(&pk2)));
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -197,7 +200,6 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk,
-                DELEGATE_ADDR,
                 string::utf8(b"Temp Key"),
                 &clock,
                 scenario.ctx(),
@@ -211,7 +213,7 @@ module memwal::account_tests {
             );
             assert!(account.delegate_count() == 0);
             assert!(!account.is_delegate(&pk));
-            assert!(!account.is_delegate_address(DELEGATE_ADDR));
+            assert!(!account.is_delegate_address(account::derive_sui_address(&pk)));
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -249,9 +251,9 @@ module memwal::account_tests {
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
 
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key 1"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Key 1"), &clock, scenario.ctx());
             // Adding same key again should fail
-            account::add_delegate_key(&mut account, pk, @0xDE2E, string::utf8(b"Key 2"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Key 2"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -292,7 +294,7 @@ module memwal::account_tests {
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
             // This should fail because OTHER is not the owner
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Stolen"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Stolen"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -318,7 +320,7 @@ module memwal::account_tests {
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
 
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Bad Key"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Bad Key"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -340,7 +342,7 @@ module memwal::account_tests {
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
 
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Bad Key"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Bad Key"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -362,7 +364,7 @@ module memwal::account_tests {
             let pk = x"";
             let clock = clock::create_for_testing(scenario.ctx());
 
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Empty Key"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Empty Key"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -444,7 +446,7 @@ module memwal::account_tests {
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
             // Should fail — account is deactivated
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Blocked"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Blocked"), &clock, scenario.ctx());
 
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -466,7 +468,7 @@ module memwal::account_tests {
             let mut account = scenario.take_shared<MemWalAccount>();
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"Key"), &clock, scenario.ctx());
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -575,7 +577,6 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk,
-                DELEGATE_ADDR,
                 string::utf8(b"Server Key"),
                 &clock,
                 scenario.ctx(),
@@ -596,20 +597,19 @@ module memwal::account_tests {
         scenario.end();
     }
 
-    /// A delegate is authorized only for the data of the account it is
-    /// registered on: `seal_approve` must reject a key id that is not
-    /// namespaced to this account's owner, even when the caller is a
-    /// registered delegate. Here OWNER registers themselves as a delegate of
-    /// their own account and then requests an id scoped to an unrelated owner
-    /// (OTHER) with that account — this must abort with ENoAccess.
+    /// SEC2-48 (CRIT-16) regression: a delegate is authorized only for the data of
+    /// the account it is registered on. Even when the caller IS a registered
+    /// delegate (non-owner), `seal_approve` must reject a key id that is not
+    /// namespaced to this account's owner. OWNER registers a delegate
+    /// (`DELEGATE_ADDR2`); that delegate then requests an id scoped to an unrelated
+    /// owner (OTHER) — the unconditional `has_suffix` check must abort ENoAccess.
     #[test]
     #[expected_failure(abort_code = account::ENoAccess)]
     fun test_seal_approve_delegate_rejects_unrelated_id() {
         let mut scenario = test_scenario::begin(OWNER);
         setup_with_account(&mut scenario);
 
-        // OWNER registers themselves as a delegate of their own account
-        // (delegate address == owner is permitted).
+        // OWNER registers a delegate (pk 0xBB → DELEGATE_ADDR2) on their account.
         scenario.next_tx(OWNER);
         {
             let mut account = scenario.take_shared<MemWalAccount>();
@@ -618,8 +618,7 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk,
-                OWNER, // delegate address == account owner
-                string::utf8(b"self delegate"),
+                string::utf8(b"delegate"),
                 &clock,
                 scenario.ctx(),
             );
@@ -627,9 +626,9 @@ module memwal::account_tests {
             test_scenario::return_shared(account);
         };
 
-        // Requesting an id scoped to an unrelated owner (OTHER) while passing
-        // this account must be denied.
-        scenario.next_tx(OWNER);
+        // The DELEGATE (non-owner) requests an id scoped to an unrelated owner
+        // (OTHER) with this account — must be denied on the delegate path.
+        scenario.next_tx(DELEGATE_ADDR2);
         {
             let account = scenario.take_shared<MemWalAccount>();
             let unrelated_key_id = sui::bcs::to_bytes(&OTHER);
@@ -716,7 +715,7 @@ module memwal::account_tests {
             while (i <= 20) {
                 let mut pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
                 pk.push_back((i as u8));
-                account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"Key"), &clock, scenario.ctx());
+                account::add_delegate_key(&mut account, pk, string::utf8(b"Key"), &clock, scenario.ctx());
                 i = i + 1;
             };
 
@@ -757,7 +756,6 @@ module memwal::account_tests {
             account::add_delegate_key(
                 &mut account,
                 pk,
-                DELEGATE_ADDR,
                 string::utf8(b"Server Key"),
                 &clock,
                 scenario.ctx(),
@@ -829,7 +827,7 @@ module memwal::account_tests {
             let clock = clock::create_for_testing(scenario.ctx());
             // 65-byte label exceeds MAX_LABEL_LENGTH (64)
             let label = string::utf8(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, label, &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, label, &clock, scenario.ctx());
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -849,7 +847,7 @@ module memwal::account_tests {
             let clock = clock::create_for_testing(scenario.ctx());
             // Exactly 64 bytes — at the boundary
             let label = string::utf8(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, label, &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, label, &clock, scenario.ctx());
             assert!(account.delegate_count() == 1);
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -894,7 +892,7 @@ module memwal::account_tests {
 
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"k"), &clock, scenario.ctx());
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -914,7 +912,7 @@ module memwal::account_tests {
             let mut account = scenario.take_shared<MemWalAccount>();
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"k"), &clock, scenario.ctx());
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
         };
@@ -1058,7 +1056,7 @@ module memwal::account_tests {
             let mut account = scenario.take_shared<MemWalAccount>();
             let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             let clock = clock::create_for_testing(scenario.ctx());
-            account::add_delegate_key(&mut account, pk, DELEGATE_ADDR, string::utf8(b"k"), &clock, scenario.ctx());
+            account::add_delegate_key(&mut account, pk, string::utf8(b"k"), &clock, scenario.ctx());
             assert!(account.delegate_count() == 1);
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(account);
@@ -1237,5 +1235,146 @@ module memwal::account_tests {
         };
 
         scenario.end();
+    }
+
+    // ============================================================
+    // Migration forge (MigrationCap) tests
+    // ============================================================
+
+    /// Init the shared registry with no owner account (forge-only scenario).
+    #[test_only]
+    fun init_registry_only(scenario: &mut test_scenario::Scenario) {
+        scenario.next_tx(OWNER);
+        { account::test_init(scenario.ctx()); };
+    }
+
+    #[test]
+    fun test_migrate_import_account_and_delegate() {
+        let mut scenario = test_scenario::begin(OWNER);
+        init_registry_only(&mut scenario);
+
+        // Forge-import an account for OTHER without OTHER's signature.
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx());
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::migrate_import_account(&mcap, &mut registry, OTHER, 111, scenario.ctx());
+            test_scenario::return_shared(registry);
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+
+        // Forge-inject a delegate onto the imported account, then assert state.
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx());
+            let registry = scenario.take_shared<AccountRegistry>();
+            let mut account = scenario.take_shared<MemWalAccount>();
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            account::migrate_add_delegate_key(&mcap, &registry, &mut account, pk, string::utf8(b"relayer"), 222);
+            assert!(account::is_migration_created(&account));
+            assert!(account.owner() == OTHER);
+            assert!(account.is_delegate(&pk));
+            assert!(account.is_delegate_address(account::derive_sui_address(&pk)));
+            test_scenario::return_shared(account);
+            test_scenario::return_shared(registry);
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = account::EAccountAlreadyExists)]
+    fun test_migrate_import_duplicate_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        init_registry_only(&mut scenario);
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx());
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::migrate_import_account(&mcap, &mut registry, OTHER, 1, scenario.ctx());
+            account::migrate_import_account(&mcap, &mut registry, OTHER, 2, scenario.ctx()); // dup → abort
+            test_scenario::return_shared(registry);
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.end();
+    }
+
+    /// MOVE-1: the forge must refuse to inject a delegate onto a native
+    /// (owner-created) account — only migration-created ones.
+    #[test]
+    #[expected_failure(abort_code = account::ENotMigrationCreated)]
+    fun test_migrate_add_delegate_rejects_native_account() {
+        let mut scenario = test_scenario::begin(OWNER);
+        setup_with_account(&mut scenario); // native OWNER account
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx());
+            let registry = scenario.take_shared<AccountRegistry>();
+            let mut account = scenario.take_shared<MemWalAccount>(); // native, migration_created == false
+            let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            account::migrate_add_delegate_key(&mcap, &registry, &mut account, pk, string::utf8(b"x"), 1); // abort
+            test_scenario::return_shared(account);
+            test_scenario::return_shared(registry);
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.end();
+    }
+
+    /// After finalize the forge is permanently closed.
+    #[test]
+    #[expected_failure(abort_code = account::EMigrationFinalized)]
+    fun test_finalize_blocks_import() {
+        let mut scenario = test_scenario::begin(OWNER);
+        init_registry_only(&mut scenario);
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::finalize_migration(&ucap, &mut registry);
+            test_scenario::return_shared(registry);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx());
+            let mut registry = scenario.take_shared<AccountRegistry>();
+            account::migrate_import_account(&mcap, &mut registry, OTHER, 1, scenario.ctx()); // abort
+            test_scenario::return_shared(registry);
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.end();
+    }
+
+    /// Minting a MigrationCap requires the package's own UpgradeCap.
+    #[test]
+    #[expected_failure(abort_code = account::ENotUpgradeAuthority)]
+    fun test_mint_migration_cap_foreign_cap_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        scenario.next_tx(OWNER);
+        {
+            let ucap = account::test_make_foreign_upgrade_cap(scenario.ctx());
+            let mcap = account::mint_migration_cap(&ucap, scenario.ctx()); // abort
+            account::burn_migration_cap(mcap);
+            sui::package::make_immutable(ucap);
+        };
+        scenario.end();
+    }
+
+    /// On-chain derivation matches the known test vector — also validates the
+    /// `DELEGATE_ADDR` constant used across the delegate tests.
+    #[test]
+    fun test_derive_sui_address_matches_known_vector() {
+        let pk = x"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(account::derive_sui_address(&pk) == DELEGATE_ADDR);
     }
 }

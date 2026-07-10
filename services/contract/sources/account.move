@@ -56,6 +56,10 @@ module memwal::account {
     const ELabelTooLong: u64 = 10;
     /// Account is already in the requested active state
     const EAccountAlreadyActive: u64 = 11;
+    /// Migration has been finalized — the cap-gated forge path is permanently closed
+    const EMigrationFinalized: u64 = 12;
+    /// Forge target is a native (owner-created) account, not migration-created (MOVE-1)
+    const ENotMigrationCreated: u64 = 13;
     /// Caller is not authorized to decrypt (SEAL)
     const ENoAccess: u64 = 100;
 
@@ -67,8 +71,10 @@ module memwal::account {
     const MAX_LABEL_LENGTH: u64 = 64;
 
     /// Current package version. Bump when shipping an upgrade that changes
-    /// invariants of `AccountRegistry` or `MemWalAccount`.
-    const VERSION: u64 = 2;
+    /// invariants of `AccountRegistry` or `MemWalAccount`. v3 adds the migration
+    /// forge: `migration_finalized` on the registry and `migration_created` on the
+    /// account.
+    const VERSION: u64 = 3;
 
     /// Dynamic field key used to store the per-object version.
     const VERSION_DF_KEY: vector<u8> = b"version";
@@ -83,6 +89,10 @@ module memwal::account {
         id: UID,
         /// Maps owner address → account object ID (prevents duplicates)
         accounts: Table<address, ID>,
+        /// One-way latch: once true, every `MigrationCap`-gated forge entry aborts.
+        /// Set by `finalize_migration` after the V1→this-package import completes, so
+        /// no residual cap can forge accounts/delegates afterward.
+        migration_finalized: bool,
     }
 
     /// Main account object — one per user
@@ -97,6 +107,11 @@ module memwal::account {
         created_at: u64,
         /// Whether the account is active (false = frozen, SEAL access denied)
         active: bool,
+        /// True only for accounts created by the `MigrationCap` forge
+        /// (`migrate_import_account`). MOVE-1: forge delegate-add is allowed ONLY on
+        /// migration-created accounts, so a cap holder can never inject a delegate onto
+        /// a real user's owner-created account.
+        migration_created: bool,
     }
 
     /// An authorized Ed25519 delegate key with its derived Sui address
@@ -109,6 +124,15 @@ module memwal::account {
         label: String,
         /// Timestamp when key was added (epoch ms)
         created_at: u64,
+    }
+
+    /// Capability that authorizes the V1→this-package import forge
+    /// (`migrate_import_account` / `migrate_add_delegate_key`) without owner
+    /// signatures. Minted by the `UpgradeCap` holder; many can exist at once (one
+    /// per migrator worker) and all are burned at finalize. Owner-signed onboarding
+    /// (`create_account` / `add_delegate_key`) never needs it.
+    public struct MigrationCap has key, store {
+        id: UID,
     }
 
     // ============================================================
@@ -155,6 +179,18 @@ module memwal::account {
         to: u64,
     }
 
+    public struct MigrationCapMinted has copy, drop {
+        cap_id: ID,
+    }
+
+    public struct MigrationCapBurned has copy, drop {
+        cap_id: ID,
+    }
+
+    public struct MigrationFinalized has copy, drop {
+        registry_id: ID,
+    }
+
     // ============================================================
     // Init — runs once at module publish
     // ============================================================
@@ -164,6 +200,7 @@ module memwal::account {
         let mut registry = AccountRegistry {
             id: object::new(ctx),
             accounts: table::new(ctx),
+            migration_finalized: false,
         };
         // Tag the registry with the current VERSION so future upgrades can
         // detect un-migrated objects.
@@ -197,6 +234,7 @@ module memwal::account {
             delegate_keys: vector::empty(),
             created_at: clock.timestamp_ms(),
             active: true,
+            migration_created: false,
         };
         // New accounts are always created at the current VERSION.
         set_version(&mut account.id, VERSION);
@@ -217,13 +255,13 @@ module memwal::account {
     /// Add a delegate key to the account
     /// Only the owner can add delegate keys
     ///
-    /// * `public_key` - Ed25519 public key bytes (32 bytes)
-    /// * `sui_address` - Sui address derived from the Ed25519 public key
+    /// * `public_key` - Ed25519 public key bytes (32 bytes). The Sui address is
+    ///   derived from it on-chain (see `derive_sui_address`), never supplied by the
+    ///   caller — so the stored address is always the key's real address.
     /// * `label` - Human-readable label for this key
     entry fun add_delegate_key(
         account: &mut MemWalAccount,
         public_key: vector<u8>,
-        sui_address: address,
         label: String,
         clock: &Clock,
         ctx: &TxContext,
@@ -261,6 +299,11 @@ module memwal::account {
             );
             i = i + 1;
         };
+
+        // F1: derive the Sui address from the public key on-chain rather than
+        // trusting a caller-supplied one, so `public_key` and `sui_address` can
+        // never diverge (was: an unverified `sui_address` param).
+        let sui_address = derive_sui_address(&public_key);
 
         let key = DelegateKey {
             public_key,
@@ -435,6 +478,113 @@ module memwal::account {
     }
 
     // ============================================================
+    // V1 → this-package import forge (MigrationCap-gated)
+    // ============================================================
+    //
+    // Imports existing V1 accounts + delegate keys WITHOUT owner signatures, so
+    // migrated users don't re-onboard. Every entry is gated by a `MigrationCap`
+    // (minted from the package `UpgradeCap`) AND the `migration_finalized` latch;
+    // delegate injection additionally requires the MOVE-1 `migration_created` guard.
+    // Burn all caps + call `finalize_migration` when the import completes.
+
+    /// Mint a `MigrationCap`. Only the package `UpgradeCap` holder can. Returned so
+    /// it can be transferred to a migrator worker inside the same PTB.
+    public fun mint_migration_cap(cap: &UpgradeCap, ctx: &mut TxContext): MigrationCap {
+        assert_cap_for_this_package(cap);
+        let mcap = MigrationCap { id: object::new(ctx) };
+        event::emit(MigrationCapMinted { cap_id: object::id(&mcap) });
+        mcap
+    }
+
+    /// Burn a `MigrationCap` so no forge authority survives finalize.
+    public fun burn_migration_cap(mcap: MigrationCap) {
+        let MigrationCap { id } = mcap;
+        let cap_id = object::uid_to_inner(&id);
+        object::delete(id);
+        event::emit(MigrationCapBurned { cap_id });
+    }
+
+    /// Permanently close the forge — one-way. After this every `migrate_*` entry
+    /// aborts `EMigrationFinalized`. Gated by the package `UpgradeCap`.
+    entry fun finalize_migration(cap: &UpgradeCap, registry: &mut AccountRegistry) {
+        assert_cap_for_this_package(cap);
+        assert_object_version(&registry.id);
+        registry.migration_finalized = true;
+        event::emit(MigrationFinalized { registry_id: object::id(registry) });
+    }
+
+    /// Import a V1 account for `owner` without the owner's signature. Creates +
+    /// shares a `MemWalAccount` flagged `migration_created` and registers it.
+    /// Aborts `EAccountAlreadyExists` if `owner` already has one (benign on retry).
+    entry fun migrate_import_account(
+        _cap: &MigrationCap,
+        registry: &mut AccountRegistry,
+        owner: address,
+        created_at: u64,
+        ctx: &mut TxContext,
+    ) {
+        assert_object_version(&registry.id);
+        assert!(!registry.migration_finalized, EMigrationFinalized);
+        assert!(!registry.accounts.contains(owner), EAccountAlreadyExists);
+
+        let mut account = MemWalAccount {
+            id: object::new(ctx),
+            owner,
+            delegate_keys: vector::empty(),
+            created_at,
+            active: true,
+            migration_created: true,
+        };
+        set_version(&mut account.id, VERSION);
+
+        let account_id = object::id(&account);
+        registry.accounts.add(owner, account_id);
+        event::emit(AccountCreated { account_id, owner });
+        transfer::share_object(account);
+    }
+
+    /// Inject a delegate key onto a MIGRATION-CREATED account without the owner's
+    /// signature (mirror the user's V1 delegates + the relayer write key). The Sui
+    /// address is derived from `public_key` (F1). Idempotent: a key already present
+    /// is skipped. MOVE-1: aborts on a native (owner-created) account.
+    entry fun migrate_add_delegate_key(
+        _cap: &MigrationCap,
+        registry: &AccountRegistry,
+        account: &mut MemWalAccount,
+        public_key: vector<u8>,
+        label: String,
+        created_at: u64,
+    ) {
+        assert_object_version(&registry.id);
+        assert!(!registry.migration_finalized, EMigrationFinalized);
+        assert_object_version(&account.id);
+        assert!(account.migration_created, ENotMigrationCreated);
+        assert!(account.active, EAccountDeactivated);
+        assert!(public_key.length() == ED25519_PUBLIC_KEY_LENGTH, EInvalidPublicKeyLength);
+        assert!(label.as_bytes().length() <= MAX_LABEL_LENGTH, ELabelTooLong);
+        assert!(account.delegate_keys.length() < MAX_DELEGATE_KEYS, ETooManyDelegateKeys);
+
+        // Idempotent re-run: skip a key already registered.
+        let mut i = 0;
+        let len = account.delegate_keys.length();
+        while (i < len) {
+            if (account.delegate_keys[i].public_key == public_key) return;
+            i = i + 1;
+        };
+
+        let sui_address = derive_sui_address(&public_key);
+        let account_id = object::id(account);
+        let key = DelegateKey { public_key, sui_address, label, created_at };
+        event::emit(DelegateKeyAdded {
+            account_id,
+            public_key: key.public_key,
+            sui_address: key.sui_address,
+            label: key.label,
+        });
+        account.delegate_keys.push_back(key);
+    }
+
+    // ============================================================
     // View Functions
     // ============================================================
 
@@ -497,6 +647,11 @@ module memwal::account {
     /// Check if the account is active
     public fun is_active(account: &MemWalAccount): bool {
         account.active
+    }
+
+    /// True if the account was created by the migration forge (not owner onboarding).
+    public fun is_migration_created(account: &MemWalAccount): bool {
+        account.migration_created
     }
 
     /// Read the on-chain version of a MemWalAccount.
@@ -605,6 +760,17 @@ module memwal::account {
     fun assert_cap_for_this_package(cap: &UpgradeCap) {
         let cap_pkg = package::upgrade_package(cap);
         assert!(object::id_to_address(&cap_pkg) == @memwal, ENotUpgradeAuthority);
+    }
+
+    /// Derive the Sui address of an Ed25519 public key: `blake2b256(0x00 ‖ pubkey)`.
+    /// The `0x00` prefix is the Ed25519 signature-scheme flag. Deriving on-chain
+    /// removes the class of bugs where a caller-supplied address is unrelated to its
+    /// public key (finding F1). Public so clients/tests can compute the same address.
+    public fun derive_sui_address(public_key: &vector<u8>): address {
+        let mut bytes = vector::empty<u8>();
+        bytes.push_back(0);
+        bytes.append(*public_key);
+        sui::address::from_bytes(sui::hash::blake2b256(&bytes))
     }
 
     /// Check if `data` ends with `suffix`.
