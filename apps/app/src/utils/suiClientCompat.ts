@@ -62,7 +62,12 @@ export async function fetchAccountIdForOwner(
     let tableId = registryTableIdCache.get(registryId)
     if (!tableId) {
         const registryJson = await fetchObjectJson(suiClient, registryId)
-        tableId = (registryJson?.accounts as { id?: string } | undefined)?.id
+        // gRPC json flattens the Table's UID to a plain string; JSON-RPC keeps
+        // Move's nested UID shape ({ id: { id: "0x…" } }) even after field
+        // unwrapping. Accept both, or the JSON-RPC path passes an object as
+        // parentId and every lookup dies with "Invalid params".
+        const rawId = (registryJson?.accounts as { id?: string | { id?: string } } | undefined)?.id
+        tableId = typeof rawId === 'string' ? rawId : rawId?.id
         if (!tableId) return null
         registryTableIdCache.set(registryId, tableId)
     }
