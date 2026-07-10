@@ -1,15 +1,17 @@
 /**
  * OldMemoriesBanner (WALM-264 T3) — "You have N old memories — delete them".
  *
- * Shown once per connected wallet (dismissal persisted in localStorage)
- * when the wallet owns deletable V1 Walrus blobs. Links to the Dashboard cleanup section.
- * Mounted in AppContent; renders nothing while the feature flag is off,
- * on the dashboard (the section is already visible there), or before the count is known.
+ * Rendered at the top of the Dashboard shell (below the navbar, above the
+ * page header) so it's the first thing a user sees; links down to the
+ * cleanup section on the same page. Shown once per browser (dismissal
+ * persisted in localStorage) when the wallet owns deletable V1 Walrus
+ * blobs; renders nothing while the feature flag is off or before the
+ * count is known.
  */
 
 import { useEffect, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
 import { useCurrentAccount, useSuiClient } from '@mysten/dapp-kit'
+import { TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { listOwnedWalrusBlobs } from '../utils/walrusBlobs'
 
@@ -18,7 +20,6 @@ const DISMISS_KEY = 'memwal_cleanup_banner_dismissed'
 export default function OldMemoriesBanner() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
-    const location = useLocation()
     const address = currentAccount?.address || ''
 
     const [count, setCount] = useState<number | null>(null)
@@ -41,26 +42,29 @@ export default function OldMemoriesBanner() {
         }
     }, [address, suiClient, dismissed])
 
-    if (
-        !config.enableMemoryDeletion ||
-        !address ||
-        dismissed ||
-        !count ||
-        location.pathname === '/dashboard'
-    ) {
+    if (!config.enableMemoryDeletion || !address || dismissed || !count) {
         return null
     }
 
     return (
-        <div className="dash-alert" role="status">
+        <div className="dash-alert dash-alert--cleanup" role="status">
+            <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
             <p>
                 You have {count} old memor{count === 1 ? 'y' : 'ies'} stored on Walrus.{' '}
-                <Link to="/dashboard#cleanup">Delete them</Link> if you no longer want them — deletion is
-                permanent.
+                <a
+                    href="#cleanup"
+                    onClick={(event) => {
+                        event.preventDefault()
+                        document.getElementById('cleanup')?.scrollIntoView({ behavior: 'smooth' })
+                    }}
+                >
+                    Delete them
+                </a>{' '}
+                if you no longer want them — deletion is permanent.
             </p>
             <button
                 type="button"
-                className="btn btn-secondary"
+                className="btn btn-secondary btn-sm dash-alert-dismiss"
                 onClick={() => {
                     localStorage.setItem(DISMISS_KEY, 'true')
                     setDismissed(true)
