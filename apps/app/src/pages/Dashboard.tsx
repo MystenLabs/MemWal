@@ -26,13 +26,7 @@ import { Card } from '../components/Card'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import {
-    getDelegateKeyFields,
-    getMoveFields,
-    type AccountObjectFields,
-    type DynamicFieldObjectFields,
-    type RegistryObjectFields,
-} from '../utils/suiFields'
+import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
 function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
     return (
@@ -327,21 +321,9 @@ export default function Dashboard({
         setAccountLookupComplete(false)
         setLoadingAccount(true)
         try {
-            const registryObj = await suiClient.getObject({
-                id: config.memwalRegistryId,
-                options: { showContent: true },
-            })
-            const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
-            if (fields) {
-                const tableId = fields?.accounts?.fields?.id?.id
-                if (tableId) {
-                    const dynField = await suiClient.getDynamicFieldObject({
-                        parentId: tableId,
-                        name: { type: 'address', value: address },
-                    })
-                    const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
-                    if (dynFields?.value) setResolvedAccountObjectId(dynFields.value)
-                }
+            const accountId = await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, address)
+            if (accountId) {
+                setResolvedAccountObjectId(accountId)
             }
         } catch (err) {
             console.error('Failed to fetch account object ID:', err)
@@ -421,24 +403,15 @@ export default function Dashboard({
         if (!effectiveAccountObjectId) return
         setLoadingKeys(true)
         try {
-            const obj = await suiClient.getObject({
-                id: effectiveAccountObjectId,
-                options: { showContent: true },
-            })
-            const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
-            if (fields) {
-                const keys = fields.delegate_keys ?? []
-                const parsed: OnChainDelegateKey[] = keys.map((k) => {
-                    const f = getDelegateKeyFields(k)
-                    const pkBytes: number[] = f.public_key ?? []
-                    const pkHex = pkBytes.map((b: number) => b.toString(16).padStart(2, '0')).join('')
-                    return {
-                        publicKey: pkHex,
-                        suiAddress: f.sui_address ?? '',
-                        label: f.label ?? '',
-                        createdAt: Number(f.created_at ?? 0),
-                    }
-                })
+            const json = await fetchObjectJson(suiClient, effectiveAccountObjectId) as
+                { delegate_keys?: { public_key?: unknown; sui_address?: string; label?: string; created_at?: string }[] } | null
+            if (json?.delegate_keys) {
+                const parsed: OnChainDelegateKey[] = json.delegate_keys.map((f) => ({
+                    publicKey: publicKeyToHex(f.public_key),
+                    suiAddress: f.sui_address ?? '',
+                    label: f.label ?? '',
+                    createdAt: Number(f.created_at ?? 0),
+                }))
                 setOnChainKeys(parsed)
             } else {
                 setOnChainKeys([])

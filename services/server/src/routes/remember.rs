@@ -1057,6 +1057,7 @@ mod tests {
             port: 8000,
             database_url: "postgres://test".to_string(),
             sui_rpc_url: "http://localhost:9000".to_string(),
+            sui_grpc_url: None,
             sui_network: "testnet".to_string(),
             memwal_account_id: None,
             openai_api_key: Some("test-key".to_string()),

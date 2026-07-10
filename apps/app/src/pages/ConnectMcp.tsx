@@ -38,7 +38,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import { getMoveFields, type DynamicFieldObjectFields, type RegistryObjectFields } from '../utils/suiFields'
+import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
 // Walrus Memory wordmark (public asset, same one the dashboard nav uses).
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
@@ -65,26 +65,10 @@ async function resolveAccountId(
     ownerAddress: string,
 ): Promise<string | null> {
     try {
-        const registryObj = await suiClient.getObject({
-            id: config.memwalRegistryId,
-            options: { showContent: true },
-        })
-        const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
-        if (fields) {
-            const tableId = fields?.accounts?.fields?.id?.id
-            if (tableId) {
-                const dynField = await suiClient.getDynamicFieldObject({
-                    parentId: tableId,
-                    name: { type: 'address', value: ownerAddress },
-                })
-                const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
-                if (dynFields?.value) return dynFields.value
-            }
-        }
+        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
     } catch {
         return null
     }
-    return null
 }
 
 interface McpCallbackPayload {

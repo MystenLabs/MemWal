@@ -16,7 +16,8 @@ import {
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
-import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
+import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
+import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
@@ -39,6 +40,20 @@ const { networkConfig } = createNetworkConfig({
   testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
   mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
 })
+
+// Opt-in gRPC client for the active network (VITE_SUI_GRPC_URL), mirroring the
+// sidecar's SUI_GRPC_URL migration (services/server/scripts/sidecar/config.ts)
+// for the same JSON-RPC sunset (2026-07-31; testnet's public JSON-RPC endpoint
+// already returns 404 today). Empty keeps the existing JSON-RPC client
+// unchanged. Every useSuiClient() consumer (account lookups, tx build,
+// sign+execute) must handle both client shapes — see utils/suiClientCompat.ts
+// and useSponsoredTransaction.ts's executeTransactionCompat.
+function createClientForNetwork(name: string, cfg: any) {
+  if (name === config.suiNetwork && config.suiGrpcUrl) {
+    return new SuiGrpcClient({ network: name, baseUrl: config.suiGrpcUrl }) as unknown as SuiJsonRpcClient
+  }
+  return new SuiJsonRpcClient(cfg)
+}
 
 const queryClient = new QueryClient()
 
@@ -282,7 +297,7 @@ export default function App() {
     <BrowserRouter>
       <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
+        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork} createClient={createClientForNetwork}>
           <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <DelegateKeyProvider>
