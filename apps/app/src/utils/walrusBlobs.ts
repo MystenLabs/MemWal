@@ -9,16 +9,16 @@
  *    expired (expired blobs would poison a whole delete PTB, and their
  *    data is already gone).
  *  - listScopedDeletableBlobs — the same list intersected with the relayer
- *    DB's authoritative memory set (POST /api/memory-blob-ids), so
- *    unrelated or V2 blobs the wallet owns are never offered for deletion.
- *    Results are cached per wallet (5 min) and in-flight calls are shared,
- *    so the banner and the cleanup card don't each rescan the chain.
+ *    DB's authoritative memory set (POST /api/memory-blob-ids, public +
+ *    rate-limited; no delegate-key session per plan T1), so unrelated or
+ *    V2 blobs the wallet owns are never offered for deletion. Results are
+ *    cached per wallet (5 min) and in-flight calls are shared, so the
+ *    banner and the cleanup card don't each rescan the chain.
  */
 
 import type { useSuiClient } from '@mysten/dapp-kit'
 import { WalrusClient } from '@mysten/walrus'
 import { config } from '../config'
-import { apiCall } from './api'
 import { isGrpcClient } from './suiClientCompat'
 
 type SuiClient = ReturnType<typeof useSuiClient>
@@ -183,60 +183,53 @@ export function invalidateWalrusBlobScan(owner?: string): void {
         scanCache.clear()
         return
     }
-    for (const key of scanCache.keys()) {
-        if (key.startsWith(`${owner}:`)) scanCache.delete(key)
-    }
+    scanCache.delete(owner)
 }
 
 export interface ScopedBlobsOptions {
-    /** Delegate key session — required to scope against the relayer DB. */
-    delegateKey: string | null
-    accountObjectId?: string | null
     onProgress?: (count: number) => void
     /** Bypass the cache (user pressed Refresh / post-delete reload). */
     force?: boolean
 }
 
 /**
- * The wallet's on-chain blobs intersected with the relayer DB's memory set.
- * With no delegate key the DB can't be consulted, so the result is marked
- * unscoped — callers must not present unscoped counts as deletable
- * memories. Cached per wallet+scope so simultaneous callers (banner + card)
- * share one chain scan.
+ * The wallet's on-chain blobs intersected with the relayer DB's memory set
+ * (public endpoint — ownership proof happens at delete time via the wallet
+ * signature, not here). Cached per wallet so simultaneous callers
+ * (banner + card) share one chain scan.
  */
 export async function listScopedDeletableBlobs(
     suiClient: SuiClient,
     owner: string,
-    { delegateKey, accountObjectId, onProgress, force }: ScopedBlobsOptions,
-): Promise<{ blobs: OwnedWalrusBlob[]; scoped: boolean }> {
-    const scoped = Boolean(delegateKey)
-    const key = `${owner}:${scoped ? 's' : 'u'}`
-
-    const cached = scanCache.get(key)
+    { onProgress, force }: ScopedBlobsOptions = {},
+): Promise<OwnedWalrusBlob[]> {
+    const cached = scanCache.get(owner)
     if (!force && cached && Date.now() - cached.at < SCAN_TTL_MS) {
-        return { blobs: await cached.promise, scoped }
+        return cached.promise
     }
 
     const promise = (async () => {
-        const owned = await listOwnedWalrusBlobs(suiClient, owner, onProgress)
-        if (!delegateKey) return owned
-        const res = await apiCall(
-            delegateKey,
-            config.memwalServerUrl,
-            '/api/memory-blob-ids',
-            {},
-            accountObjectId ?? undefined,
-        )
+        const [owned, res] = await Promise.all([
+            listOwnedWalrusBlobs(suiClient, owner, onProgress),
+            fetch(`${config.memwalServerUrl}/api/memory-blob-ids`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ owner }),
+            }).then(async (r) => {
+                if (!r.ok) throw new Error(`memory-blob-ids failed (${r.status})`)
+                return r.json()
+            }),
+        ])
         const known = new Set<string>(res.blobIds ?? [])
         return owned.filter((b) => known.has(b.blobId))
     })()
-    scanCache.set(key, { at: Date.now(), promise })
+    scanCache.set(owner, { at: Date.now(), promise })
 
     try {
-        return { blobs: await promise, scoped }
+        return await promise
     } catch (err) {
         // Don't cache failures.
-        if (scanCache.get(key)?.promise === promise) scanCache.delete(key)
+        if (scanCache.get(owner)?.promise === promise) scanCache.delete(owner)
         throw err
     }
 }

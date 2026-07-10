@@ -47,7 +47,7 @@ fn json_error_response(status: axum::http::StatusCode, msg: &'static str) -> Res
 }
 
 /// Validate a Sui address: `0x` followed by exactly 64 hex characters.
-fn validate_sui_address(s: &str) -> bool {
+pub(super) fn validate_sui_address(s: &str) -> bool {
     s.starts_with("0x") && s.len() == 66 && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 

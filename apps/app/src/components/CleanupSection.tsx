@@ -2,13 +2,14 @@
  * CleanupSection — permanent V1 memory deletion (WALM-264). Dashboard card
  * (id="cleanup"; the old-memories banner links here).
  *
- * One button deletes ALL deletable blobs — no per-blob picking. Blobs are
- * deleted in PTB batches of 950 (Sui's 1024-command cap minus headroom),
- * one wallet signature per batch. The user only signs: the app builds each
- * PTB, sponsors it via POST /sponsor (Enoki), then hands
+ * One button deletes ALL deletable blobs — no per-blob picking, and no
+ * delegate-key session (plan T1: the wallet signature over the sponsored
+ * transaction IS the ownership proof). The user only signs: the app builds
+ * each PTB (batched), sponsors it via POST /sponsor (Enoki), then hands
  * {digest, signature, blobIds} to POST /api/delete-memories — the backend
- * submits on-chain and deletes the matching DB rows in the same call, so
- * chain and index never drift.
+ * submits on-chain, verifies success and the sender, and deletes that
+ * sender's matching DB rows in the same call, so chain and index never
+ * drift.
  *
  * Deletion is permanent: never recoverable, never migrated. The warning
  * and confirm dialog say so in plain words — per WALM-264 that messaging
@@ -16,13 +17,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useCurrentAccount, useSignTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { RefreshCw, Trash2 } from 'lucide-react'
 import { config } from '../config'
-import { useDelegateKey } from '../App'
-import { apiCall } from '../utils/api'
 import { sponsorTransactionKind } from '../utils/sponsor'
 import { Card } from './Card'
 import {
@@ -52,7 +50,6 @@ export default function CleanupSection() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
-    const { delegateKey, accountObjectId } = useDelegateKey()
 
     const address = currentAccount?.address || ''
 
@@ -72,12 +69,8 @@ export default function CleanupSection() {
         setError('')
         try {
             // Scoped to the relayer DB's authoritative V1 memory list, so
-            // unrelated/V2 blobs the wallet owns are never deleted from
-            // here. Without a delegate-key session the list stays unscoped
-            // and the UI shows the setup prompt instead of a count.
-            const { blobs: scoped } = await listScopedDeletableBlobs(suiClient, address, {
-                delegateKey,
-                accountObjectId,
+            // unrelated/V2 blobs the wallet owns are never deleted from here.
+            const scoped = await listScopedDeletableBlobs(suiClient, address, {
                 onProgress: setScanned,
                 force,
             })
@@ -87,7 +80,7 @@ export default function CleanupSection() {
             setError(err instanceof Error ? err.message : 'failed to list blobs')
             setPhase({ kind: 'ready' })
         }
-    }, [address, suiClient, delegateKey, accountObjectId])
+    }, [address, suiClient])
 
     useEffect(() => {
         void loadBlobs()
@@ -104,7 +97,7 @@ export default function CleanupSection() {
     const deleteInFlight = useRef(false)
 
     const executeDelete = useCallback(async () => {
-        if (!address || !delegateKey || deletableBlobs.length === 0) return
+        if (!address || deletableBlobs.length === 0) return
         // Double-click guard: a second concurrent run would sponsor the same
         // objects twice and paint a spurious error over a successful delete.
         if (deleteInFlight.current) return
@@ -145,18 +138,22 @@ export default function CleanupSection() {
                     transaction: Transaction.from(sponsored.bytes),
                 })
 
-                // The backend submits and deletes the DB rows together.
-                const result = await apiCall(
-                    delegateKey,
-                    config.memwalServerUrl,
-                    '/api/delete-memories',
-                    {
+                // The backend submits, verifies on-chain success + sender,
+                // and deletes that sender's DB rows together. The wallet
+                // signature is the ownership proof — no session needed.
+                const deleteRes = await fetch(`${config.memwalServerUrl}/api/delete-memories`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
                         digest: sponsored.digest,
                         signature,
                         blobIds: batch.map((b) => b.blobId),
-                    },
-                    accountObjectId ?? undefined,
-                )
+                    }),
+                })
+                if (!deleteRes.ok) {
+                    throw new Error(`Delete failed (${deleteRes.status}): ${await deleteRes.text()}`)
+                }
+                const result = await deleteRes.json()
 
                 deletedBlobs += batch.length
                 deletedRows += result.deletedRows ?? 0
@@ -183,7 +180,7 @@ export default function CleanupSection() {
         } finally {
             deleteInFlight.current = false
         }
-    }, [address, delegateKey, accountObjectId, deletableBlobs, suiClient, signTransaction, loadBlobs])
+    }, [address, deletableBlobs, suiClient, signTransaction, loadBlobs])
 
     const count = deletableBlobs.length
     const busy = phase.kind === 'deleting' || phase.kind === 'loading'
@@ -207,7 +204,7 @@ export default function CleanupSection() {
                     <button
                         className="btn btn-danger dashboard-cleanup-delete"
                         onClick={() => setConfirming(true)}
-                        disabled={busy || count === 0 || !delegateKey}
+                        disabled={busy || count === 0}
                     >
                         <Trash2 size={16} /> Delete all{count > 0 ? ` ${count}` : ''} forever
                     </button>
@@ -247,14 +244,7 @@ export default function CleanupSection() {
             )}
 
             {phase.kind === 'ready' && (
-                !delegateKey ? (
-                    // Without the session the list can't be scoped to real
-                    // memories, so a count here would be wrong — prompt for
-                    // setup instead.
-                    <p className="dashboard-cleanup-status">
-                        A delegate key session is required to delete — <Link to="/setup">set one up</Link> first.
-                    </p>
-                ) : count === 0 ? (
+                count === 0 ? (
                     <div className="dashboard-empty-message">
                         <span>No deletable memories found for this wallet.</span>
                     </div>

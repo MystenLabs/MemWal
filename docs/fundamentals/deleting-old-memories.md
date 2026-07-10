@@ -38,4 +38,4 @@ If the flow stops partway (a rejected signature, a network drop), nothing is los
 - Walrus Memory sponsors the gas, so deleting costs you nothing.
 - Only blobs marked `deletable` onchain with unexpired storage can be deleted. The app hides the rest.
 - Sponsored transactions have a per-wallet rate limit, so deleting many thousands of memories can take more than one session.
-- You need an active delegate-key session (the same one the dashboard and playground use) so the server can verify the request is really yours.
+- Your wallet signature is the proof of ownership: the server reads the signer of the executed transaction onchain and only removes that wallet's index rows. You do not need a delegate-key session to delete.
