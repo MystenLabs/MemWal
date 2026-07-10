@@ -58,8 +58,11 @@ pub(super) fn decode_base64(s: &str) -> Option<Vec<u8>> {
 
 /// Validate a Sui transaction digest: base58 alphabet, 43 or 44 characters.
 pub(super) fn validate_digest(s: &str) -> bool {
+    // Base58 of 32 bytes is normally 43-44 chars, but digests with leading
+    // zero bytes encode shorter (~0.1% of real digests are 42) — accept the
+    // full range a 32-byte value can produce.
     let len = s.len();
-    if len != 43 && len != 44 {
+    if !(32..=44).contains(&len) {
         return false;
     }
     // Base58 alphabet excludes: 0, O, I, l
@@ -83,10 +86,12 @@ async fn call_sidecar_sponsor_execute(
     state: &AppState,
     digest: &str,
     signature: &str,
+    verify_effects: bool,
 ) -> Result<(reqwest::StatusCode, axum::body::Bytes), AppError> {
     let forwarded = serde_json::json!({
         "digest": digest,
         "signature": signature,
+        "verifyEffects": verify_effects,
     });
 
     let url = format!("{}/sponsor/execute", state.config.sidecar_url);
@@ -126,17 +131,24 @@ async fn call_sidecar_sponsor_execute(
     Ok((upstream_status, resp_body))
 }
 
-/// Execute a user-signed sponsored transaction via the sidecar and wait for
-/// the result. Used by `/api/delete-memories`, which must confirm on-chain
-/// success before touching the DB. Returns `Ok(())` only on success.
+/// Execute a user-signed sponsored transaction via the sidecar and confirm
+/// it SUCCEEDED on-chain (the sidecar checks effects status — Enoki's
+/// execute alone only means "submitted"). Used by `/api/delete-memories`,
+/// which must confirm on-chain success before touching the DB. Returns the
+/// executed transaction's sender so the caller can bind it to the
+/// authenticated owner.
 pub(super) async fn execute_sponsored_tx(
     state: &AppState,
     digest: &str,
     signature: &str,
-) -> Result<(), AppError> {
-    let (upstream_status, resp_body) = call_sidecar_sponsor_execute(state, digest, signature).await?;
+) -> Result<Option<String>, AppError> {
+    let (upstream_status, resp_body) =
+        call_sidecar_sponsor_execute(state, digest, signature, true).await?;
     if upstream_status.is_success() {
-        Ok(())
+        let sender = serde_json::from_slice::<serde_json::Value>(&resp_body)
+            .ok()
+            .and_then(|v| v.get("sender").and_then(|s| s.as_str()).map(String::from));
+        Ok(sender)
     } else {
         crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
         tracing::error!(
@@ -339,7 +351,7 @@ pub async fn sponsor_execute_proxy(
     }
 
     let (upstream_status, resp_body) =
-        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature).await?;
+        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature, false).await?;
 
     if upstream_status.is_success() {
         Ok(Response::builder()
@@ -428,8 +440,14 @@ mod more_tests {
     }
 
     #[test]
-    fn test_digest_too_short_42() {
-        assert!(!validate_digest(&"1".repeat(42)));
+    fn test_digest_valid_42_chars_leading_zero_encoding() {
+        // 32-byte digests with leading zero bytes encode shorter than 43.
+        assert!(validate_digest(&"1".repeat(42)));
+    }
+
+    #[test]
+    fn test_digest_too_short_31() {
+        assert!(!validate_digest(&"1".repeat(31)));
     }
 
     #[test]

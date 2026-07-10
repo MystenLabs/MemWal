@@ -107,17 +107,19 @@ pub async fn memory_blob_ids(
 /// POST /api/delete-memories (WALM-264)
 ///
 /// Permanently delete V1 memories: submit the user-signed sponsored
-/// `system::delete_blob` PTB, and — only after it lands on-chain — delete
-/// the matching `vector_entries` rows. The backend owns both side-effects
-/// so chain and DB can't drift (a frontend that submits but never cleans
-/// the DB, or vice versa). Owner comes from verified auth, never the body,
-/// so a caller can only ever remove their own rows. If the row-delete step
-/// fails after a successful submit, `cleanup_expired_blob` self-heals the
-/// rows on the next recall.
+/// `system::delete_blob` PTB, and — only after it SUCCEEDS on-chain
+/// (sidecar verifies effects status, not just Enoki's 200) and the executed
+/// transaction's sender matches the authenticated owner — delete the
+/// matching `vector_entries` rows. Owner comes from verified auth, never
+/// the body, so a caller can only ever remove their own rows. The blob-id
+/// list itself is client-supplied and NOT cross-checked against the
+/// transaction's deleted objects — a dishonest caller can only desync their
+/// own index rows (same blast radius as `/api/forget`), and
+/// `cleanup_expired_blob` self-heals any drift on the next recall.
 ///
 /// Gated by `ENABLE_MEMORY_DELETION` (off by default) until rollout is
-/// agreed — the route answers 404 when disabled, indistinguishable from
-/// the route not existing.
+/// agreed — the route answers 404 when disabled (auth middleware still runs
+/// first, so unauthenticated probes see 401 either way).
 pub async fn delete_memories(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
@@ -155,13 +157,33 @@ pub async fn delete_memories(
     );
 
     // Submit first; abort the whole call if the transaction doesn't land —
-    // never delete rows for a delete that didn't happen on-chain.
-    super::sponsor::execute_sponsored_tx(&state, &body.digest, &body.signature).await?;
+    // never delete rows for a delete that didn't happen on-chain. The
+    // sidecar verifies effects success and reports the executed sender.
+    let tx_sender = super::sponsor::execute_sponsored_tx(&state, &body.digest, &body.signature)
+        .await?;
 
-    let mut deleted_rows: u64 = 0;
-    for blob_id in &body.blob_ids {
-        deleted_rows += state.db.delete_by_blob_id(blob_id, owner).await?;
+    // Bind the executed transaction to the authenticated owner: a signed
+    // tx from a different wallet must never clear this owner's rows.
+    match tx_sender {
+        Some(sender) if sender.eq_ignore_ascii_case(owner) => {}
+        Some(sender) => {
+            tracing::warn!(
+                "delete-memories: tx sender {} does not match owner {} — refusing row delete",
+                sender,
+                owner
+            );
+            return Err(AppError::BadRequest(
+                "transaction sender does not match authenticated owner".into(),
+            ));
+        }
+        None => {
+            return Err(AppError::Internal(
+                "sponsored execute did not report a sender".into(),
+            ));
+        }
     }
+
+    let deleted_rows = state.db.delete_by_blob_ids(&body.blob_ids, owner).await?;
 
     tracing::info!(
         "delete-memories complete: owner={} blobs={} deleted_rows={}",

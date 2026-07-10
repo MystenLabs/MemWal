@@ -16,6 +16,7 @@
 import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
+import { sponsorTransactionKind } from '../utils/sponsor'
 import { executeTransactionCompat } from '../utils/suiClientCompat'
 
 export function useSponsoredTransaction() {
@@ -47,25 +48,9 @@ export function useSponsoredTransaction() {
                 client: suiClient,
                 onlyTransactionKind: true,
             })
-            const kindBase64 = uint8ArrayToBase64(kindBytes)
 
             // 2. Sponsor via server (proxied to sidecar)
-            const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    transactionBlockKindBytes: kindBase64,
-                    sender,
-                }),
-            })
-
-            if (!sponsorRes.ok) {
-                const errText = await sponsorRes.text()
-                throw new Error(`Sponsor failed (${sponsorRes.status}): ${errText}`)
-            }
-
-            const sponsored = await sponsorRes.json()
-            // sponsored = { bytes: base64, digest: string }
+            const sponsored = await sponsorTransactionKind(kindBytes, sender)
 
             // 3. Sign sponsored bytes with user wallet
             const sponsoredTx = Transaction.from(sponsored.bytes)
@@ -104,13 +89,4 @@ export function useSponsoredTransaction() {
     }
 
     return { mutateAsync }
-}
-
-// Helper: Uint8Array → base64
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-    let binary = ''
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i])
-    }
-    return btoa(binary)
 }
