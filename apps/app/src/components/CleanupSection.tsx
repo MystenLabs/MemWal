@@ -37,14 +37,10 @@ import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
  * The binding limit is NOT Sui's 1024-command PTB cap but the relayer's
  * /sponsor gates: 7000 bytes of TransactionKind (sponsor.rs) under a 10 KiB
  * JSON body (main.rs). Each delete costs ~135 bytes of kind BCS, so ~50 is
- * the ceiling — 40 leaves headroom. VITE_DELETE_BATCH_SIZE overrides for
- * testing the multi-batch flow with a small wallet (e.g. set to 1 and
- * delete 3 memories → 3 batches/3 signatures), clamped to the safe cap.
+ * the ceiling — 40 leaves headroom. (To test the multi-batch flow with a
+ * small wallet, temporarily set this to 1.)
  */
-const DELETE_BATCH_SIZE = Math.min(
-    40,
-    Math.max(1, Number(import.meta.env.VITE_DELETE_BATCH_SIZE) || 40),
-)
+const DELETE_BATCH_SIZE = 40
 
 type Phase =
     | { kind: 'loading' }
