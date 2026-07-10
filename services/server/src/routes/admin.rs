@@ -74,6 +74,108 @@ pub async fn forget(
     }))
 }
 
+/// Walrus blob IDs are base64url of a 32-byte id (43 chars, unpadded).
+/// Accept a small range around that so we don't hard-fail on encoding
+/// variants, while still rejecting garbage before it reaches the DB.
+fn validate_blob_id(s: &str) -> bool {
+    (40..=48).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=')
+}
+
+/// Upper bound on blob ids per call — one PTB holds ~950 deletes (Sui's
+/// 1024-command cap minus headroom), so anything above that is a client bug.
+const MAX_DELETE_BLOB_IDS: usize = 1000;
+
+/// POST /api/memory-blob-ids (WALM-264)
+///
+/// Return every Walrus blob id indexed for the verified owner. The
+/// delete-memories UI intersects the wallet's on-chain Blob objects with
+/// this set so only real V1 memories are offered for deletion (a wallet
+/// can also own unrelated or V2 blobs). Same flag gate as delete.
+pub async fn memory_blob_ids(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<MemoryBlobIdsResponse>, AppError> {
+    if !state.config.enable_memory_deletion {
+        return Err(AppError::BlobNotFound("Not found".into()));
+    }
+    let blob_ids = state.db.list_blob_ids_by_owner(&auth.owner).await?;
+    Ok(Json(MemoryBlobIdsResponse { blob_ids }))
+}
+
+/// POST /api/delete-memories (WALM-264)
+///
+/// Permanently delete V1 memories: submit the user-signed sponsored
+/// `system::delete_blob` PTB, and — only after it lands on-chain — delete
+/// the matching `vector_entries` rows. The backend owns both side-effects
+/// so chain and DB can't drift (a frontend that submits but never cleans
+/// the DB, or vice versa). Owner comes from verified auth, never the body,
+/// so a caller can only ever remove their own rows. If the row-delete step
+/// fails after a successful submit, `cleanup_expired_blob` self-heals the
+/// rows on the next recall.
+///
+/// Gated by `ENABLE_MEMORY_DELETION` (off by default) until rollout is
+/// agreed — the route answers 404 when disabled, indistinguishable from
+/// the route not existing.
+pub async fn delete_memories(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<DeleteMemoriesRequest>,
+) -> Result<Json<DeleteMemoriesResponse>, AppError> {
+    if !state.config.enable_memory_deletion {
+        return Err(AppError::BlobNotFound("Not found".into()));
+    }
+
+    if !super::sponsor::validate_digest(&body.digest) {
+        return Err(AppError::BadRequest("Invalid digest".into()));
+    }
+    let sig_bytes = super::sponsor::decode_base64(&body.signature)
+        .ok_or_else(|| AppError::BadRequest("signature must be valid base64".into()))?;
+    if !super::sponsor::validate_sponsored_signature_len(sig_bytes.len()) {
+        return Err(AppError::BadRequest(
+            "signature has unexpected length".into(),
+        ));
+    }
+    if body.blob_ids.is_empty() {
+        return Err(AppError::BadRequest("blobIds cannot be empty".into()));
+    }
+    if body.blob_ids.len() > MAX_DELETE_BLOB_IDS {
+        return Err(AppError::BadRequest("too many blobIds".into()));
+    }
+    if !body.blob_ids.iter().all(|id| validate_blob_id(id)) {
+        return Err(AppError::BadRequest("Invalid blob id".into()));
+    }
+
+    let owner = &auth.owner;
+    tracing::info!(
+        "delete-memories: owner={} blobs={} submitting signed PTB",
+        owner,
+        body.blob_ids.len()
+    );
+
+    // Submit first; abort the whole call if the transaction doesn't land —
+    // never delete rows for a delete that didn't happen on-chain.
+    super::sponsor::execute_sponsored_tx(&state, &body.digest, &body.signature).await?;
+
+    let mut deleted_rows: u64 = 0;
+    for blob_id in &body.blob_ids {
+        deleted_rows += state.db.delete_by_blob_id(blob_id, owner).await?;
+    }
+
+    tracing::info!(
+        "delete-memories complete: owner={} blobs={} deleted_rows={}",
+        owner,
+        body.blob_ids.len(),
+        deleted_rows
+    );
+
+    Ok(Json(DeleteMemoriesResponse {
+        digest: body.digest,
+        deleted_rows,
+    }))
+}
+
 /// POST /api/stats
 ///
 /// Return memory count + stored bytes for `owner`'s `namespace`. Used by
@@ -689,6 +791,29 @@ pub async fn restore(
 #[cfg(test)]
 mod tests {
     use crate::types::RecallResult;
+
+    // ── delete-memories blob id validation ───────────────────────
+
+    #[test]
+    fn blob_id_accepts_base64url_43_chars() {
+        // Canonical Walrus blob id: base64url of 32 bytes, unpadded.
+        assert!(super::validate_blob_id(
+            "J9fUNQpo-J6bl1WbyLtw-xX_KTteIa6hsN_XwVIALiM"
+        ));
+    }
+
+    #[test]
+    fn blob_id_rejects_garbage() {
+        assert!(!super::validate_blob_id("")); // empty
+        assert!(!super::validate_blob_id("short")); // too short
+        assert!(!super::validate_blob_id(&"a".repeat(49))); // too long
+        assert!(!super::validate_blob_id(
+            "J9fUNQpo-J6bl1WbyLtw-xX_KTteIa6hsN_XwVIA%iM" // bad char
+        ));
+        assert!(!super::validate_blob_id(
+            "'; DROP TABLE vector_entries; -- padding padd" // injection shape
+        ));
+    }
 
     // ── Memory context wraps in XML tags ─────────────────────────
 

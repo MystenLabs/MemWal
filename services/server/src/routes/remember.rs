@@ -1078,6 +1078,7 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            enable_memory_deletion: false,
         }
     }
 

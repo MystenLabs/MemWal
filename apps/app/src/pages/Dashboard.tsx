@@ -23,6 +23,7 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import CleanupSection from '../components/CleanupSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -1343,6 +1344,8 @@ const result = await generateText({
                         </button>
                     </div>
                 </Card>
+
+                {config.enableMemoryDeletion && <CleanupSection />}
 
                 {removeKeysConfirm && (
                     <div

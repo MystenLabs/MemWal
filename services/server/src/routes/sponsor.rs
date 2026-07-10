@@ -52,12 +52,12 @@ fn validate_sui_address(s: &str) -> bool {
 }
 
 /// Validate base64 and return decoded bytes, or None on failure.
-fn decode_base64(s: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_base64(s: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 /// Validate a Sui transaction digest: base58 alphabet, 43 or 44 characters.
-fn validate_digest(s: &str) -> bool {
+pub(super) fn validate_digest(s: &str) -> bool {
     let len = s.len();
     if len != 43 && len != 44 {
         return false;
@@ -72,8 +72,81 @@ fn validate_digest(s: &str) -> bool {
 
 /// Sui transaction signatures are serialized as base64 bytes. Native schemes are
 /// 65/97 bytes, while zkLogin signatures are variable-size serialized payloads.
-fn validate_sponsored_signature_len(len: usize) -> bool {
+pub(super) fn validate_sponsored_signature_len(len: usize) -> bool {
     (65..=MAX_SPONSORED_SIGNATURE_BYTES).contains(&len)
+}
+
+/// Forward a signed sponsored transaction to the sidecar's
+/// `/sponsor/execute` and return the upstream status + body. Shared by the
+/// `/sponsor/execute` proxy and `/api/delete-memories`.
+async fn call_sidecar_sponsor_execute(
+    state: &AppState,
+    digest: &str,
+    signature: &str,
+) -> Result<(reqwest::StatusCode, axum::body::Bytes), AppError> {
+    let forwarded = serde_json::json!({
+        "digest": digest,
+        "signature": signature,
+    });
+
+    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
+    let mut req = state
+        .http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&forwarded);
+    if let Some(secret) = state.config.sidecar_secret.as_deref() {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "sponsor_execute",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
+        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "sponsor_execute",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let upstream_status = resp.status();
+    let resp_body = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+    Ok((upstream_status, resp_body))
+}
+
+/// Execute a user-signed sponsored transaction via the sidecar and wait for
+/// the result. Used by `/api/delete-memories`, which must confirm on-chain
+/// success before touching the DB. Returns `Ok(())` only on success.
+pub(super) async fn execute_sponsored_tx(
+    state: &AppState,
+    digest: &str,
+    signature: &str,
+) -> Result<(), AppError> {
+    let (upstream_status, resp_body) = call_sidecar_sponsor_execute(state, digest, signature).await?;
+    if upstream_status.is_success() {
+        Ok(())
+    } else {
+        crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
+        tracing::error!(
+            "sponsored execute upstream error {}: {}",
+            upstream_status,
+            String::from_utf8_lossy(&resp_body)
+        );
+        let (_, masked_msg) = mask_upstream(upstream_status.as_u16());
+        Err(AppError::Internal(masked_msg.to_string()))
+    }
 }
 
 /// POST /sponsor — proxy to sidecar POST /sponsor
@@ -265,45 +338,8 @@ pub async fn sponsor_execute_proxy(
         }
     }
 
-    let forwarded = serde_json::json!({
-        "digest": req.digest,
-        "signature": req.signature,
-    });
-
-    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-    let started = std::time::Instant::now();
-    let resp = req.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sidecar",
-            "sponsor_execute",
-            "transport_error",
-            started.elapsed(),
-        );
-        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
-        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
-    })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sidecar",
-        "sponsor_execute",
-        &status_label,
-        started.elapsed(),
-    );
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+    let (upstream_status, resp_body) =
+        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature).await?;
 
     if upstream_status.is_success() {
         Ok(Response::builder()

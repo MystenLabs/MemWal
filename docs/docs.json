@@ -56,7 +56,8 @@
             "group": "Concepts",
             "pages": [
               "fundamentals/concepts/memory-space",
-              "fundamentals/concepts/ownership-and-access"
+              "fundamentals/concepts/ownership-and-access",
+              "fundamentals/deleting-old-memories"
             ]
           },
           {

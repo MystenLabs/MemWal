@@ -44,6 +44,10 @@ export const config = {
         import.meta.env.VITE_ANALYTICS_ALLOWED_HOSTS as string | undefined,
         DEFAULT_ANALYTICS_ALLOWED_HOSTS,
     ),
+    // WALM-264: permanent V1 memory deletion UI. Off by default so nothing
+    // is user-visible until the feature is tested and rollout is agreed.
+    // Must be enabled together with the relayer's ENABLE_MEMORY_DELETION.
+    enableMemoryDeletion: (import.meta.env.VITE_ENABLE_MEMORY_DELETION as string || '') === 'true',
     demoUrls: (import.meta.env.VITE_DEMO_URLS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean)
         .map(entry => {
