@@ -25,9 +25,9 @@ import {
 } from "./config.js";
 import { shortAddress } from "./util.js";
 
-// JSON-RPC client. Still required by the blob query/restore path, which uses
-// index methods (getOwnedObjects, getDynamicFieldObject, suix_queryTransaction-
-// Blocks) that gRPC does not expose — migrating that path to GraphQL is stage 2.
+// JSON-RPC client. Only used by the blob query/restore path as the fallback
+// when SUI_GRPC_URL is unset — with gRPC enabled that path runs on
+// listOwnedObjects/getDynamicField instead (see routes/walrus-query.ts).
 export const suiJsonRpcClient = new SuiJsonRpcClient({
     url: SUI_RPC_URL,
     network: SUI_NETWORK,

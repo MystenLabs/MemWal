@@ -4,12 +4,15 @@
  */
 
 import express, { type Express } from "express";
+import { bcs } from "@mysten/sui/bcs";
 import { JSON_LIMIT_METADATA, WALRUS_PACKAGE_ID } from "../config.js";
-// Query/restore path uses JSON-RPC index methods (getOwnedObjects,
-// getDynamicFieldObject, suix_queryTransactionBlocks) that gRPC does not expose,
-// so it stays on the JSON-RPC client even when the write path moves to gRPC.
-// Migrating this path to GraphQL is stage 2 before the 2026-07-31 sunset.
-import { suiJsonRpcClient, suiRpc } from "../clients.js";
+// When SUI_GRPC_URL is set, `suiClient` is the gRPC client and this path uses
+// listOwnedObjects (server-side type filter) + getDynamicField, so no JSON-RPC
+// index method is needed. Without SUI_GRPC_URL it falls back to the original
+// JSON-RPC path (getOwnedObjects, getDynamicFieldObject,
+// suix_queryTransactionBlocks) — same explicit, reversible opt-in as the
+// write path.
+import { suiClient, suiJsonRpcClient, suiRpc } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
@@ -162,6 +165,101 @@ async function fetchRawBlobObjects(candidates: RecentBlobCandidate[]): Promise<R
         .filter((obj: RawBlobObj | null): obj is RawBlobObj => obj !== null);
 }
 
+// gRPC clients expose getDynamicField, JSON-RPC clients don't — same
+// discriminator as the frontend's suiClientCompat.
+const isGrpcClient = typeof (suiClient as any).getDynamicField === "function";
+
+/**
+ * gRPC path for step 1: listOwnedObjects filters by object type server-side
+ * and `include.json` returns the flattened Move fields (blob_id included), so
+ * one paginated call replaces both the queryTransactionBlocks candidate scan
+ * and the multiGetObjects content fetch. Unlike the tx scan the order is
+ * unspecified rather than newest-first, so `cap` bounds work, not recency.
+ */
+async function listBlobObjectsGrpc(owner: string, blobType: string, cap: number): Promise<RawBlobObj[]> {
+    const out: RawBlobObj[] = [];
+    let cursor: string | null = null;
+
+    while (out.length < cap) {
+        const page = await withRpcRetry<any>(
+            "[query-blobs] listOwnedObjects",
+            () => (suiClient as any).listOwnedObjects({
+                owner,
+                type: blobType,
+                include: { json: true },
+                cursor: cursor ?? undefined,
+                limit: 50,
+            }),
+        );
+
+        for (const obj of page?.objects ?? []) {
+            if (typeof obj?.objectId !== "string") continue;
+            const rawBlobId = obj.json?.blob_id ?? obj.json?.blobId ?? null;
+            out.push({ objectId: obj.objectId, rawBlobId });
+            if (out.length >= cap) break;
+        }
+
+        if (!page?.hasNextPage || !page?.cursor) break;
+        cursor = page.cursor;
+    }
+
+    return out;
+}
+
+// Walrus's `Metadata` struct is `{ metadata: VecMap<String, String> }`;
+// VecMap's BCS byte layout (struct { contents: vector<Entry<K, V>> }) is
+// identical to bcs.map's vector-of-pairs, so this parses the dynamic field
+// value bytes returned by gRPC getDynamicField.
+const WALRUS_METADATA_BCS = bcs.struct("Metadata", {
+    metadata: bcs.map(bcs.string(), bcs.string()),
+});
+
+// Dynamic field name b"metadata" as gRPC wants it: BCS bytes, not a JSON value.
+const METADATA_FIELD_NAME_GRPC = {
+    type: "vector<u8>",
+    bcs: bcs.vector(bcs.u8()).serialize(Array.from(Buffer.from("metadata"))).toBytes(),
+};
+
+/**
+ * Fetch the memwal_* metadata entries attached to a Blob object as key/value
+ * pairs, regardless of client transport. Returns [] when the blob has no
+ * metadata dynamic field.
+ */
+async function fetchBlobMetadataEntries(objectId: string): Promise<Array<{ key: string; value: string }>> {
+    if (isGrpcClient) {
+        const dynField = await withRpcRetry<any>(
+            `[query-blobs] getDynamicField ${objectId}`,
+            () => (suiClient as any).getDynamicField({
+                parentId: objectId,
+                name: METADATA_FIELD_NAME_GRPC,
+            }),
+        );
+        const valueBcs = dynField?.dynamicField?.value?.bcs;
+        if (!valueBcs) return [];
+        const parsed = WALRUS_METADATA_BCS.parse(valueBcs);
+        return [...parsed.metadata.entries()].map(([key, value]) => ({ key, value }));
+    }
+
+    const dynField = await withRpcRetry<any>(
+        `[query-blobs] getDynamicField ${objectId}`,
+        () => suiJsonRpcClient.getDynamicFieldObject({
+            parentId: objectId,
+            name: {
+                type: "vector<u8>",
+                value: Array.from(Buffer.from("metadata")) as any,
+            },
+        }),
+    );
+    if (!dynField.data?.content || dynField.data.content.dataType !== "moveObject") return [];
+    const dynFields = (dynField.data.content as any).fields;
+    // Path: fields.value.fields.metadata.fields.contents[]
+    const contents = dynFields?.value?.fields?.metadata?.fields?.contents;
+    if (!Array.isArray(contents)) return [];
+    return contents
+        .map((entry: any) => ({ key: entry?.fields?.key, value: entry?.fields?.value }))
+        .filter((e: any) => typeof e.key === "string" && typeof e.value === "string");
+}
+
 export function registerWalrusQueryRoute(app: Express): void {
     app.post("/walrus/query-blobs", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
         try {
@@ -179,7 +277,14 @@ export function registerWalrusQueryRoute(app: Express): void {
             // newest transfer transactions and cap candidates at 100 instead of
             // scanning every Walrus Blob object owned by the wallet.
             let rawObjs: RawBlobObj[] = [];
-            if (useRecentTxPath) {
+            if (isGrpcClient) {
+                const cap = useRecentTxPath ? Math.max(1, Math.min(desiredMatches * 5, 100)) : Infinity;
+                rawObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, cap);
+                console.log(
+                    `[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner} via gRPC` +
+                    (useRecentTxPath ? ` (candidateCap=${cap})` : ""),
+                );
+            } else if (useRecentTxPath) {
                 const candidates = await queryRecentBlobObjectCandidates(owner, WALRUS_BLOB_TYPE, desiredMatches);
                 rawObjs = await fetchRawBlobObjects(candidates);
                 console.log(
@@ -215,11 +320,6 @@ export function registerWalrusQueryRoute(app: Express): void {
 
             // Step 2: Fetch metadata for each blob with bounded concurrency
             // to avoid overwhelming Sui RPC and hitting 429 rate limits.
-            const METADATA_FIELD_NAME = {
-                type: "vector<u8>",
-                value: [109, 101, 116, 97, 100, 97, 116, 97], // b"metadata"
-            };
-
             type BlobMeta = {
                 objectId: string;
                 rawBlobId: string | number | null;
@@ -237,28 +337,11 @@ export function registerWalrusQueryRoute(app: Express): void {
                 let blobAgentId = "";
 
                 try {
-                    const dynField = await withRpcRetry(
-                        `[query-blobs] getDynamicField ${obj.objectId}`,
-                        () => suiJsonRpcClient.getDynamicFieldObject({
-                            parentId: obj.objectId,
-                            name: METADATA_FIELD_NAME,
-                        }),
-                    );
-
-                    if (dynField.data?.content && dynField.data.content.dataType === "moveObject") {
-                        const dynFields = (dynField.data.content as any).fields;
-                        // Path: fields.value.fields.metadata.fields.contents[]
-                        const contents = dynFields?.value?.fields?.metadata?.fields?.contents;
-                        if (Array.isArray(contents)) {
-                            for (const entry of contents) {
-                                const key = entry?.fields?.key;
-                                const value = entry?.fields?.value;
-                                if (key === "memwal_namespace") blobNamespace = value;
-                                if (key === "memwal_owner") blobOwner = value;
-                                if (key === "memwal_package_id") blobPackageId = value;
-                                if (key === "memwal_agent_id") blobAgentId = value;
-                            }
-                        }
+                    for (const { key, value } of await fetchBlobMetadataEntries(obj.objectId)) {
+                        if (key === "memwal_namespace") blobNamespace = value;
+                        if (key === "memwal_owner") blobOwner = value;
+                        if (key === "memwal_package_id") blobPackageId = value;
+                        if (key === "memwal_agent_id") blobAgentId = value;
                     }
                 } catch {
                     // No dynamic field = no metadata = use defaults
