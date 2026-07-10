@@ -2,105 +2,148 @@
  * useSponsoredTransaction — Enoki-sponsored transaction hook
  *
  * Drop-in replacement for useSignAndExecuteTransaction from @mysten/dapp-kit.
- * Routes transactions through Enoki sponsor via the sidecar server for gasless UX.
+ * ALL transactions are gaslessly sponsored via Enoki (through the sidecar
+ * server) for BOTH zkLogin and regular-wallet users — nobody is ever asked to
+ * pay their own gas.
  *
- * Flow:
- *   1. Build Transaction as TransactionKind bytes
- *   2. POST to sidecar /sponsor → get { bytes, digest }
- *   3. Sign sponsored bytes with user wallet
- *   4. POST to sidecar /sponsor/execute → get { digest }
+ * There is intentionally NO self-pay fallback. The old fallback re-signed the
+ * transaction with the user's own wallet, which for a gasless zkLogin wallet
+ * (0 SUI) always aborted in the Sui SDK gas resolver with the misleading
+ * "No valid gas coins found for the transaction." — masking the real cause
+ * (network blip, relayer 429/5xx, sponsor dry-run rejection). Instead we retry
+ * the sponsor flow on transient failures and, if it ultimately fails, surface
+ * the real reason.
  *
- * Falls back to direct signAndExecute if sponsor fails.
+ * Flow (per attempt):
+ *   1. Build Transaction as TransactionKind bytes (no gas data)
+ *   2. POST /sponsor → { bytes, digest }
+ *   3. Sign sponsored bytes with the user's wallet
+ *   4. POST /sponsor/execute → { digest }
  */
 
-import { useCurrentAccount, useSignTransaction, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
+import { useCurrentAccount, useSignTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
-import { executeTransactionCompat } from '../utils/suiClientCompat'
+
+const MAX_ATTEMPTS = 3
+const BASE_DELAY_MS = 500
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Transient statuses worth retrying:
+ *   429 rate limit, 500 proxy/transport error (sidecar unreachable),
+ *   503 overloaded, 504 gateway timeout, 408 request timeout.
+ * NOT retried: 502 — the sidecar/Enoki dry-run rejected the transaction
+ * (e.g. a duplicate delegate key or an otherwise invalid tx). Retrying that
+ * just fails again, so we surface it immediately.
+ */
+function isRetryableStatus(status: number): boolean {
+    return status === 408 || status === 429 || status === 500 || status === 503 || status === 504
+}
+
+/** fetch() rejects with a TypeError on network failure / offline / CORS. */
+function isNetworkError(err: unknown): boolean {
+    return err instanceof TypeError
+}
+
+class SponsorHttpError extends Error {
+    readonly stage: 'sponsor' | 'execute'
+    readonly status: number
+    readonly body: string
+    constructor(stage: 'sponsor' | 'execute', status: number, body: string) {
+        super(`Sponsor ${stage} failed (${status})`)
+        this.name = 'SponsorHttpError'
+        this.stage = stage
+        this.status = status
+        this.body = body
+    }
+}
+
+function sponsorFailureMessage(err: unknown): string {
+    if (isNetworkError(err)) {
+        return 'Network error reaching the sponsor service — please check your connection and try again.'
+    }
+    if (err instanceof SponsorHttpError) {
+        if (err.status === 429) return 'Too many requests — please wait a moment and try again.'
+        if (err.status === 502) return 'The transaction was rejected by the sponsor (it may be invalid or already applied). Please refresh and try again.'
+        if (err.status >= 500 || err.status === 503) return 'Sponsor service is temporarily unavailable — please try again in a moment.'
+        return 'Sponsor request was rejected. Please try again.'
+    }
+    return err instanceof Error ? err.message : 'Transaction sponsorship failed. Please try again.'
+}
 
 export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
-    const { mutateAsync: directSignAndExecute } = useSignAndExecuteTransaction({
-        execute: (args) => executeTransactionCompat(suiClient, args),
-    })
 
     const mutateAsync = async ({ transaction }: { transaction: Transaction }): Promise<{ digest: string }> => {
         const sender = currentAccount?.address
         if (!sender) throw new Error('No wallet connected')
 
-        // Track the already-built TransactionKind bytes so the catch block can
-        // rebuild a FRESH Transaction (Transaction.fromKind) instead of reusing
-        // `transaction` itself. `transaction.build({onlyTransactionKind:true})`
-        // resolves/caches the plan with no sender attached (transaction-kind
-        // bytes exclude sender by design); reusing that same already-built
-        // object in directSignAndExecute below does not correctly re-resolve
-        // against the real signer, which silently executed as ENotOwner in
-        // testing (assert! account.owner == ctx.sender() in add_delegate_key)
-        // instead of the connected wallet's actual address.
-        let kindBytes: Uint8Array | undefined
+        // TransactionKind bytes never change across retries — build once.
+        const kindBytes = await transaction.build({
+            client: suiClient,
+            onlyTransactionKind: true,
+        })
+        const kindBase64 = uint8ArrayToBase64(kindBytes)
 
-        try {
-            // 1. Build TransactionKind bytes (without gas data)
-            kindBytes = await transaction.build({
-                client: suiClient,
-                onlyTransactionKind: true,
-            })
-            const kindBase64 = uint8ArrayToBase64(kindBytes)
+        let lastError: unknown
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                // 1. Sponsor via server (proxied to sidecar → Enoki)
+                const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        transactionBlockKindBytes: kindBase64,
+                        sender,
+                    }),
+                })
+                if (!sponsorRes.ok) {
+                    throw new SponsorHttpError('sponsor', sponsorRes.status, await sponsorRes.text())
+                }
+                const sponsored = await sponsorRes.json()
+                // sponsored = { bytes: base64, digest: string }
 
-            // 2. Sponsor via server (proxied to sidecar)
-            const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    transactionBlockKindBytes: kindBase64,
-                    sender,
-                }),
-            })
+                // 2. Sign sponsored bytes with user wallet
+                //    (silent for zkLogin; wallet prompt for extension wallets)
+                const sponsoredTx = Transaction.from(sponsored.bytes)
+                const { signature } = await signTransaction({ transaction: sponsoredTx })
 
-            if (!sponsorRes.ok) {
-                const errText = await sponsorRes.text()
-                throw new Error(`Sponsor failed (${sponsorRes.status}): ${errText}`)
+                // 3. Execute via server (proxied to sidecar → Enoki)
+                const execRes = await fetch(`${config.memwalServerUrl}/sponsor/execute`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        digest: sponsored.digest,
+                        signature,
+                    }),
+                })
+                if (!execRes.ok) {
+                    throw new SponsorHttpError('execute', execRes.status, await execRes.text())
+                }
+
+                const result = await execRes.json()
+                console.log(`[sponsored-tx] success, digest=${result.digest}`)
+                return { digest: result.digest }
+            } catch (err) {
+                lastError = err
+                const retryable = err instanceof SponsorHttpError
+                    ? isRetryableStatus(err.status)
+                    : isNetworkError(err)
+                if (!retryable || attempt === MAX_ATTEMPTS) break
+                console.warn(`[sponsored-tx] attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying:`, err)
+                await sleep(BASE_DELAY_MS * 2 ** (attempt - 1))
             }
-
-            const sponsored = await sponsorRes.json()
-            // sponsored = { bytes: base64, digest: string }
-
-            // 3. Sign sponsored bytes with user wallet
-            const sponsoredTx = Transaction.from(sponsored.bytes)
-            const { signature } = await signTransaction({ transaction: sponsoredTx })
-
-            // 4. Execute via server (proxied to sidecar)
-            const execRes = await fetch(`${config.memwalServerUrl}/sponsor/execute`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    digest: sponsored.digest,
-                    signature,
-                }),
-            })
-
-            if (!execRes.ok) {
-                const errText = await execRes.text()
-                throw new Error(`Sponsored execute failed (${execRes.status}): ${errText}`)
-            }
-
-            const result = await execRes.json()
-            console.log(`[sponsored-tx] success, digest=${result.digest}`)
-            return { digest: result.digest }
-        } catch (err) {
-            // Fallback: try direct signing if sponsor fails.
-            // Rebuild a fresh Transaction from the TransactionKind bytes (if we
-            // got that far) instead of reusing the original `transaction` — it
-            // was already built with onlyTransactionKind:true (no sender), and
-            // reusing that resolved/cached plan here does not correctly
-            // re-resolve ownership against the actual connected signer.
-            console.warn('[sponsored-tx] sponsor failed, falling back to direct signing:', err)
-            const fallbackTx = kindBytes ? Transaction.fromKind(kindBytes) : transaction
-            const result = await directSignAndExecute({ transaction: fallbackTx })
-            return { digest: result.digest }
         }
+
+        // Sponsorship failed after retries. Do NOT self-pay — every user is
+        // meant to be gaslessly sponsored — so surface the real cause instead
+        // of masking it as "No valid gas coins".
+        console.error('[sponsored-tx] sponsorship failed after retries:', lastError)
+        throw new Error(sponsorFailureMessage(lastError))
     }
 
     return { mutateAsync }

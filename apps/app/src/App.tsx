@@ -45,9 +45,10 @@ const { networkConfig } = createNetworkConfig({
 // sidecar's SUI_GRPC_URL migration (services/server/scripts/sidecar/config.ts)
 // for the same JSON-RPC sunset (2026-07-31; testnet's public JSON-RPC endpoint
 // already returns 404 today). Empty keeps the existing JSON-RPC client
-// unchanged. Every useSuiClient() consumer (account lookups, tx build,
-// sign+execute) must handle both client shapes — see utils/suiClientCompat.ts
-// and useSponsoredTransaction.ts's executeTransactionCompat.
+// unchanged. Every useSuiClient() consumer (account lookups, tx build) must
+// handle both client shapes — see utils/suiClientCompat.ts. Execution happens
+// server-side via the sponsor sidecar (useSponsoredTransaction.ts), so no
+// client-side execute compat is needed.
 function createClientForNetwork(name: string, cfg: any) {
   if (name === config.suiNetwork && config.suiGrpcUrl) {
     return new SuiGrpcClient({ network: name, baseUrl: config.suiGrpcUrl }) as unknown as SuiJsonRpcClient

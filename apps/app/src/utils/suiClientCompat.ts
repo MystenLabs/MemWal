@@ -94,29 +94,3 @@ export function publicKeyToHex(publicKey: unknown): string {
     console.warn('[suiClientCompat] unrecognized public_key encoding', typeof publicKey)
     return ''
 }
-
-/**
- * Execute a signed transaction, regardless of client transport. dapp-kit's
- * default useSignAndExecuteTransaction execute step calls the JSON-RPC-only
- * client.executeTransactionBlock(); gRPC's core API only has
- * executeTransaction(), with a {Transaction:{digest}} | {FailedTransaction:
- * {digest}} union response instead of a flat one.
- */
-export async function executeTransactionCompat(
-    client: unknown,
-    { bytes, signature }: { bytes: string; signature: string },
-): Promise<{ digest: string; rawEffects?: number[] }> {
-    if (!isGrpcClient(client)) {
-        const res = await (client as any).executeTransactionBlock({
-            transactionBlock: bytes,
-            signature,
-            options: { showRawEffects: true },
-        })
-        return { digest: res.digest, rawEffects: res.rawEffects }
-    }
-
-    const res = await (client as any).executeTransaction({ transaction: fromBase64(bytes), signatures: [signature] })
-    const digest = res?.Transaction?.digest ?? res?.FailedTransaction?.digest
-    if (!digest) throw new Error('executeTransaction: could not resolve digest from result')
-    return { digest }
-}
