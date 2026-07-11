@@ -7,6 +7,7 @@ import express, { type Express } from "express";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import {
+    isSuiObjectNotYetVisible,
     isWalrusBlobObjectMissingFromEffects,
     isWalrusPackageVersionMismatch,
     isWalrusReferencedObjectStale,
@@ -18,6 +19,8 @@ import {
     ENOKI_FALLBACK_TO_DIRECT_SIGN,
     SERVER_SUI_PRIVATE_KEYS,
     WALRUS_DEP_VERSION,
+    WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS,
+    WALRUS_TX_WAIT_TIMEOUT_MS,
     WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS,
     JSON_LIMIT_WALRUS_UPLOAD,
 } from "../config.js";
@@ -82,6 +85,41 @@ async function uploadWalrusBlobWithEffectsRetry(
                 registerDigest,
                 message: truncateForLog(message),
             })}`);
+            await sleep(retryDelayMs);
+        }
+    }
+}
+
+async function getBlobWithVisibilityRetry(
+    flow: any,
+    walrusClient: { reset(): void },
+    context: {
+        traceId: string;
+        jobId?: string | null;
+        keyIndex: number;
+    },
+): Promise<any> {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            return await flow.getBlob();
+        } catch (err: unknown) {
+            const message = errorMessage(err);
+            const retryDelayMs = WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS[attempt - 1];
+            if (!retryDelayMs || !isSuiObjectNotYetVisible(message)) {
+                throw err;
+            }
+
+            console.warn(`[walrus/upload] [${context.traceId}] get_blob_retry ${JSON.stringify({
+                jobId: context.jobId,
+                keyIndex: context.keyIndex,
+                attempt,
+                nextAttempt: attempt + 1,
+                retryDelayMs,
+                message: truncateForLog(message),
+            })}`);
+            // The client's object loader caches per-key rejections; reset so
+            // the retry re-reads the (by now visible) blob object.
+            walrusClient.reset();
             await sleep(retryDelayMs);
         }
     }
@@ -207,7 +245,11 @@ export function registerWalrusUploadRoute(app: Express): void {
             })}`);
 
             phase = "encode";
-            const flow = getWalrusClient().writeBlobFlow({ blob: blobData });
+            // Capture the instance the flow closes over: a later
+            // refreshWalrusClient() swaps getWalrusClient()'s return, and
+            // get_blob retries must reset THIS client's object-loader cache.
+            const walrusClient = getWalrusClient();
+            const flow = walrusClient.writeBlobFlow({ blob: blobData });
             await flow.encode();
 
             phase = "register_build";
@@ -249,7 +291,10 @@ export function registerWalrusUploadRoute(app: Express): void {
             );
             await timedPhase(
                 "register_wait",
-                () => suiClient.waitForTransaction({ digest: registerDigest }),
+                () => suiClient.waitForTransaction({
+                    digest: registerDigest,
+                    timeout: WALRUS_TX_WAIT_TIMEOUT_MS,
+                }),
                 () => ({ digest: registerDigest }),
             );
 
@@ -277,11 +322,21 @@ export function registerWalrusUploadRoute(app: Express): void {
             );
             await timedPhase(
                 "certify_wait",
-                () => suiClient.waitForTransaction({ digest: certifyDigest }),
+                () => suiClient.waitForTransaction({
+                    digest: certifyDigest,
+                    timeout: WALRUS_TX_WAIT_TIMEOUT_MS,
+                }),
                 () => ({ digest: certifyDigest }),
             );
 
-            const blob = await timedPhase("get_blob", () => flow.getBlob());
+            const blob = await timedPhase(
+                "get_blob",
+                () => getBlobWithVisibilityRetry(
+                    flow,
+                    walrusClient,
+                    { traceId, jobId: jobIdForLog, keyIndex: keySlot },
+                ),
+            );
 
             const blobObjectId = extractBlobObjectId(blob);
 

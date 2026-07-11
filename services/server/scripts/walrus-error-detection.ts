@@ -41,6 +41,22 @@ export function isWalrusReferencedObjectStale(message: string): boolean {
         && /at version/i.test(message);
 }
 
+/**
+ * Detect a read/simulation failure caused by an object that exists on-chain
+ * but is not yet visible to the serving node — read-after-write lag on the
+ * load-balanced public fullnode. Covers both transports:
+ *   - gRPC:      "Object 0x… not found"      (SimulateTransaction / GetObject)
+ *   - JSON-RPC:  "Object 0x… does not exist" (ObjectError notExists)
+ *
+ * Only retry on this when the caller KNOWS the object was just created by its
+ * own earlier transaction (register → certify / get_blob); for arbitrary
+ * object ids the same message can mean the object genuinely never existed.
+ */
+export function isSuiObjectNotYetVisible(message: string): boolean {
+    if (!message) return false;
+    return /object 0x[0-9a-f]{1,64} (not found|does not exist)/i.test(message);
+}
+
 export type EnokiSponsoredTransactionInvalidation = "expired" | "referenced_object_stale";
 
 export function isEnokiSponsoredTransactionExpired(message: string): boolean {

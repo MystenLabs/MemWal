@@ -12,6 +12,7 @@ import {
     SEAL_SERVER_CONFIGS,
     SEAL_THRESHOLD,
     SERVER_SUI_PRIVATE_KEYS,
+    SUI_GRPC_URL,
     SUI_NETWORK,
     WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
     WALRUS_UPLOAD_MAX_CONCURRENCY,
@@ -72,6 +73,11 @@ export function sidecarStateSnapshot(): Record<string, unknown> {
         sealThreshold: SEAL_THRESHOLD,
         sealKeyServerTimeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,
         suiNetwork: SUI_NETWORK,
+        // Which transport the shared write-path suiClient runs on (clients.ts):
+        // set SUI_GRPC_URL -> gRPC, empty -> JSON-RPC. Surfaced here because
+        // nothing else in the logs distinguishes the two.
+        suiTransport: SUI_GRPC_URL ? "grpc" : "jsonrpc",
+        suiGrpcUrl: SUI_GRPC_URL || null,
         enokiNetwork: ENOKI_NETWORK,
         enokiEnabled: !!ENOKI_API_KEY,
         fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,

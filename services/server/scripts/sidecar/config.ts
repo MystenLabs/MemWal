@@ -182,6 +182,13 @@ export const WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS = parsePositiveIntEnv(
     180_000,
 );
 export const WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 40_000] as const;
+// Retry schedule for reads/simulations of an object our own register tx just
+// created but the serving fullnode can't see yet (public-pool read-after-write
+// lag was measured at 40-70s under gRPC). Total grace ≈ 77s.
+export const WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 40_000] as const;
+// waitForTransaction defaults to 60s, which sits inside the same 40-70s lag
+// window — a wait that would succeed at 65s burns a whole upload attempt.
+export const WALRUS_TX_WAIT_TIMEOUT_MS = 120_000;
 
 // ============================================================
 // Enoki sponsorship

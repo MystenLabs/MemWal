@@ -10,6 +10,7 @@ import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import type { Transaction } from "@mysten/sui/transactions";
 import {
     classifyEnokiSponsoredTransactionInvalidation,
+    isSuiObjectNotYetVisible,
     isWalrusObjectLockEquivocation,
 } from "../walrus-error-detection.js";
 import {
@@ -17,6 +18,7 @@ import {
     ENOKI_INVALIDATED_MAX_ATTEMPTS,
     ENOKI_INVALIDATED_MAX_DELAY_MS,
     SUI_TYPE,
+    WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS,
 } from "./config.js";
 import { executeWithEnokiSponsor } from "./enoki.js";
 import { sidecarMetrics } from "./state.js";
@@ -119,18 +121,31 @@ export async function submitRebuildableWalletTransaction(
             return await submitWalletTransaction(buildTransaction(), signer, allowedAddresses);
         } catch (err: unknown) {
             const message = errorMessage(err);
-            const reason = classifyEnokiSponsoredTransactionInvalidation(message);
-            const retryDelayMs = getEnokiInvalidatedRetryDelayMs(attempt);
-            if (!reason || retryDelayMs === null) {
+            const enokiReason = classifyEnokiSponsoredTransactionInvalidation(message);
+            // A rebuilt tx re-simulates from scratch, so "our just-registered
+            // object isn't visible to the fullnode yet" heals on the same
+            // rebuild path — but on its own (longer) schedule, since the
+            // public pool was measured lagging reads by 40-70s.
+            const objectNotYetVisible = !enokiReason && isSuiObjectNotYetVisible(message);
+            const retryDelayMs = enokiReason
+                ? getEnokiInvalidatedRetryDelayMs(attempt)
+                : objectNotYetVisible
+                    ? WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS[attempt - 1] ?? null
+                    : null;
+            if (retryDelayMs === null) {
                 throw err;
             }
+            const reason = enokiReason ?? "object_not_yet_visible";
+            const maxAttempts = enokiReason
+                ? ENOKI_INVALIDATED_MAX_ATTEMPTS
+                : WALRUS_OBJECT_VISIBILITY_RETRY_DELAYS_MS.length + 1;
 
             console.warn(`[enoki-sponsor] rebuildable_retry ${JSON.stringify({
                 phase: phaseName,
                 ...logContext,
                 attempt,
                 nextAttempt: attempt + 1,
-                maxAttempts: ENOKI_INVALIDATED_MAX_ATTEMPTS,
+                maxAttempts,
                 retryDelayMs,
                 reason,
                 message: truncateForLog(message),
