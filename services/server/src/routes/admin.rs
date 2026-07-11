@@ -121,11 +121,19 @@ pub async fn memory_blob_ids(
 /// sponsored transaction IS the ownership proof, and the owner is read
 /// from the executed transaction on-chain — never from the request. The
 /// blob-id list is client-supplied and NOT cross-checked against the
-/// transaction's deleted objects — a dishonest caller can only desync
-/// rows of the wallet that signed (same blast radius as deleting your own
-/// data), and `cleanup_expired_blob` self-heals any drift on the next
-/// recall. Sponsored digests are single-use upstream, so a replayed call
-/// fails at execute and never reaches the row delete.
+/// transaction's deleted objects, so a dishonest caller could otherwise
+/// pass blob ids the transaction never touched. Two things bound that:
+///   1. the owner is the executed tx's on-chain sender, so the row-delete
+///      can only ever hit the wallet that signed; and
+///   2. the digest is claimed single-use in the DB (`claim_delete_digest`)
+///      before any row-delete, so a REPLAY of another wallet's public
+///      {digest, signature} with an attacker-chosen blob-id list is
+///      rejected here even if the upstream execute returns success for an
+///      already-consumed digest.
+/// A signer passing extra blob ids of their OWN is the only remaining
+/// desync, bounded to self-harm; those rows point at blobs the tx really
+/// deleted, so recall hits a Walrus 404 and `cleanup_expired_blob` heals
+/// the drift.
 ///
 /// Gated by `ENABLE_MEMORY_DELETION` (off by default) until rollout is
 /// agreed — the route answers 404 when disabled.
@@ -172,6 +180,21 @@ pub async fn delete_memories(
     let owner = tx_sender.ok_or_else(|| {
         AppError::Internal("sponsored execute did not report a sender".into())
     })?;
+
+    // Replay guard: claim the digest single-use before deleting any rows.
+    // Runs AFTER execute (so a first-time caller is never blocked by a
+    // transient execute failure) but BEFORE the row-delete, so a replayed
+    // {digest, signature} — both public on-chain — cannot desync the
+    // signer's index with an attacker-chosen blob-id list.
+    if !state.db.claim_delete_digest(&body.digest, &owner).await? {
+        tracing::warn!(
+            "delete-memories: digest already processed for owner={}, refusing replay",
+            owner
+        );
+        return Err(AppError::BadRequest(
+            "This deletion has already been processed".into(),
+        ));
+    }
 
     let deleted_rows = state.db.delete_by_blob_ids(&body.blob_ids, &owner).await?;
 

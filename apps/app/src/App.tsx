@@ -276,7 +276,6 @@ function AppContent() {
   }
 
   return (
-    <>
     <Routes>
       <Route path="/" element={
         authPending ? <RoutePending /> :
@@ -292,7 +291,6 @@ function AppContent() {
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-    </>
   )
 }
 

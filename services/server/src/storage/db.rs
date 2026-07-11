@@ -90,6 +90,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        // single-use ledger for /api/delete-memories (replay guard).
+        let migration_010 = include_str!("../../migrations/010_processed_delete_digests.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -464,6 +471,30 @@ impl VectorDb {
             started.elapsed(),
         );
         Ok(result?.rows_affected())
+    }
+
+    /// Claim a delete digest exactly once (WALM-264 replay guard).
+    /// Returns `true` if this call inserted the digest (first use), `false`
+    /// if it was already claimed — the caller must NOT delete rows on `false`.
+    /// The PRIMARY KEY + `ON CONFLICT DO NOTHING` makes the check-and-claim
+    /// atomic across concurrent callers, so exactly one wins the race.
+    pub async fn claim_delete_digest(&self, digest: &str, owner: &str) -> Result<bool, AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO processed_delete_digests (digest, owner) VALUES ($1, $2) \
+             ON CONFLICT (digest) DO NOTHING",
+        )
+        .bind(digest)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to claim delete digest: {}", e)));
+        crate::observability::observe_db(
+            "delete_digest.claim",
+            db_status(&result),
+            started.elapsed(),
+        );
+        Ok(result?.rows_affected() == 1)
     }
 
     // ============================================================
