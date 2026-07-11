@@ -43,12 +43,12 @@ export const config = {
     // protocol package defaults still intentionally use suiNetwork above.
     suiClientNetwork: localE2eJsonRpc ? 'localnet' as const :
         (import.meta.env.VITE_SUI_NETWORK as 'testnet' | 'mainnet' || 'testnet'),
-    // JSON-RPC exists only for the local devstack browser suite. Real
-    // testnet/mainnet builds must use the gRPC endpoint below.
+    // JSON-RPC endpoint override for the app's shared Sui client. For a real
+    // network it applies only to the active network; the local browser suite
+    // also uses it for its explicit localnet escape hatch.
     suiRpcUrl: import.meta.env.VITE_SUI_RPC_URL as string || '',
     localE2eJsonRpc,
-    // Required gRPC endpoint for real networks. Client construction fails
-    // closed when this is absent; there is no JSON-RPC fallback.
+    // gRPC endpoint used by the security-delete subsystem's dedicated client.
     suiGrpcUrl: import.meta.env.VITE_SUI_GRPC_URL as string || '',
     sealKeyServers,
     // Same cutover rationale as legacyMemwalPackageId: legacy blobs were
