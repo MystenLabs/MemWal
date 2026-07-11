@@ -18,7 +18,11 @@ import {
     sharedSecretAuthMiddleware,
     stripCorsMiddleware,
 } from "./middleware.js";
-import { registerHealthRoute, registerWalletMetricsRoute } from "./routes/health.js";
+import {
+    registerHealthRoute,
+    registerWalletMetricsRoute,
+    registerWhoamiRoute,
+} from "./routes/health.js";
 import { registerSealRoutes } from "./routes/seal.js";
 import { registerSponsorRoutes } from "./routes/sponsor.js";
 import { registerWalrusMetadataRoutes } from "./routes/walrus-metadata.js";
@@ -49,6 +53,9 @@ export function createSidecarApp(): Express {
     registerWalletMetricsRoute(app);
 
     app.use(sharedSecretAuthMiddleware);
+
+    // Identity probe sits behind the shared secret on purpose — see its doc.
+    registerWhoamiRoute(app);
 
     registerSealRoutes(app);
     registerWalrusUploadRoute(app);

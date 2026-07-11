@@ -209,6 +209,33 @@ async fn main() {
     // Start TS sidecar HTTP server (SEAL + Walrus operations)
     let sidecar_url = config.sidecar_url.clone();
     tracing::info!("  sidecar: starting at {}", sidecar_url);
+    // Preflight: nothing may be listening on the sidecar address yet — ours
+    // hasn't been spawned, so any listener is a foreign sidecar (typically
+    // another checkout on the same port) that would swallow our health checks
+    // and 401 every real call. Failing here beats spawning a sidecar that
+    // loses the bind race.
+    if let Ok(parsed) = reqwest::Url::parse(&sidecar_url) {
+        if let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) {
+            let addr = format!("{host}:{port}");
+            let occupied = std::net::ToSocketAddrs::to_socket_addrs(&addr)
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .is_some_and(|sock_addr| {
+                    std::net::TcpStream::connect_timeout(
+                        &sock_addr,
+                        std::time::Duration::from_millis(300),
+                    )
+                    .is_ok()
+                });
+            if occupied {
+                panic!(
+                    "something is already listening on {addr} before the sidecar was spawned — \
+                     a foreign sidecar (another checkout?) owns the port. \
+                     Free it (pkill -f sidecar-server.ts) and restart."
+                );
+            }
+        }
+    }
     // Use SIDECAR_SCRIPTS_DIR if set (Docker), otherwise derive from CARGO_MANIFEST_DIR (local dev)
     let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
         .map(std::path::PathBuf::from)
@@ -252,6 +279,38 @@ async fn main() {
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
     }
 
+    // /health is unauthenticated, so a foreign sidecar (another checkout
+    // holding our port after ours lost the bind race) passes the readiness
+    // loop and then 401s every real call ("seal encrypt failed:
+    // Unauthorized"). Verify the process we are about to trust actually
+    // shares our SIDECAR_AUTH_TOKEN before serving traffic.
+    if let Some(token) = config.sidecar_secret.as_deref() {
+        let whoami_url = format!("{}/internal/whoami", sidecar_url);
+        match http_client.get(&whoami_url).bearer_auth(token).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("  sidecar: identity verified (token accepted)");
+            }
+            Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                sidecar_child.kill().await.ok();
+                panic!(
+                    "sidecar at {sidecar_url} rejected our SIDECAR_AUTH_TOKEN — a foreign \
+                     sidecar (another checkout?) likely owns the port while ours failed to \
+                     bind. Free the port (pkill -f sidecar-server.ts) and restart."
+                );
+            }
+            Ok(resp) => {
+                // e.g. 404 from an older sidecar build without the probe.
+                tracing::warn!(
+                    "  sidecar: identity probe returned {}; skipping the check",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("  sidecar: identity probe failed ({e}); skipping the check");
+            }
+        }
+    }
+
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
     // Enoki/Walrus failures from the sidecar process becoming unavailable.
     // If the sidecar remains unhealthy, exit the relayer so Railway restarts
@@ -266,19 +325,29 @@ async fn main() {
         sidecar_watch_max_failures
     );
     let sidecar_watch_client = http_client.clone();
-    let sidecar_watch_url = health_url.clone();
+    // Watch the authenticated identity probe when a token is configured: if a
+    // foreign sidecar takes over our port mid-run (observed when a second
+    // checkout starts on the same ports), /health keeps passing while every
+    // real call 401s — the probe turns that into visible watchdog failures.
+    let sidecar_watch_token = config.sidecar_secret.clone();
+    let sidecar_watch_url = if sidecar_watch_token.is_some() {
+        format!("{}/internal/whoami", sidecar_url)
+    } else {
+        health_url.clone()
+    };
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
         let mut consecutive_failures = 0u32;
         loop {
             interval.tick().await;
-            match sidecar_watch_client
+            let mut watch_request = sidecar_watch_client
                 .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
-                .send()
-                .await
-            {
+                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs));
+            if let Some(token) = sidecar_watch_token.as_deref() {
+                watch_request = watch_request.bearer_auth(token);
+            }
+            match watch_request.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     if consecutive_failures > 0 {
                         tracing::info!(

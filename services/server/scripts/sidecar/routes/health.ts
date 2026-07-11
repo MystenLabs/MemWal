@@ -22,6 +22,7 @@ export function registerHealthRoute(app: Express): void {
         const uploads = getUploadCounts();
         res.json({
             status: "ok",
+            pid: process.pid,
             uptimeMs: Date.now() - sidecarStartedAtMs,
             activeWalrusUploads: uploads.active,
             queuedWalrusUploads: uploads.queued,
@@ -49,6 +50,21 @@ export function registerWalletMetricsRoute(app: Express): void {
             ...sidecarMetrics,
             enokiEnabled: !!ENOKI_API_KEY,
             suiNetwork: SUI_NETWORK,
+        });
+    });
+}
+
+// Authenticated identity probe — registered AFTER the shared-secret
+// middleware (see app.ts). A foreign sidecar (another checkout running on
+// the same port) answers /health fine but rejects our SIDECAR_AUTH_TOKEN
+// here with 401, so the relayer can detect the cross-wiring at boot and in
+// the watchdog instead of surfacing it as "seal encrypt failed: Unauthorized"
+// on the first user request.
+export function registerWhoamiRoute(app: Express): void {
+    app.get("/internal/whoami", (_req: Request, res: ExpressResponse) => {
+        res.json({
+            pid: process.pid,
+            startedAtMs: sidecarStartedAtMs,
         });
     });
 }

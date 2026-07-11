@@ -311,8 +311,11 @@ impl Config {
                 .expect("MEMWAL_PACKAGE_ID must be set"),
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
+            // 127.0.0.1 (not localhost): the sidecar binds the IPv4 loopback
+            // explicitly, and resolving localhost can prefer ::1 — landing
+            // our requests on whatever foreign process holds the IPv6 side.
             sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
