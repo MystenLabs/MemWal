@@ -5,15 +5,16 @@
  * One button deletes ALL deletable blobs — no per-blob picking, and no
  * delegate-key session (plan T1: the wallet signature over the sponsored
  * transaction IS the ownership proof). The user only signs: the app builds
- * each PTB (batched), sponsors it via POST /sponsor (Enoki), then hands
+ * each PTB (batched), sponsors it via POST /sponsor-delete (Enoki; the
+ * rate-limit-exempt delete-only path), then hands
  * {digest, signature, blobIds} to POST /api/delete-memories — the backend
  * submits on-chain, verifies success and the sender, and deletes that
  * sender's matching DB rows in the same call, so chain and index never
  * drift.
  *
- * Deletion is permanent: never recoverable, never migrated. The warning
- * and confirm dialog say so in plain words — per WALM-264 that messaging
- * is the one thing that must be right.
+ * Deletion is permanent: never recoverable, never migrated. The confirm
+ * dialog says so in plain words — per WALM-264 that messaging is the one
+ * thing that must be right.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -33,10 +34,10 @@ import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 
 /**
  * The binding limit is NOT Sui's 1024-command PTB cap but the relayer's
- * /sponsor gates: 7000 bytes of TransactionKind (sponsor.rs) under a 10 KiB
- * JSON body (main.rs). Each delete costs ~135 bytes of kind BCS, so ~50 is
- * the ceiling — 40 leaves headroom. (To test the multi-batch flow with a
- * small wallet, temporarily set this to 1.)
+ * /sponsor-delete gates: 7000 bytes of TransactionKind (sponsor.rs) under a
+ * 10 KiB JSON body (main.rs). Each delete costs ~135 bytes of kind BCS, so
+ * ~50 is the ceiling — 40 leaves headroom. (To test the multi-batch flow
+ * with a small wallet, temporarily set this to 1.)
  */
 const DELETE_BATCH_SIZE = 40
 
@@ -132,7 +133,10 @@ export default function CleanupSection() {
                 const kindBytes = await tx.build({ client: suiClient, onlyTransactionKind: true })
 
                 // Sponsor (Enoki) — gas is covered; the user only signs.
-                const sponsored = await sponsorTransactionKind(kindBytes, address)
+                // deleteFlow routes via /sponsor-delete: no sponsor rate
+                // limit (a big run's batches would trip the normal caps),
+                // in exchange the sidecar verifies the PTB is delete-only.
+                const sponsored = await sponsorTransactionKind(kindBytes, address, { deleteFlow: true })
 
                 const { signature } = await signTransaction({
                     transaction: Transaction.from(sponsored.bytes),
@@ -211,12 +215,6 @@ export default function CleanupSection() {
                 </div>
             }
         >
-            <div className="dashboard-cleanup-warning">
-                Deleting is <strong>permanent</strong>: a deleted memory is erased from Walrus and
-                from your memory index. It can never be recovered, and it will never be migrated
-                anywhere. Only delete your old memories if you are sure you no longer want them.
-            </div>
-
             {error && (
                 <div className="dashboard-cleanup-error" role="alert">
                     {error}

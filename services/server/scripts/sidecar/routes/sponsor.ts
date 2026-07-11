@@ -6,10 +6,11 @@
  */
 
 import express, { type Express } from "express";
-import { suiClient } from "../clients.js";
+import { getWalrusClient, suiClient } from "../clients.js";
 import { ENOKI_API_KEY, ENOKI_NETWORK, JSON_LIMIT_METADATA } from "../config.js";
 import { callEnoki, type EnokiExecuteResponse, type EnokiSponsorResponse } from "../enoki.js";
 import { requestIdFor, sidecarLog } from "../log.js";
+import { verifyDeleteOnlyKind } from "../sponsor-delete-verify.js";
 import { errorMessage } from "../util.js";
 
 /**
@@ -54,12 +55,24 @@ async function verifyExecutedTransaction(
 export function registerSponsorRoutes(app: Express): void {
     app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
         try {
-            const { transactionBlockKindBytes, sender } = req.body;
+            const { transactionBlockKindBytes, sender, deleteOnly } = req.body;
             if (!transactionBlockKindBytes || !sender) {
                 return res.status(400).json({ error: "Missing required fields: transactionBlockKindBytes, sender" });
             }
             if (!ENOKI_API_KEY) {
                 return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
+            }
+
+            // WALM-264: deleteOnly marks a request from the Rust server's
+            // rate-limit-exempt /sponsor-delete route — refuse to sponsor
+            // anything that isn't strictly a cleanup transaction, otherwise
+            // the exemption would be a free bypass for arbitrary sponsoring.
+            if (deleteOnly === true) {
+                const { package_id } = await getWalrusClient().systemObject();
+                const rejection = verifyDeleteOnlyKind(transactionBlockKindBytes, sender, package_id);
+                if (rejection !== null) {
+                    return res.status(400).json({ error: `deleteOnly verification failed: ${rejection}` });
+                }
             }
 
             // Redact full sender address (PII / deanonymisation) — log only

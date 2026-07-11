@@ -161,13 +161,10 @@ pub(super) async fn execute_sponsored_tx(
     }
 }
 
-/// POST /sponsor — proxy to sidecar POST /sponsor
-pub async fn sponsor_proxy(
-    State(state): State<Arc<AppState>>,
-    body: axum::body::Bytes,
-) -> Result<Response<Body>, AppError> {
-    // Parse and validate — never echo back client-supplied values in errors.
-    let req: SponsorRequest = serde_json::from_slice(&body)
+/// Parse and validate a /sponsor-shaped body (shared by `/sponsor` and
+/// `/sponsor-delete`) — never echo back client-supplied values in errors.
+fn parse_sponsor_request(body: &[u8]) -> Result<SponsorRequest, AppError> {
+    let req: SponsorRequest = serde_json::from_slice(body)
         .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
 
     if !validate_sui_address(&req.sender) {
@@ -183,57 +180,26 @@ pub async fn sponsor_proxy(
         ));
     }
 
-    // Per-sender rate limit — second axis that a distributed IP attack cannot bypass.
-    // Runs after validation so we only count well-formed requests against the sender.
-    {
-        let config = &state.config.sponsor_rate_limit;
-        match rate_limit::check_sender_rate_limit(
-            &state,
-            &req.sender,
-            config.per_minute,
-            config.per_hour,
-        )
-        .await
-        {
-            Ok(rate_limit::SponsorRlResult::MinuteLimitExceeded) => {
-                tracing::warn!(
-                    "sponsor rate limit [sender/min]: sender={}...",
-                    &req.sender[..16]
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::TOO_MANY_REQUESTS,
-                    "Rate limit exceeded",
-                ));
-            }
-            Ok(rate_limit::SponsorRlResult::HourLimitExceeded) => {
-                tracing::warn!(
-                    "sponsor rate limit [sender/hr]: sender={}...",
-                    &req.sender[..16]
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::TOO_MANY_REQUESTS,
-                    "Rate limit exceeded",
-                ));
-            }
-            Ok(rate_limit::SponsorRlResult::Allowed) => {}
-            Err(_) => {
-                // Redis and in-memory fallback both unavailable — deny to fail-closed.
-                tracing::error!(
-                    "sponsor sender rate limit unavailable for sponsor_proxy, denying request"
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "Rate limiter temporarily unavailable",
-                ));
-            }
-        }
-    }
+    Ok(req)
+}
 
+/// Forward a validated sponsor request to the sidecar's POST /sponsor.
+/// `delete_only: true` (the `/sponsor-delete` path) tells the sidecar to
+/// verify the kind is strictly a WALM-264 delete-blob cleanup before
+/// sponsoring — the check that makes that path's rate-limit exemption safe.
+async fn forward_sponsor(
+    state: &AppState,
+    req: &SponsorRequest,
+    delete_only: bool,
+) -> Result<Response<Body>, AppError> {
     // Re-serialise only validated fields before forwarding.
-    let forwarded = serde_json::json!({
+    let mut forwarded = serde_json::json!({
         "sender": req.sender,
         "transactionBlockKindBytes": req.transaction_block_kind_bytes,
     });
+    if delete_only {
+        forwarded["deleteOnly"] = serde_json::json!(true);
+    }
 
     let url = format!("{}/sponsor", state.config.sidecar_url);
     let mut req = state
@@ -281,6 +247,87 @@ pub async fn sponsor_proxy(
         let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
         Ok(json_error_response(masked_status, masked_msg))
     }
+}
+
+/// POST /sponsor — proxy to sidecar POST /sponsor
+pub async fn sponsor_proxy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Response<Body>, AppError> {
+    let req = parse_sponsor_request(&body)?;
+
+    // Per-sender rate limit — second axis that a distributed IP attack cannot bypass.
+    // Runs after validation so we only count well-formed requests against the sender.
+    {
+        let config = &state.config.sponsor_rate_limit;
+        match rate_limit::check_sender_rate_limit(
+            &state,
+            &req.sender,
+            config.per_minute,
+            config.per_hour,
+        )
+        .await
+        {
+            Ok(rate_limit::SponsorRlResult::MinuteLimitExceeded) => {
+                tracing::warn!(
+                    "sponsor rate limit [sender/min]: sender={}...",
+                    &req.sender[..16]
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "Rate limit exceeded",
+                ));
+            }
+            Ok(rate_limit::SponsorRlResult::HourLimitExceeded) => {
+                tracing::warn!(
+                    "sponsor rate limit [sender/hr]: sender={}...",
+                    &req.sender[..16]
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "Rate limit exceeded",
+                ));
+            }
+            Ok(rate_limit::SponsorRlResult::Allowed) => {}
+            Err(_) => {
+                // Redis and in-memory fallback both unavailable — deny to fail-closed.
+                tracing::error!(
+                    "sponsor sender rate limit unavailable for sponsor_proxy, denying request"
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Rate limiter temporarily unavailable",
+                ));
+            }
+        }
+    }
+
+    forward_sponsor(&state, &req, false).await
+}
+
+/// POST /sponsor-delete — sponsor a WALM-264 delete-blob cleanup transaction.
+///
+/// Deliberately NO sponsor rate limit on this path (neither the per-IP
+/// middleware — see the router split in main.rs — nor the per-sender
+/// bucket): a delete-all run sponsors one transaction per 40-blob batch,
+/// so a wallet with hundreds of old memories would trip the 10/min caps
+/// mid-run and strand the cleanup. The exemption cannot be abused for
+/// arbitrary sponsoring: the sidecar refuses to sponsor a `deleteOnly`
+/// request whose kind is anything but walrus `system::delete_blob` calls
+/// plus a transfer of the reclaimed Storage back to the sender.
+///
+/// Gated by `ENABLE_MEMORY_DELETION` (404 when off), same as the other
+/// WALM-264 routes.
+pub async fn sponsor_delete_proxy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Response<Body>, AppError> {
+    if !state.config.enable_memory_deletion {
+        return Err(AppError::BlobNotFound("Not found".into()));
+    }
+
+    let req = parse_sponsor_request(&body)?;
+    forward_sponsor(&state, &req, true).await
 }
 
 /// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute

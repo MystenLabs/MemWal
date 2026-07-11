@@ -15,11 +15,24 @@ export interface SponsoredTx {
     digest: string
 }
 
+export interface SponsorOptions {
+    /**
+     * Route through POST /sponsor-delete instead of /sponsor. That path has
+     * no sponsor rate limit — a delete-all run sponsors one transaction per
+     * batch and would trip the normal per-IP/per-sender caps mid-run — and
+     * in exchange the sidecar only sponsors transactions it verifies to be
+     * pure walrus `system::delete_blob` cleanups.
+     */
+    deleteFlow?: boolean
+}
+
 export async function sponsorTransactionKind(
     kindBytes: Uint8Array,
     sender: string,
+    { deleteFlow }: SponsorOptions = {},
 ): Promise<SponsoredTx> {
-    const res = await fetch(`${config.memwalServerUrl}/sponsor`, {
+    const endpoint = deleteFlow ? '/sponsor-delete' : '/sponsor'
+    const res = await fetch(`${config.memwalServerUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
