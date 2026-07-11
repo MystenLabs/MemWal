@@ -30,7 +30,7 @@ pub use recall::{recall, recall_manual};
 pub use remember::{
     remember, remember_bulk, remember_bulk_status, remember_manual, remember_status,
 };
-pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
+pub use sponsor::{sponsor_delete_proxy, sponsor_execute_proxy, sponsor_proxy};
 
 use futures::stream::{self, StreamExt};
 

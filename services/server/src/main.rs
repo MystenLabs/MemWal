@@ -798,15 +798,6 @@ async fn main() {
             "/sponsor/execute",
             post(routes::sponsor_execute_proxy).layer(DefaultBodyLimit::max(4 * 1024)),
         )
-        // WALM-264: permanent V1 memory deletion — lives with the sponsor
-        // flow it belongs to. No delegate-key gate (plan T1): ownership is
-        // the wallet signature on the sponsored transaction, verified
-        // on-chain by the sidecar. Gated by ENABLE_MEMORY_DELETION (404
-        // when off).
-        .route(
-            "/api/delete-memories",
-            post(routes::delete_memories).layer(DefaultBodyLimit::max(64 * 1024)),
-        )
         .route(
             "/api/memory-blob-ids",
             post(routes::memory_blob_ids).layer(DefaultBodyLimit::max(4 * 1024)),
@@ -815,6 +806,28 @@ async fn main() {
             state.clone(),
             rate_limit::sponsor_rate_limit_middleware,
         ));
+
+    // WALM-264: permanent V1 memory deletion — deliberately OUTSIDE the
+    // sponsor rate-limit middleware. A delete-all run over hundreds of
+    // blobs makes ~2 calls per 40-blob batch (sponsor + submit), which
+    // trips the 10/min-per-IP bucket after a handful of batches and
+    // strands the run. Exempting is safe because both routes are gated by
+    // ENABLE_MEMORY_DELETION (404 when off) and are individually
+    // unspoofable: /sponsor-delete only sponsors PTBs the sidecar verifies
+    // to be pure walrus system::delete_blob cleanups, and
+    // /api/delete-memories only acts when the user-signed transaction
+    // SUCCEEDS on-chain (sponsored digests are single-use). No delegate-key
+    // gate (plan T1): ownership is the wallet signature on the sponsored
+    // transaction.
+    let deletion_routes = Router::new()
+        .route(
+            "/sponsor-delete",
+            post(routes::sponsor_delete_proxy).layer(DefaultBodyLimit::max(10 * 1024)),
+        )
+        .route(
+            "/api/delete-memories",
+            post(routes::delete_memories).layer(DefaultBodyLimit::max(64 * 1024)),
+        );
 
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
@@ -865,6 +878,7 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(sponsor_routes)
+        .merge(deletion_routes)
         .merge(mcp_routes);
 
     // CORS — restrict to configured origins.
