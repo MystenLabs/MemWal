@@ -478,11 +478,23 @@ async fn main() {
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
+    // Sui gRPC client for delegate-key verification — built once here (the
+    // constructor parses the OS root-cert store and sets up the channel) and
+    // cheaply cloned per request in auth, mirroring the pooled http_client.
+    let sui_grpc_client = config.sui_grpc_url.as_deref().map(|url| {
+        sui_rpc::Client::new(url)
+            .unwrap_or_else(|e| panic!("SUI_GRPC_URL {url} is not a valid gRPC endpoint: {e}"))
+    });
+    if let Some(url) = config.sui_grpc_url.as_deref() {
+        tracing::info!("  Sui gRPC: {}", url);
+    }
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
         config: Arc::clone(&config),
         http_client,
+        sui_grpc_client,
         key_pool,
         alerts,
         engine,

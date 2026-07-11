@@ -43,8 +43,15 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = ["
 opentelemetry-appender-tracing = "0.31"
 tracing-opentelemetry = "0.32"
 
-# HTTP client (for Sui RPC onchain verification)
+# HTTP client (legacy Sui JSON-RPC — being phased out per the 2026-07-31 sunset)
 reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Sui gRPC client (for onchain account/delegate-key verification, migrating
+# off the JSON-RPC calls above — testnet's public JSON-RPC endpoint already
+# returns 404, ahead of the documented sunset)
+sui-rpc = "0.3"
+sui-sdk-types = "0.3"
+prost-types = "0.14"
 
 # Async utilities
 futures = "0.3"

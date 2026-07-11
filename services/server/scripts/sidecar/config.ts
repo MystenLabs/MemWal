@@ -35,6 +35,16 @@ export const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" |
 // has served stale reads (a certified blob read back as "does not exist"),
 // which fails uploads at get_blob / certify. Falls back to the network default.
 export const SUI_RPC_URL = process.env.SUI_RPC_URL?.trim() || getJsonRpcFullnodeUrl(SUI_NETWORK);
+
+// gRPC base URL for the core/upload path. Sui sunsets JSON-RPC on 2026-07-31 in
+// favour of gRPC + GraphQL, so the write path must move off JSON-RPC. When set,
+// the shared core client (used by Walrus/SEAL/Enoki upload + certify) is a
+// SuiGrpcClient pointed here; when empty it stays on the JSON-RPC client so this
+// is an opt-in, zero-behaviour-change default until validated on a dev relayer.
+// The blob query/restore path still needs JSON-RPC index methods and is not yet
+// migrated (see suiJsonRpcClient in clients.ts) — that is stage 2 (GraphQL).
+// Example: https://fullnode.mainnet.sui.io
+export const SUI_GRPC_URL = process.env.SUI_GRPC_URL?.trim() || "";
 export const SUI_TYPE = "0x2::sui::SUI";
 
 // ============================================================

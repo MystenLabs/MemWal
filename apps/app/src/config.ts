@@ -24,6 +24,10 @@ export const config = {
     // network — which serves stale/slow reads under load on mainnet, so
     // production should point this at a dedicated RPC (e.g. suiscan).
     suiRpcUrl: import.meta.env.VITE_SUI_RPC_URL as string || '',
+    // gRPC endpoint for the app's Sui client. Opt-in, mirrors the sidecar's
+    // SUI_GRPC_URL (services/server/scripts/sidecar/config.ts) — empty keeps
+    // the existing JSON-RPC client unchanged for that network.
+    suiGrpcUrl: import.meta.env.VITE_SUI_GRPC_URL as string || '',
     sealKeyServers: (import.meta.env.VITE_SEAL_KEY_SERVERS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean) as string[],
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
