@@ -19,10 +19,9 @@ import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
 import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
 
-import OldMemoriesBanner from './components/OldMemoriesBanner'
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
 import SetupWizard from './pages/SetupWizard'
@@ -269,7 +268,6 @@ function AppContent() {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
   const { delegateKey } = useDelegateKey()
-  const { pathname } = useLocation()
   const authPending = autoConnectStatus === 'idle'
 
   const requireAccount = (element: React.ReactNode) => {
@@ -279,9 +277,6 @@ function AppContent() {
 
   return (
     <>
-    {/* WALM-264 T3 — one app-wide mount; the dashboard renders its own
-        instance below the navbar instead (see Dashboard.tsx). */}
-    {pathname.replace(/\/+$/, '') !== '/dashboard' && <OldMemoriesBanner />}
     <Routes>
       <Route path="/" element={
         authPending ? <RoutePending /> :

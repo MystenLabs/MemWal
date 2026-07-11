@@ -1,9 +1,11 @@
 /**
  * OldMemoriesBanner (WALM-264 T3) — "You have N old memories — delete them".
  *
- * Mounted twice, exactly one instance visible at a time:
+ * Currently NOT mounted anywhere — rollout deferred by product until further
+ * notice. To re-enable, mount twice with exactly one instance visible at a
+ * time:
  *  - AppContent (per the T3 spec: once, inside `.app`) — every page EXCEPT
- *    the dashboard, where the mount site skips it;
+ *    the dashboard: `{pathname.replace(/\/+$/, '') !== '/dashboard' && <OldMemoriesBanner />}`;
  *  - Dashboard's shell — below the navbar, above the "Welcome" header
  *    (`.dash-alert--cleanup` order), linking down to the cleanup section.
  *
