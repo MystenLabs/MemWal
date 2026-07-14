@@ -27,8 +27,11 @@ impl LegacyDb {
             .connect_with(options)
             .await
             .map_err(|error| AppError::Internal(format!("legacy db connect failed: {error}")))?;
-        static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations_legacy");
-        MIGRATOR
+        let mut migrator = sqlx::migrate!("./migrations_legacy");
+        // The old V1 database already contains migration history from Apalis.
+        // Only validate and apply migrations owned by the security-delete subsystem.
+        migrator.set_ignore_missing(true);
+        migrator
             .run(&pool)
             .await
             .map_err(|error| AppError::Internal(format!("legacy migration failed: {error}")))?;
