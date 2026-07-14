@@ -48,7 +48,7 @@ pub const UPLOADS_PAUSED_MESSAGE: &str =
 
 pub async fn uploads_paused() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
     (
-        axum::http::StatusCode::NOT_FOUND,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({ "error": UPLOADS_PAUSED_MESSAGE })),
     )
 }
@@ -129,10 +129,10 @@ mod uploads_paused_tests {
     use super::*;
 
     #[tokio::test]
-    async fn returns_security_upgrade_message_with_not_found_status() {
+    async fn returns_security_upgrade_message_with_service_unavailable_status() {
         let (status, axum::Json(body)) = uploads_paused().await;
 
-        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body,
             serde_json::json!({
