@@ -19,6 +19,11 @@ export const config = {
         '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437',
     memwalServerUrl: import.meta.env.VITE_MEMWAL_SERVER_URL as string || 'http://localhost:8000',
     suiNetwork: (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') as 'testnet' | 'mainnet',
+    // JSON-RPC endpoint override for the app's Sui client, mirroring the
+    // relayer's SUI_RPC_URL. Empty falls back to the public fullnode for the
+    // network — which serves stale/slow reads under load on mainnet, so
+    // production should point this at a dedicated RPC (e.g. suiscan).
+    suiRpcUrl: import.meta.env.VITE_SUI_RPC_URL as string || '',
     // gRPC endpoint for the app's Sui client. Opt-in, mirrors the sidecar's
     // SUI_GRPC_URL (services/server/scripts/sidecar/config.ts) — empty keeps
     // the existing JSON-RPC client unchanged for that network.
