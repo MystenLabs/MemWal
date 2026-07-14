@@ -296,6 +296,7 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
+            &state.config.package_id,
             &cached_account_id,
             pk_bytes,
         )
@@ -333,6 +334,7 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
+            &state.config.package_id,
             exact_account_id,
             pk_bytes,
         )
@@ -371,6 +373,7 @@ async fn resolve_account(
         &state.http_client,
         &state.config.sui_rpc_url,
         &state.config.registry_id,
+        &state.config.package_id,
         pk_bytes,
     )
     .await
