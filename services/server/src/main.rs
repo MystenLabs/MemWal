@@ -48,6 +48,93 @@ const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const DEFAULT_APALIS_STARTUP_TIMEOUT_SECS: u64 = 45;
 
+fn security_delete_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn security_delete_cors_is_public_and_route_scoped() {
+        let restricted_cors =
+            CorsLayer::new().allow_origin(AllowOrigin::list(["https://app.memwal.test"
+                .parse()
+                .unwrap()]));
+        let app = Router::new()
+            .route("/restricted", get(|| async {}))
+            .layer(restricted_cors)
+            .merge(
+                Router::new()
+                    .route("/security-delete", post(|| async {}))
+                    .layer(security_delete_cors()),
+            );
+
+        let public_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/security-delete")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let public_response = app.clone().oneshot(public_preflight).await.unwrap();
+
+        assert_eq!(
+            public_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        let allowed_methods = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for method in ["GET", "POST", "DELETE", "OPTIONS"] {
+            assert!(allowed_methods.split(',').any(|allowed| allowed == method));
+        }
+        let allowed_headers = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for name in ["authorization", "content-type"] {
+            assert!(allowed_headers
+                .split(',')
+                .any(|allowed| allowed.eq_ignore_ascii_case(name)));
+        }
+
+        let restricted_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/restricted")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap();
+        let restricted_response = app.oneshot(restricted_preflight).await.unwrap();
+
+        assert_eq!(
+            restricted_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None
+        );
+    }
+}
+
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
         return fallback;
@@ -919,7 +1006,12 @@ async fn main() {
             routes::security_delete::security_delete_feature_gate,
         ));
 
-    let security_delete_routes = security_delete_auth_routes.merge(security_delete_bearer_routes);
+    // The deletion API is intentionally consumable by public browser clients.
+    // Keep its CORS policy route-scoped so the rest of the API still uses the
+    // deployment's ALLOWED_ORIGINS allowlist.
+    let security_delete_routes = security_delete_auth_routes
+        .merge(security_delete_bearer_routes)
+        .layer(security_delete_cors());
 
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
@@ -970,7 +1062,6 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(sponsor_routes)
-        .merge(security_delete_routes)
         .merge(mcp_routes);
 
     // CORS — restrict to configured origins.
@@ -1022,8 +1113,11 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
-        .with_state(state)
         .layer(cors)
+        // Merge after applying the deployment-wide CORS layer so its
+        // preflight handler cannot shadow the deletion API's public policy.
+        .merge(security_delete_routes)
+        .with_state(state)
         .layer(middleware::from_fn(
             observability::request_context_middleware,
         ));

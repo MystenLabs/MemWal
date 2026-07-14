@@ -33,6 +33,11 @@ Enabling the API also requires `LEGACY_DB_URL`, `SUI_GRPC_URL`,
 base64-encoded 32-byte `SPONSOR_PRIVATE_KEY`. Configuration changes require a
 restart or rolling deployment.
 
+The API supports browser requests from any origin. Cross-origin preflight
+requests allow `GET`, `POST`, and `DELETE`, plus the `Content-Type` and
+`Authorization` headers used by the flow below. Authentication and all other
+authorization checks still apply to cross-origin callers.
+
 The background selectors are independent of route exposure:
 `DELETION_OBJECT_RESOLVER_ENABLED` might run with both route flags off, and
 `DELETION_RECONCILER_ENABLED` might reconcile existing batches while routes are
