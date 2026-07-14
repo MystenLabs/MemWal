@@ -6,10 +6,50 @@
  */
 
 import express, { type Express } from "express";
+import { suiClient } from "../clients.js";
 import { ENOKI_API_KEY, ENOKI_NETWORK, JSON_LIMIT_METADATA } from "../config.js";
 import { callEnoki, type EnokiExecuteResponse, type EnokiSponsorResponse } from "../enoki.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { errorMessage } from "../util.js";
+
+/**
+ * Confirm an executed sponsored transaction actually SUCCEEDED
+ * on-chain and report its sender. Enoki's execute endpoint returns 200 once
+ * the transaction is submitted — effects status is not part of that
+ * contract — so callers that key irreversible side-effects off "execute
+ * returned 200" must verify effects
+ * themselves. Uses the core getTransaction API, which has the same shape on
+ * the gRPC and JSON-RPC clients.
+ */
+async function verifyExecutedTransaction(
+    digest: string,
+): Promise<{ success: boolean; sender: string | null; error: string | null }> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+            const result: any = await (suiClient as any).core.getTransaction({
+                digest,
+                include: { transaction: true },
+            });
+            const tx = result?.Transaction ?? result?.FailedTransaction;
+            if (tx) {
+                const success = tx.status?.success === true;
+                return {
+                    success,
+                    sender: tx.transaction?.sender ?? null,
+                    error: success ? null : errorMessage(tx.status?.error ?? "transaction failed"),
+                };
+            }
+        } catch (err) {
+            // Not indexed yet (or transient) — retry below.
+            lastError = err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000 + attempt * 500));
+    }
+    throw new Error(
+        `executed transaction not found on-chain after retries: ${errorMessage(lastError)}`,
+    );
+}
 
 export function registerSponsorRoutes(app: Express): void {
     app.post("/sponsor", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
@@ -21,6 +61,7 @@ export function registerSponsorRoutes(app: Express): void {
             if (!ENOKI_API_KEY) {
                 return res.status(503).json({ error: "Enoki sponsorship is not configured (ENOKI_API_KEY missing)" });
             }
+
 
             // Redact full sender address (PII / deanonymisation) — log only
             // a short prefix for correlation. Never log the full digest here either.
@@ -47,7 +88,7 @@ export function registerSponsorRoutes(app: Express): void {
 
     app.post("/sponsor/execute", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
         try {
-            const { digest, signature } = req.body;
+            const { digest, signature, verifyEffects } = req.body;
             if (!digest || !signature) {
                 return res.status(400).json({ error: "Missing required fields: digest, signature" });
             }
@@ -71,6 +112,24 @@ export function registerSponsorRoutes(app: Express): void {
             // value that ties log lines to individual user transactions. Log only
             // a length indicator for diagnostics.
             console.log(`[sponsor/execute] executed sponsored tx (digest_len=${digest.length})`);
+
+            // Callers key irreversible DB updates off this
+            // response, so it asks us to confirm effects success + sender. The
+            // plain proxy path skips this (no behavior change).
+            if (verifyEffects === true) {
+                const verdict = await verifyExecutedTransaction(executed.digest ?? digest);
+                if (!verdict.success) {
+                    sidecarLog("error", "sponsor_execute_effects_failed", {
+                        requestId: requestIdFor(req),
+                        error: verdict.error,
+                    });
+                    return res.status(422).json({
+                        error: `sponsored transaction did not succeed on-chain: ${verdict.error ?? "unknown"}`,
+                    });
+                }
+                return res.json({ digest: executed.digest, sender: verdict.sender });
+            }
+
             res.json(executed); // { digest }
         } catch (err: any) {
             const traceId = requestIdFor(req);

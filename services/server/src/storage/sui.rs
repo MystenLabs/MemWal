@@ -1,18 +1,33 @@
+use base64::Engine as _;
 use serde::Deserialize;
 
 /// Verify that a given public key is registered as a delegate key
 /// in the onchain MemWalAccount object.
 ///
-/// Uses Sui JSON-RPC `sui_getObject` to fetch the object and parse
-/// its fields — no full `sui-sdk` dependency needed.
+/// Routes through gRPC when `grpc_client` is provided (opt-in via
+/// SUI_GRPC_URL, mirrors the sidecar's write-path migration — JSON-RPC
+/// sunsets 2026-07-31, and testnet's public JSON-RPC endpoint already
+/// returns 404 today), otherwise falls back to the original Sui JSON-RPC
+/// `sui_getObject` call below. The gRPC client is built once at startup
+/// (AppState) and cloned here — clones share the underlying tonic channel.
 ///
 /// Returns `Ok(owner_address)` if the key is found, `Err` otherwise.
 pub async fn verify_delegate_key_onchain(
     http_client: &reqwest::Client,
     rpc_url: &str,
+    grpc_client: Option<&sui_rpc::Client>,
     account_object_id: &str,
     public_key_bytes: &[u8],
 ) -> Result<String, OnchainVerifyError> {
+    if let Some(grpc_client) = grpc_client {
+        return verify_delegate_key_onchain_grpc(
+            grpc_client.clone(),
+            account_object_id,
+            public_key_bytes,
+        )
+        .await;
+    }
+
     // Build JSON-RPC request
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -125,6 +140,141 @@ pub async fn verify_delegate_key_onchain(
 
     Err(OnchainVerifyError::KeyNotFound(format!(
         "Public key not found in {} delegate key(s) for account {}",
+        delegate_keys.len(),
+        account_object_id
+    )))
+}
+
+// ── gRPC value helpers ──
+// google.protobuf.Value (via prost-types) is a dynamic JSON-like tree, not
+// serde_json::Value — these navigate it the same way `fields.get(...)` reads
+// the parsed JSON-RPC content above, so the two code paths stay structurally
+// parallel and easy to compare.
+fn grpc_value_as_struct(v: &prost_types::Value) -> Option<&prost_types::Struct> {
+    match &v.kind {
+        Some(prost_types::value::Kind::StructValue(s)) => Some(s),
+        _ => None,
+    }
+}
+
+fn grpc_value_as_str(v: &prost_types::Value) -> Option<&str> {
+    match &v.kind {
+        Some(prost_types::value::Kind::StringValue(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn grpc_value_as_bool(v: &prost_types::Value) -> Option<bool> {
+    match &v.kind {
+        Some(prost_types::value::Kind::BoolValue(b)) => Some(*b),
+        _ => None,
+    }
+}
+
+fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
+    match &v.kind {
+        Some(prost_types::value::Kind::ListValue(l)) => Some(&l.values),
+        _ => None,
+    }
+}
+
+/// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
+/// (owner, active, delegate_keys membership), fetched via
+/// LedgerService.GetObject instead of JSON-RPC's `sui_getObject`.
+///
+/// The gRPC `.json` object representation is flatter than JSON-RPC's
+/// `.fields` shape and encodes delegate key `public_key` as base64 (not a
+/// byte-array) — verified live against real testnet objects while migrating
+/// the sidecar and web app to gRPC for this same JSON-RPC sunset.
+async fn verify_delegate_key_onchain_grpc(
+    mut client: sui_rpc::Client,
+    account_object_id: &str,
+    public_key_bytes: &[u8],
+) -> Result<String, OnchainVerifyError> {
+    let address: sui_sdk_types::Address = account_object_id
+        .parse()
+        .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
+    let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
+    request.read_mask = Some(prost_types::FieldMask {
+        paths: vec!["json".to_string()],
+    });
+
+    let started = std::time::Instant::now();
+    let response = client.ledger_client().get_object(request).await;
+    let status_label = match &response {
+        Ok(_) => "200".to_string(),
+        Err(status) => status.code().to_string(),
+    };
+    crate::observability::observe_external(
+        "sui_grpc",
+        "GetObject",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let object = response
+        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {}", e)))?
+        .into_inner()
+        .object
+        .ok_or_else(|| OnchainVerifyError::RpcError("gRPC response missing object".into()))?;
+
+    let json = object
+        .json
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
+    let fields = grpc_value_as_struct(&json)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
+
+    let owner = fields
+        .fields
+        .get("owner")
+        .and_then(grpc_value_as_str)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
+        .to_string();
+
+    let active = fields
+        .fields
+        .get("active")
+        .and_then(grpc_value_as_bool)
+        .unwrap_or(true);
+    if !active {
+        tracing::warn!(
+            "account {} is deactivated — rejecting delegate key auth (gRPC)",
+            account_object_id
+        );
+        return Err(OnchainVerifyError::AccountDeactivated(format!(
+            "Account {} has been deactivated",
+            account_object_id
+        )));
+    }
+
+    let delegate_keys = fields
+        .fields
+        .get("delegate_keys")
+        .and_then(grpc_value_as_list)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    for dk in delegate_keys {
+        let Some(dk_fields) = grpc_value_as_struct(dk) else {
+            continue;
+        };
+        let Some(stored_b64) = dk_fields
+            .fields
+            .get("public_key")
+            .and_then(grpc_value_as_str)
+        else {
+            continue;
+        };
+        let Ok(stored_bytes) = base64::engine::general_purpose::STANDARD.decode(stored_b64) else {
+            continue;
+        };
+        if stored_bytes == public_key_bytes {
+            tracing::info!("delegate key verified onchain (gRPC), owner: {}", owner);
+            return Ok(owner);
+        }
+    }
+
+    Err(OnchainVerifyError::KeyNotFound(format!(
+        "Public key not found in {} delegate key(s) for account {} (gRPC)",
         delegate_keys.len(),
         account_object_id
     )))
@@ -295,9 +445,18 @@ pub async fn find_account_by_delegate_key(
                 continue;
             }
 
-            // Fetch the actual MemWalAccount to check delegate_keys
-            match verify_delegate_key_onchain(http_client, rpc_url, account_id, public_key_bytes)
-                .await
+            // Fetch the actual MemWalAccount to check delegate_keys. This
+            // legacy registry scan is never called on testnet; auth requires
+            // the signed x-account-id hint there and verifies that exact
+            // object over gRPC.
+            match verify_delegate_key_onchain(
+                http_client,
+                rpc_url,
+                None,
+                account_id,
+                public_key_bytes,
+            )
+            .await
             {
                 Ok(owner) => {
                     tracing::info!(
@@ -637,5 +796,45 @@ mod tests {
         let err: Box<dyn std::error::Error> =
             Box::new(OnchainVerifyError::AccountDeactivated("test".into()));
         assert!(err.to_string().contains("deactivated"));
+    }
+
+    // ── gRPC path: live network tests (real testnet, no mocking) ─────────
+    // `cargo test -- --ignored` to run. Not part of the default suite since
+    // it needs real network access — but this is exactly how the equivalent
+    // gRPC shape bugs were caught on the TS side during this same migration
+    // (guessing from docs got the shape wrong twice; live testing didn't).
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_verify_delegate_key_onchain_grpc_real_account() {
+        // Real MemWalAccount on testnet with a known delegate_keys entry,
+        // confirmed live while migrating the sidecar/web app to gRPC for
+        // this same JSON-RPC sunset.
+        let account_id = "0xfba86e31b07ce36748ffe46de494bd4a2fa0058a5851ec4006141abcc5498fe2";
+        let wrong_key = [0u8; 32];
+
+        let client = sui_rpc::Client::new("https://fullnode.testnet.sui.io").unwrap();
+        let result = verify_delegate_key_onchain_grpc(client, account_id, &wrong_key).await;
+
+        // The account genuinely exists and gRPC parses it correctly — a
+        // non-matching key must fail with KeyNotFound, not RpcError. Getting
+        // RpcError here means the gRPC request/response shape is wrong, not
+        // that the key is missing.
+        match result {
+            Err(OnchainVerifyError::KeyNotFound(_)) => {}
+            other => {
+                panic!("expected KeyNotFound for a real account with a wrong key, got: {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_verify_delegate_key_onchain_grpc_missing_object() {
+        // Object that doesn't exist onchain — must surface as an error, not panic.
+        let fake_id = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let client = sui_rpc::Client::new("https://fullnode.testnet.sui.io").unwrap();
+        let result = verify_delegate_key_onchain_grpc(client, fake_id, &[0u8; 32]).await;
+        assert!(result.is_err());
     }
 }

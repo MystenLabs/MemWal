@@ -175,6 +175,10 @@ jobs:
       # hit /health + auth-contract paths only; they don't reach onchain
       # verification, so no real-wallet secrets are needed.
       SUI_NETWORK: testnet
+      # Testnet no longer serves JSON-RPC, so the server and the sidecar both
+      # refuse to start on testnet without a gRPC endpoint. Boot-only here: the
+      # CI-scoped tests never issue an onchain call through it.
+      SUI_GRPC_URL: "https://fullnode.testnet.sui.io:443"
       MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
       # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start

@@ -23,16 +23,11 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import {
-    getDelegateKeyFields,
-    getMoveFields,
-    type AccountObjectFields,
-    type DynamicFieldObjectFields,
-    type RegistryObjectFields,
-} from '../utils/suiFields'
+import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
 function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
     return (
@@ -229,6 +224,24 @@ export default function Dashboard({
     const [accountLookupComplete, setAccountLookupComplete] = useState(!shouldResolveAccount)
     const [loadingAccount, setLoadingAccount] = useState(false)
     const effectiveAccountObjectId = accountObjectId ?? previewAccountObjectId ?? resolvedAccountObjectId
+    // Security-delete previews authorize against the PRE-cutover package's
+    // Account object (seal_approve is typed to that package), so when a
+    // legacy registry is configured, resolve the account from it instead of
+    // reusing the current-deployment account above.
+    const legacyRegistryDiffers = config.legacyMemwalRegistryId !== config.memwalRegistryId
+    const [legacyAccountObjectId, setLegacyAccountObjectId] = useState<string | null>(null)
+    useEffect(() => {
+        if (!legacyRegistryDiffers || !address || previewMode) { setLegacyAccountObjectId(null); return }
+        let cancelled = false
+        fetchAccountIdForOwner(suiClient, config.legacyMemwalRegistryId, address)
+            .then(accountId => { if (!cancelled) setLegacyAccountObjectId(accountId) })
+            .catch(err => {
+                console.error('Failed to fetch legacy account object ID:', err)
+                if (!cancelled) setLegacyAccountObjectId(null)
+            })
+        return () => { cancelled = true }
+    }, [legacyRegistryDiffers, address, previewMode, suiClient])
+    const securityDeleteAccountObjectId = legacyRegistryDiffers ? legacyAccountObjectId : effectiveAccountObjectId
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
     const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
@@ -327,21 +340,9 @@ export default function Dashboard({
         setAccountLookupComplete(false)
         setLoadingAccount(true)
         try {
-            const registryObj = await suiClient.getObject({
-                id: config.memwalRegistryId,
-                options: { showContent: true },
-            })
-            const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
-            if (fields) {
-                const tableId = fields?.accounts?.fields?.id?.id
-                if (tableId) {
-                    const dynField = await suiClient.getDynamicFieldObject({
-                        parentId: tableId,
-                        name: { type: 'address', value: address },
-                    })
-                    const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
-                    if (dynFields?.value) setResolvedAccountObjectId(dynFields.value)
-                }
+            const accountId = await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, address)
+            if (accountId) {
+                setResolvedAccountObjectId(accountId)
             }
         } catch (err) {
             console.error('Failed to fetch account object ID:', err)
@@ -368,7 +369,6 @@ export default function Dashboard({
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
     const accountLookupPending = loadingAccount || (shouldResolveAccount && (!accountLookupComplete || accountLookupAddress !== address))
     const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount && !previewReady
-    const isNewAccount = !delegateKey && accountLookupComplete && !hasResolvedAccount
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
@@ -421,24 +421,15 @@ export default function Dashboard({
         if (!effectiveAccountObjectId) return
         setLoadingKeys(true)
         try {
-            const obj = await suiClient.getObject({
-                id: effectiveAccountObjectId,
-                options: { showContent: true },
-            })
-            const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
-            if (fields) {
-                const keys = fields.delegate_keys ?? []
-                const parsed: OnChainDelegateKey[] = keys.map((k) => {
-                    const f = getDelegateKeyFields(k)
-                    const pkBytes: number[] = f.public_key ?? []
-                    const pkHex = pkBytes.map((b: number) => b.toString(16).padStart(2, '0')).join('')
-                    return {
-                        publicKey: pkHex,
-                        suiAddress: f.sui_address ?? '',
-                        label: f.label ?? '',
-                        createdAt: Number(f.created_at ?? 0),
-                    }
-                })
+            const json = await fetchObjectJson(suiClient, effectiveAccountObjectId) as
+                { delegate_keys?: { public_key?: unknown; sui_address?: string; label?: string; created_at?: string }[] } | null
+            if (json?.delegate_keys) {
+                const parsed: OnChainDelegateKey[] = json.delegate_keys.map((f) => ({
+                    publicKey: publicKeyToHex(f.public_key),
+                    suiAddress: f.sui_address ?? '',
+                    label: f.label ?? '',
+                    createdAt: Number(f.created_at ?? 0),
+                }))
                 setOnChainKeys(parsed)
             } else {
                 setOnChainKeys([])
@@ -552,10 +543,7 @@ export default function Dashboard({
         }
 
         const result = await signAndExecuteTx({ transaction: tx })
-        await suiClient.waitForTransaction({
-            digest: result.digest,
-            options: { showEffects: true, showObjectChanges: true },
-        })
+        await suiClient.waitForTransaction({ digest: result.digest })
     }, [walletSigner, effectiveAccountObjectId, signAndExecuteTx, suiClient])
 
     const executeRemoveKeys = useCallback(async (publicKeyHexes: string[], source: RemoveKeysConfirmState['source']) => {
@@ -789,14 +777,16 @@ const result = await generateText({
                     </div>
                 )}
 
-                {isNewAccount && (
-                    <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <p>
-                            No Walrus Memory account found for this wallet. Create a delegate key to get started.
-                        </p>
-                    </div>
-                )}
+                <div className="dash-alert" style={{ marginBottom: 24 }}>
+                    <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                    <p>
+                        New uploads to Walrus Memory are paused while we conduct a security upgrade.
+                        The upgrade addresses a bug that makes it possible to bypass the encryption of
+                        stored memories. We recommend users review any sensitive data they may have
+                        stored on Walrus Memory. A guide to removing data is available{' '}
+                        <a href={config.securityGuideUrl} target="_blank" rel="noopener noreferrer">here</a>.
+                    </p>
+                </div>
 
                 {hasMaxDelegateKeys && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
@@ -1370,6 +1360,11 @@ const result = await generateText({
                         </button>
                     </div>
                 </Card>
+
+                {config.enableMemoryDeletion && (
+                    config.securityDeleteEnabled
+                        && <SecurityDeleteSection accountObjectId={securityDeleteAccountObjectId} />
+                )}
 
                 {removeKeysConfirm && (
                     <div

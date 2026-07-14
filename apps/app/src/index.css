@@ -7,6 +7,26 @@
   font-display: swap;
 }
 
+/* Security-delete table and client-only preview. */
+.dash-page .sd-warning, .dash-page .sd-counts, .dash-page .sd-actions, .dash-page .sd-tabs {
+  display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;
+}
+.dash-page .sd-warning { margin-bottom: 1rem; color: #7d5400; }
+.dash-page .sd-counts, .dash-page .sd-tabs, .dash-page .sd-actions { margin-bottom: 1rem; }
+.dash-page .sd-table-wrap { overflow-x: auto; }
+.dash-page .sd-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.dash-page .sd-table th, .dash-page .sd-table td { padding: 0.65rem; border-bottom: 1px solid rgba(0,0,0,.12); text-align: left; white-space: nowrap; }
+.dash-page .sd-state { display: inline-block; padding: .2rem .5rem; border-radius: 999px; background: rgba(0,0,0,.08); }
+.dash-page .sd-preview-button { min-width: auto; padding: .4rem; }
+.dash-page .sd-pager { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; margin-top: 1rem; }
+.dash-page .sd-toasts { position: fixed; bottom: 1.25rem; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; flex-direction: column; align-items: center; gap: .5rem; max-width: min(360px, 90vw); }
+.dash-page .sd-toast { display: flex; align-items: center; gap: .75rem; padding: .75rem 1rem; border-radius: 8px; background: #1d1d1f; color: #fff; box-shadow: 0 4px 16px rgba(0,0,0,.25); font-size: .875rem; }
+.dash-page .sd-toast-dismiss { margin-left: auto; background: none; border: none; color: inherit; font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0 .15rem; }
+.dash-page .sd-pager-gap { padding: 0 .25rem; user-select: none; }
+.dash-page .sd-pager-status { margin-left: .5rem; font-size: .875rem; opacity: .75; }
+.dash-page .sd-preview-dialog { max-width: min(700px, 92vw); }
+.dash-page .sd-preview-content { max-height: 55vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
 
 :root {
   --bg-primary: #FAF8F5;
@@ -11267,5 +11287,125 @@ h1, h2, h3 {
   .playground-nav .demo-nav-icon {
     width: 16px;
     height: 16px;
+  }
+}
+
+/* ============================================================
+   Delete old memories card — mirrors the Delegate
+   keys card; order places it last in the dash-shell flex flow.
+   ============================================================ */
+
+/* The install card zeroes its bottom margin (it used to be the last card
+   on the page), so the cleanup card supplies its own top gap to keep the
+   56px card rhythm — and, as the new last card, zeroes its own bottom.
+   Shell/type mirror the keys+install cards' final design; the generic
+   860px rules (24px padding, 28px title, 44px pills — all !important)
+   cover mobile the same way they do for those cards. */
+.dash-page .dashboard-cleanup-card {
+  order: 7;
+  margin-top: 56px;
+  margin-bottom: 0 !important;
+  padding: 39px 40px;
+  border-color: #54575a;
+  border-radius: 24px;
+  background: #000000;
+  overflow: clip;
+}
+
+.dash-page .dashboard-cleanup-card .card-header {
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 34px;
+}
+
+.dash-page .dashboard-cleanup-card .card-title {
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 36px;
+  font-weight: 500;
+  line-height: 0.88;
+  letter-spacing: 0;
+}
+
+.dash-page .dashboard-cleanup-card .card-subtitle {
+  margin-top: 14px;
+  color: #b8bbbe;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.dash-page .dashboard-cleanup-card .card-header-actions {
+  align-self: flex-start;
+  gap: 20px;
+}
+
+/* Old-memories banner — first thing in the shell: below the navbar,
+   above the "Welcome" header (all other dash-shell orders start at 0). */
+.dash-page .dash-alert--cleanup {
+  order: -1;
+  margin-bottom: 40px !important;
+}
+
+/* App-wide mount (T3: once in AppContent, direct child of .app) — pages
+   render their own navbars below it, so keep the page column width and a
+   slim gap instead of the in-shell 48px alert margin. */
+.app > .dash-alert--cleanup {
+  width: min(1240px, calc(100% - 48px));
+  margin: 16px auto;
+  margin-bottom: 16px !important; /* base .dash-alert forces 48px */
+}
+
+.dash-alert--cleanup .dash-alert-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Header delete button matches the card-header pill spec (52px, radius 26,
+   px-30, 18px label — same as Refresh/Add key) in danger colors. */
+.dash-page .dashboard-cleanup-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  height: 52px;
+  padding: 10px 30px;
+  border-radius: 26px;
+  font-size: 1.125rem;
+  letter-spacing: 0.72px;
+}
+
+.dash-page .dashboard-cleanup-error {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin: 0 0 18px;
+  color: var(--danger);
+  font-size: 16px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* Body copy matches the final card-subtitle scale (18px / 1.3). */
+.dash-page .dashboard-cleanup-status {
+  margin: 0;
+  color: #b8bbbe;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+/* The generic 860px rules shrink header pills to 44px but only match
+   .btn-secondary — keep the danger pill in step with Refresh. */
+@media (max-width: 860px) {
+  .dash-page .dashboard-cleanup-delete {
+    min-height: 44px;
+    height: 44px;
+    padding: 0 16px;
+    border-radius: 22px;
+    font-size: 15px;
+    letter-spacing: 0.25px;
   }
 }

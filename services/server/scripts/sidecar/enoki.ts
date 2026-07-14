@@ -26,6 +26,19 @@ type EnokiDataWrapper<T> = { data: T };
 export type EnokiSponsorResponse = { bytes: string; digest: string };
 export type EnokiExecuteResponse = { digest: string };
 
+// SuiJsonRpcClient.signAndExecuteTransaction resolves to a flat
+// SuiTransactionBlockResponse (`.digest`). SuiGrpcClient's core API resolves to
+// the discriminated union `{Transaction: {digest}} | {FailedTransaction: {digest}}`
+// instead — no top-level `.digest`. Direct-sign fallback reads this result on
+// both clients, so it must handle both shapes or `.digest` is silently
+// `undefined` once SUI_GRPC_URL is set.
+function extractTransactionDigest(result: any): string {
+    if (typeof result?.digest === "string") return result.digest;
+    const digest = result?.Transaction?.digest ?? result?.FailedTransaction?.digest;
+    if (typeof digest === "string") return digest;
+    throw new Error("signAndExecuteTransaction: could not resolve digest from result");
+}
+
 export function redactEnokiPath(path: string): string {
     return path.replace(/\/transaction-blocks\/sponsor\/[^/?]+/, "/transaction-blocks/sponsor/<digest>");
 }
@@ -51,6 +64,22 @@ export function summarizeEnokiError(text: string): Record<string, unknown> {
 
 export function isMoveAbortBalanceSplit(message: string): boolean {
     return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
+}
+
+/**
+ * Detect the `0x2::coin::destroy_zero` abort (ENonZero, abort code 0) that the
+ * Walrus register PTB raises when the WAL payment coin still holds a non-zero
+ * remainder. The `@mysten/walrus` `#withWal` helper pre-funds an *exact* WAL
+ * amount (`storageUnits × price × epochs`) computed from the client's cached
+ * `systemState`, then asserts the coin is empty via `destroy_zero`. When the
+ * on-chain storage/write price drops between the cached read and execution, the
+ * contract deducts less WAL than we split off, leaving change that trips
+ * `destroy_zero`. It is not input-specific — refreshing the Walrus client so the
+ * next attempt re-reads the live price clears it, so callers treat it as
+ * transient rather than a permanent MoveAbort.
+ */
+export function isMoveAbortWalDestroyZero(message: string): boolean {
+    return /moveabort/i.test(message) && /destroy_zero/i.test(message);
 }
 
 export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
@@ -127,6 +156,14 @@ async function executeSponsoredTransactionOnce(
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
 ): Promise<string> {
+    // Resolve owned-object inputs against the correct sender. The gRPC client
+    // validates object ownership against the tx sender during build/resolution;
+    // the Walrus `certify` tx is built WITHOUT a sender (0x0) — register sets its
+    // own, certify does not — so gRPC rejects it ("Transaction was not signed by
+    // the correct sender ... given owner/signer 0x0"). Enoki still sponsors with
+    // its own sender and `onlyTransactionKind` excludes the sender from the
+    // bytes, so this only fixes resolution (no-op on the JSON-RPC path).
+    tx.setSenderIfNotSet(signer.toSuiAddress());
     const txKindBytes = await tx.build({
         client: suiClient as any,
         onlyTransactionKind: true,
@@ -171,7 +208,7 @@ export async function executeWithEnokiSponsor(
             signer,
             transaction: tx,
         });
-        return direct.digest;
+        return extractTransactionDigest(direct);
     }
 
     let sponsorError: unknown;
@@ -203,6 +240,6 @@ export async function executeWithEnokiSponsor(
             signer,
             transaction: tx,
         });
-        return direct.digest;
+        return extractTransactionDigest(direct);
     }
 }

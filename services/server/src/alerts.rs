@@ -458,8 +458,12 @@ impl SlackPayload {
             (Some(before), Some(after)) => {
                 format!("*On-chain system version:* `{}` → `{}`\n", before, after)
             }
-            (None, Some(after)) => format!("*On-chain system version (after refresh):* `{}`\n", after),
-            (Some(before), None) => format!("*On-chain system version (before refresh):* `{}`\n", before),
+            (None, Some(after)) => {
+                format!("*On-chain system version (after refresh):* `{}`\n", after)
+            }
+            (Some(before), None) => {
+                format!("*On-chain system version (before refresh):* `{}`\n", before)
+            }
             (None, None) => String::new(),
         };
         let details = format!(
@@ -672,9 +676,7 @@ Congestion-requeued jobs ride it out with minutes-scale backoff, but sustained s
         let threshold_wal = format_wal_amount(alert.threshold);
         let required_line = alert
             .required
-            .map(|required| {
-                format!("*Required:* {} WAL\n", format_wal_amount(required))
-            })
+            .map(|required| format!("*Required:* {} WAL\n", format_wal_amount(required)))
             .unwrap_or_default();
         let action = "*Action (ops):* top up WAL for this relayer wallet before retrying.
 If the wallet is being topped up, rotate or temporarily remove that key from pool to keep uploads flowing."

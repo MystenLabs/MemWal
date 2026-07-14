@@ -18,6 +18,7 @@ mod admin;
 mod analyze;
 mod recall;
 mod remember;
+pub mod security_delete;
 mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`

@@ -35,9 +35,20 @@ import '@mysten/dapp-kit/dist/index.css'
 // Network config
 // ============================================================
 
+// The app-wide client stays on JSON-RPC. Every existing consumer of the provider
+// client (SetupWizard, ConnectMcp, account resolution) is written against
+// JSON-RPC request shapes: `getObject({ id, options })` and
+// `getDynamicFieldObject`, which the gRPC client neither accepts nor provides.
+// Swapping the shared client would break them silently, because dapp-kit's types
+// hard-code SuiJsonRpcClient and hide the mismatch from the compiler.
+//
+// gRPC is scoped to the deletion subsystem, which owns its own client. The Seal
+// and Walrus SDKs the deletion preview uses accept either transport, so nothing
+// in that path needs the shared client to be gRPC.
 const { networkConfig } = createNetworkConfig({
   testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
   mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
+  localnet: { url: config.suiRpcUrl || 'http://127.0.0.1:9000', network: 'localnet' },
 })
 
 const queryClient = new QueryClient()
@@ -226,15 +237,16 @@ const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
  *  by restoring the saved query string; otherwise go to the dashboard. */
 function PostAuthRedirect() {
   const pending = sessionStorage.getItem(MCP_CONNECT_STORAGE_KEY)
+  let connectQuery = ''
   if (pending) {
     // Consume once — prevents a redirect loop on later visits to `/`.
     sessionStorage.removeItem(MCP_CONNECT_STORAGE_KEY)
     try {
       const params = JSON.parse(pending) as Record<string, string>
-      const qs = new URLSearchParams(params).toString()
-      if (qs) return <Navigate to={`/connect/mcp?${qs}`} replace />
+      connectQuery = new URLSearchParams(params).toString()
     } catch { /* fall through to dashboard */ }
   }
+  if (connectQuery) return <Navigate to={`/connect/mcp?${connectQuery}`} replace />
   return <Navigate to="/dashboard" replace />
 }
 
@@ -282,7 +294,7 @@ export default function App() {
     <BrowserRouter>
       <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork}>
+        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiClientNetwork}>
           <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <DelegateKeyProvider>
