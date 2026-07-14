@@ -13,6 +13,7 @@
 }
 .dash-page .sd-warning { margin-bottom: 1rem; color: #7d5400; }
 .dash-page .sd-counts, .dash-page .sd-tabs, .dash-page .sd-actions { margin-bottom: 1rem; }
+.dash-page .sd-tabs .btn[aria-selected='true'] { border-color: #faf8f5; background: #faf8f5; color: #000000; }
 .dash-page .sd-table-wrap { overflow-x: auto; }
 .dash-page .sd-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 .dash-page .sd-table th, .dash-page .sd-table td { padding: 0.65rem; border-bottom: 1px solid rgba(0,0,0,.12); text-align: left; white-space: nowrap; }

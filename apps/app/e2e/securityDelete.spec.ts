@@ -173,14 +173,14 @@ test('security delete: connect, table, Seal preview, delete selected, progress, 
 	await page.getByRole('button', { name: /^Delete selected/ }).click()
 	await page.getByRole('dialog', { name: /Permanently delete/ }).getByRole('button', { name: 'Delete forever' }).click()
 
-	// 5. Rows move to the Progress tab as `deleted`; the 3rd (untouched) row
+	// 5. Rows move to the Deleted tab as `deleted`; the 3rd (untouched) row
 	// stays in "Stored". Real wallet-tx completion + real server submit,
 	// polled via the UI's own refresh — no client-side pretending.
 	await expect(page.getByTitle(seededBlobIds[0], { exact: true })).toHaveCount(0, { timeout: 30_000 })
 	await expect(page.getByTitle(seededBlobIds[1], { exact: true })).toHaveCount(0, { timeout: 30_000 })
 	await expect(page.getByTitle(seededBlobIds[2], { exact: true })).toBeVisible()
 
-	await page.getByRole('tab', { name: 'Progress' }).click()
+	await page.getByRole('tab', { name: 'Deleted' }).click()
 	for (const blobId of [seededBlobIds[0], seededBlobIds[1]]) {
 		const row = page.locator('tr', { has: page.getByTitle(blobId, { exact: true }) })
 		await expect(row).toBeVisible({ timeout: 30_000 })
