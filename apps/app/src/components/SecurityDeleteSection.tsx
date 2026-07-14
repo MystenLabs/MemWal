@@ -224,7 +224,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> stored, <strong>{visibleCounts.deleting}</strong> in progress, <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> deleted</div>
         <div className="sd-tabs" role="tablist">
             <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} onClick={() => selectTab('risk')}>Stored</button>
-            <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Progress</button>
+            <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Deleted</button>
         </div>
         {error && <div className="dashboard-cleanup-error" role="alert">{error}</div>}
         {deletion.phase.kind === 'error' && <div className="dashboard-cleanup-error" role="alert">{deletion.phase.message} <code>{deletion.phase.code}</code></div>}

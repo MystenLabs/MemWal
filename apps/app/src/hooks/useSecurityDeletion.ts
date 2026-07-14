@@ -120,7 +120,7 @@ export function useSecurityDeletion({ onStateChanged }: { onStateChanged: () => 
                     'REFETCH',
                     true,
                     statusError instanceof SdApiError ? statusError.status : 0,
-                    'Submission status is temporarily unavailable. Check the Progress tab.',
+                    'Submission status is temporarily unavailable. Check the Deleted tab.',
                 )
             }
             if (status.state === 'completed') return { state: 'completed' as const, deleted: status.blobCount, digest: status.digest ?? '' }
@@ -132,7 +132,7 @@ export function useSecurityDeletion({ onStateChanged }: { onStateChanged: () => 
                 if (retryError.code === 'SPONSOR_FUNDS_UNAVAILABLE') throw retryError
                 throw new SdApiError('BATCH_RECOVERED_FAILED', 'RE_PREPARE', true, 409, 'The batch must be prepared again.')
             }
-            throw new SdApiError('BATCH_EXECUTING', 'REFETCH', true, 409, 'Deletion is still executing. Check the Progress tab.')
+            throw new SdApiError('BATCH_EXECUTING', 'REFETCH', true, 409, 'Deletion is still executing. Check the Deleted tab.')
         }
     }, [authed])
 
