@@ -50,6 +50,18 @@
         ]
       },
       {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/delete-old-memories",
+              "guides/delete-memories-programmatically"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Fundamentals",
         "groups": [
           {
