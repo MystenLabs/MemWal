@@ -294,6 +294,5 @@ If submitting a batch times out or returns `RPC_UNAVAILABLE`, query
 `GET /api/security-deletions/{batchId}` until it reaches a terminal state. Do not prepare a
 replacement batch for the same blobs while its state is `executing`.
 
-For endpoint schemas, state definitions, limits, and the complete error contract, see the
-[Security Delete API reference](/api/security-delete). To delete memories through the
-dashboard instead, see [Delete old memories](/guides/delete-old-memories).
+To delete memories through the dashboard instead, see
+[Delete old memories](/guides/delete-old-memories).
