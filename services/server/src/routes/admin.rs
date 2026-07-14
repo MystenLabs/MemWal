@@ -155,8 +155,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigRespon
     Json(ConfigResponse {
         package_id: state.config.package_id.clone(),
         network: state.config.sui_network.clone(),
-        sui_rpc_url: (state.config.sui_network != "testnet")
-            .then(|| state.config.sui_rpc_url.clone()),
+        // Keep the legacy endpoint in the response while SDK/server versions
+        // roll independently. New SDKs prefer gRPC when advertised and fall
+        // back to this URL; old SDKs still require this field.
+        sui_rpc_url: Some(state.config.sui_rpc_url.clone()),
         sui_grpc_url: state.config.sui_grpc_url.clone(),
         sui_transport: if state.config.sui_grpc_url.is_some() {
             "grpc"

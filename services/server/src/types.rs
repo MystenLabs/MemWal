@@ -1229,12 +1229,12 @@ pub struct ConfigResponse {
     pub network: String,
     #[serde(rename = "suiRpcUrl", skip_serializing_if = "Option::is_none")]
     pub sui_rpc_url: Option<String>,
-    /// Preferred gRPC endpoint. Testnet always returns this field and clients
-    /// must not fall back to `suiRpcUrl` there.
+    /// Preferred gRPC endpoint. Clients may fall back to `suiRpcUrl` during a
+    /// rolling deployment or when the preferred endpoint is unavailable.
     #[serde(rename = "suiGrpcUrl", skip_serializing_if = "Option::is_none")]
     pub sui_grpc_url: Option<String>,
-    /// Transport clients must use for Sui reads. Kept explicit so adding the
-    /// gRPC URL remains backward-compatible for localnet JSON-RPC consumers.
+    /// Preferred transport for Sui reads. Clients may use the other advertised
+    /// endpoint as a compatibility fallback.
     #[serde(rename = "suiTransport")]
     pub sui_transport: &'static str,
     /// Mirror of `RateLimitConfig::bench_bypass_enabled`. Lets benchmark
@@ -1621,7 +1621,7 @@ mod tests {
         let response = ConfigResponse {
             package_id: "0x1".into(),
             network: "testnet".into(),
-            sui_rpc_url: None,
+            sui_rpc_url: Some("https://rpc.example".into()),
             sui_grpc_url: Some("https://grpc.example".into()),
             sui_transport: "grpc",
             rate_limit_disabled: false,
@@ -1643,7 +1643,7 @@ mod tests {
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["suiGrpcUrl"], "https://grpc.example");
         assert_eq!(json["suiTransport"], "grpc");
-        assert!(json.get("suiRpcUrl").is_none());
+        assert_eq!(json["suiRpcUrl"], "https://rpc.example");
     }
 
     #[test]

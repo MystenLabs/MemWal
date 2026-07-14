@@ -925,10 +925,9 @@ export class MemWal {
         const transport = body.network === "testnet"
             ? "grpc"
             : (body.suiTransport as "grpc" | "jsonrpc" | undefined) ?? (body.suiGrpcUrl ? "grpc" : "jsonrpc");
-        if (transport === "grpc" && !body.suiGrpcUrl) {
+        if (transport === "grpc" && !body.suiGrpcUrl && !body.suiRpcUrl) {
             throw new Error(
-                `GET /config requires suiGrpcUrl for ${body.network} ${transport} transport; ` +
-                    "JSON-RPC fallback is disabled",
+                `GET /config requires suiGrpcUrl or suiRpcUrl for ${body.network} ${transport} transport`,
             );
         }
         if (transport === "jsonrpc" && !body.suiRpcUrl) {
@@ -953,7 +952,7 @@ export class MemWal {
 
         const clientCandidates: Array<{ name: string; client: any }> = [];
 
-        if (cfg.suiTransport === "grpc") {
+        if (cfg.suiTransport === "grpc" && cfg.suiGrpcUrl) {
             try {
                 const mod = (await import("@mysten/sui/grpc")) as any;
                 if (typeof mod.SuiGrpcClient === "function") {
@@ -966,9 +965,15 @@ export class MemWal {
                     });
                 }
             } catch {
-                /* Report the missing required transport below. */
+                /* Try the legacy JSON-RPC client below. */
             }
-        } else {
+        }
+
+        // Keep JSON-RPC as a runtime fallback when gRPC is preferred. This is
+        // required for rolling SDK/server deployments and prevents a transient
+        // gRPC outage from breaking every relayer-mode request while the
+        // advertised JSON-RPC endpoint remains healthy.
+        if (cfg.suiRpcUrl) {
             let SuiClient: any = undefined;
             try {
                 const mod = (await import("@mysten/sui/client")) as any;
@@ -1002,8 +1007,8 @@ export class MemWal {
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
 
         // SessionKey accepts either transport through the shared core client
-        // interface, but the server-selected transport is authoritative. In
-        // particular, a failed testnet gRPC attempt never retries JSON-RPC.
+        // interface. Candidates are ordered by the server's preferred
+        // transport, with JSON-RPC retained as a compatibility fallback.
         let session: any = undefined;
         let lastClientError: unknown;
         for (const candidate of clientCandidates) {
