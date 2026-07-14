@@ -24,7 +24,7 @@
  * Errors are written to stderr with non-zero exit code.
  */
 
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Transaction } from "@mysten/sui/transactions";
@@ -96,8 +96,10 @@ function parseArgs(): {
 async function main() {
     const { data, privateKey, packageId, registryId } = parseArgs();
 
-    const suiClient = new SuiJsonRpcClient({
-        url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+    const grpcUrl = process.env.SUI_GRPC_URL?.trim()
+        || `https://fullnode.${SUI_NETWORK}.sui.io`;
+    const suiClient = new SuiGrpcClient({
+        baseUrl: grpcUrl,
         network: SUI_NETWORK,
     });
 

@@ -47,19 +47,22 @@ fn json_error_response(status: axum::http::StatusCode, msg: &'static str) -> Res
 }
 
 /// Validate a Sui address: `0x` followed by exactly 64 hex characters.
-fn validate_sui_address(s: &str) -> bool {
+pub(super) fn validate_sui_address(s: &str) -> bool {
     s.starts_with("0x") && s.len() == 66 && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Validate base64 and return decoded bytes, or None on failure.
-fn decode_base64(s: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_base64(s: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
 /// Validate a Sui transaction digest: base58 alphabet, 43 or 44 characters.
-fn validate_digest(s: &str) -> bool {
+pub(super) fn validate_digest(s: &str) -> bool {
+    // Base58 of 32 bytes is normally 43-44 chars, but digests with leading
+    // zero bytes encode shorter (~0.1% of real digests are 42) — accept the
+    // full range a 32-byte value can produce.
     let len = s.len();
-    if len != 43 && len != 44 {
+    if !(32..=44).contains(&len) {
         return false;
     }
     // Base58 alphabet excludes: 0, O, I, l
@@ -72,17 +75,66 @@ fn validate_digest(s: &str) -> bool {
 
 /// Sui transaction signatures are serialized as base64 bytes. Native schemes are
 /// 65/97 bytes, while zkLogin signatures are variable-size serialized payloads.
-fn validate_sponsored_signature_len(len: usize) -> bool {
+pub(super) fn validate_sponsored_signature_len(len: usize) -> bool {
     (65..=MAX_SPONSORED_SIGNATURE_BYTES).contains(&len)
 }
 
-/// POST /sponsor — proxy to sidecar POST /sponsor
-pub async fn sponsor_proxy(
-    State(state): State<Arc<AppState>>,
-    body: axum::body::Bytes,
-) -> Result<Response<Body>, AppError> {
-    // Parse and validate — never echo back client-supplied values in errors.
-    let req: SponsorRequest = serde_json::from_slice(&body)
+/// Forward a signed sponsored transaction to the sidecar's
+/// `/sponsor/execute` and return the upstream status + body. Shared by the
+/// `/sponsor/execute` proxy.
+async fn call_sidecar_sponsor_execute(
+    state: &AppState,
+    digest: &str,
+    signature: &str,
+    verify_effects: bool,
+) -> Result<(reqwest::StatusCode, axum::body::Bytes), AppError> {
+    let forwarded = serde_json::json!({
+        "digest": digest,
+        "signature": signature,
+        "verifyEffects": verify_effects,
+    });
+
+    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
+    let mut req = state
+        .http_client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&forwarded);
+    if let Some(secret) = state.config.sidecar_secret.as_deref() {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "sponsor_execute",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
+        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "sponsor_execute",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let upstream_status = resp.status();
+    let resp_body = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+    Ok((upstream_status, resp_body))
+}
+
+/// Parse and validate a /sponsor-shaped body — never echo back
+/// client-supplied values in errors.
+fn parse_sponsor_request(body: &[u8]) -> Result<SponsorRequest, AppError> {
+    let req: SponsorRequest = serde_json::from_slice(body)
         .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
 
     if !validate_sui_address(&req.sender) {
@@ -98,52 +150,14 @@ pub async fn sponsor_proxy(
         ));
     }
 
-    // Per-sender rate limit — second axis that a distributed IP attack cannot bypass.
-    // Runs after validation so we only count well-formed requests against the sender.
-    {
-        let config = &state.config.sponsor_rate_limit;
-        match rate_limit::check_sender_rate_limit(
-            &state,
-            &req.sender,
-            config.per_minute,
-            config.per_hour,
-        )
-        .await
-        {
-            Ok(rate_limit::SponsorRlResult::MinuteLimitExceeded) => {
-                tracing::warn!(
-                    "sponsor rate limit [sender/min]: sender={}...",
-                    &req.sender[..16]
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::TOO_MANY_REQUESTS,
-                    "Rate limit exceeded",
-                ));
-            }
-            Ok(rate_limit::SponsorRlResult::HourLimitExceeded) => {
-                tracing::warn!(
-                    "sponsor rate limit [sender/hr]: sender={}...",
-                    &req.sender[..16]
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::TOO_MANY_REQUESTS,
-                    "Rate limit exceeded",
-                ));
-            }
-            Ok(rate_limit::SponsorRlResult::Allowed) => {}
-            Err(_) => {
-                // Redis and in-memory fallback both unavailable — deny to fail-closed.
-                tracing::error!(
-                    "sponsor sender rate limit unavailable for sponsor_proxy, denying request"
-                );
-                return Ok(json_error_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "Rate limiter temporarily unavailable",
-                ));
-            }
-        }
-    }
+    Ok(req)
+}
 
+/// Forward a validated sponsor request to the sidecar's POST /sponsor.
+async fn forward_sponsor(
+    state: &AppState,
+    req: &SponsorRequest,
+) -> Result<Response<Body>, AppError> {
     // Re-serialise only validated fields before forwarding.
     let forwarded = serde_json::json!({
         "sender": req.sender,
@@ -196,6 +210,62 @@ pub async fn sponsor_proxy(
         let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
         Ok(json_error_response(masked_status, masked_msg))
     }
+}
+
+/// POST /sponsor — proxy to sidecar POST /sponsor
+pub async fn sponsor_proxy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Response<Body>, AppError> {
+    let req = parse_sponsor_request(&body)?;
+
+    // Per-sender rate limit — second axis that a distributed IP attack cannot bypass.
+    // Runs after validation so we only count well-formed requests against the sender.
+    {
+        let config = &state.config.sponsor_rate_limit;
+        match rate_limit::check_sender_rate_limit(
+            &state,
+            &req.sender,
+            config.per_minute,
+            config.per_hour,
+        )
+        .await
+        {
+            Ok(rate_limit::SponsorRlResult::MinuteLimitExceeded) => {
+                tracing::warn!(
+                    "sponsor rate limit [sender/min]: sender={}...",
+                    &req.sender[..16]
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "Rate limit exceeded",
+                ));
+            }
+            Ok(rate_limit::SponsorRlResult::HourLimitExceeded) => {
+                tracing::warn!(
+                    "sponsor rate limit [sender/hr]: sender={}...",
+                    &req.sender[..16]
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "Rate limit exceeded",
+                ));
+            }
+            Ok(rate_limit::SponsorRlResult::Allowed) => {}
+            Err(_) => {
+                // Redis and in-memory fallback both unavailable — deny to fail-closed.
+                tracing::error!(
+                    "sponsor sender rate limit unavailable for sponsor_proxy, denying request"
+                );
+                return Ok(json_error_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Rate limiter temporarily unavailable",
+                ));
+            }
+        }
+    }
+
+    forward_sponsor(&state, &req).await
 }
 
 /// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
@@ -265,45 +335,8 @@ pub async fn sponsor_execute_proxy(
         }
     }
 
-    let forwarded = serde_json::json!({
-        "digest": req.digest,
-        "signature": req.signature,
-    });
-
-    let url = format!("{}/sponsor/execute", state.config.sidecar_url);
-    let mut req = state
-        .http_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&forwarded);
-    if let Some(secret) = state.config.sidecar_secret.as_deref() {
-        req = req.header("authorization", format!("Bearer {}", secret));
-    }
-    let req = crate::observability::apply_request_id_header(req);
-    let started = std::time::Instant::now();
-    let resp = req.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sidecar",
-            "sponsor_execute",
-            "transport_error",
-            started.elapsed(),
-        );
-        crate::observability::record_sidecar_failure("sponsor_execute", "transport_error");
-        AppError::Internal(format!("Sponsor execute proxy failed: {}", e))
-    })?;
-    let status_label = resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sidecar",
-        "sponsor_execute",
-        &status_label,
-        started.elapsed(),
-    );
-
-    let upstream_status = resp.status();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Sponsor execute proxy read failed: {}", e)))?;
+    let (upstream_status, resp_body) =
+        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature, false).await?;
 
     if upstream_status.is_success() {
         Ok(Response::builder()
@@ -392,8 +425,14 @@ mod more_tests {
     }
 
     #[test]
-    fn test_digest_too_short_42() {
-        assert!(!validate_digest(&"1".repeat(42)));
+    fn test_digest_valid_42_chars_leading_zero_encoding() {
+        // 32-byte digests with leading zero bytes encode shorter than 43.
+        assert!(validate_digest(&"1".repeat(42)));
+    }
+
+    #[test]
+    fn test_digest_too_short_31() {
+        assert!(!validate_digest(&"1".repeat(31)));
     }
 
     #[test]

@@ -19,6 +19,7 @@ RUN cargo build --release && rm -rf src
 # Build real source
 COPY src/ src/
 COPY migrations/ migrations/
+COPY migrations_legacy/ migrations_legacy/
 # Touch main.rs to invalidate the cache for the actual source
 RUN touch src/main.rs
 RUN cargo build --release

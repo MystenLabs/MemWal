@@ -3,12 +3,16 @@ mod auth;
 mod compatibility;
 mod engine;
 mod jobs;
+mod jobs_security_delete;
 mod mcp_proxy;
 mod observability;
 mod rate_limit;
 mod routes;
+mod security_delete_auth;
+mod security_delete_error;
 mod services;
 mod storage;
+mod sui;
 mod types;
 
 use axum::http::{header, HeaderValue, Method};
@@ -34,6 +38,7 @@ use jobs::{
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
+use storage::legacy_db::LegacyDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -42,6 +47,93 @@ use types::{
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const DEFAULT_APALIS_STARTUP_TIMEOUT_SECS: u64 = 45;
+
+fn security_delete_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn security_delete_cors_is_public_and_route_scoped() {
+        let restricted_cors =
+            CorsLayer::new().allow_origin(AllowOrigin::list(["https://app.memwal.test"
+                .parse()
+                .unwrap()]));
+        let app = Router::new()
+            .route("/restricted", get(|| async {}))
+            .layer(restricted_cors)
+            .merge(
+                Router::new()
+                    .route("/security-delete", post(|| async {}))
+                    .layer(security_delete_cors()),
+            );
+
+        let public_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/security-delete")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let public_response = app.clone().oneshot(public_preflight).await.unwrap();
+
+        assert_eq!(
+            public_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        let allowed_methods = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for method in ["GET", "POST", "DELETE", "OPTIONS"] {
+            assert!(allowed_methods.split(',').any(|allowed| allowed == method));
+        }
+        let allowed_headers = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for name in ["authorization", "content-type"] {
+            assert!(allowed_headers
+                .split(',')
+                .any(|allowed| allowed.eq_ignore_ascii_case(name)));
+        }
+
+        let restricted_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/restricted")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap();
+        let restricted_response = app.oneshot(restricted_preflight).await.unwrap();
+
+        assert_eq!(
+            restricted_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None
+        );
+    }
+}
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
@@ -174,6 +266,10 @@ async fn main() {
 
     // Load config
     let config = Config::from_env();
+    if let Err(error) = crate::types::validate_security_delete_config(&config) {
+        tracing::error!("boot guard: {}", error);
+        std::process::exit(1);
+    }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
     tracing::info!("  package id: {}", config.package_id);
@@ -322,6 +418,23 @@ async fn main() {
             .await
             .expect("Failed to connect to PostgreSQL"),
     );
+    let security_delete_component_enabled = config.enable_security_delete
+        || config.deletion_reconciler_enabled
+        || config.deletion_object_resolver_enabled;
+    let legacy_db = if security_delete_component_enabled {
+        Some(Arc::new(
+            LegacyDb::new(
+                config
+                    .legacy_db_url
+                    .as_deref()
+                    .expect("boot guard requires LEGACY_DB_URL"),
+            )
+            .await
+            .expect("Failed to initialize legacy security-delete database"),
+        ))
+    } else {
+        None
+    };
 
     let apalis_startup_timeout_secs = parse_env_u64(
         "APALIS_STARTUP_TIMEOUT_SECS",
@@ -396,6 +509,8 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
+    let security_delete_nonce_store: Arc<dyn security_delete_auth::NonceStore> =
+        Arc::new(security_delete_auth::RedisNonceStore::new(redis.clone()));
 
     // Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
     let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
@@ -478,11 +593,65 @@ async fn main() {
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
+    // General delegate-key verification keeps its existing independent gRPC
+    // client; security deletion owns a separate quota-gated client below.
+    let sui_grpc_client = config.sui_grpc_url.as_deref().map(|url| {
+        sui_rpc::Client::new(url)
+            .unwrap_or_else(|e| panic!("SUI_GRPC_URL {url} is not a valid gRPC endpoint: {e}"))
+    });
+    if let Some(url) = config.sui_grpc_url.as_deref() {
+        tracing::info!("  Sui gRPC: {}", url);
+    }
+    type SecurityDeleteSui = Option<Arc<dyn sui::SuiApi>>;
+    type SecurityDeleteVerifier = Arc<dyn security_delete_auth::WalletSignatureVerifier>;
+    let (security_delete_sui, security_delete_background_sui, security_delete_wallet_verifier): (
+        SecurityDeleteSui,
+        SecurityDeleteSui,
+        SecurityDeleteVerifier,
+    ) = if security_delete_component_enabled {
+        let client = sui::SuiClient::new(
+            config
+                .sui_grpc_url
+                .as_deref()
+                .expect("boot guard requires SUI_GRPC_URL"),
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize security-delete Sui client")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid security-delete Sui RPC controls")
+        .with_walrus_config(
+            config.walrus_package_id.clone(),
+            config.walrus_system_object_id.clone(),
+        );
+        (
+            Some(Arc::new(client.clone())),
+            Some(Arc::new(client.background())),
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else {
+        (
+            None,
+            None,
+            Arc::new(security_delete_auth::NativeWalletSignatureVerifier),
+        )
+    };
+    let security_delete_execution_gate = Arc::new(types::SecurityDeleteExecutionGate::new(
+        config.security_delete_execute_max_in_flight,
+    ));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
+        legacy_db,
+        security_delete_nonce_store,
+        security_delete_wallet_verifier,
+        security_delete_sui,
+        security_delete_background_sui,
+        security_delete_execution_gate,
         config: Arc::clone(&config),
         http_client,
+        sui_grpc_client,
         key_pool,
         alerts,
         engine,
@@ -498,6 +667,9 @@ async fn main() {
         blob_cache_max_bytes,
         embedding_cache_ttl,
     });
+
+    jobs_security_delete::spawn_reconciler(Arc::clone(&state));
+    jobs_security_delete::spawn_object_resolver(Arc::clone(&state));
 
     tracing::info!(
         "  alerts: Slack {} via ALERT_TO_SLACK",
@@ -516,8 +688,7 @@ async fn main() {
     // throttle the burst) — before queued requests outlive the sidecar's
     // 120s acquire timeout and start failing.
     let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
-    let saturation_consecutive =
-        parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
+    let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
     let saturation_interval_secs =
         parse_env_u64("SIDECAR_QUEUE_SATURATION_INTERVAL_SECS", 30, 5, 300);
     tracing::info!(
@@ -532,9 +703,8 @@ async fn main() {
         let monitor_alerts = Arc::clone(&state.alerts);
         let monitor_network = config.sui_network.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                saturation_interval_secs,
-            ));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
             let mut consecutive_saturated = 0u32;
             loop {
                 interval.tick().await;
@@ -593,8 +763,9 @@ async fn main() {
                         threshold: saturation_threshold,
                         consecutive_checks: consecutive_saturated,
                     };
-                    if let Err(err) =
-                        monitor_alerts.notify_walrus_upload_queue_saturated(alert).await
+                    if let Err(err) = monitor_alerts
+                        .notify_walrus_upload_queue_saturated(alert)
+                        .await
                     {
                         tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
                     }
@@ -791,6 +962,57 @@ async fn main() {
             rate_limit::sponsor_rate_limit_middleware,
         ));
 
+    let security_delete_auth_routes = Router::new()
+        .route(
+            "/api/security-delete-auth/challenge",
+            post(security_delete_auth::challenge).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/security-delete-auth/verify",
+            post(security_delete_auth::verify).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_auth_rate_limit,
+        ))
+        // Last layer executes first: hide disabled deployments before rate
+        // limiting or JSON extraction can reveal the route contract.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    let security_delete_bearer_routes = Router::new()
+        .route(
+            "/api/security-deletable-blobs",
+            get(routes::security_delete::list_deletable_blobs),
+        )
+        .route(
+            "/api/security-deletions",
+            post(routes::security_delete::prepare_deletion)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}/submit",
+            post(routes::security_delete::submit_deletion).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}",
+            get(routes::security_delete::deletion_status)
+                .delete(routes::security_delete::cancel_deletion),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    // The deletion API is intentionally consumable by public browser clients.
+    // Keep its CORS policy route-scoped so the rest of the API still uses the
+    // deployment's ALLOWED_ORIGINS allowlist.
+    let security_delete_routes = security_delete_auth_routes
+        .merge(security_delete_bearer_routes)
+        .layer(security_delete_cors());
+
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
     // open and the sidecar parses it as the Ed25519 delegate key. Body limit
@@ -866,7 +1088,7 @@ async fn main() {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::AUTHORIZATION,
@@ -891,8 +1113,11 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
-        .with_state(state)
         .layer(cors)
+        // Merge after applying the deployment-wide CORS layer so its
+        // preflight handler cannot shadow the deletion API's public policy.
+        .merge(security_delete_routes)
+        .with_state(state)
         .layer(middleware::from_fn(
             observability::request_context_middleware,
         ));
