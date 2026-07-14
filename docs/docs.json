@@ -55,7 +55,8 @@
           {
             "group": "Guides",
             "pages": [
-              "guides/delete-old-memories"
+              "guides/delete-old-memories",
+              "guides/delete-memories-programmatically"
             ]
           }
         ]
