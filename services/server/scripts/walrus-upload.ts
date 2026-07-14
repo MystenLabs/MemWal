@@ -21,7 +21,7 @@
  */
 
 import { WalrusClient } from "@mysten/walrus";
-import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 
@@ -90,23 +90,28 @@ async function main() {
     const signer = Ed25519Keypair.fromSecretKey(secretKey);
 
     // Network config from env vars
-    const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
+    const rawNetwork = (process.env.SUI_NETWORK || "mainnet").trim().toLowerCase();
+    if (rawNetwork !== "mainnet" && rawNetwork !== "testnet") {
+        throw new Error(`unsupported SUI_NETWORK=${process.env.SUI_NETWORK}; expected mainnet or testnet`);
+    }
+    const SUI_NETWORK: "mainnet" | "testnet" = rawNetwork;
     const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
         SUI_NETWORK === "testnet"
             ? "https://upload-relay.testnet.walrus.space"
             : "https://upload-relay.mainnet.walrus.space"
     );
 
-    // Create Sui JSON-RPC client
-    const suiClient = new SuiJsonRpcClient({
-        url: getJsonRpcFullnodeUrl(SUI_NETWORK),
+    const grpcUrl = process.env.SUI_GRPC_URL?.trim()
+        || `https://fullnode.${SUI_NETWORK}.sui.io`;
+    const suiClient = new SuiGrpcClient({
+        baseUrl: grpcUrl,
         network: SUI_NETWORK,
     });
 
     // Create WalrusClient with upload relay
     const walrusClient = new WalrusClient({
         network: SUI_NETWORK,
-        suiClient: suiClient as any,
+        suiClient,
         uploadRelay: {
             host: WALRUS_UPLOAD_RELAY_URL,
             sendTip: { max: 10_000_000 },
@@ -139,16 +144,28 @@ async function main() {
     });
 
     // Step 3: Upload encoded data to relay
-    await flow.upload({ digest: registerResult.digest });
+    if (registerResult.$kind === "FailedTransaction") {
+        throw new Error(
+            `Walrus register transaction ${registerResult.FailedTransaction.digest} failed: ` +
+                JSON.stringify(registerResult.FailedTransaction.status.error),
+        );
+    }
+    await flow.upload({ digest: registerResult.Transaction.digest });
 
     // Step 4: Certify blob on Sui → returns a Transaction
     const certifyTx = flow.certify();
 
     // Sign and execute the certify transaction
-    await suiClient.signAndExecuteTransaction({
+    const certifyResult = await suiClient.signAndExecuteTransaction({
         signer,
         transaction: certifyTx,
     });
+    if (certifyResult.$kind === "FailedTransaction") {
+        throw new Error(
+            `Walrus certify transaction ${certifyResult.FailedTransaction.digest} failed: ` +
+                JSON.stringify(certifyResult.FailedTransaction.status.error),
+        );
+    }
 
     // Get blob info from the flow
     const blob = await flow.getBlob();

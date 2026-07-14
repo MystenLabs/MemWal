@@ -22,6 +22,8 @@ pnpm-debug.log*
 # Environment variables
 .env
 .env*.local
+.env.local.*
+.env*.bak
 .env.production
 .env.test
 */.env.test
@@ -137,3 +139,7 @@ claudedocs/
 
 # Temp File
 temp/
+
+
+# Devstack local state (private keys, docker/container state — never commit)
+.devstack/

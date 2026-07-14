@@ -18,6 +18,7 @@ mod admin;
 mod analyze;
 mod recall;
 mod remember;
+pub mod security_delete;
 mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
@@ -37,6 +38,20 @@ use crate::storage::db::VectorDb;
 use crate::types::*;
 
 use apalis::prelude::Storage as _;
+
+/// Temporary response for every endpoint that can create a new Walrus memory.
+///
+/// Keep this at the routing boundary so paused requests cannot start request
+/// validation, extraction, database writes, or background upload jobs.
+pub const UPLOADS_PAUSED_MESSAGE: &str =
+    "New uploads to Walrus Memory are paused while we conduct a security upgrade";
+
+pub async fn uploads_paused() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({ "error": UPLOADS_PAUSED_MESSAGE })),
+    )
+}
 
 // ============================================================
 // Wallet-job enqueue (used by remember + analyze)
@@ -107,6 +122,24 @@ where
         .into_iter()
         .map(|(_, result)| result)
         .collect()
+}
+
+#[cfg(test)]
+mod uploads_paused_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn returns_security_upgrade_message_with_service_unavailable_status() {
+        let (status, axum::Json(body)) = uploads_paused().await;
+
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "New uploads to Walrus Memory are paused while we conduct a security upgrade"
+            })
+        );
+    }
 }
 
 // ============================================================

@@ -9,16 +9,21 @@
 /**
  * Sign a request using Ed25519 delegate key.
  *
- * Message format: "{timestamp}.{method}.{path}.{sha256(body)}"
+ * Message format (must match the relayer auth middleware and SDK v0.4+):
+ *   "{timestamp}.{method}.{path}.{sha256(body)}.{nonce}.{account_id}"
+ * The nonce is a per-request UUID v4 (replay protection) — requests without
+ * an x-nonce header are rejected with 426 as unsupported legacy clients.
  */
 export async function signRequest(
     privateKeyHex: string,
     method: string,
     path: string,
     body: string,
+    accountId = '',
 ) {
     const ed = await import('@noble/ed25519')
     const timestamp = Math.floor(Date.now() / 1000).toString()
+    const nonce = crypto.randomUUID()
 
     const bodyBytes = new TextEncoder().encode(body)
     const hashBuf = await crypto.subtle.digest('SHA-256', bodyBytes)
@@ -26,7 +31,7 @@ export async function signRequest(
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('')
 
-    const message = `${timestamp}.${method}.${path}.${bodySha}`
+    const message = `${timestamp}.${method}.${path}.${bodySha}.${nonce}.${accountId}`
     const msgBytes = new TextEncoder().encode(message)
 
     const privKey = Uint8Array.from(
@@ -38,6 +43,7 @@ export async function signRequest(
 
     return {
         timestamp,
+        nonce,
         publicKey: Array.from(pubKey)
             .map((b) => b.toString(16).padStart(2, '0'))
             .join(''),
@@ -61,11 +67,12 @@ export async function apiCall(
     accountId?: string,
 ) {
     const bodyStr = JSON.stringify(body)
-    const { timestamp, publicKey, signature } = await signRequest(
+    const { timestamp, nonce, publicKey, signature } = await signRequest(
         privateKeyHex,
         'POST',
         path,
         bodyStr,
+        accountId ?? '',
     )
 
     const headers: Record<string, string> = {
@@ -73,6 +80,7 @@ export async function apiCall(
         'x-public-key': publicKey,
         'x-signature': signature,
         'x-timestamp': timestamp,
+        'x-nonce': nonce,
         'x-delegate-key': privateKeyHex,
     }
     if (accountId) {

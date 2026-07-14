@@ -143,7 +143,7 @@ pub async fn version() -> Json<crate::compatibility::VersionResponse> {
 ///
 /// public, unauthenticated endpoint returning deployment
 /// parameters the SDK needs to build a SEAL `SessionKey` client-side —
-/// specifically the Move `packageId` and the Sui network/RPC URL.
+/// specifically the Move `packageId` and the Sui network endpoint/transport.
 ///
 /// These values are public on-chain metadata (not secrets), so no auth is
 /// required. Exposing them here lets the SDK migrate from transmitting
@@ -155,8 +155,38 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigRespon
     Json(ConfigResponse {
         package_id: state.config.package_id.clone(),
         network: state.config.sui_network.clone(),
-        sui_rpc_url: state.config.sui_rpc_url.clone(),
+        // Keep the legacy endpoint in the response while SDK/server versions
+        // roll independently. New SDKs prefer gRPC when advertised and fall
+        // back to this URL; old SDKs still require this field.
+        sui_rpc_url: Some(state.config.sui_rpc_url.clone()),
+        sui_grpc_url: state.config.sui_grpc_url.clone(),
+        sui_transport: if state.config.sui_grpc_url.is_some() {
+            "grpc"
+        } else {
+            "jsonrpc"
+        },
         rate_limit_disabled: state.config.rate_limit.bench_bypass_enabled,
+        security_delete_sui_rpc_requests_per_window: state.config.sui_rpc_requests_per_window,
+        security_delete_sui_rpc_window_secs: state.config.sui_rpc_window.as_secs(),
+        security_delete_enabled: state.config.enable_security_delete,
+        security_delete_reconciler_enabled: state.config.deletion_reconciler_enabled,
+        security_delete_object_resolver_enabled: state.config.deletion_object_resolver_enabled,
+        security_delete_batch_max: state.config.delete_batch_max,
+        security_delete_max_active_batches_per_owner: state.config.max_active_batches_per_owner,
+        security_delete_auth_requests_per_minute: state
+            .config
+            .security_delete_auth_requests_per_minute,
+        security_delete_prepare_requests_per_minute: state
+            .config
+            .security_delete_prepare_requests_per_minute,
+        security_delete_execute_max_in_flight: state.config.security_delete_execute_max_in_flight,
+        security_delete_crash_test_enabled: state
+            .config
+            .security_delete_crash_test_secret
+            .is_some(),
+        security_delete_claim_ttl_secs: state.config.claim_ttl_secs,
+        security_delete_execution_grace_secs: state.config.exec_grace_secs,
+        security_delete_expiry_margin_epochs: state.config.expiry_margin_epochs,
     })
 }
 

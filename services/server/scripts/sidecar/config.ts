@@ -8,6 +8,7 @@
 
 import { getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
 import { getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "../seal-config.js";
+import { parseSuiNetwork, validateSuiTransportPolicy } from "./sui-transport-policy.js";
 
 export function parsePositiveIntEnv(
     name: string,
@@ -29,9 +30,37 @@ export function parsePositiveIntEnv(
 // Network
 // ============================================================
 
-export const SUI_NETWORK = (process.env.SUI_NETWORK || "mainnet") as "mainnet" | "testnet";
-export const SUI_RPC_URL = getJsonRpcFullnodeUrl(SUI_NETWORK);
+export const SUI_NETWORK = parseSuiNetwork(process.env.SUI_NETWORK);
+// Legacy JSON-RPC endpoint for non-testnet compatibility. Testnet startup
+// requires SUI_GRPC_URL below and no code may contact this URL.
+//
+// The explicit SUI_RPC_URL override (e.g. a dedicated / premium RPC) exists so we
+// can move off the public fullnode when its pool degrades — the public endpoint
+// has served stale reads (a certified blob read back as "does not exist"), which
+// fails uploads at get_blob / certify. Falls back to the network default.
+export const SUI_RPC_URL = process.env.SUI_RPC_URL?.trim() || getJsonRpcFullnodeUrl(SUI_NETWORK);
+
+// gRPC base URL for the core/upload/query path. It is mandatory on testnet;
+// non-testnet deployments may retain the legacy JSON-RPC compatibility path.
+// Example: https://fullnode.mainnet.sui.io
+export const SUI_GRPC_URL = process.env.SUI_GRPC_URL?.trim() || "";
 export const SUI_TYPE = "0x2::sui::SUI";
+
+// Opt-in override to force the sidecar's shared core client (suiClient in
+// clients.ts) onto JSON-RPC even when SUI_GRPC_URL is set. Devstack's local
+// validator rejects GrpcCoreClient's automatic CoinWithBalance gas-payment
+// resolution (resolveTransactionData -> gRPC SimulateTransaction) with a
+// bogus "insufficient SUI balance" error even when the paying account holds
+// ample SUI; SuiJsonRpcClient works against that same node. Set to
+// "jsonrpc" for local devstack stacks only. Testnet rejects this value at
+// startup rather than silently selecting a retired transport.
+export const SIDECAR_SUI_TX_CLIENT = (process.env.SIDECAR_SUI_TX_CLIENT || "").trim().toLowerCase();
+
+validateSuiTransportPolicy({
+    network: SUI_NETWORK,
+    grpcUrl: SUI_GRPC_URL,
+    txClientOverride: SIDECAR_SUI_TX_CLIENT,
+});
 
 // ============================================================
 // SEAL
@@ -80,6 +109,15 @@ export const WALRUS_PACKAGE_ID = process.env.WALRUS_PACKAGE_ID || (
         : "0xfdc88f7d7cf30afab2f82e8380d11ee8f70efb90e863d1de8616fae1bb09ea77"
 );
 
+// @mysten/walrus's WalrusClient only recognizes "mainnet"/"testnet" as named
+// networks — it throws "Unsupported network" for anything else (e.g. a
+// devstack localnet). Set both to hand it an explicit on-chain packageConfig
+// instead of a named network; see createWalrusClient in clients.ts. Left
+// unset on mainnet/testnet, where the named-network default already
+// resolves the right ids.
+export const WALRUS_SYSTEM_OBJECT_ID = process.env.WALRUS_SYSTEM_OBJECT_ID?.trim() || "";
+export const WALRUS_STAKING_POOL_ID = process.env.WALRUS_STAKING_POOL_ID?.trim() || "";
+
 export const WALRUS_UPLOAD_RELAY_URL = process.env.WALRUS_UPLOAD_RELAY_URL || (
     SUI_NETWORK === "testnet"
         ? "https://upload-relay.testnet.walrus.space"
@@ -123,9 +161,16 @@ export function clampWalrusEpochs(rawEpochs: unknown): number {
     return Math.min(Math.floor(parsed), MAX_WALRUS_EPOCHS);
 }
 
+// The cached WalrusClient snapshots `systemState` (storage/write price,
+// committee) at creation and reuses it for its whole lifetime. The register
+// PTB pre-funds an *exact* WAL payment from that cached price, so when mainnet
+// price drifts the split leaves change and `coin::destroy_zero` aborts. Keep
+// the client young so the cached price tracks the live price closely; the
+// register-path `destroy_zero` handler also recreates it on demand. Was 30 min,
+// which let the cached price fall far behind a live-drifting mainnet price.
 export const WALRUS_CLIENT_MAX_AGE_MS = (() => {
     const parsed = Number.parseInt(process.env.WALRUS_CLIENT_MAX_AGE_MS || "", 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60 * 1000;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 1000;
 })();
 
 // Mirror of services/server/src/alerts.rs SIDECAR_WALRUS_DEP_VERSION.

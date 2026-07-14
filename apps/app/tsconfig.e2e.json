@@ -1,0 +1,24 @@
+// Typechecks the Playwright suite (e2e/ + playwright.config.ts), which no
+// other tsconfig includes — Playwright transpiles without typechecking.
+// Run: pnpm exec tsc -p tsconfig.e2e.json
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}
