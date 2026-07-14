@@ -252,7 +252,6 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
             <button className="btn btn-secondary" disabled={visiblePage >= totalPages || loading} onClick={() => void load(visiblePage + 1)}>Next ›</button>
             <span className="sd-pager-status" aria-live="polite">Page {visiblePage} of {totalPages}</span>
         </nav>}
-        {!accountObjectId && <p className="dashboard-cleanup-status">Preview becomes available when your account details finish resolving.</p>}
         {visibleConfirm && <div className="dashboard-confirm-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeConfirm() }}>
             <section className="dashboard-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="sd-confirm-title" aria-describedby="sd-confirm-description">
                 <div className="dashboard-confirm-copy"><h3 id="sd-confirm-title">Permanently delete {confirmCount} {confirmCount === 1 ? 'memory' : 'memories'}?</h3><p id="sd-confirm-description">Deletion from Walrus Memory is permanent and cannot be undone.</p></div>
