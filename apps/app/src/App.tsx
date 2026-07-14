@@ -45,9 +45,19 @@ import '@mysten/dapp-kit/dist/index.css'
 // gRPC is scoped to the deletion subsystem, which owns its own client. The Seal
 // and Walrus SDKs the deletion preview uses accept either transport, so nothing
 // in that path needs the shared client to be gRPC.
+// VITE_SUI_RPC_URL overrides the public fullnode for the active network only
+// (mirrors the relayer's SUI_RPC_URL — the public mainnet pool serves
+// stale/slow reads under load). Other networks keep the public default.
+function jsonRpcUrlFor(network: 'testnet' | 'mainnet'): string {
+  if (network === config.suiNetwork && config.suiRpcUrl) {
+    return config.suiRpcUrl
+  }
+  return getJsonRpcFullnodeUrl(network)
+}
+
 const { networkConfig } = createNetworkConfig({
-  testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
-  mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
+  testnet: { url: jsonRpcUrlFor('testnet'), network: 'testnet' },
+  mainnet: { url: jsonRpcUrlFor('mainnet'), network: 'mainnet' },
   localnet: { url: config.suiRpcUrl || 'http://127.0.0.1:9000', network: 'localnet' },
 })
 
