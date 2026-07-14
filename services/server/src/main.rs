@@ -911,7 +911,7 @@ async fn main() {
     // caps are enforced independently and a mismatch silently rejects valid
     // requests.
     let protected_routes = Router::new()
-        .route("/api/remember", post(routes::remember))
+        .route("/api/remember", post(routes::uploads_paused))
         .route(
             "/api/remember/{job_id}",
             axum::routing::get(routes::remember_status),
@@ -921,14 +921,14 @@ async fn main() {
             post(routes::remember_bulk_status),
         )
         .route("/api/recall", post(routes::recall))
-        .route("/api/remember/manual", post(routes::remember_manual))
+        .route("/api/remember/manual", post(routes::uploads_paused))
         .route("/api/recall/manual", post(routes::recall_manual))
         // Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
         .route(
             "/api/remember/bulk",
-            post(routes::remember_bulk).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+            post(routes::uploads_paused).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
-        .route("/api/analyze", post(routes::analyze))
+        .route("/api/analyze", post(routes::uploads_paused))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
         // admin/harness endpoints — namespace delete + stats.
