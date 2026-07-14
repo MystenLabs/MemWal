@@ -33,6 +33,11 @@ export function parsePositiveIntEnv(
 export const SUI_NETWORK = parseSuiNetwork(process.env.SUI_NETWORK);
 // Legacy JSON-RPC endpoint for non-testnet compatibility. Testnet startup
 // requires SUI_GRPC_URL below and no code may contact this URL.
+//
+// The explicit SUI_RPC_URL override (e.g. a dedicated / premium RPC) exists so we
+// can move off the public fullnode when its pool degrades — the public endpoint
+// has served stale reads (a certified blob read back as "does not exist"), which
+// fails uploads at get_blob / certify. Falls back to the network default.
 export const SUI_RPC_URL = process.env.SUI_RPC_URL?.trim() || getJsonRpcFullnodeUrl(SUI_NETWORK);
 
 // gRPC base URL for the core/upload/query path. It is mandatory on testnet;

@@ -18,7 +18,7 @@ If you only work on TypeScript apps or docs, you don't need Rust.
 ## Step 1 — Clone and Install
 
 ```bash
-git clone https://github.com/CommandOSSLabs/MemWal.git
+git clone https://github.com/MystenLabs/MemWal.git
 cd MemWal
 pnpm install
 ```

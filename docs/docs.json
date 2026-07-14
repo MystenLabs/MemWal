@@ -64,6 +64,7 @@
             "pages": [
               "fundamentals/architecture/core-components",
               "fundamentals/architecture/how-storage-works",
+              "fundamentals/architecture/funding-storage",
               "fundamentals/architecture/data-flow-security-model"
             ]
           }
@@ -87,6 +88,9 @@
               },
               "sdk/cookbook-multi-tenant",
               "sdk/cloudflare-workers",
+              "sdk/agent-storage-loop",
+              "sdk/production-readiness",
+              "sdk/versioned-datasets",
               "sdk/api-reference",
               "sdk/changelog"
             ]
@@ -201,6 +205,17 @@
             "pages": [
               "reference/configuration",
               "reference/environment-variables"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Troubleshooting",
+        "groups": [
+          {
+            "group": "Troubleshooting",
+            "pages": [
+              "troubleshooting/overview"
             ]
           }
         ]
