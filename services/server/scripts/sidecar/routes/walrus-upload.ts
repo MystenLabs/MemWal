@@ -45,7 +45,7 @@ import {
     sleep,
     truncateForLog,
 } from "../util.js";
-import { isMoveAbortBalanceSplit } from "../enoki.js";
+import { isMoveAbortBalanceSplit, isMoveAbortWalDestroyZero } from "../enoki.js";
 import {
     patchGasCoinIntents,
     submitRebuildableWalletTransaction,
@@ -361,6 +361,15 @@ export function registerWalrusUploadRoute(app: Express): void {
             }
             if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
                 refreshWalrusClient("register_sponsor_balance_split");
+            }
+            // `coin::destroy_zero` (ENonZero) means the WAL payment coin the
+            // register PTB pre-funded from the cached storage price wasn't fully
+            // consumed on-chain — the live price dropped between the cached read
+            // and execution. Recreate the client so the retry re-reads the
+            // current price and splits the exact amount. The Rust worker
+            // classifies this abort Transient so Apalis actually retries.
+            if (isMoveAbortWalDestroyZero(message)) {
+                refreshWalrusClient("walrus_wal_payment_destroy_zero");
             }
             if (isWalrusPackageVersionMismatch(message)) {
                 // EWrongVersion is phase-independent: can fire from register / upload / certify
