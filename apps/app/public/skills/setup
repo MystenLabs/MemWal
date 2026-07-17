@@ -22,10 +22,12 @@ user explicitly asks for developer integration.
 
 ## Setup Rules
 
-1. Identify the AI client first. ChatGPT (or another client that cannot run a
-   local MCP command but supports custom connector headers) uses the Remote
-   MCP section below. Every other client (Claude Desktop, Claude Code, Cursor,
-   Codex, other local apps) uses the Local MCP Server section.
+1. Identify the AI client first. A client that cannot run a local MCP command
+   but can attach two custom connector headers uses the Remote MCP section
+   below. Every other client (Claude Desktop, Claude Code, Cursor, Codex,
+   other local apps) uses the Local MCP Server section. ChatGPT is not
+   supported today: its connector UI exposes only a single bearer field and
+   cannot supply the required `x-memwal-account-id` header.
 2. Decide whether you have local shell and filesystem access.
 3. If you can edit local user config files, do the setup yourself after showing
    the config you will add.
@@ -252,23 +254,23 @@ Use memwal_recall to search for: "setup verification succeeded"
 If the tools support a `namespace` argument, use a setup-only namespace such as
 `setup-verification`.
 
-## Remote MCP (ChatGPT and other header-capable clients)
+## Remote MCP (header-capable clients)
 
 Some clients connect to a remote MCP server URL instead of running a local
-command. Use this path only when the client supports custom request headers.
-ChatGPT (developer mode) supports this today.
+command. Use this path only when the client can attach BOTH custom request
+headers shown below. A client that exposes only a single bearer/token field
+cannot use this path.
+
+ChatGPT is not supported today. Its connector UI exposes only one bearer slot,
+so the required `x-memwal-account-id` header cannot be provided. Do not attempt
+ChatGPT setup; offer a local client (Claude Desktop, Claude Code, Cursor, or
+Codex) instead.
 
 Prerequisite: credentials must already exist. Have the user run the login once
 on their computer (see Recommended Login). The Remote MCP path needs Node.js
 only for that one step.
 
-For ChatGPT:
-
-1. Settings > Connectors > enable Developer mode.
-2. Add a connector with URL `https://relayer.memory.walrus.xyz/api/mcp`.
-3. Add the two headers shown in the template below.
-
-For config-file clients that support remote servers with headers, merge:
+For config-file clients that support remote servers with two headers, merge:
 
 ```json
 {
@@ -295,10 +297,10 @@ cat ~/.memwal/credentials.json
 settings, never into the chat. You (the agent) must not read or print this
 file. Treat the bearer token like an API key and never save it in a repo file.
 
-If the client cannot attach custom headers, remote MCP is not available for it
-today. Tell the user which clients are supported (ChatGPT developer mode,
-Claude Desktop, Claude Code, Cursor, Codex) and offer to set one of those up
-instead. Do not re-run this skill for the same client.
+If the client cannot attach both custom headers, remote MCP is not available
+for it today. Tell the user which clients are supported (Claude Desktop, Claude
+Code, Cursor, Codex) and offer to set one of those up instead. Do not re-run
+this skill for the same client.
 
 ## Troubleshooting
 
