@@ -1,10 +1,10 @@
 ---
 title: Codex
-description: Add portable Walrus Memory to OpenAI Codex as a full plugin with automatic memory, or as a plain MCP server.
+description: Add portable Walrus Memory to OpenAI Codex as a plain MCP server (recommended), or as a full plugin with automatic-memory hooks.
 keywords: [MCP, Codex, Walrus Memory, MemWal, plugin, automatic memory]
 ---
 
-Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
+Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as **MCP-only** (recommended; just the tools, one config block, no repo to clone) or as a full **plugin** (adds automatic-memory hooks, but currently requires cloning the repo).
 
 ## Prerequisites
 
@@ -14,7 +14,21 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
 ## Installation
 
 <Tabs>
-  <Tab title="Plugin (recommended)">
+  <Tab title="MCP-only (recommended)">
+    Add to `~/.codex/config.toml`:
+    ```toml
+    [mcp_servers.memwal]
+    command = "npx"
+    args = ["-y", "@mysten-incubation/memwal-mcp"]
+    ```
+    Restart Codex, then ask the agent to run `memwal_login` on first use. The
+    memory tools are proactive, so this is enough for automatic save and recall.
+  </Tab>
+  <Tab title="Plugin (automatic-memory hooks)">
+    The plugin adds lifecycle hooks on top of the MCP server. There is no Codex
+    marketplace install yet, so it currently requires a cloned repo. If you just
+    want memory in Codex, use the MCP-only tab instead.
+
     <Steps>
       <Step title="Install the hooks + MCP server">
         From a cloned repo:
@@ -34,15 +48,6 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
         Restart Codex. On first use the agent runs `memwal_login` to connect your wallet.
       </Step>
     </Steps>
-  </Tab>
-  <Tab title="MCP-only">
-    Add to `~/.codex/config.toml`:
-    ```toml
-    [mcp_servers.memwal]
-    command = "npx"
-    args = ["-y", "@mysten-incubation/memwal-mcp"]
-    ```
-    Restart Codex, then ask the agent to run `memwal_login` on first use.
   </Tab>
 </Tabs>
 
