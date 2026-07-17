@@ -2,12 +2,52 @@
 title: "Environment Variables"
 ---
 
-Use this page when you run your own relayer.
-For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting).
+This page lists every environment variable MemWal reads, grouped by where it runs:
 
-Environment variables documented here are public relayer contract items. Renaming, removing, or changing their meaning follows the deprecation process in [Versioning and Compatibility](/relayer/versioning-and-compatibility).
+- **[Client, CLI, and MCP](#client-cli-and-mcp)** — what you set when integrating the SDK, running the CLI, or configuring the MCP server (`@mysten-incubation/memwal-mcp`).
+- **[Relayer (self-hosting)](#relayer-self-hosting)** — what you set when you run your own relayer.
 
-## Required
+If a variable is not listed on this page, MemWal does not read it. The client, CLI, and MCP server read your credentials from `~/.memwal/credentials.json` after `memwal_login`, so most integrations need few or no environment variables.
+
+## Client, CLI, and MCP
+
+These apply to the MemWal SDK, the CLI, and the MCP server that AI clients run. They are separate from the relayer variables in the next section.
+
+### MCP server
+
+The MCP server (`npx -y @mysten-incubation/memwal-mcp`) reads these automatically. Each has an equivalent command-line flag.
+
+| Variable | Default | Flag | Notes |
+| --- | --- | --- | --- |
+| `MEMWAL_SERVER_URL` | `https://relayer.memory.walrus.xyz` | `--relayer` | Relayer URL the MCP server and login flow talk to |
+| `MEMWAL_WEB_URL` | `https://memory.walrus.xyz` | `--web-url` | Dashboard URL opened in the browser during login |
+| `MEMWAL_NAMESPACE` | unset (relayer uses `default`) | `--namespace` | Default namespace applied to `remember`, `recall`, `analyze`, and `restore` when a call omits one. An explicit per-call namespace always wins |
+| `MEMWAL_CLIENT_LABEL` | `MCP Client` | `--label` | Friendly label registered on-chain for the delegate key. The login flow uses `Walrus Memory MCP` when unset |
+| `MEMWAL_MCP_DEBUG` | unset | — | Set to `1` for verbose logging to stderr |
+| `MEMWAL_MCP_SSE_IDLE_MS` | `30000` | — | Idle timeout in milliseconds before the MCP bridge reconnects a stalled relayer SSE stream. Values below `500` are ignored. Mostly for tests |
+
+### SDK and CLI credentials
+
+The SDK takes its configuration as a config object (see [Configuration](/reference/configuration)); it does not read these names on its own. The names below are the conventions used across the SDK examples and the CLI. Set them in your own environment, then pass them into `MemWal.create()` or `MemWalManual.create()`.
+
+| Variable | Config field | Notes |
+| --- | --- | --- |
+| `MEMWAL_PRIVATE_KEY` / `MEMWAL_DELEGATE_KEY` | `key` | Ed25519 delegate private key in hex |
+| `MEMWAL_ACCOUNT_ID` | `accountId` | `MemWalAccount` object ID on Sui |
+| `SUI_PRIVATE_KEY` | `suiPrivateKey` | `suiprivkey1…` key for SEAL and Walrus signing in the manual client |
+| `OPENAI_API_KEY` | `embeddingApiKey` | OpenAI-compatible embedding key for the manual client. This is the client-side embedding key, distinct from the relayer's server-side `OPENAI_API_KEY` below |
+
+<Note>
+Credentials created by `memwal_login` live in `~/.memwal/credentials.json`, not in environment variables. Do not print, log, or commit that file.
+</Note>
+
+## Relayer (self-hosting)
+
+Use this section when you run your own relayer. For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting).
+
+Relayer variables documented here are public relayer contract items. Renaming, removing, or changing their meaning follows the deprecation process in [Versioning and Compatibility](/relayer/versioning-and-compatibility).
+
+### Required
 
 | Variable | Notes |
 | --- | --- |
@@ -16,7 +56,7 @@ Environment variables documented here are public relayer contract items. Renamin
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID. See [Contract Overview](/contract/overview) |
 | `SIDECAR_AUTH_TOKEN` | Shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it |
 
-## Usually Required
+### Usually Required
 
 These are not all enforced at boot, but most real deployments need them.
 
@@ -25,7 +65,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `SERVER_SUI_PRIVATE_KEY` | Primary server key for backend decrypt and Walrus actions |
 | `OPENAI_API_KEY` | Server-side key used to call the embedding and fact-extraction provider |
 
-## Optional
+### Optional
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -68,7 +108,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Maximum new MCP sessions opened by one source IP per minute |
 
-## Notes
+### Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas when sponsorship is missing, expired, or rejected.
