@@ -136,7 +136,11 @@ Edit:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Merge:
+Newer Claude Desktop versions pre-populate this file, so it may already contain
+other top-level keys (for example `preferences`) and no `mcpServers` block. Add
+`mcpServers` as a new sibling of those keys; do not replace the file. If an
+`mcpServers` block already exists, add the `memwal` entry inside it next to any
+other servers.
 
 ```json
 {
