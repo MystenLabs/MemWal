@@ -2,12 +2,45 @@
 title: "Environment Variables"
 ---
 
-Use this page when you run your own relayer.
-For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting).
+This page lists every environment variable used across Walrus Memory, grouped by where you set it: the client SDKs, the MCP server, the self-hosted relayer, and frontend apps. Each entry notes its default and whether the variable is read automatically or is a name you wire into config yourself.
 
-Environment variables documented here are public relayer contract items. Renaming, removing, or changing their meaning follows the deprecation process in [Versioning and Compatibility](/relayer/versioning-and-compatibility).
+If a variable is not listed here, Walrus Memory does not read it. A typo such as `MEMWAL_SERVER` or `MEMWAL_ACCOUNT` is silently ignored, so match these names exactly.
 
-## Required
+## Client SDK
+
+The TypeScript SDK (`MemWal.create()` and `withMemWal()`) and the Python SDK take a configuration object, not environment variables. The SDK does not read the names below automatically. They are the conventions used consistently across the documentation examples, so you can keep them in a `.env` file and pass them into the config yourself.
+
+| Variable | Config field | Default | Notes |
+| --- | --- | --- | --- |
+| `MEMWAL_PRIVATE_KEY` | `key` | none | Delegate private key in hex. The fundamentals and Python examples use this name |
+| `MEMWAL_KEY` | `key` | none | The same delegate private key under a shorter name used by the getting-started and SDK quick-starts. Pick one name per project |
+| `MEMWAL_ACCOUNT_ID` | `accountId` | none | `MemWalAccount` object ID on Sui |
+| `MEMWAL_SERVER_URL` | `serverUrl` | `https://relayer.memory.walrus.xyz` | Relayer base URL the SDK calls |
+| `SUI_PRIVATE_KEY` | `suiPrivateKey` | none | Sui signer key for `MemWalManual` local signing, in `suiprivkey1...` format |
+| `OPENAI_API_KEY` | `embeddingApiKey` | none | Embedding and fact-extraction provider key used by `MemWalManual` and the Python SDK |
+| `OPENAI_BASE_URL` | `embeddingApiBase` | `https://api.openai.com/v1` | Base URL for an OpenAI-compatible provider such as OpenRouter |
+
+<Note>
+`MEMWAL_PRIVATE_KEY` and `MEMWAL_KEY` are two names for the same delegate key. The examples use both. Standardize on one in your own project.
+</Note>
+
+## MCP server
+
+The stdio MCP package reads these environment variables directly. A CLI flag takes precedence when both a flag and its variable are set.
+
+| Variable | CLI flag | Default | Notes |
+| --- | --- | --- | --- |
+| `MEMWAL_SERVER_URL` | `--relayer <url>` | hosted relayer | Relayer base URL |
+| `MEMWAL_NAMESPACE` | `--namespace <name>` (alias `--ns`) | `default` (applied by the relayer) | Default namespace injected into memory tool calls that omit one |
+| `MEMWAL_WEB_URL` | `--web-url <url>` | dashboard default | Dashboard URL used during login |
+| `MEMWAL_CLIENT_LABEL` | `--label <text>` | none | Friendly delegate-key label shown in the dashboard |
+| `MEMWAL_MCP_DEBUG` | none | `0` | Set to `1` for verbose stderr logging |
+
+## Self-hosted relayer
+
+Use this section when you run your own relayer. For setup steps and deployment context, see [Self-Hosting](/relayer/self-hosting). These variables are public relayer contract items. Renaming, removing, or changing their meaning follows the deprecation process in [Versioning and Compatibility](/relayer/versioning-and-compatibility).
+
+### Required
 
 | Variable | Notes |
 | --- | --- |
@@ -16,7 +49,7 @@ Environment variables documented here are public relayer contract items. Renamin
 | `MEMWAL_REGISTRY_ID` | Onchain registry object ID. See [Contract Overview](/contract/overview) |
 | `SIDECAR_AUTH_TOKEN` | Shared secret for Rust-to-sidecar calls. The sidecar refuses to start without it |
 
-## Usually Required
+### Usually Required
 
 These are not all enforced at boot, but most real deployments need them.
 
@@ -25,7 +58,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `SERVER_SUI_PRIVATE_KEY` | Primary server key for backend decrypt and Walrus actions |
 | `OPENAI_API_KEY` | Server-side key used to call the embedding and fact-extraction provider |
 
-## Optional
+### Optional
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -68,7 +101,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Maximum new MCP sessions opened by one source IP per minute |
 
-## Notes
+### Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas when sponsorship is missing, expired, or rejected.
@@ -87,3 +120,14 @@ These are not all enforced at boot, but most real deployments need them.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).
 - `MEMWAL_RELAYER_URL` is only needed when the sidecar should call a different relayer URL than the Rust server's local port. The Rust server sets it automatically to `http://127.0.0.1:$PORT` for the managed sidecar when it starts.
+
+## Frontend apps
+
+Browser apps built on Walrus Memory read build-time public variables, exposed through the bundler's public prefix (`VITE_` for Vite, `NEXT_PUBLIC_` for Next.js). These carry only public onchain identifiers, never private keys.
+
+| Variable | Notes |
+| --- | --- |
+| `VITE_MEMWAL_PACKAGE_ID` | Walrus Memory package ID embedded in a Vite app build |
+| `VITE_MEMWAL_REGISTRY_ID` | Onchain registry object ID embedded in a Vite app build |
+
+The server variables `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are not interchangeable with these `VITE_*` app variables. For network-specific values, see [Contract Overview](/contract/overview).
