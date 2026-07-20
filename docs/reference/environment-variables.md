@@ -2,9 +2,9 @@
 title: "Environment Variables"
 ---
 
-This page lists every environment variable used across Walrus Memory, grouped by where you set it: the client SDKs, the MCP server, the self-hosted relayer, and frontend apps. Each entry notes its default and whether the variable is read automatically or is a name you wire into config yourself.
+This page lists the supported, public environment variables across Walrus Memory, grouped by where you set it: the client SDKs, the MCP server, the self-hosted relayer, and frontend apps. Each entry notes its default and whether the variable is read automatically or is a name you wire into config yourself. Internal and test-only variables are intentionally omitted.
 
-If a variable is not listed here, Walrus Memory does not read it. A typo such as `MEMWAL_SERVER` or `MEMWAL_ACCOUNT` is silently ignored, so match these names exactly.
+Walrus Memory reads only specific names, so a typo such as `MEMWAL_SERVER` or `MEMWAL_ACCOUNT` is silently ignored. Match the names here exactly.
 
 ## Client SDK
 
@@ -35,6 +35,7 @@ The stdio MCP package reads these environment variables directly. A CLI flag tak
 | `MEMWAL_WEB_URL` | `--web-url <url>` | dashboard default | Dashboard URL used during login |
 | `MEMWAL_CLIENT_LABEL` | `--label <text>` | `MCP Client` / `Walrus Memory MCP` | Friendly delegate-key label shown in the dashboard |
 | `MEMWAL_MCP_DEBUG` | none | `0` | Set to `1` for verbose stderr logging |
+| `MEMWAL_MCP_SSE_IDLE_MS` | none | `30000` | Maximum milliseconds of silence on the SSE stream before the bridge treats the session as dead and reconnects. Values below `500` are ignored and fall back to the default. Mainly for tests |
 
 ## Self-hosted relayer
 
