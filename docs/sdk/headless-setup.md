@@ -17,7 +17,7 @@ This is the only step that involves a browser. Your runtime never opens one.
 
 ## Initialize from the environment
 
-Load the credentials from environment variables and construct the client at startup. Call `health()` immediately so a bad key or an unreachable relayer fails at boot rather than on the first write:
+Load the credentials from environment variables and construct the client at startup. Call `health()` to confirm the relayer is reachable before your service starts serving traffic:
 
 ```ts service.ts
 import { MemWal } from "@mysten-incubation/memwal";
@@ -36,9 +36,13 @@ const memwal = MemWal.create({
   namespace: "service-memory",
 });
 
-// Fail fast at boot instead of on the first write mid-run.
+// Confirm the relayer is reachable at boot.
 await memwal.health();
 ```
+
+<Note>
+`health()` is an unauthenticated liveness and version check. It confirms the relayer is reachable, but it does not validate your delegate key or account ID. A bad key or account ID surfaces on the first authenticated call, such as `remember` or `recall`. If you want to validate credentials at boot, make a cheap authenticated call, for example a `recall` with a trivial query, and handle its error.
+</Note>
 
 The `MemWal.create` config takes four fields:
 
@@ -59,7 +63,7 @@ Recall is scoped per **account plus namespace**. Never hardcode an account ID co
 
 ## When to use the manual client
 
-The default `MemWal` client lets the relayer handle embedding and Seal encryption on your behalf, which is the right choice for most runtimes. Use `MemWalManual` only when the runtime must hold its own keys and keep plaintext entirely client-side. The manual client requires a few more fields, because it performs Seal encryption and signs Sui operations itself:
+The default `MemWal` client lets the relayer handle embedding and Seal encryption on your behalf, which is the right choice for most runtimes. Use `MemWalManual` only when the runtime must hold its own keys and keep plaintext entirely client-side. With the manual client, the runtime embeds and Seal-encrypts locally, then the relayer uploads the resulting ciphertext to Walrus and stores the vector row, so the relayer never sees plaintext. It requires a few more fields, including a Sui key that authorizes SEAL:
 
 ```ts
 import { MemWalManual } from "@mysten-incubation/memwal/manual";
@@ -69,7 +73,8 @@ const manual = MemWalManual.create({
   accountId: requireEnv("MEMWAL_ACCOUNT_ID"),
   packageId: requireEnv("MEMWAL_PACKAGE_ID"),
   serverUrl: "https://relayer.memory.walrus.xyz",
-  // The runtime signs Seal and Walrus operations with its own Sui key.
+  // The Sui key authorizes SEAL encryption and decryption. The relayer still
+  // handles the Walrus upload, registration, search, and restore.
   suiPrivateKey: requireEnv("SUI_PRIVATE_KEY"),
   embeddingApiKey: requireEnv("OPENAI_API_KEY"),
   suiNetwork: "mainnet",

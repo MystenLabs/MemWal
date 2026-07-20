@@ -4,7 +4,7 @@ description: "Why memory stored on Walrus Memory is both durable and verifiable:
 keywords: [verifiable memory, persistent memory, content addressing, blob id, onchain ownership, durability, availability, AI agents, trust]
 ---
 
-An AI agent is only as trustworthy as the memory it acts on. If memory can be silently altered, or if the service holding it can rewrite history or lock you out, the agent's decisions cannot be trusted. Walrus Memory gives agents memory that is both **persistent** (it outlives any single process or provider) and **verifiable** (you can prove what was stored and who controls it). This page explains where those guarantees come from and how to check each one yourself.
+An AI agent is only as trustworthy as the memory it acts on. If memory can be silently altered, or if the service holding it can rewrite history or lock you out, the agent's decisions cannot be trusted. Walrus Memory gives agents memory that is both **persistent** (it outlives any single process or provider) and **verifiable** (you can confirm the stored data is intact and who controls it). This page explains where those guarantees come from and how to check each one yourself.
 
 Verifiability here rests on three independent properties. None of them requires you to trust the relayer.
 
@@ -34,8 +34,8 @@ The encrypted blobs live on Walrus, which stores data across a decentralized net
 
 You do not have to take these guarantees on faith. You can inspect all three properties directly:
 
-- **Availability:** call `health()` to confirm the relayer and its Walrus and Sui dependencies are reachable before you rely on them.
-- **Integrity:** read the `blob_id` off a `recall` result. It is a content-addressed handle to the exact stored bytes, and a blob ID that resolves confirms those bytes are unchanged.
+- **Availability:** call `health()` to confirm the relayer is reachable before you rely on it. This is an unauthenticated liveness check, not a validation of your credentials.
+- **Integrity:** read the `blob_id` off a `recall` result. It is a content-addressed handle to the exact stored ciphertext, so a blob ID that resolves confirms that encrypted blob is intact and unchanged. This is blob-level integrity; the plaintext inside is protected by Seal encryption, not by content-addressing.
 - **Ownership:** take your `MemWalAccount` object ID and open it in a Sui explorer. The account, its owner, and its delegate authorizations are public onchain state that anyone can inspect, independent of the relayer.
 
 <Note>
