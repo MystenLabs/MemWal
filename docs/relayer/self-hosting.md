@@ -116,7 +116,7 @@ By default, the relayer enforces rate limits and storage quotas via Redis to pre
 - `SERVER_SUI_PRIVATE_KEYS` is a comma-separated key pool for parallel Walrus uploads
 - if both are set, the key pool takes priority for uploads
 
-### Sui RPC Transport (gRPC)
+### Sui RPC transport (gRPC)
 
 By default the relayer talks to Sui over JSON-RPC. Ahead of the **Sui JSON-RPC sunset on 2026-07-31**, you can opt into gRPC:
 
