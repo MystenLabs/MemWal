@@ -50,6 +50,18 @@
         ]
       },
       {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/delete-old-memories",
+              "guides/delete-memories-programmatically"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Fundamentals",
         "groups": [
           {
@@ -71,11 +83,12 @@
         ]
       },
       {
-        "tab": "SDK",
+        "tab": "TypeScript SDK",
         "groups": [
           {
-            "group": "SDK",
+            "group": "TypeScript SDK",
             "pages": [
+              "sdk/overview",
               "sdk/quick-start",
               {
                 "group": "Usage",
@@ -86,11 +99,16 @@
                   "sdk/usage/with-memwal"
                 ]
               },
+              "sdk/advanced-usage",
+              "sdk/ai-integration",
               "sdk/cookbook-multi-tenant",
               "sdk/cloudflare-workers",
               "sdk/agent-storage-loop",
               "sdk/production-readiness",
               "sdk/versioned-datasets",
+              "sdk/example-map",
+              "sdk/examples",
+              "sdk/research-app-example",
               "sdk/api-reference",
               "sdk/changelog"
             ]

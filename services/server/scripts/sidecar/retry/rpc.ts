@@ -3,7 +3,21 @@
  * transient availability errors.
  */
 
+// gRPC status codes (from @protobuf-ts/runtime-rpc's RpcError.code, used by
+// SuiGrpcClient) that map to the same transient conditions the JSON-RPC string
+// matching below covers. gRPC errors don't carry "429"/"503"/"timeout" text, so
+// without this the write path silently stops retrying once SUI_GRPC_URL is set.
+const RETRYABLE_GRPC_CODES = new Set([
+    "UNAVAILABLE",
+    "RESOURCE_EXHAUSTED",
+    "DEADLINE_EXCEEDED",
+    "ABORTED",
+]);
+
 export function isRetryableRpcError(err: any): boolean {
+    if (typeof err?.code === "string" && RETRYABLE_GRPC_CODES.has(err.code)) {
+        return true;
+    }
     const msg = String(err?.message || err).toLowerCase();
     return msg.includes("429")
         || msg.includes("503")
