@@ -57,6 +57,10 @@ flowchart LR
 
 The sidecar is started automatically when the Rust server boots and communicates over HTTP on `localhost:9000` (configurable via `SIDECAR_URL`). If the sidecar fails to start, the relayer exits immediately.
 
+### Sui RPC transport
+
+The relayer reaches Sui over JSON-RPC by default. Ahead of the Sui JSON-RPC sunset on 2026-07-31, the write path (Walrus register and certify, SEAL, and Enoki build) can be switched to gRPC by setting `SUI_GRPC_URL` to a Sui gRPC fullnode URL. This is opt-in and off by default: with `SUI_GRPC_URL` empty, the write path keeps using JSON-RPC. The blob query and restore path still uses JSON-RPC index methods, so a JSON-RPC endpoint remains in use even when the write path runs on gRPC. For configuration details, see [Self-Hosting](/relayer/self-hosting) and the [Environment Variables](/reference/environment-variables) reference.
+
 ## Key Pool
 
 For the `analyze` endpoint (which stores multiple facts concurrently), the relayer supports a pool of Sui private keys (`SERVER_SUI_PRIVATE_KEYS`). Each concurrent Walrus upload uses a different key from the pool in round-robin order, bypassing per-signer serialization and enabling parallel uploads.

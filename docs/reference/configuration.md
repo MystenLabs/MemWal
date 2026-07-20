@@ -79,3 +79,11 @@ Walrus and network fields:
 - Relayer/sidecar SEAL defaults use Mysten's initial committee aggregator on `testnet`. `mainnet` keeps the legacy independent key server pair until an official mainnet committee aggregator is available.
 - `MemWalManual` keeps the legacy independent testnet default for compatibility. Pass `sealServerConfigs` to use a committee aggregator manually.
 - Use `sealServerConfigs` to override the built-in default with another committee by providing `objectId`, `weight`, and `aggregatorUrl`.
+
+## Relayer configuration
+
+The fields above configure the client SDKs. If you run your own relayer, its behavior is configured through environment variables rather than these config objects. One option to be aware of is the Sui RPC transport for the write path:
+
+- `SUI_GRPC_URL`: set to a Sui gRPC fullnode URL to route the relayer write path (Walrus register and certify, SEAL, and Enoki build) through gRPC instead of JSON-RPC. It is empty by default, which keeps JSON-RPC. This option exists to migrate the write path ahead of the Sui JSON-RPC sunset on 2026-07-31.
+
+For the full list of relayer settings, see the [Environment Variables](/reference/environment-variables) reference and the [Self-Hosting](/relayer/self-hosting) guide.
