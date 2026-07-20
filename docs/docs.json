@@ -68,7 +68,8 @@
             "group": "Concepts",
             "pages": [
               "fundamentals/concepts/memory-space",
-              "fundamentals/concepts/ownership-and-access"
+              "fundamentals/concepts/ownership-and-access",
+              "fundamentals/concepts/verifiable-memory"
             ]
           },
           {
@@ -90,6 +91,7 @@
             "pages": [
               "sdk/overview",
               "sdk/quick-start",
+              "sdk/headless-setup",
               {
                 "group": "Usage",
                 "root": "sdk/usage",
@@ -102,6 +104,7 @@
               "sdk/advanced-usage",
               "sdk/ai-integration",
               "sdk/cookbook-multi-tenant",
+              "sdk/codebase-memory",
               "sdk/cloudflare-workers",
               "sdk/agent-storage-loop",
               "sdk/production-readiness",
