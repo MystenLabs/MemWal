@@ -82,8 +82,8 @@ Walrus and network fields:
 
 ## Relayer configuration
 
-The fields above configure the client SDKs. If you run your own relayer, its behavior is configured through environment variables rather than these config objects. One option to be aware of is the Sui RPC transport for the write path:
+The fields above configure the client SDKs. If you run your own relayer, its behavior is configured through environment variables rather than these config objects. One option to be aware of is the Sui RPC transport:
 
-- `SUI_GRPC_URL`: set to a Sui gRPC fullnode URL to route the relayer write path (Walrus register and certify, SEAL, and Enoki build) through gRPC instead of JSON-RPC. It is empty by default, which keeps JSON-RPC. This option exists to migrate the write path ahead of the Sui JSON-RPC sunset on 2026-07-31.
+- `SUI_GRPC_URL`: set to a Sui gRPC fullnode URL to route the relayer's Sui calls through gRPC instead of JSON-RPC. This covers both the write path (Walrus register and certify, SEAL, and Enoki build) and the blob query and restore path. It is empty by default, which keeps JSON-RPC. This option exists to migrate ahead of the Sui JSON-RPC sunset on 2026-07-31.
 
 For the full list of relayer settings, see the [Environment Variables](/reference/environment-variables) reference and the [Self-Hosting](/relayer/self-hosting) guide.

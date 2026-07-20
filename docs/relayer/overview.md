@@ -59,7 +59,7 @@ The sidecar is started automatically when the Rust server boots and communicates
 
 ### Sui RPC transport
 
-The relayer reaches Sui over JSON-RPC by default. Ahead of the Sui JSON-RPC sunset on 2026-07-31, the write path (Walrus register and certify, SEAL, and Enoki build) can be switched to gRPC by setting `SUI_GRPC_URL` to a Sui gRPC fullnode URL. This is opt-in and off by default: with `SUI_GRPC_URL` empty, the write path keeps using JSON-RPC. The blob query and restore path still uses JSON-RPC index methods, so a JSON-RPC endpoint remains in use even when the write path runs on gRPC. For configuration details, see [Self-Hosting](/relayer/self-hosting) and the [Environment Variables](/reference/environment-variables) reference.
+The relayer reaches Sui over JSON-RPC by default. Ahead of the Sui JSON-RPC sunset on 2026-07-31, setting `SUI_GRPC_URL` to a Sui gRPC fullnode URL switches the relayer to gRPC. This is opt-in and off by default: with `SUI_GRPC_URL` empty, the relayer keeps using JSON-RPC. When set, both the write path (Walrus register and certify, SEAL, and Enoki build) and the blob query and restore path run on gRPC, so it is a single reversible switch. For configuration details, see [Self-Hosting](/relayer/self-hosting) and the [Environment Variables](/reference/environment-variables) reference.
 
 ## Key Pool
 
