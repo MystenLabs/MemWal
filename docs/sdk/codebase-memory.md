@@ -85,7 +85,7 @@ Walrus Memory scopes and groups memories by **namespace**. There is no separate 
 
 Choose sub-namespaces when categories should never be searched together, and keywords when you want one search to span them.
 
-## SDK compared with the Cursor MCP server
+## When to use the SDK instead of the MCP server
 
 This guide builds codebase memory yourself with the SDK, which is the right path when you are writing an assistant or an editor integration. If instead you want to give an existing tool like Cursor access to Walrus Memory without writing code, connect the Walrus Memory MCP server. See [Cursor](/mcp/cursor) for that setup. The two paths can coexist: build repository memory with the SDK, and expose it to an editor through MCP.
 
