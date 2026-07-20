@@ -15,10 +15,10 @@ The TypeScript SDK (`MemWal.create()` and `withMemWal()`) and the Python SDK tak
 | `MEMWAL_PRIVATE_KEY` | `key` | none | Delegate private key in hex. The fundamentals and Python examples use this name |
 | `MEMWAL_KEY` | `key` | none | The same delegate private key under a shorter name used by the getting-started and SDK quick-starts. Pick one name per project |
 | `MEMWAL_ACCOUNT_ID` | `accountId` | none | `MemWalAccount` object ID on Sui |
-| `MEMWAL_SERVER_URL` | `serverUrl` | `https://relayer.memory.walrus.xyz` | Relayer base URL the SDK calls |
+| `MEMWAL_SERVER_URL` | `serverUrl` | SDK-specific | Relayer base URL. The TypeScript SDK defaults to `https://relayer.memwal.ai`; the Python SDK defaults to `http://localhost:8000` unless `env="prod"` selects the hosted relayer |
 | `SUI_PRIVATE_KEY` | `suiPrivateKey` | none | Sui signer key for `MemWalManual` local signing, in `suiprivkey1...` format |
-| `OPENAI_API_KEY` | `embeddingApiKey` | none | Embedding and fact-extraction provider key used by `MemWalManual` and the Python SDK |
-| `OPENAI_BASE_URL` | `embeddingApiBase` | `https://api.openai.com/v1` | Base URL for an OpenAI-compatible provider such as OpenRouter |
+| `OPENAI_API_KEY` | `embeddingApiKey` (manual client only) | none | Embedding and fact-extraction provider key. Only the `MemWalManual` client takes it as `embeddingApiKey`. The standard `MemWal` and Python SDKs let the relayer handle embeddings, so this is needed only for optional OpenAI middleware or demos |
+| `OPENAI_BASE_URL` | `embeddingApiBase` (manual client only) | `https://api.openai.com/v1` | Base URL for an OpenAI-compatible provider such as OpenRouter, in the same manual-client and optional-middleware contexts as `OPENAI_API_KEY` |
 
 <Note>
 `MEMWAL_PRIVATE_KEY` and `MEMWAL_KEY` are two names for the same delegate key. The examples use both. Standardize on one in your own project.
@@ -33,7 +33,7 @@ The stdio MCP package reads these environment variables directly. A CLI flag tak
 | `MEMWAL_SERVER_URL` | `--relayer <url>` | hosted relayer | Relayer base URL |
 | `MEMWAL_NAMESPACE` | `--namespace <name>` (alias `--ns`) | `default` (applied by the relayer) | Default namespace injected into memory tool calls that omit one |
 | `MEMWAL_WEB_URL` | `--web-url <url>` | dashboard default | Dashboard URL used during login |
-| `MEMWAL_CLIENT_LABEL` | `--label <text>` | none | Friendly delegate-key label shown in the dashboard |
+| `MEMWAL_CLIENT_LABEL` | `--label <text>` | `MCP Client` / `Walrus Memory MCP` | Friendly delegate-key label shown in the dashboard |
 | `MEMWAL_MCP_DEBUG` | none | `0` | Set to `1` for verbose stderr logging |
 
 ## Self-hosted relayer
@@ -123,11 +123,15 @@ These are not all enforced at boot, but most real deployments need them.
 
 ## Frontend apps
 
-Browser apps built on Walrus Memory read build-time public variables, exposed through the bundler's public prefix (`VITE_` for Vite, `NEXT_PUBLIC_` for Next.js). These carry only public onchain identifiers, never private keys.
+Browser apps built on Walrus Memory read build-time public variables, exposed through the bundler's public prefix (`VITE_` for Vite, `NEXT_PUBLIC_` for Next.js). These carry only public values, the onchain identifiers and the relayer endpoint, never private keys. Use the prefix that matches your bundler.
 
 | Variable | Notes |
 | --- | --- |
-| `VITE_MEMWAL_PACKAGE_ID` | Walrus Memory package ID embedded in a Vite app build |
-| `VITE_MEMWAL_REGISTRY_ID` | Onchain registry object ID embedded in a Vite app build |
+| `VITE_MEMWAL_PACKAGE_ID` | Walrus Memory package ID for a Vite app build |
+| `VITE_MEMWAL_REGISTRY_ID` | Onchain registry object ID for a Vite app build |
+| `VITE_MEMWAL_SERVER_URL` | Relayer base URL for a Vite app build |
+| `NEXT_PUBLIC_MEMWAL_PACKAGE_ID` | Walrus Memory package ID for a Next.js app build |
+| `NEXT_PUBLIC_MEMWAL_REGISTRY_ID` | Onchain registry object ID for a Next.js app build |
+| `NEXT_PUBLIC_MEMWAL_SERVER_URL` | Relayer base URL for a Next.js app build |
 
-The server variables `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are not interchangeable with these `VITE_*` app variables. For network-specific values, see [Contract Overview](/contract/overview).
+The server variables `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are not interchangeable with these `VITE_*` and `NEXT_PUBLIC_*` app variables. For network-specific values, see [Contract Overview](/contract/overview).
