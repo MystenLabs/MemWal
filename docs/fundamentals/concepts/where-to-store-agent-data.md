@@ -1,6 +1,7 @@
 ---
 title: "Where to Store AI Agent Data"
 description: "A decision guide for where to store data for autonomous AI agents: provider-native memory, managed and self-hosted vector databases, and Walrus Memory, compared across persistence, portability, ownership, and verifiability."
+keywords: [where to store AI agent data, AI agent data storage, data storage for AI agents, vector database for AI agents, agent memory storage, decision guide, Walrus Memory]
 ---
 
 When you give an AI agent long-term memory, you have to decide where that data lives. The choice shapes what the agent can do later: whether its memory survives a restart, moves with the user to another app, stays under the user's control, and can be trusted. This guide compares the common options and shows where each one fits.
@@ -47,7 +48,7 @@ These options are not mutually exclusive. An agent can keep a small local cache 
 
 ## Where Walrus Memory fits against a vector database
 
-"Best vector database for AI agents" is a common way to frame this decision, but a vector database and Walrus Memory solve overlapping-but-different problems. A vector database is a search index: it stores vectors and returns nearest neighbors. Walrus Memory uses a vector index internally for exactly that, and adds the layer most agent products end up needing anyway:
+Teams often frame this decision as choosing the best vector database for AI agents, but a vector database and Walrus Memory solve overlapping but different problems. A vector database is a search index: it stores vectors and returns nearest neighbors. Walrus Memory uses a vector index internally for exactly that, and adds the layer most agent products end up needing anyway:
 
 - **The data outlives the index:** The encrypted memories live on Walrus, and the vector index is a cache that `restore` can rebuild from Walrus. Losing the database does not lose the memory.
 - **Ownership is not an application concern:** Who can read or write a memory space is enforced by Sui smart contracts, so it holds across apps and relayers rather than being reimplemented per application.

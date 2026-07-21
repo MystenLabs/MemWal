@@ -1,6 +1,7 @@
 ---
 title: "How AI Agent Memory Works"
 description: "How AI agents store and recall long-term memory: the difference between the context window and persistent memory, short-term versus long-term memory, and how semantic memory works with embeddings and vector search."
+keywords: [agent memory, AI agent memory, long-term memory, short-term memory, context window, semantic memory, embeddings, vector search, retrieval-augmented generation, persistent memory]
 ---
 
 An AI agent is only as capable as what it can remember. A model on its own starts every session blank: it has no record of the last conversation, the decisions it made, or what it learned. Agent memory is the layer that gives an agent a durable, searchable record it can carry across sessions, apps, and workflows.
@@ -45,7 +46,7 @@ Long-term memory for agents is usually **semantic**: the agent stores and retrie
 4. **Augment.** The agent adds the retrieved memories to its context window and answers with them in hand. This retrieve-then-answer pattern is the core of retrieval-augmented generation.
 
 <Note>
-Semantic recall is why an agent can answer "How do we issue session tokens?" from a memory written as "createSession signs a JWT with a 30-minute TTL," even though the two share almost no words. The embeddings encode meaning, so the match is by concept, not by string.
+Semantic recall is why an agent can answer "How are session tokens issued?" from a memory written as "createSession signs a JWT with a 30-minute TTL," even though the two share almost no words. The embeddings encode meaning, so the match is by concept, not by string.
 </Note>
 
 ### Kinds of memory an agent keeps
