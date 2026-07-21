@@ -4,83 +4,35 @@ description: "How AI agents store and recall long-term memory: the difference be
 keywords: [agent memory, AI agent memory, long-term memory, short-term memory, context window, semantic memory, embeddings, vector search, retrieval-augmented generation, persistent memory]
 ---
 
-An AI agent is only as capable as what it can remember. A model on its own starts every session blank: it has no record of the last conversation, the decisions it made, or what it learned. Agent memory is the layer that gives an agent a durable, searchable record it can carry across sessions, apps, and workflows.
-
-This page explains what agent memory is, how it differs from the model's context window, and how long-term memory actually works under the hood. For the hands-on version, see the [Agent Storage Loop](/sdk/agent-storage-loop).
+AI agent memory is a durable, searchable store of what an agent has learned, kept outside the model so it survives across sessions, apps, and workflows. A model on its own starts every session blank, with no record of the last conversation or the decisions it made, and memory is the layer that gives it continuity.
 
 ## The context window is not memory
 
-A large language model reads and writes through its **context window**: the block of tokens it sees on each request. Everything the model "knows" in the moment lives there, and when the request ends, it is gone. The next request starts fresh unless you resend the earlier text.
+A large language model reads and writes through its context window, the block of tokens it sees on each request. Everything the model knows in the moment lives there, and when the request ends it is gone. The next request starts fresh unless you resend the earlier text.
 
-Treating the context window as memory runs into hard limits:
+That makes the context window a poor substitute for memory. It is bounded, so an agent's entire history cannot fit into it, and padding it with old turns crowds out room for the current task. It is temporary, so nothing in it survives the request and persistence has to come from somewhere the model does not control. And it is costly to refill, because replaying a long history on every call spends tokens and latency on material that mostly has no bearing on the current question. Long-term memory sidesteps all three problems by keeping the agent's knowledge outside the prompt and pulling only the relevant pieces back into the context window when they are needed.
 
-- **Bounded:** A context window holds a fixed number of tokens. You cannot fit an agent's entire history into it, and stuffing it with old turns crowds out room for the current task.
-- **Temporary:** Nothing in the window survives the request. Persistence has to come from somewhere the model does not control.
-- **Expensive to re-send:** Replaying a long history on every call costs tokens and latency, and most of that history is irrelevant to the current question.
-
-Long-term memory solves this by keeping the agent's knowledge outside the prompt and pulling only the relevant pieces back into the context window when they are needed.
-
-| | Context window | Long-term memory |
-|---|---|---|
-| **Lifetime** | One request | Persists across sessions |
-| **Capacity** | Fixed token budget | Effectively unbounded |
-| **Retrieval** | Everything, every call | Only the relevant pieces, on demand |
-| **Who holds it** | The model provider, transiently | A store you control |
+| **Aspect** | **Context window** | **Long-term memory** |
+| --- | --- | --- |
+| Lifetime | One request | Persists across sessions |
+| Capacity | Fixed token budget | Effectively unbounded |
+| Retrieval | Everything, every call | Only the relevant pieces, on demand |
+| Where it lives | The model provider, transiently | A store you control |
 
 ## Short-term and long-term memory
 
-By analogy with how people think about memory, an agent has two layers:
-
-- **Short-term (working) memory** is the context window: the current conversation, the task at hand, and whatever you have just retrieved. It is fast and immediate, but small and fleeting.
-- **Long-term memory** is a durable store outside the model: past conversations, extracted facts, embeddings, and checkpoints. It is large and persistent, and the agent reaches into it deliberately.
-
-A working agent uses both. It keeps the active task in the context window and, when it needs something it does not currently hold, it retrieves that from long-term memory and adds it to the window.
+It helps to think of an agent as having two layers of memory, much as people do. Short-term, or working, memory is the context window: the current conversation, the task at hand, and whatever you have just retrieved. It is fast and immediate but small and fleeting. Long-term memory is a durable store that sits outside the model and holds past conversations, extracted facts, embeddings, and checkpoints. It is large and persistent, and the agent reaches into it deliberately. A working agent uses both, keeping the active task in the context window and retrieving from long-term memory whatever it does not currently hold.
 
 ## How long-term memory works
 
-Long-term memory for agents is usually **semantic**: the agent stores and retrieves by *meaning* rather than by exact keywords. The mechanism behind this is embeddings and vector search.
+Long-term memory for agents is usually semantic, which means the agent stores and retrieves by meaning rather than by exact keywords. The mechanism behind it is embeddings and vector search. When you store a piece of text, an embedding model converts it into a vector, a list of numbers that captures its meaning, so that two texts about the same idea end up close together even when they share no words. That vector is saved alongside the original text. Later, when the agent needs context, its query is embedded the same way, and the store returns the entries whose vectors sit closest to the query, ranked by similarity. The agent adds those retrieved memories to its context window and answers with them in hand, which is the retrieve-then-answer pattern at the core of retrieval-augmented generation.
 
-1. **Embed.** When you store a piece of text, an embedding model converts it into a vector, a list of numbers that captures its meaning. Two texts about the same idea produce vectors that sit close together, even if they share no words.
-2. **Store.** The vector is saved alongside the original text (and any metadata) so it can be searched later.
-3. **Recall.** When the agent needs context, its query is embedded into a vector too. The store returns the entries whose vectors are closest to the query vector, ranked by similarity. Those results are the agent's relevant memories.
-4. **Augment.** The agent adds the retrieved memories to its context window and answers with them in hand. This retrieve-then-answer pattern is the core of retrieval-augmented generation.
+Semantic recall is what lets an agent answer "How are session tokens issued?" from a memory written as "createSession signs a JWT with a 30-minute TTL," even though the two share almost no words. The embeddings encode meaning, so the match is by concept rather than by string.
 
-<Note>
-Semantic recall is why an agent can answer "How are session tokens issued?" from a memory written as "createSession signs a JWT with a 30-minute TTL," even though the two share almost no words. The embeddings encode meaning, so the match is by concept, not by string.
-</Note>
-
-### Kinds of memory an agent keeps
-
-Not every memory is a conversation turn. Agents accumulate several kinds of long-term memory:
-
-- **Semantic memory** is general knowledge and facts: how a system works, a user's preferences, a project convention.
-- **Episodic memory** is a record of what happened: past conversations, actions taken, and their outcomes.
-- **Procedural memory** is how to do things: reusable steps, workflows, and learned routines.
-
-The same store can hold all three. What matters is that each item is individually retrievable by meaning when the agent needs it.
+Not every memory is a conversation turn. Agents accumulate a few different kinds of long-term memory. Semantic memory is general knowledge and facts, such as how a system works or a user's preferences. Episodic memory is a record of what happened, including past conversations, actions taken, and their outcomes. Procedural memory is how to do things, from reusable steps to learned routines. A single store can hold all three, as long as each item stays individually retrievable by meaning.
 
 ## How Walrus Memory implements this
 
-Walrus Memory is a long-term memory layer built for agents. It handles the embed, store, and recall loop for you and adds durability, ownership, and verifiability that a plain database does not provide:
+Walrus Memory is a long-term memory layer built for agents. It runs the embed, store, and recall loop for you and adds durability, ownership, and verifiability that a plain database does not. Storing a memory with `remember` embeds and saves it, while `recall` embeds your query and returns the closest matches, scoped to a [memory space](/fundamentals/concepts/memory-space). The `analyze` operation goes further, extracting discrete facts from a longer passage and storing each as its own memory so that recall stays precise rather than returning one large blob. Because memories are encrypted and stored on Walrus, they outlive any single process or provider and travel with the agent across apps, and because ownership and access are enforced onchain through Sui rather than by whoever runs the server, control of a memory space stays with its owner. For the durability and ownership details, see [Persistent, Verifiable Memory](/fundamentals/concepts/verifiable-memory) and [Ownership and Access](/fundamentals/concepts/ownership-and-access).
 
-- **Remember and recall:** These run the semantic loop above. `remember` embeds and stores an item, and `recall` embeds your query and returns the closest matches, scoped to a [memory space](/fundamentals/concepts/memory-space).
-- **Analyze:** Extracts discrete facts from a longer text and stores each as its own memory, so recall is precise instead of returning one large blob.
-- **Durable and portable:** Memories are encrypted and stored on Walrus, so they outlive any single process or provider and travel with the agent across apps. See [Persistent, Verifiable Memory](/fundamentals/concepts/verifiable-memory).
-- **Owner-controlled:** Ownership and access are enforced onchain through Sui, not by whoever runs the server. See [Ownership and Access](/fundamentals/concepts/ownership-and-access).
-
-## Next steps
-
-<CardGroup cols={2}>
-  <Card title="Agent Storage Loop" icon="arrows-rotate" href="/sdk/agent-storage-loop">
-    Build the write-confirm-recall loop end to end with the SDK.
-  </Card>
-  <Card title="Headless SDK Setup" icon="server" href="/sdk/headless-setup">
-    Initialize memory in a server or agent runtime with no browser step.
-  </Card>
-  <Card title="Where to Store AI Agent Data" icon="scale-balanced" href="/fundamentals/concepts/where-to-store-agent-data">
-    Compare Walrus Memory with vector databases and other options.
-  </Card>
-  <Card title="Memory Space" icon="folder" href="/fundamentals/concepts/memory-space">
-    Understand how memories are scoped, isolated, and retrieved.
-  </Card>
-</CardGroup>
+To build this in practice, follow the [Agent Storage Loop](/sdk/agent-storage-loop) for the full write-confirm-recall loop, or [Headless SDK Setup](/sdk/headless-setup) to initialize memory in a server or agent runtime. To weigh Walrus Memory against vector databases and other options, see [Where to Store AI Agent Data](/fundamentals/concepts/where-to-store-agent-data).
