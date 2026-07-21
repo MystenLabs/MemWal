@@ -4,7 +4,7 @@ description: "Initialize the Walrus Memory SDK in a server or agent runtime with
 keywords: [headless, server, agent runtime, setup, MemWal.create, environment variables, delegate key, accountId, MemWalManual, SDK]
 ---
 
-A server or agent runtime has no human to click through a wallet or paste a key at a prompt. This page shows how to initialize the Walrus Memory SDK entirely from configuration, so you can drop it into a backend service, a cron job, or an autonomous agent. For the full write-confirm-recall loop that builds on this setup, see [Agent Storage Loop](/sdk/agent-storage-loop).
+A server or agent runtime has no human to click through a wallet or paste a key at a prompt. The Walrus Memory SDK initializes entirely from configuration, so you can drop it into a backend service, a cron job, or an autonomous agent. For the full write-confirm-recall loop that builds on this setup, see [Agent Storage Loop](/sdk/agent-storage-loop).
 
 ## Generate credentials once
 
@@ -44,9 +44,9 @@ await memwal.health();
 `health()` is an unauthenticated liveness and version check. It confirms the relayer is reachable, but it does not validate your delegate key or account ID. A bad key or account ID surfaces on the first authenticated call, such as `remember` or `recall`. If you want to validate credentials at boot, make a cheap authenticated call, for example a `recall` with a trivial query, and handle its error.
 </Note>
 
-The `MemWal.create` config takes four fields:
+The `MemWal.create` config takes 4 fields:
 
-| Property | Type | Required | Description |
+| **Property** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `key` | `string` | Yes | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | `MemWalAccount` object ID on Sui |
@@ -63,7 +63,7 @@ Recall is scoped per **account plus namespace**. Never hardcode an account ID co
 
 ## When to use the manual client
 
-The default `MemWal` client lets the relayer handle embedding and Seal encryption on your behalf, which is the right choice for most runtimes. Use `MemWalManual` only when the runtime must hold its own keys and keep plaintext entirely client-side. With the manual client, the runtime embeds and Seal-encrypts locally, then the relayer uploads the resulting ciphertext to Walrus and stores the vector row, so the relayer never sees plaintext. It requires a few more fields, including a Sui key that authorizes SEAL:
+The default `MemWal` client lets the relayer handle embedding and Seal encryption on your behalf, which is the right choice for most runtimes. Use `MemWalManual` only when the runtime must hold its own keys and keep plaintext entirely client-side. With the manual client, the runtime embeds and Seal-encrypts locally, then the relayer uploads the resulting ciphertext to Walrus and stores the vector row, so the relayer never sees plaintext. It requires a few more fields, including a Sui key that authorizes Seal:
 
 ```ts
 import { MemWalManual } from "@mysten-incubation/memwal/manual";
@@ -73,7 +73,7 @@ const manual = MemWalManual.create({
   accountId: requireEnv("MEMWAL_ACCOUNT_ID"),
   packageId: requireEnv("MEMWAL_PACKAGE_ID"),
   serverUrl: "https://relayer.memory.walrus.xyz",
-  // The Sui key authorizes SEAL encryption and decryption. The relayer still
+  // The Sui key authorizes Seal encryption and decryption. The relayer still
   // handles the Walrus upload, registration, search, and restore.
   suiPrivateKey: requireEnv("SUI_PRIVATE_KEY"),
   embeddingApiKey: requireEnv("OPENAI_API_KEY"),

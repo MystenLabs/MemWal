@@ -4,7 +4,7 @@ description: "Give an AI coding assistant persistent memory of a codebase with t
 keywords: [codebase memory, coding assistant, cursor, code context, namespace, remember, recall, rememberBulk, RAG, SDK]
 ---
 
-AI coding assistants like Cursor feel like they "remember" a codebase because they retrieve relevant context at query time rather than holding an entire repository in the model's context window. You can build the same persistent, cross-session memory on Walrus Memory: store code and project context as memories, then recall the pieces that matter for each question. This guide shows the pattern with the TypeScript SDK.
+AI coding assistants like Cursor appear to remember a codebase because they retrieve relevant context at query time rather than holding an entire repository in the model's context window. You can build the same persistent, cross-session memory on Walrus Memory with the TypeScript SDK: store code and project context as memories, then recall the pieces that matter for each question.
 
 ## How it fits together
 
@@ -80,14 +80,14 @@ Each result carries the matched `text`, its `distance`, and the `blob_id` that d
 
 Walrus Memory scopes and groups memories by **namespace**. There is no separate tags parameter. When you need finer-grained organization than one namespace per repository, you have two options:
 
-- **Sub-namespaces:** encode the category into the namespace, for example `repo-acme-billing:tests` or `repo-acme-billing:api`, and pass the specific namespace on the `recall` call. This keeps categories in fully separate search spaces.
-- **Keywords in the text:** because recall is semantic, category words you include in a memory's text (for example, a leading `[tests]` or `[security]`) are searchable through the query itself.
+- **Sub-namespaces:** Encode the category into the namespace, for example `repo-acme-billing:tests` or `repo-acme-billing:api`, and pass the specific namespace on the `recall` call. This keeps categories in fully separate search spaces.
+- **Keywords in the text:** Because recall is semantic, category words you include in a memory's text, for example a leading `[tests]` or `[security]`, are searchable through the query itself.
 
 Choose sub-namespaces when categories should never be searched together, and keywords when you want one search to span them.
 
 ## When to use the SDK instead of the MCP server
 
-This guide builds codebase memory yourself with the SDK, which is the right path when you are writing an assistant or an editor integration. If instead you want to give an existing tool like Cursor access to Walrus Memory without writing code, connect the Walrus Memory MCP server. See [Cursor](/mcp/cursor) for that setup. The two paths can coexist: build repository memory with the SDK, and expose it to an editor through MCP.
+Building codebase memory yourself with the SDK is the right path when you are writing an assistant or an editor integration. If instead you want to give an existing tool like Cursor access to Walrus Memory without writing code, connect the Walrus Memory MCP server. See [Cursor](/mcp/cursor) for that setup. The two paths can coexist: build repository memory with the SDK, and expose it to an editor through MCP.
 
 ## References
 
