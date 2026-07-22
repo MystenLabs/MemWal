@@ -5,6 +5,8 @@ description: "The lifecycle of a memory in Walrus Memory — from plaintext to e
 
 When you call `memwal.remember(...)`, the relayer accepts a background job immediately and then stores the memory asynchronously. Here's what happens.
 
+<iframe src="/diagrams/interactive_walrus-memory-storage_v1.html" style={{width:'100%',height:'620px',border:'0'}} title="How Walrus Memory storage works" loading="lazy"></iframe>
+
 ## Storing a memory
 
 ```mermaid
