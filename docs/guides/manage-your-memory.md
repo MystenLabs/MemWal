@@ -20,11 +20,7 @@ Connect your wallet to open the dashboard:
 
 ## Browse and search
 
-Memories are not stored under names or folders you scroll through. They are stored by meaning, so you find them by asking for what you want rather than by browsing a list. This is what makes recall work for an agent, and it is how you search your own memory too.
-
-### Search by meaning
-
-The core operation is recall: you give a natural language query and Walrus Memory returns the closest matches, scoped to your memory space. This works the same whether an agent runs it or you run it to check what you stored.
+You do not browse memories by name or folder. You search them by meaning: give a natural language query, and recall returns the closest matches, scoped to your memory space. Recall works the same whether an agent runs it or you run it to check what you stored.
 
 ```ts
 const result = await memwal.recall({
@@ -72,7 +68,7 @@ Choose namespaces before you write at scale. Because recall and restore match a 
 
 ## Renew memories
 
-A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory is gone. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so the content is never re-uploaded.
+A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory is gone. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content.
 
 You renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
 
@@ -93,7 +89,7 @@ Both deletion paths are permanent. Start with a preview in the dashboard or a dr
 
 ## Rebuild the index
 
-The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might be missing rows for those blobs, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
+The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might be missing rows for those blobs, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
 
 Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 

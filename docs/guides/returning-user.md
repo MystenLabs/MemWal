@@ -32,7 +32,7 @@ When you connect your wallet on a device that has no saved delegate key, the das
   <Step>
     ### Reach your existing memories
 
-    Because access control is enforced onchain by your account's owner and delegates, any delegate key registered to the account can decrypt the account's memories. The new key you just created reads the memories you wrote with the old one. You do not need to recover the old key.
+    Because your account's owner and delegates enforce access control onchain, any delegate key registered to the account can decrypt its memories. The new key you just created reads the memories you wrote with the old one. You do not need to recover the old key.
   </Step>
 </Steps>
 
@@ -44,7 +44,7 @@ Losing a delegate key does not lose your memories. The key is a credential for r
 
 The search index lives in the relayer's database, not your browser, scoped to your account and namespace. Once you have a delegate key on the new device, recall reaches your existing memories straight away, with nothing to rebuild.
 
-You only run restore when the relayer's index itself is missing rows, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
+You only run restore when the relayer's index itself is missing rows, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
 ```ts
 const result = await memwal.restore("personal");
@@ -71,11 +71,11 @@ Re-uploading is not a loss of ownership. You still own the original Walrus blobs
 
 This boundary runs the other way too. Deleting a memory in Walrus Memory does not touch any separate Walrus blob you uploaded elsewhere, because they are different objects with different owners and lifecycles.
 
-## What your wallet reveals onchain
+## Onchain privacy
 
-Walrus Memory is private in content but public in structure, and it helps to know which is which before you rely on it.
+Walrus Memory keeps your content private but your ownership public. Know which is which before you rely on it.
 
-- **Your memory content is encrypted.** Every memory is Seal-encrypted before it reaches Walrus, and only your account's owner and delegates can decrypt it. No one else reads your memories, including the relayer operator when you use client-managed encryption.
+- **Your memory content is encrypted.** Walrus Memory Seal-encrypts every memory before it reaches Walrus, and only your account's owner and delegates can decrypt it. No one else reads your memories, including the relayer operator when you use client-managed encryption.
 - **Your ownership is public.** The `Blob` objects your wallet owns are visible on Sui, along with metadata such as blob IDs, sizes, expiry epochs, and the namespace label. Anyone inspecting the chain can see that your address owns blobs and how many, even though they cannot read the contents.
 - **Namespace labels are not secret.** A namespace is an organizing label attached as metadata, not a private field. Avoid putting sensitive information in a namespace name.
 

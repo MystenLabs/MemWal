@@ -51,7 +51,7 @@ A blob moves through a predictable set of states from the moment the agent write
   <Step>
     ### Renew or drop
 
-    Before a blob expires, the agent either extends its lifetime for more epochs or lets it lapse. A blob the agent lets lapse is dropped by the network and its content is no longer recoverable. An agent with durable memory runs an extend-before-expiry loop.
+    Before a blob expires, the agent either extends its lifetime for more epochs or lets it lapse. When the agent lets a blob lapse, the network drops it and its content is no longer recoverable. An agent with durable memory runs an extend-before-expiry loop.
   </Step>
 </Steps>
 
@@ -76,7 +76,7 @@ This index is a convenience, not the source of truth. Treat it as a cache the ag
 
 ### 2. Query the chain by owner and namespace
 
-Because every `Blob` object is owned by a Sui address, the agent can ask the chain directly which blobs an address owns, filtered by the namespace metadata attached at write time. This is the same discovery the relayer performs during restore, and it does not depend on any local state surviving.
+Because a Sui address owns every `Blob` object, the agent can ask the chain directly which blobs an address owns, filtered by the namespace metadata attached at write time. This is the same discovery the relayer performs during restore, and it does not depend on any local state surviving.
 
 The relayer exposes this through `restore`, which queries onchain blobs for the caller's owner and namespace, then rebuilds the vector index for any it finds:
 
@@ -86,7 +86,7 @@ const result = await memwal.restore("agent-state");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Restore is bounded by its `limit` (default 10) and inspects onchain blobs newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To enumerate or rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
+Restore's `limit` (default 10) caps how many onchain blobs it inspects, newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To enumerate or rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
 
 ### 3. Read the `Blob` object on Sui
 
