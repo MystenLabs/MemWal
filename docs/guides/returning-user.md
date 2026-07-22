@@ -40,16 +40,18 @@ When you connect your wallet on a device that has no saved delegate key, the das
 Losing a delegate key does not lose your memories. The key is a credential for reaching your account, not the account itself. Create a new one and your memories are still there. If a lost key might be exposed, remove it from your account on the dashboard so it can no longer act on your behalf.
 </Note>
 
-### Rediscover your memories
+### Your memories are already searchable
 
-A new device also starts with an empty local index, so recall might return nothing at first even though your memories exist on Walrus. Rebuild the index with restore, which rediscovers the blobs your account owns in a namespace and re-indexes them:
+The search index is not stored in your browser. It lives in the relayer's database, scoped to your account and namespace, so once you have a delegate key on the new device, recall reaches your existing memories straight away. A new device does not need to rebuild anything to read what you already stored.
+
+You only run restore when the relayer's index itself is missing rows, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
 ```ts
 const result = await memwal.restore("personal");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Run restore once per namespace you use. The `total` count reflects the memories your account actually owns on Walrus. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
+Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of your namespace. To rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 ## You own your data, and you re-upload it
 

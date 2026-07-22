@@ -40,7 +40,7 @@ Each result carries a `distance`, where a smaller number means a closer match. R
 
 ### Preview stored content
 
-To read the exact content of a stored memory, the dashboard shows a preview of each memory's decrypted text. Previewing is the safest way to confirm what a memory holds before you delete it, because deletion cannot be undone. The [Delete old memories](/guides/delete-old-memories) guide walks through the preview control in the delete panel.
+To read the exact content of a stored memory, the dashboard's delete panel shows a preview of each memory's decrypted text before you remove it. Previewing is the safest way to confirm what a memory holds before you delete it, because deletion cannot be undone. The [Delete old memories](/guides/delete-old-memories) guide walks through the preview control. From code, `recall` returns the decrypted `text` of each match, so you can read stored content programmatically as well.
 
 ## Organize with namespaces
 
@@ -73,9 +73,9 @@ Choose namespaces before you write at scale. Because recall and restore match a 
 
 A memory persists on Walrus for a fixed number of epochs, the storage period you paid for when you wrote it. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When a memory's epochs run out, Walrus drops the blob and the memory is gone. Renewal extends a memory's lifetime by paying for more epochs.
 
-On the dashboard, renewal is a control on the memory that extends its storage for another period without re-uploading the content. The blob keeps its blob ID and its place in your index, and only its expiry epoch moves forward.
+Renewal extends the memory's underlying Walrus `Blob` object for more epochs. The blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content. Because renewal changes a blob's lifetime, it is blob lifecycle management rather than a recall or remember call.
 
-From code, renewal is an extend operation on the memory's underlying Walrus `Blob` object. Because renewal changes a blob's lifetime, it is part of blob lifecycle management rather than a recall or remember call. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
+Today you renew at the storage layer, by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
 
 <Warning>
 Renew before the expiry epoch, not after. Once a blob lapses, its content is no longer recoverable, so a lapsed memory cannot be renewed. Track expiry epochs and renew with a margin to spare.
@@ -94,18 +94,18 @@ You have two paths, depending on whether you want to click through the dashboard
 Both deletion paths are permanent. Start with a preview in the dashboard or a dry run in the API, review every blob ID, and only then delete.
 </Warning>
 
-## Rebuild your view if it looks incomplete
+## Rebuild the index if it looks incomplete
 
-If the dashboard or your recall results look like they are missing memories you know you stored, your local index might be out of sync with Walrus. Walrus holds the permanent record, so you can rebuild the index from it.
+The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might be missing rows for those blobs, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
 
-Restore rediscovers the blobs your account owns in a namespace and re-indexes any that are missing locally:
+Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
 ```ts
 const result = await memwal.restore("personal");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-The `total` count is how many memories your account actually owns in that namespace on Walrus, which is the number to trust. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
+Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. To rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 ## Related links
 

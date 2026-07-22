@@ -86,7 +86,7 @@ const result = await memwal.restore("agent-state");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-The `total` count is the number of onchain blobs the relayer saw for the agent's owner and namespace. That number is the ground truth for how many memories the agent owns in that namespace, independent of any local index.
+Restore is bounded by its `limit` (default 10) and inspects onchain blobs newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. To enumerate or rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
 
 ### Read the `Blob` object on Sui
 
