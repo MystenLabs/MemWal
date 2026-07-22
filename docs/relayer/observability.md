@@ -66,6 +66,11 @@ Core relayer metrics:
 | `memwal_sidecar_failures_total` | `operation`, `reason` | Sidecar transport and HTTP failures |
 | `memwal_db_query_duration_seconds` | `operation`, `status` | PostgreSQL and pgvector query latency |
 | `memwal_db_pool_connections` | `state` | PostgreSQL pool `open` and `idle` gauges |
+| `memwal_write_stream_permits_total` | none | Configured permit ceiling |
+| `memwal_write_stream_permits_available` | none | Permits currently free |
+| `memwal_write_stream_waiters_total` | none | Tasks waiting for a permit |
+| `memwal_write_stream_acquired_total` | `result` | Permit acquisition outcomes |
+| `memwal_write_stream_rejected_total` | `route` | Requests rejected with `429` |
 
 Example Prometheus scrape config:
 

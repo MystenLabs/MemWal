@@ -101,9 +101,13 @@ fn spawn_prepare_remember_job(
     owner: String,
     namespace: String,
     agent_public_key: String,
+    // Held until prep completes; releases the permit on drop.
+    permit: crate::services::write_stream::WriteStreamPermit,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
+        // Hold the permit until prep hands off to the durable wallet queue.
+        let _permit = permit;
         let work = async move {
             let result: Result<(), AppError> = async {
                 // texts beyond the embedder's context window must be
@@ -202,6 +206,9 @@ fn spawn_prepare_bulk_remember_job(
     owner: String,
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
+    // One guard per item; each is held until that item's prep completes and
+    // releases its own slot.
+    item_permits: Vec<crate::services::write_stream::WriteStreamPermit>,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -213,10 +220,14 @@ fn spawn_prepare_bulk_remember_job(
             let result: Result<(), AppError> = async {
                 let prep_tasks: Vec<_> = pending_items
                     .into_iter()
-                    .map(|item| {
+                    .zip(item_permits)
+                    .map(|(item, _permit)| {
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
                         async move {
+                            // Hold the permit until this item's prep hands off to the durable bulk queue.
+                            let _permit = _permit;
+
                             // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
                             let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
@@ -635,6 +646,8 @@ pub async fn remember(
     let namespace_owned = namespace.clone();
     let text = body.text;
 
+    // Insert the remember_jobs row first. If permit acquisition times out, the
+    // row remains `running` and the stale-job sweeper will mark it failed.
     let job_id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query(
@@ -647,6 +660,35 @@ pub async fn remember(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
 
+    // Acquire a write-stream permit after persisting the job row. On timeout
+    // the caller gets 429 immediately while the row stays running for the
+    // stale-job sweeper.
+    let permit = match state
+        .write_stream_limiter
+        .acquire(state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permit) => {
+            crate::observability::record_write_stream_acquired_success();
+            permit
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember"));
+        }
+        Err(crate::services::write_stream::AcquireError::Closed) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::Internal("write stream limiter closed".into()));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity { .. }) => {
+            crate::observability::record_write_stream_rejected("/api/remember");
+            crate::observability::record_write_stream_acquired("failure");
+            // n=1 can never exceed capacity, but keep the arm consistent.
+            return Err(AppError::RateLimited(
+                "Write stream capacity exceeded; retry after a short delay".into(),
+            ));
+        }
+    };
+
     spawn_prepare_remember_job(
         Arc::clone(&state),
         job_id.clone(),
@@ -654,6 +696,7 @@ pub async fn remember(
         owner_owned,
         namespace_owned,
         auth.public_key.clone(),
+        permit,
     );
 
     tracing::info!(
@@ -751,13 +794,17 @@ pub async fn remember_bulk(
         }
     }
 
+    let item_count = body.items.len();
+
     let owner = &auth.owner;
     tracing::info!(
         "remember_bulk: {} items owner={}",
-        body.items.len(),
+        item_count,
         &owner[..10.min(owner.len())],
     );
 
+    // Insert remember_jobs rows first. If permit acquisition times out, the
+    // rows remain `running` and the stale-job sweeper will mark them failed.
     let mut job_ids: Vec<String> = Vec::with_capacity(body.items.len());
     let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
@@ -784,11 +831,54 @@ pub async fn remember_bulk(
 
     let total = job_ids.len();
 
+    // Acquire write-stream permits after persisting rows. On timeout the
+    // caller gets 429 immediately while the rows stay running for the
+    // stale-job sweeper.
+    let mut permits = match state
+        .write_stream_limiter
+        .acquire_many(item_count, state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permits) => {
+            crate::observability::record_write_stream_acquired_success_n(item_count);
+            permits
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated("/api/remember/bulk"));
+        }
+        Err(crate::services::write_stream::AcquireError::WouldExceedCapacity {
+            requested,
+            max: _,
+        }) => {
+            crate::observability::record_write_stream_rejected("/api/remember/bulk");
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::RateLimited(format!(
+                "Bulk request of {} items exceeds write stream capacity; reduce batch size",
+                requested
+            )));
+        }
+        Err(crate::services::write_stream::AcquireError::Closed) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::Internal("write stream limiter closed".into()));
+        }
+    };
+
+    // Split the acquired batch permit into one guard per item so each item's
+    // prep task releases its own slot when its embedding/encryption finishes.
+    let item_permits: Vec<crate::services::write_stream::WriteStreamPermit> = (0..item_count)
+        .map(|_| {
+            permits
+                .split_one()
+                .expect("acquired permits equal pending_items.len()")
+        })
+        .collect();
+
     spawn_prepare_bulk_remember_job(
         Arc::clone(&state),
         owner.clone(),
         auth.public_key.clone(),
         pending_items,
+        item_permits,
     );
 
     tracing::info!("remember_bulk accepted: {} items owner={}", total, owner,);
@@ -912,6 +1002,30 @@ pub async fn remember_manual(
     // Check storage quota before upload (quota enforcement stays here —
     // the engine owns persistence, not policy).
     rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
+
+    // Gate on write-stream capacity so a saturated stream can't be driven
+    // through the synchronous manual path.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(state.config.write_stream_acquire_timeout)
+        .await
+    {
+        Ok(permit) => {
+            crate::observability::record_write_stream_acquired_success();
+            permit
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            return Err(crate::routes::write_stream_saturated(
+                "/api/remember/manual",
+            ));
+        }
+        Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(AppError::Internal(
+                "write stream limiter unavailable".into(),
+            ));
+        }
+    };
 
     // Persist via the storage engine: Walrus upload (pool key pays gas,
     // configured storage epochs, immediate transfer to owner) -> Postgres index row.
@@ -1078,6 +1192,8 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             allowed_origins: String::new(),
             benchmark_mode: false,
+            write_stream_max_concurrency: 8,
+            write_stream_acquire_timeout: std::time::Duration::from_millis(5_000),
         }
     }
 
@@ -1126,5 +1242,25 @@ mod tests {
         assert!(seen.len() > 1);
         assert!(seen.iter().all(|len| *len <= SUMMARIZE_CHUNK_BYTES + 1024));
         assert!(seen.iter().all(|len| *len < MAX_REMEMBER_TEXT_BYTES / 4));
+    }
+
+    #[tokio::test]
+    async fn write_stream_limiter_blocks_beyond_capacity() {
+        use crate::services::write_stream::WriteStreamLimiter;
+        use std::time::Duration;
+
+        let limiter = WriteStreamLimiter::test_new(2);
+        let p1 = limiter.acquire(Duration::from_millis(10)).await.unwrap();
+        let p2 = limiter.acquire(Duration::from_millis(10)).await.unwrap();
+        let timeout = limiter
+            .acquire(Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            timeout,
+            crate::services::write_stream::AcquireError::Timeout
+        ));
+        drop(p1);
+        drop(p2);
     }
 }

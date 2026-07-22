@@ -908,6 +908,32 @@ async fn execute_upload_and_transfer(
         encrypted.len(),
     );
 
+    // Acquire a write-stream permit before hitting the sidecar. This ensures
+    // the sidecar upload queue cannot grow beyond the Rust-managed budget.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(permit) => {
+            crate::observability::record_write_stream_acquired_success();
+            permit
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            crate::observability::record_write_stream_acquired("timeout");
+            return Err(WalletJobError::Transient(
+                "write stream permit unavailable; will retry".into(),
+            ));
+        }
+        Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
+            // Limiter closed — leave job in queue for retry.
+            return Err(WalletJobError::Transient(
+                "write stream limiter closed; will retry".into(),
+            ));
+        }
+    };
+
     // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
     let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
@@ -1449,11 +1475,7 @@ async fn maybe_alert_walrus_low_wal_balance(
         error: msg.to_string(),
     };
 
-    if let Err(err) = state
-        .alerts
-        .notify_walrus_low_wal_balance(alert)
-        .await
-    {
+    if let Err(err) = state.alerts.notify_walrus_low_wal_balance(alert).await {
         tracing::warn!(
             "[wallet-job:upload] failed to send Slack alert for low WAL balance: {}",
             err
@@ -1814,6 +1836,33 @@ pub async fn execute_remember(
         wallet_index_for_upload_attempt(starting_key_index, attempt_info.current, key_pool_len)
             .expect("non-empty key pool must yield wallet index");
 
+    // Acquire a write-stream permit before hitting the sidecar. Legacy
+    // RememberJob rows share the same upload budget as UploadAndTransfer jobs.
+    let _permit = match state
+        .write_stream_limiter
+        .acquire(std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(permit) => {
+            crate::observability::record_write_stream_acquired_success();
+            permit
+        }
+        Err(crate::services::write_stream::AcquireError::Timeout) => {
+            crate::observability::record_write_stream_acquired("timeout");
+            return Err(WalletJobError::Transient(
+                "write stream permit unavailable; will retry".into(),
+            )
+            .into_apalis_error());
+        }
+        Err(_) => {
+            crate::observability::record_write_stream_acquired("failure");
+            return Err(WalletJobError::Transient(
+                "write stream limiter closed; will retry".into(),
+            )
+            .into_apalis_error());
+        }
+    };
+
     // ── Step 3: walrus upload (the slow part ~2-3s) ───────────────
     let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
@@ -2152,7 +2201,7 @@ mod tests {
         classify_wallet_remember_handoff_failure, congestion_backoff_secs,
         escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
         is_walrus_package_version_mismatch, mark_remember_job_failed, parse_locked_object_info,
-        wallet_index_for_upload_attempt, wallet_job_request, parse_wal_balance_alert_info,
+        parse_wal_balance_alert_info, wallet_index_for_upload_attempt, wallet_job_request,
         WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
         MAX_CONGESTION_REQUEUES,
     };
@@ -2291,7 +2340,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
         // The whole requeue budget must outlive a realistic backlog drain
         // (the 2026-06-10 queue needed ~8 minutes at ~16 uploads/min).
-        let total: u64 = (0..MAX_CONGESTION_REQUEUES).map(congestion_backoff_secs).sum();
+        let total: u64 = (0..MAX_CONGESTION_REQUEUES)
+            .map(congestion_backoff_secs)
+            .sum();
         assert!(
             total >= 20 * 60,
             "congestion requeue budget should span >= 20 minutes, got {}s",
@@ -2437,7 +2488,8 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     #[test]
     fn parse_wal_balance_alert_info_extracts_required_and_available() {
-        let parsed = parse_wal_balance_alert_info(LOW_WAL_BALANCE_ERR).expect("expected low WAL signal");
+        let parsed =
+            parse_wal_balance_alert_info(LOW_WAL_BALANCE_ERR).expect("expected low WAL signal");
         assert_eq!(parsed.required, Some(64367730));
         assert_eq!(parsed.available, 10708877);
     }
@@ -2445,10 +2497,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     #[test]
     fn classify_low_wal_balance_is_dedicated_transient() {
         let classified = WalletJobError::classify_sidecar_error(LOW_WAL_BALANCE_ERR);
-        assert!(matches!(
-            classified,
-            WalletJobError::WalrusBalanceLow(_)
-        ));
+        assert!(matches!(classified, WalletJobError::WalrusBalanceLow(_)));
         assert!(!classified.aborts_retries());
         assert!(!classified.is_permanent());
         assert_eq!(classified.kind(), "walrus_balance_low");

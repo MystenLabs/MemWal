@@ -176,6 +176,48 @@ static DB_POOL: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .expect("register memwal_db_pool_connections")
 });
 
+static WRITE_STREAM_PERMITS_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_write_stream_permits_total",
+        "Total configured write-stream permits."
+    )
+    .expect("register memwal_write_stream_permits_total")
+});
+
+static WRITE_STREAM_PERMITS_AVAILABLE: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_write_stream_permits_available",
+        "Currently available write-stream permits."
+    )
+    .expect("register memwal_write_stream_permits_available")
+});
+
+static WRITE_STREAM_WAITERS_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_write_stream_waiters_total",
+        "Tasks currently waiting for a write-stream permit."
+    )
+    .expect("register memwal_write_stream_waiters_total")
+});
+
+static WRITE_STREAM_ACQUIRED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "memwal_write_stream_acquired_total",
+        "Write-stream permit acquisition outcomes.",
+        &["result"]
+    )
+    .expect("register memwal_write_stream_acquired_total")
+});
+
+static WRITE_STREAM_REJECTED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "memwal_write_stream_rejected_total",
+        "Requests rejected because the write stream is saturated.",
+        &["route"]
+    )
+    .expect("register memwal_write_stream_rejected_total")
+});
+
 pub fn init_tracing() -> TelemetryGuard {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "memwal_server=info,tower_http=info".into());
@@ -564,6 +606,37 @@ pub fn update_db_pool_metrics(pool: &sqlx::PgPool) {
     DB_POOL
         .with_label_values(&["idle"])
         .set(pool.num_idle() as i64);
+}
+
+pub fn observe_write_stream_state(total: usize, available: usize, waiters: usize) {
+    WRITE_STREAM_PERMITS_TOTAL.set(total as i64);
+    WRITE_STREAM_PERMITS_AVAILABLE.set(available as i64);
+    WRITE_STREAM_WAITERS_TOTAL.set(waiters as i64);
+}
+
+pub fn record_write_stream_acquired(result: &str) {
+    WRITE_STREAM_ACQUIRED_TOTAL
+        .with_label_values(&[result])
+        .inc();
+}
+
+pub fn record_write_stream_acquired_success() {
+    record_write_stream_acquired("success");
+}
+
+pub fn record_write_stream_acquired_success_n(n: usize) {
+    if n == 0 {
+        return;
+    }
+    WRITE_STREAM_ACQUIRED_TOTAL
+        .with_label_values(&["success"])
+        .inc_by(n as u64);
+}
+
+pub fn record_write_stream_rejected(route: &str) {
+    WRITE_STREAM_REJECTED_TOTAL
+        .with_label_values(&[route])
+        .inc();
 }
 
 fn record_http_request(method: &str, route: &str, status: StatusCode, elapsed: Duration) {
