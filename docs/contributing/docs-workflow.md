@@ -29,7 +29,7 @@ The most important rules are:
 - Code blocks: Use triple backticks with a language identifier, and introduce them with descriptive text.
 - Links: Use relative paths for internal links.
 
-Treat the style guide as a required step, not a suggestion. Before writing or editing any file
+Treat the Sui Documentation Style Guide as a required step, not a suggestion. Before writing or editing any file
 under `docs/`, apply every rule above; after editing, self-check the changed prose against the same
 list and fix violations before finishing. Documentation that does not comply is not complete.
 
