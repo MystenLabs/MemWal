@@ -40,7 +40,7 @@ Each result carries a `distance`, where a smaller number means a closer match. R
 
 ### Preview stored content
 
-To read the exact content of a stored memory, the dashboard's delete panel shows a preview of each memory's decrypted text before you remove it. Previewing is the safest way to confirm what a memory holds before you delete it, because deletion cannot be undone. The [Delete old memories](/guides/delete-old-memories) guide walks through the preview control. From code, `recall` returns the decrypted `text` of each match, so you can read stored content programmatically as well.
+From code, `recall` returns the decrypted `text` of each match, so you can read stored content programmatically. Preview a memory before deleting it, because deletion cannot be undone; the [Delete old memories](/guides/delete-old-memories) guide covers previewing content in the dashboard delete flow.
 
 ## Organize with namespaces
 
@@ -87,7 +87,7 @@ Deletion permanently removes a memory from Walrus Memory. You cannot undo it, so
 
 You have two paths, depending on whether you want to click through the dashboard or run deletion from code:
 
-- **Dashboard:** The delete panel lists your stored memories with their blob ID, object ID, creation date, and state, lets you preview each one, and deletes the memories you select. See [Delete old memories](/guides/delete-old-memories).
+- **Dashboard:** Review and delete stored memories from the dashboard delete flow. See [Delete old memories](/guides/delete-old-memories).
 - **Programmatic:** The Security Delete API finds memories older than a cutoff, prepares a sponsored transaction, and deletes them in batches after a dry run. See [Delete memories programmatically](/guides/delete-memories-programmatically).
 
 <Warning>
@@ -105,7 +105,7 @@ const result = await memwal.restore("personal");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. To rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
+Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 ## Related links
 

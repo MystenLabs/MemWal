@@ -51,7 +51,7 @@ const result = await memwal.restore("personal");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of your namespace. To rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
+Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of your namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 ## You own your data, and you re-upload it
 

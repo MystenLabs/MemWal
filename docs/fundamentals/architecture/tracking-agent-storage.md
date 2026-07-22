@@ -86,7 +86,7 @@ const result = await memwal.restore("agent-state");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Restore is bounded by its `limit` (default 10) and inspects onchain blobs newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. To enumerate or rebuild a large namespace, call restore repeatedly, or raise `limit`, until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
+Restore is bounded by its `limit` (default 10) and inspects onchain blobs newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To enumerate or rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
 
 ### Read the `Blob` object on Sui
 
@@ -96,7 +96,7 @@ When the agent needs the details of a specific blob, such as its size or exact e
 
 Expiry is the one part of the lifecycle that fails silently. A blob does not warn the agent before it lapses, so the agent has to compare the current epoch against each blob's expiry epoch on a schedule.
 
-Renewal is an extend operation on the `Blob` object: the owner pays WAL for more epochs and the expiry epoch moves forward. In the dashboard, this surfaces as a renewal control on the memory, described in [Manage your memory](/guides/manage-your-memory). For an agent that manages its own blobs, run the check as a loop:
+Renewal is an extend operation on the `Blob` object: the owner pays WAL for more epochs and the expiry epoch moves forward. A one-click renewal control in the dashboard is planned; today renewal happens at this storage layer, which [Manage your memory](/guides/manage-your-memory) covers from the memory side. For an agent that manages its own blobs, run the check as a loop:
 
 1. Read the current Walrus epoch.
 2. For each tracked blob, compare its expiry epoch against the current epoch plus a safety margin.
