@@ -96,7 +96,7 @@ Both deletion paths are permanent. Start with a preview in the dashboard or a dr
 
 ## Rebuild your view if it looks incomplete
 
-If the dashboard or your recall results look like they are missing memories you know you stored, your local index may be out of sync with Walrus. Walrus holds the permanent record, so you can rebuild the index from it.
+If the dashboard or your recall results look like they are missing memories you know you stored, your local index might be out of sync with Walrus. Walrus holds the permanent record, so you can rebuild the index from it.
 
 Restore rediscovers the blobs your account owns in a namespace and re-indexes any that are missing locally:
 

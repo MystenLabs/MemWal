@@ -42,7 +42,7 @@ Losing a delegate key does not lose your memories. The key is a credential for r
 
 ### Rediscover your memories
 
-A new device also starts with an empty local index, so recall may return nothing at first even though your memories exist on Walrus. Rebuild the index with restore, which rediscovers the blobs your account owns in a namespace and re-indexes them:
+A new device also starts with an empty local index, so recall might return nothing at first even though your memories exist on Walrus. Rebuild the index with restore, which rediscovers the blobs your account owns in a namespace and re-indexes them:
 
 ```ts
 const result = await memwal.restore("personal");
