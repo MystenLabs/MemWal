@@ -29,29 +29,6 @@ The vector entry in the relayer database is the only object in this list that is
 
 A blob moves through a predictable set of states from the moment the agent writes it. The agent's job is to know which state each blob is in and act before the blob expires.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Registered: reserve_space + register_blob
-    Registered --> Certified: certify_blob
-    Certified --> Tracked: agent records blob ID + object ID + expiry epoch
-    Tracked --> Renewed: extend before expiry
-    Renewed --> Tracked: new expiry epoch recorded
-    Tracked --> Expiring: expiry epoch approaches
-    Expiring --> Renewed: extend
-    Expiring --> Deleted: delete or let lapse
-    Deleted --> [*]
-
-    note right of Tracked
-        Agent keeps blob ID,
-        object ID, namespace,
-        and expiry epoch
-    end note
-    note right of Expiring
-        Renew before the epoch
-        or Walrus drops the data
-    end note
-```
-
 <Steps>
   <Step>
     ### Register and certify
