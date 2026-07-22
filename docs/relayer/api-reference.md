@@ -351,3 +351,88 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
   "owner": "0x..."
 }
 ```
+
+### `POST /api/clear-namespace`
+
+Soft-delete every memory in one namespace. The memories immediately stop appearing in `recall`; the underlying Walrus blobs are user-owned and persist (this clears retrievability, not the blob). Owner-scoped.
+
+**Request:**
+
+```json
+{
+  "namespace": "demo"
+}
+```
+
+**Response:**
+
+```json
+{
+  "cleared": 12,
+  "namespace": "demo",
+  "owner": "0x..."
+}
+```
+
+`cleared` is the number of memories newly soft-deleted; `0` is a safe no-op (already empty/cleared).
+
+### `POST /api/list`
+
+Enumerate the live memories in one namespace, newest first. Metadata only — no decrypted text — so it is cheap to call for auditing. Each item's `id` is the handle for `/api/memories/forget`. Owner-scoped; soft-deleted memories are omitted.
+
+**Request:**
+
+```json
+{
+  "namespace": "demo",
+  "limit": 50,
+  "cursor": "<next_cursor from a previous response, omit for the first page>"
+}
+```
+
+`limit` defaults to `50` (clamped to 1–500). Omit `cursor` for the first page.
+
+**Response:**
+
+```json
+{
+  "memories": [
+    {
+      "id": "uuid",
+      "blob_id": "walrus-blob-id",
+      "created_at": "2026-06-18T12:00:00+00:00",
+      "importance": 0.5
+    }
+  ],
+  "returned": 1,
+  "has_more": false,
+  "namespace": "demo",
+  "owner": "0x..."
+}
+```
+
+`returned` is this page's size (not the namespace total). When `has_more` is `true`, the response also includes a `next_cursor`; pass it back as `cursor` to fetch the next page.
+
+### `POST /api/memories/forget`
+
+Soft-delete a single memory by its `id` (from `/api/list`). The memory stops appearing in `recall`; an identical-text memory stored separately is unaffected (deletion is per-memory). Owner-scoped.
+
+**Request:**
+
+```json
+{
+  "id": "uuid"
+}
+```
+
+**Response:**
+
+```json
+{
+  "forgotten": 1,
+  "id": "uuid",
+  "owner": "0x..."
+}
+```
+
+`forgotten` is `1` on success, `0` if the id was not found, is not the caller's, or was already forgotten (all safe no-ops).

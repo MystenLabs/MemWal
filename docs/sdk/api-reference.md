@@ -141,6 +141,54 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 }
 ```
 
+### `clearNamespace(namespace): Promise<ClearNamespaceResult>`
+
+Soft-delete every memory in a namespace so it stops surfacing in `recall()` — the reset primitive for iteration/dev loops. Soft-delete clears *retrievability*; the Walrus blob is user-owned and persists (un-recallable, not erased). Owner-scoped; namespace matched exactly.
+
+**Returns:**
+
+```ts
+{
+  cleared: number;    // Memories newly cleared (0 = safe no-op, already empty/cleared)
+  namespace: string;
+  owner: string;
+}
+```
+
+### `list(namespace, opts?): Promise<ListResult>`
+
+Enumerate the memories in a namespace — metadata only (id, blob_id, created_at, importance), newest first. Decrypt-free, so cheap to call for auditing. Each item's `id` is the handle for `forget()`. Use `recall()` to read content.
+
+- `opts` is `{ limit?, cursor? }` (a bare `number` is accepted as `limit`); `limit` defaults to `50`, capped 1–500.
+- Paginate: when `has_more` is `true`, pass `next_cursor` back as `opts.cursor`.
+
+**Returns:**
+
+```ts
+{
+  memories: { id: string; blob_id: string; created_at: string; importance: number }[];
+  returned: number;       // This page's size (NOT the namespace total)
+  has_more: boolean;
+  next_cursor?: string;   // Pass back as opts.cursor for the next page
+  namespace: string;
+  owner: string;
+}
+```
+
+### `forget(id): Promise<ForgetResult>`
+
+Soft-delete a single memory by its `id` (from `list()`). An identical-text memory stored separately is unaffected (deletion is per-memory). Like `clearNamespace`, clears retrievability, not the blob. Owner-scoped.
+
+**Returns:**
+
+```ts
+{
+  forgotten: number;  // 1 on success; 0 = safe no-op (not found / not yours / already gone)
+  id: string;
+  owner: string;
+}
+```
+
 ### `health(): Promise<HealthResult>`
 
 Check relayer health. Does not require authentication.

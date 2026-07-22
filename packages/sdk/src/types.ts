@@ -304,6 +304,55 @@ export interface RestoreResult {
     owner: string;
 }
 
+/**
+ * Result of `clearNamespace()` — a soft-delete that stops every memory in the
+ * namespace from surfacing in `recall()`. The underlying Walrus blobs are
+ * user-owned and persist until on-chain deletion / storage-epoch expiry; this
+ * clears *retrievability*, not the blob itself.
+ */
+export interface ClearNamespaceResult {
+    /** Number of memories newly cleared (0 if the namespace was already clear). */
+    cleared: number;
+    namespace: string;
+    owner: string;
+}
+
+/** One memory's metadata as returned by `list()`. No decrypted text — listing
+ * is decrypt-free. `id` is the unique handle to pass to `forget(id)`. */
+export interface MemoryListItem {
+    /** Unique per-memory id — the handle for `forget(id)`. */
+    id: string;
+    /** Walrus blob id (not unique; identical-text memories share one). */
+    blob_id: string;
+    /** ISO-8601 insertion timestamp. */
+    created_at: string;
+    /** Ranking importance weight for this memory (0.0–1.0). */
+    importance: number;
+}
+
+/** Result of `list()` — one page of live memories in a namespace, newest first,
+ * metadata only (use the `id`s with `forget()`). Soft-deleted memories omitted. */
+export interface ListResult {
+    memories: MemoryListItem[];
+    /** Number of memories in THIS page (== `memories.length`, capped by `limit`).
+     * NOT the namespace's total — paginate via `has_more`/`next_cursor` to enumerate fully. */
+    returned: number;
+    /** True if more live memories exist beyond this page; pass `next_cursor` back as `cursor`. */
+    has_more: boolean;
+    /** Opaque cursor for the next page; absent when `has_more` is false. */
+    next_cursor?: string;
+    namespace: string;
+    owner: string;
+}
+
+/** Result of `forget(id)` — soft-delete a single memory by its `id`. */
+export interface ForgetResult {
+    /** 1 if soft-deleted, 0 if the id wasn't found / not yours / already gone. */
+    forgotten: number;
+    id: string;
+    owner: string;
+}
+
 // ============================================================
 // Full Client-Side Manual Flow — MemWalManual class
 // ============================================================

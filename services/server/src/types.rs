@@ -561,6 +561,19 @@ pub struct SearchHit {
     pub importance: f32,
 }
 
+/// One row in a `/api/list` response — metadata for a stored memory, with NO
+/// decrypted text (listing is decrypt-free). `id` is the unique per-row handle
+/// the caller passes to `/api/memories/forget` to delete this specific memory.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryListItem {
+    /// Unique per-row id (`vector_entries.id`) — the handle for `forget`.
+    pub id: String,
+    /// Walrus blob id (not unique; identical-text memories share one).
+    pub blob_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub importance: f32,
+}
+
 /// Composite-scoring weights for `/api/recall` and `/api/ask`. Optional on
 /// the wire — when omitted, the response order is byte-identical to a
 /// pure pgvector cosine-distance sort (today's behaviour).
@@ -873,6 +886,79 @@ pub struct ForgetRequest {
 pub struct ForgetResponse {
     pub deleted: u64,
     pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/clear-namespace — user-facing SOFT-delete of every memory in a
+/// namespace (sets `deleted_at`; rows retained, Walrus blobs persist). The
+/// memories stop surfacing in recall. Distinct from /api/forget (hard DELETE,
+/// harness-only). Owner-scoped.
+#[derive(Debug, Deserialize)]
+pub struct ClearNamespaceRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClearNamespaceResponse {
+    /// Number of memories newly soft-deleted (0 if already cleared).
+    pub cleared: u64,
+    pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/list — enumerate a namespace's live memories (metadata only,
+/// decrypt-free). Returns each memory's per-row `id` so the caller can
+/// `forget` a specific one. Owner-scoped.
+fn default_list_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    #[serde(default = "default_list_limit")]
+    pub limit: usize,
+    /// Opaque pagination cursor from a previous response's `next_cursor`.
+    /// Omit (or null) for the first page; pass it verbatim to get the next.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListResponse {
+    pub memories: Vec<MemoryListItem>,
+    /// Number of memories in THIS page (== `memories.len()`, capped by `limit`).
+    /// NOT the namespace's total memory count — use `has_more` + paging to
+    /// enumerate fully.
+    pub returned: usize,
+    /// True if more live memories exist beyond this page. When true, pass
+    /// `next_cursor` back as `cursor` to fetch the next page.
+    pub has_more: bool,
+    /// Opaque cursor for the next page; `None` when `has_more` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub namespace: String,
+    pub owner: String,
+}
+
+/// POST /api/memories/forget — soft-delete a SINGLE memory by its per-row
+/// `id` (from `/api/list`). Per-row: identical-text siblings survive. The
+/// underlying Walrus blob persists (un-recallable, not erased). Owner-scoped.
+/// Distinct from `/api/clear-namespace` (whole-namespace) and `/api/forget`
+/// (hard delete, harness-only).
+#[derive(Debug, Deserialize)]
+pub struct ForgetByIdRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForgetByIdResponse {
+    /// 1 if the memory was soft-deleted, 0 if not found / not the caller's /
+    /// already deleted.
+    pub forgotten: u64,
+    pub id: String,
     pub owner: String,
 }
 

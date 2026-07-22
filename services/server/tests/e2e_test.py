@@ -136,6 +136,24 @@ def _load_delegate_key() -> SigningKey | None:
     return SigningKey(raw, encoder=RawEncoder)
 
 
+def _load_delegate_key_2() -> tuple[SigningKey | None, str | None]:
+    """Optional SECOND owner (TEST_DELEGATE_KEY_2 + TEST_ACCOUNT_ID_2) for the
+    cross-owner isolation test. Returns (key, account_id) or (None, None)
+    if not configured — the cross-owner test is then skipped (documented gap)."""
+    hex_key = os.environ.get("TEST_DELEGATE_KEY_2", "").strip()
+    if not hex_key:
+        return None, None
+    try:
+        raw = bytes.fromhex(hex_key)
+    except ValueError:
+        print("[warn] TEST_DELEGATE_KEY_2 is not valid hex; skipping cross-owner check")
+        return None, None
+    if len(raw) != 32:
+        print(f"[warn] TEST_DELEGATE_KEY_2 must be 32 bytes (got {len(raw)}); skipping cross-owner check")
+        return None, None
+    return SigningKey(raw, encoder=RawEncoder), (os.environ.get("TEST_ACCOUNT_ID_2") or None)
+
+
 def test_health() -> None:
     req = urllib.request.Request(f"{BASE_URL}/health")
     with urllib.request.urlopen(req) as resp:
@@ -280,6 +298,323 @@ def test_remember_recall_happy_path(signing_key: SigningKey, account_id: str | N
     print(f"[pass] POST /api/recall → {recall_result['total']} hits, top distance={top['distance']:.4f}")
 
 
+def test_clear_namespace_soft_delete(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """remember → recall (present) → clearNamespace → recall (absent).
+
+    Verifies the soft-delete contract end-to-end: a cleared namespace stops
+    surfacing in recall, and an unrelated namespace is untouched (owner+ns
+    scoping). Shares the Walrus/SEAL/Sui prerequisites with the happy path.
+    """
+    ns = "e2e-clear-test"
+    sibling = "e2e-clear-keep"
+
+    # 1. Remember one memory in each namespace.
+    for namespace, text in ((ns, "The sky is blue."), (sibling, "Grass is green.")):
+        r = make_signed_request(
+            "POST", "/api/remember", {"text": text, "namespace": namespace},
+            signing_key, account_id=account_id,
+        )
+        wait_for_remember_job(signing_key, account_id, r["job_id"])
+    print(f"[pass] seeded memories in {ns} + {sibling}")
+
+    # 2. Recall — the target memory is present.
+    before = make_signed_request(
+        "POST", "/api/recall",
+        {"query": "What colour is the sky?", "limit": 5, "namespace": ns},
+        signing_key, account_id=account_id,
+    )
+    assert before["total"] >= 1, f"Expected ≥1 hit before clear, got {before['total']}"
+    print(f"[pass] recall before clear → {before['total']} hit(s)")
+
+    # 3. clearNamespace (soft-delete).
+    cleared = make_signed_request(
+        "POST", "/api/clear-namespace", {"namespace": ns},
+        signing_key, account_id=account_id,
+    )
+    assert cleared["cleared"] >= 1, f"Expected ≥1 cleared, got {cleared}"
+    print(f"[pass] POST /api/clear-namespace → cleared={cleared['cleared']}")
+
+    # 4. Recall again — the cleared namespace returns nothing.
+    after = make_signed_request(
+        "POST", "/api/recall",
+        {"query": "What colour is the sky?", "limit": 5, "namespace": ns},
+        signing_key, account_id=account_id,
+    )
+    assert after["total"] == 0, f"Expected 0 hits after clear, got {after['total']}"
+    print(f"[pass] recall after clear → {after['total']} hits (soft-deleted)")
+
+    # 5. Sibling namespace is untouched (owner+namespace scoping).
+    keep = make_signed_request(
+        "POST", "/api/recall",
+        {"query": "What colour is grass?", "limit": 5, "namespace": sibling},
+        signing_key, account_id=account_id,
+    )
+    assert keep["total"] >= 1, f"Sibling namespace wrongly cleared, got {keep['total']}"
+    print(f"[pass] sibling namespace intact → {keep['total']} hit(s)")
+
+    # 6. Re-clear is idempotent — already-cleared rows are skipped (0).
+    again = make_signed_request(
+        "POST", "/api/clear-namespace", {"namespace": ns},
+        signing_key, account_id=account_id,
+    )
+    assert again["cleared"] == 0, f"Expected 0 on re-clear, got {again}"
+    print(f"[pass] re-clear idempotent → cleared={again['cleared']}")
+
+
+def test_list_and_forget_by_id(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """list() exposes per-row ids; forget(id) is per-row.
+
+    Stores two DISTINCT memories, lists to get their ids, forgets one, and
+    asserts: the forgotten one is gone from recall + list, the other survives.
+    Then verifies forget is owner/id-scoped (a bogus id → forgotten=0).
+    Shares the Walrus/SEAL/Sui prerequisites with the happy path.
+    """
+    ns = "e2e-forget-test"
+
+    # Seed two distinct memories.
+    for text in ("Alice plays the violin.", "Bob coaches soccer."):
+        r = make_signed_request(
+            "POST", "/api/remember", {"text": text, "namespace": ns},
+            signing_key, account_id=account_id,
+        )
+        wait_for_remember_job(signing_key, account_id, r["job_id"])
+    print(f"[pass] seeded 2 memories in {ns}")
+
+    # list() returns per-row ids (metadata only — no text field).
+    listing = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50},
+        signing_key, account_id=account_id,
+    )
+    assert listing["returned"] >= 2, f"Expected ≥2 listed, got {listing['returned']}"
+    for m in listing["memories"]:
+        assert "id" in m and m["id"], f"list item missing id: {m}"
+        assert "text" not in m, f"list must be metadata-only, leaked text: {m}"
+    target_id = listing["memories"][0]["id"]
+    print(f"[pass] POST /api/list → {listing['returned']} items, ids present, no text")
+
+    # forget one by id.
+    forgot = make_signed_request(
+        "POST", "/api/memories/forget", {"id": target_id},
+        signing_key, account_id=account_id,
+    )
+    assert forgot["forgotten"] == 1, f"Expected forgotten=1, got {forgot}"
+    print(f"[pass] POST /api/memories/forget id={target_id[:8]}… → forgotten=1")
+
+    # The forgotten id no longer appears in list; the other remains.
+    after = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50},
+        signing_key, account_id=account_id,
+    )
+    remaining_ids = {m["id"] for m in after["memories"]}
+    assert target_id not in remaining_ids, "Forgotten id still listed"
+    assert after["returned"] == listing["returned"] - 1, (
+        f"Expected one fewer after forget: {listing['returned']} → {after['returned']}"
+    )
+    print(f"[pass] list after forget → {after['returned']} (forgotten id absent)")
+
+    # forget is id/owner-scoped: a bogus id is a no-op, not an error.
+    noop = make_signed_request(
+        "POST", "/api/memories/forget", {"id": "00000000-0000-0000-0000-000000000000"},
+        signing_key, account_id=account_id,
+    )
+    assert noop["forgotten"] == 0, f"Expected forgotten=0 for bogus id, got {noop}"
+    print(f"[pass] forget bogus id → forgotten=0 (no-op, scoped)")
+
+    # Double-forget the SAME real id is idempotent — the second call hits the
+    # already-tombstoned branch (deleted_at NOT NULL), distinct from not-found,
+    # and must also return 0.
+    redo = make_signed_request(
+        "POST", "/api/memories/forget", {"id": target_id},
+        signing_key, account_id=account_id,
+    )
+    assert redo["forgotten"] == 0, f"Expected forgotten=0 on re-forget, got {redo}"
+    print(f"[pass] re-forget same id → forgotten=0 (idempotent)")
+
+
+def test_list_pagination(signing_key: SigningKey, account_id: str | None) -> None:
+    """list() cursor pagination enumerates every live memory once — no skips,
+    no duplicates, stable across pages, has_more/next_cursor correct.
+
+    Seeds N memories, pages through with limit < N using next_cursor, and
+    asserts the union of pages == the full set with no repeats and the last
+    page reports has_more=false.
+    """
+    ns = "e2e-paging-test"
+    n = 7
+    page = 3  # < n, so we get 3 + 3 + 1 across three pages
+
+    for i in range(n):
+        r = make_signed_request(
+            "POST", "/api/remember", {"text": f"paging memory number {i}", "namespace": ns},
+            signing_key, account_id=account_id,
+        )
+        wait_for_remember_job(signing_key, account_id, r["job_id"])
+    print(f"[pass] seeded {n} memories in {ns}")
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        body = {"namespace": ns, "limit": page}
+        if cursor is not None:
+            body["cursor"] = cursor
+        resp = make_signed_request("POST", "/api/list", body, signing_key, account_id=account_id)
+        pages += 1
+        got = [m["id"] for m in resp["memories"]]
+        assert len(got) == resp["returned"], "returned must equal len(memories)"
+        assert resp["returned"] <= page, f"page exceeded limit: {resp['returned']} > {page}"
+        seen.extend(got)
+        if resp["has_more"]:
+            assert resp.get("next_cursor"), "has_more=true must carry a next_cursor"
+            cursor = resp["next_cursor"]
+        else:
+            assert not resp.get("next_cursor"), "last page must not carry a next_cursor"
+            break
+        assert pages <= n + 2, "pagination did not terminate (cursor not advancing)"
+
+    # Every memory seen exactly once across the pages.
+    assert len(seen) == n, f"expected {n} memories across pages, saw {len(seen)}"
+    assert len(set(seen)) == n, f"duplicate ids across pages: {len(seen)} seen, {len(set(seen))} unique"
+    print(f"[pass] paginated {n} memories over {pages} pages: no skips, no dups, has_more correct")
+
+    # An invalid cursor is a 400, not a silent first-page reset.
+    bad = None
+    try:
+        make_signed_request(
+            "POST", "/api/list", {"namespace": ns, "limit": page, "cursor": "not-a-valid-cursor"},
+            signing_key, account_id=account_id,
+        )
+    except urllib.error.HTTPError as e:
+        bad = e.code
+    assert bad == 400, f"invalid cursor should 400, got {bad}"
+    print(f"[pass] invalid cursor → 400 (no silent reset)")
+
+    make_signed_request("POST", "/api/clear-namespace", {"namespace": ns}, signing_key, account_id=account_id)
+
+
+def test_forget_is_per_row_not_per_blob(
+    signing_key: SigningKey, account_id: str | None
+) -> None:
+    """forget(id) is keyed on the per-row id, NOT the blob_id.
+
+    Stores TWO memories with IDENTICAL text. SEAL ciphertext is deterministic
+    (same plaintext → same blob_id — the content-addressed dedup property), so
+    the two rows share a blob_id but have distinct row `id`s. Forgetting ONE by
+    its id must leave the other recallable. A buggy blob_id-keyed delete would
+    tombstone BOTH rows (shared blob_id) and this test would catch it — which
+    the prior distinct-text test could not.
+    """
+    ns = "e2e-perrow-test"
+    text = "The mitochondria is the powerhouse of the cell."
+
+    for _ in range(2):
+        r = make_signed_request(
+            "POST", "/api/remember", {"text": text, "namespace": ns},
+            signing_key, account_id=account_id,
+        )
+        wait_for_remember_job(signing_key, account_id, r["job_id"])
+
+    listing = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50},
+        signing_key, account_id=account_id,
+    )
+    ids = [m["id"] for m in listing["memories"]]
+    assert len(ids) >= 2, f"Expected ≥2 identical-text rows, got {len(ids)}"
+    # If determinism holds they share one blob_id; assert distinct row ids regardless.
+    assert len(set(ids)) == len(ids), "row ids must be unique even for identical text"
+    print(f"[pass] 2 identical-text memories stored as {len(ids)} distinct rows")
+
+    # Forget exactly one by its row id.
+    forgot = make_signed_request(
+        "POST", "/api/memories/forget", {"id": ids[0]},
+        signing_key, account_id=account_id,
+    )
+    assert forgot["forgotten"] == 1, (
+        f"Expected forgotten=1 (per-row), got {forgot} — "
+        "a blob_id-keyed delete would tombstone all siblings"
+    )
+
+    # The sibling (same text, different row id) must survive.
+    after = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50},
+        signing_key, account_id=account_id,
+    )
+    remaining = {m["id"] for m in after["memories"]}
+    assert ids[0] not in remaining, "forgotten row still listed"
+    assert ids[1] in remaining, (
+        "identical-text sibling was wrongly removed — forget appears to be "
+        "blob_id-keyed, not per-row"
+    )
+    print(f"[pass] forget one of two identical-text rows → sibling survives (per-row id-keyed)")
+
+
+def test_cross_owner_isolation(
+    owner_a: SigningKey, account_a: str | None,
+    owner_b: SigningKey, account_b: str | None,
+) -> None:
+    """owner B cannot clear/list/forget owner A's memories.
+
+    The privacy-floor assertion that matters most: every delete/list path is
+    owner-scoped by the auth-derived owner, so a second tenant sees nothing of
+    A's data and their delete attempts are clean no-ops. Requires a SECOND
+    delegate key (TEST_DELEGATE_KEY_2 / TEST_ACCOUNT_ID_2); skipped otherwise.
+    """
+    ns = "e2e-xowner-test"
+
+    # A seeds a memory.
+    r = make_signed_request(
+        "POST", "/api/remember", {"text": "A's private note.", "namespace": ns},
+        owner_a, account_id=account_a,
+    )
+    wait_for_remember_job(owner_a, account_a, r["job_id"])
+    a_list = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50}, owner_a, account_id=account_a
+    )
+    assert a_list["returned"] >= 1, "A's own memory should be listed"
+    a_id = a_list["memories"][0]["id"]
+    print(f"[pass] owner A seeded + lists own memory (id={a_id[:8]}…)")
+
+    # B sees nothing of A's namespace (B's own rows there = none).
+    b_list = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50}, owner_b, account_id=account_b
+    )
+    assert b_list["returned"] == 0, f"owner B must not see A's memories, got {b_list['returned']}"
+    print(f"[pass] owner B list of A's namespace → 0 (isolated)")
+
+    # B's clear of the shared namespace string clears only B's rows (none).
+    b_clear = make_signed_request(
+        "POST", "/api/clear-namespace", {"namespace": ns}, owner_b, account_id=account_b
+    )
+    assert b_clear["cleared"] == 0, f"owner B clear must touch nothing of A's, got {b_clear}"
+
+    # B's forget of A's real id is a no-op (owner-scoped, not just id-scoped).
+    b_forget = make_signed_request(
+        "POST", "/api/memories/forget", {"id": a_id}, owner_b, account_id=account_b
+    )
+    assert b_forget["forgotten"] == 0, (
+        f"owner B forgetting A's id must be a no-op (IDOR guard), got {b_forget}"
+    )
+    print(f"[pass] owner B clear + forget of A's data → no-ops (owner-scoped)")
+
+    # A's memory survived all of B's attempts.
+    a_after = make_signed_request(
+        "POST", "/api/list", {"namespace": ns, "limit": 50}, owner_a, account_id=account_a
+    )
+    assert a_id in {m["id"] for m in a_after["memories"]}, (
+        "A's memory was wrongly affected by B — cross-owner isolation broken"
+    )
+    print(f"[pass] owner A's memory intact after B's attempts (isolation holds)")
+
+    # Cleanup A's namespace so reruns start clean.
+    make_signed_request(
+        "POST", "/api/clear-namespace", {"namespace": ns}, owner_a, account_id=account_a
+    )
+
+
 MAX_REMEMBER_TEXT_BYTES = 1024 * 1024  # mirrors src/routes.rs constant
 # Largest plaintext we exercise in the e2e test. Smaller than the route
 # ceiling — bigger payloads work too (see scripts/bench-remember-sizes.ts)
@@ -420,6 +755,10 @@ def main() -> int:
             ("size_64kb_summarized", test_remember_size_64kb_summarized),
             ("size_large_accepted", test_remember_size_large_accepted),
             ("size_over_limit_rejected", test_remember_size_over_limit_rejected),
+            ("clear_namespace_soft_delete", test_clear_namespace_soft_delete),
+            ("list_and_forget_by_id", test_list_and_forget_by_id),
+            ("list_pagination", test_list_pagination),
+            ("forget_is_per_row_not_per_blob", test_forget_is_per_row_not_per_blob),
         )
         for name, fn in size_checks:
             try:
@@ -427,9 +766,30 @@ def main() -> int:
             except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
                 failures.append(f"{name}: {e}")
                 print(f"[FAIL] {name}: {e}")
+
+        # cross-owner isolation — needs a SECOND delegate key.
+        owner_b, account_b = _load_delegate_key_2()
+        if owner_b:
+            try:
+                test_cross_owner_isolation(delegate_key, account_id, owner_b, account_b)
+            except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                failures.append(f"cross_owner_isolation: {e}")
+                print(f"[FAIL] cross_owner_isolation: {e}")
+        else:
+            # Without a second key, cross-OWNER isolation
+            # is unverified by E2E. The owner-scoping is pinned at the SQL level
+            # by the Rust test `soft_delete_queries_are_owner_scoped`; this E2E
+            # is the live-stack confirmation. Set TEST_DELEGATE_KEY_2 +
+            # TEST_ACCOUNT_ID_2 to enable.
+            print("[skip] cross_owner_isolation (set TEST_DELEGATE_KEY_2 + TEST_ACCOUNT_ID_2 to enable)")
     else:
         print("[skip] remember_recall_happy_path (no TEST_DELEGATE_KEY)")
         print("[skip] size_*_test (no TEST_DELEGATE_KEY)")
+        print("[skip] clear_namespace_soft_delete (no TEST_DELEGATE_KEY)")
+        print("[skip] list_and_forget_by_id (no TEST_DELEGATE_KEY)")
+        print("[skip] list_pagination (no TEST_DELEGATE_KEY)")
+        print("[skip] forget_is_per_row_not_per_blob (no TEST_DELEGATE_KEY)")
+        print("[skip] cross_owner_isolation (no TEST_DELEGATE_KEY)")
 
     print()
     print("=" * 60)

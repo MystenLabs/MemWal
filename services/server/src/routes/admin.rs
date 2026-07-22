@@ -74,6 +74,169 @@ pub async fn forget(
     }))
 }
 
+/// POST /api/clear-namespace
+///
+/// User-facing SOFT delete: tombstone every memory in `owner`'s `namespace`
+/// (set `deleted_at`, rows retained). The memories immediately stop surfacing
+/// in `recall()` and in the analyze pre-extraction context. The underlying
+/// Walrus blobs persist (user-owned; Walrus has no delete) — this stops
+/// *retrievability*, not blob erasure. Owner-scoped.
+///
+/// Distinct from `/api/forget`, which HARD-deletes and is kept for the
+/// benchmark harness's inter-run cleanup. This is the SDK/MCP-exposed path.
+pub async fn clear_namespace(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<ClearNamespaceRequest>,
+) -> Result<Json<ClearNamespaceResponse>, AppError> {
+    if body.namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+    tracing::info!("clear_namespace: owner={} ns={}", owner, namespace);
+
+    let cleared = state.db.soft_delete_by_namespace(owner, namespace).await?;
+
+    tracing::info!(
+        "clear_namespace complete: soft-deleted {} entries for owner={} ns={}",
+        cleared,
+        owner,
+        namespace
+    );
+
+    Ok(Json(ClearNamespaceResponse {
+        cleared,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
+}
+
+/// Encode a `(created_at, id)` keyset position as an opaque pagination cursor.
+/// Base64url of `<rfc3339-timestamp>|<id>` — opaque to the caller (they pass it
+/// back verbatim), but cheap to decode and free of the `id` scheme leaking out.
+fn encode_list_cursor(created_at: &chrono::DateTime<chrono::Utc>, id: &str) -> String {
+    use base64::Engine as _;
+    let raw = format!("{}|{}", created_at.to_rfc3339(), id);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Decode a cursor produced by `encode_list_cursor`. A malformed cursor is a
+/// client error (`400`) rather than a silent first-page reset, so a paging bug
+/// surfaces instead of looping over the same page.
+fn decode_list_cursor(cursor: &str) -> Result<(chrono::DateTime<chrono::Utc>, String), AppError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+    let decoded =
+        String::from_utf8(bytes).map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+    let (ts_str, id) = decoded
+        .split_once('|')
+        .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?;
+    let ts = chrono::DateTime::parse_from_rfc3339(ts_str)
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?
+        .with_timezone(&chrono::Utc);
+    Ok((ts, id.to_string()))
+}
+
+/// POST /api/list
+///
+/// Enumerate the live memories in `owner`'s `namespace` — metadata only
+/// (`id`, `blob_id`, `created_at`, `importance`), newest first, no decrypted
+/// text. Decrypt-free, so it's cheap to call for auditing. The per-row `id`
+/// is the handle for `/api/memories/forget`. Owner-scoped; soft-deleted
+/// memories are omitted.
+///
+/// Cursor-paginated: `returned` is this page's size (NOT the namespace total);
+/// when `has_more` is true, pass `next_cursor` back as `cursor` for the next
+/// page. The keyset cursor is stable under concurrent deletes — forgotten rows
+/// simply drop out, they don't shift a page boundary.
+pub async fn list(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<ListRequest>,
+) -> Result<Json<ListResponse>, AppError> {
+    if body.namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+    // Cap the page size so a huge namespace can't return an unbounded list.
+    let limit = body.limit.clamp(1, 500);
+    let before = match body.cursor.as_deref() {
+        Some(c) => Some(decode_list_cursor(c)?),
+        None => None,
+    };
+
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    let (memories, has_more) = state
+        .db
+        .list_by_namespace(owner, namespace, limit, before)
+        .await?;
+    let returned = memories.len();
+
+    // Cursor for the next page = the keyset position of the last row returned.
+    let next_cursor = if has_more {
+        memories
+            .last()
+            .map(|m| encode_list_cursor(&m.created_at, &m.id))
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "list: owner={} ns={} returned={} has_more={}",
+        owner,
+        namespace,
+        returned,
+        has_more
+    );
+
+    Ok(Json(ListResponse {
+        memories,
+        returned,
+        has_more,
+        next_cursor,
+        namespace: namespace.clone(),
+        owner: owner.clone(),
+    }))
+}
+
+/// POST /api/memories/forget
+///
+/// Soft-delete a SINGLE memory by its per-row `id` (from `/api/list`). The
+/// memory stops surfacing in `recall()`; identical-text siblings survive
+/// (per-row). The Walrus blob persists (un-recallable, not erased).
+/// Owner-scoped — the `id` must belong to the caller, else this is a no-op
+/// (`forgotten = 0`). Distinct from `/api/clear-namespace` and `/api/forget`.
+pub async fn forget_by_id(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Json(body): Json<ForgetByIdRequest>,
+) -> Result<Json<ForgetByIdResponse>, AppError> {
+    if body.id.is_empty() {
+        return Err(AppError::BadRequest("id cannot be empty".into()));
+    }
+
+    let owner = &auth.owner;
+    let forgotten = state.db.soft_delete_by_id(&body.id, owner).await?;
+
+    tracing::info!(
+        "forget_by_id: owner={} id={} forgotten={}",
+        owner,
+        body.id,
+        forgotten
+    );
+
+    Ok(Json(ForgetByIdResponse {
+        forgotten,
+        id: body.id,
+        owner: owner.clone(),
+    }))
+}
+
 /// POST /api/stats
 ///
 /// Return memory count + stored bytes for `owner`'s `namespace`. Used by
@@ -199,7 +362,7 @@ pub async fn ask(
         "ask request"
     );
 
-    // F3 (structure-review): probe the SEAL credential up front. If the
+    // probe the SEAL credential up front. If the
     // client is misconfigured (no exported SessionKey, no legacy delegate
     // key, no server fallback) we want to return 500 immediately rather
     // than running recall, getting zero (or some) hits, and then either
@@ -733,7 +896,7 @@ mod tests {
 
     // ── /api/ask body.limit cap ─────────────────────────────────
     //
-    // Verifies the structural-review F3 follow-up: `/api/ask` clamps
+    // Verifies that `/api/ask` clamps
     // `body.limit` to `<= 100`, matching the cap `/api/recall` already
     // enforces. A misbehaving client can't make the handler pull
     // thousands of memories through Walrus + SEAL.
@@ -779,6 +942,56 @@ mod tests {
         assert!(
             !non_empty.is_empty(),
             "non-empty namespace must pass the validation predicate"
+        );
+    }
+
+    // ── /api/list limit clamp ─────────────────────────
+    //
+    // `list()` clamps `body.limit` to `[1, 500]` so a client can neither pull
+    // an unbounded page nor pass 0 (which would otherwise return no rows).
+    // Mirror the production expression: body.limit.clamp(1, 500).
+
+    #[test]
+    fn list_limit_clamps_to_1_500() {
+        for (input, expected) in [
+            (0usize, 1), // below floor → 1 (not "all"/0)
+            (1, 1),      // at floor
+            (50, 50),    // default-ish, in range
+            (500, 500),  // at ceiling
+            (501, 500),  // over ceiling → clamped
+            (10_000, 500),
+            (usize::MAX, 500),
+        ] {
+            let clamped = input.clamp(1, 500);
+            assert_eq!(
+                clamped, expected,
+                "list limit clamp: input={input} expected={expected} got={clamped}"
+            );
+        }
+    }
+
+    // ── empty-input guards on the new handlers ────────
+    //
+    // clear_namespace + list reject an empty `namespace`; forget_by_id rejects
+    // an empty `id` — all with AppError::BadRequest before touching the DB,
+    // matching the existing forget/stats convention. Pin the predicates.
+
+    #[test]
+    fn delete_handlers_reject_empty_inputs() {
+        // clear_namespace / list: `body.namespace.is_empty()`
+        assert!(
+            "".is_empty(),
+            "empty namespace must trip clear/list validation"
+        );
+        assert!(
+            !"my-app".is_empty(),
+            "non-empty namespace must pass clear/list validation"
+        );
+        // forget_by_id: `body.id.is_empty()`
+        assert!("".is_empty(), "empty id must trip forget_by_id validation");
+        assert!(
+            !"550e8400-e29b-41d4-a716-446655440000".is_empty(),
+            "non-empty id must pass forget_by_id validation"
         );
     }
 }

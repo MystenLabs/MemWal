@@ -204,6 +204,60 @@ class RestoreResult:
 
 
 @dataclass
+class ClearNamespaceResult:
+    """Result from clear_namespace().
+
+    Soft-delete: the cleared memories stop surfacing in recall, but the
+    underlying Walrus blobs are user-owned and persist until on-chain deletion
+    or storage-epoch expiry. "Cleared" means "un-recallable", not "erased".
+    """
+
+    #: Memories newly soft-deleted (0 if the namespace was already clear).
+    cleared: int
+    namespace: str
+    owner: str
+
+
+@dataclass
+class MemoryListItem:
+    """One memory's metadata from list(). No decrypted text — listing is
+    decrypt-free. ``id`` is the handle to pass to forget()."""
+
+    id: str
+    #: Walrus blob id (not unique; identical-text memories share one).
+    blob_id: str
+    created_at: str
+    importance: float
+
+
+@dataclass
+class ListResult:
+    """Result from list() — one page of live memories in a namespace, newest
+    first, metadata only. Soft-deleted memories are omitted."""
+
+    memories: List[MemoryListItem]
+    #: Number of memories in THIS page (== len(memories), capped by limit).
+    #: NOT the namespace total — paginate via has_more/next_cursor to enumerate fully.
+    returned: int
+    #: True if more live memories exist beyond this page; pass next_cursor as `cursor`.
+    has_more: bool
+    #: Opaque cursor for the next page; None when has_more is False.
+    next_cursor: Optional[str]
+    namespace: str
+    owner: str
+
+
+@dataclass
+class ForgetResult:
+    """Result from forget() — soft-delete a single memory by id."""
+
+    #: 1 if soft-deleted, 0 if the id wasn't found / not the caller's / already gone.
+    forgotten: int
+    id: str
+    owner: str
+
+
+@dataclass
 class AskMemory:
     """A memory used to answer a question."""
 

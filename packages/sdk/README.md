@@ -55,6 +55,11 @@ const memories = await memwal.recall({
   maxDistance: 0.7,
 });
 await memwal.restore("demo");
+
+// Delete: list a namespace (metadata only), forget one memory, or clear it all.
+const { memories: stored } = await memwal.list("demo", { limit: 50 });
+if (stored.length) await memwal.forget(stored[0].id);
+await memwal.clearNamespace("demo"); // reset the namespace (soft-delete; un-recallable)
 ```
 
 If you are self-hosting the relayer and do not have an account ID yet, see [Self-Hosting](../../docs/relayer/self-hosting.md) for the account creation and delegate key setup flow.
