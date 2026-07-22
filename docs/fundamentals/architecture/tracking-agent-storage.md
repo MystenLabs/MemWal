@@ -4,22 +4,22 @@ description: "How an autonomous agent keeps track of the Walrus blobs and storag
 keywords: [agent, blob, storage resource, ownership, lifetime, epoch, expiry, extend, renew, restore, namespace, tracking, MemWal, Walrus]
 ---
 
-Every memory an agent writes becomes a durable object on two systems: an encrypted blob on Walrus, and a `Blob` object on Sui that records who owns that blob and how long it lives. An agent that depends on its memory has to know which blobs it owns, when each one expires, and when to renew or drop it. This page explains the object model behind an agent's storage and gives a concrete pattern for tracking it over time.
+Every memory an agent writes becomes a durable object on two systems: an encrypted blob on Walrus, and a `Blob` object on Sui that records who owns that blob and how long it lives. An agent that depends on its memory has to know which blobs it owns, when each one expires, and when to renew or drop it.
 
-If you only need to write and recall memories through a relayer, you rarely touch these objects directly, because the relayer owns and manages them for you. Read this page when your agent holds its own tokens and manages its own blob lifecycle, or when you need to audit what an agent owns. For who pays for storage, see [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
+An agent that writes and recalls through a relayer rarely touches these objects directly, because the relayer owns and manages them. The object model below matters when an agent holds its own tokens and manages its own blob lifecycle, or when you need to audit what an agent owns. For who pays for storage, see [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
 
 ## What an agent owns
 
 A single write produces more than one tracked object. Keep the roles separate, because each one has a different owner and a different lifetime.
 
-| Object | Lives on | What it represents | Why the agent tracks it |
+| **Object** | **Lives on** | **What it represents** | **Why the agent tracks it** |
 | --- | --- | --- | --- |
 | Encrypted blob | Walrus | The Seal-encrypted memory content, stored across the decentralized network | The durable source of truth for the memory |
 | `Blob` object | Sui | The onchain record of the blob: its blob ID, size, namespace metadata, and expiry epoch | Controls the lifecycle: extend, delete, or burn |
 | Storage resource | Sui | Reserved storage capacity for a size and epoch range | Pre-bought capacity the agent spends on writes |
 | Vector entry | Relayer database | The embedding plus blob ID that makes recall fast | Rebuildable from Walrus, so it is not the source of truth |
 
-The blob content on Walrus is the permanent record. The `Blob` object on Sui is the handle the agent uses to manage that record. Whoever owns the `Blob` object controls the blob's lifecycle, so ownership of that object matters as much as ownership of the content.
+The blob content on Walrus is the permanent record. The `Blob` object on Sui is what the agent uses to manage that record. Whoever owns the `Blob` object controls the blob's lifecycle, so ownership of that object matters as much as ownership of the content.
 
 <Note>
 The vector entry in the relayer database is the only object in this list that is not a source of truth. If it is lost, the [restore flow](/fundamentals/architecture/how-storage-works) rebuilds it from the blobs the agent still owns on Walrus. The other three objects are the record.
@@ -59,7 +59,7 @@ A blob moves through a predictable set of states from the moment the agent write
 
 An agent does not need a separate database to know what it owns, because ownership is already recorded on Sui and on Walrus. Use the source that fits the moment.
 
-### Capture identifiers at write time
+### 1. Capture identifiers at write time
 
 The most direct record is the one the agent builds as it writes. Every `remember` result carries the blob ID once the job reaches `done`, so the agent can append it to its own index as it goes.
 
@@ -74,7 +74,7 @@ for (const result of settled.results) {
 
 This index is a convenience, not the source of truth. Treat it as a cache the agent can rebuild, because the authoritative record lives on Sui and Walrus.
 
-### Query the chain by owner and namespace
+### 2. Query the chain by owner and namespace
 
 Because every `Blob` object is owned by a Sui address, the agent can ask the chain directly which blobs an address owns, filtered by the namespace metadata attached at write time. This is the same discovery the relayer performs during restore, and it does not depend on any local state surviving.
 
@@ -88,7 +88,7 @@ console.log(`restored=${result.restored} skipped=${result.skipped} total=${resul
 
 Restore is bounded by its `limit` (default 10) and inspects onchain blobs newest-first, so `total` is the number of blobs the relayer inspected in that call, not a full count of everything the agent owns in the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To enumerate or rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. When the agent needs an exact, unbounded count, query the chain directly for the `Blob` objects the address owns rather than reading it off a single restore call.
 
-### Read the `Blob` object on Sui
+### 3. Read the `Blob` object on Sui
 
 When the agent needs the details of a specific blob, such as its size or exact expiry epoch, it reads the `Blob` object on Sui by its object ID. The object carries the expiry epoch that drives every renewal decision.
 
@@ -114,11 +114,3 @@ Storage resources follow the same ownership rule. A storage resource is a transf
 When a sponsor runs the write, ownership of the resulting `Blob` object does not automatically land with the agent. By default, a publisher's sub-wallet owns the blob it creates. If the agent is meant to manage the blob's lifecycle, the sponsor sets the publisher's `send-object-to` parameter to the agent's Sui address so the `Blob` object transfers to the agent after upload.
 
 Confirm where the object landed before you assume the agent can renew it. An agent that believes it owns a blob it does not own cannot extend that blob, and the data lapses on the sponsor's schedule rather than the agent's. For the full set of sponsored patterns and who ends up owning the blob in each one, see [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
-
-## Related links
-
-- [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage)
-- [How Storage Works](/fundamentals/architecture/how-storage-works)
-- [Manage your memory](/guides/manage-your-memory)
-- [Agent Storage Loop](/sdk/agent-storage-loop)
-- [Walrus blob lifecycle](https://docs.wal.app/docs/dev-guide/dev-operations)

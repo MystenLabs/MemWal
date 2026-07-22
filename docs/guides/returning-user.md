@@ -1,12 +1,12 @@
 ---
-title: "Sign in as a returning user"
+title: "Sign in as a Returning User"
 description: "What to expect when you return to Walrus Memory on a new device or as an existing Walrus user: first-sign-in memory discovery, the re-upload expectation, and what your wallet reveals onchain."
 keywords: [returning user, existing user, sign in, recovery, delegate key, restore, migration, re-upload, wallet visibility, privacy, MemWal, Walrus]
 ---
 
-Your memories live on Walrus and your account lives on Sui, so they persist no matter which device you sign in from. What does not travel with you is the delegate key your browser used last time. This guide explains what happens the first time you sign in on a new device, why your existing Walrus data is not automatically imported, and what other people can see about your account onchain.
+Your memories live on Walrus and your account lives on Sui, so they persist no matter which device you sign in from. Only the delegate key your browser used last time stays behind. On a new device, expect to recover access, re-upload rather than import existing Walrus data, and see what your account reveals onchain.
 
-## Your account outlives any single device
+## Your account is not tied to one device
 
 Walrus Memory stores your memories as encrypted blobs on Walrus and records your account and its permissions on Sui. Neither depends on your browser. When you connect the same wallet again, whether a week later or on a different machine, the same account and the same memories are still yours.
 
@@ -42,7 +42,7 @@ Losing a delegate key does not lose your memories. The key is a credential for r
 
 ### Your memories are already searchable
 
-The search index is not stored in your browser. It lives in the relayer's database, scoped to your account and namespace, so once you have a delegate key on the new device, recall reaches your existing memories straight away. A new device does not need to rebuild anything to read what you already stored.
+The search index lives in the relayer's database, not your browser, scoped to your account and namespace. Once you have a delegate key on the new device, recall reaches your existing memories straight away, with nothing to rebuild.
 
 You only run restore when the relayer's index itself is missing rows, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
@@ -53,9 +53,9 @@ console.log(`restored=${result.restored} skipped=${result.skipped} total=${resul
 
 Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of your namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
-## You own your data, and you re-upload it
+## Existing Walrus data is not migrated
 
-If you already use Walrus to store files directly, expect a clear boundary: Walrus Memory does not import your existing Walrus blobs as memories. There is no migration step, and this is by design, not a limitation to work around.
+If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design.
 
 A memory is not just a blob. When Walrus Memory stores a memory, it encrypts the content with Seal, attaches namespace metadata, and generates a vector embedding so the memory is searchable by meaning. An arbitrary blob you uploaded to Walrus through another tool has none of that structure, so Walrus Memory cannot treat it as a memory or return it from recall.
 
@@ -84,11 +84,3 @@ Treat namespace names and the fact that your wallet owns memory as public. Keep 
 </Warning>
 
 For the full ownership and access model, see [Ownership and Delegates](/fundamentals/concepts/ownership-and-access).
-
-## Related links
-
-- [Ownership and Delegates](/fundamentals/concepts/ownership-and-access)
-- [How Storage Works](/fundamentals/architecture/how-storage-works)
-- [Manage your memory](/guides/manage-your-memory)
-- [Memory Space](/fundamentals/concepts/memory-space)
-- [SDK Quickstart](/sdk/quick-start)

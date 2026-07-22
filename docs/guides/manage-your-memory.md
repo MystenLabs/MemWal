@@ -1,23 +1,24 @@
 ---
-title: "Manage your memory"
+title: "Manage Your Memory"
 description: "Browse, search, organize, renew, and delete the memories your Walrus Memory account holds, from the dashboard and through the SDK."
 keywords: [manage memory, browse, search, delete, namespace, epoch, renew, extend, dashboard, MemWal, Walrus]
 ---
 
-Your Walrus Memory account accumulates memories over time. This guide shows you how to see what you have stored, organize it with namespaces, renew memories before they expire, and delete the ones you no longer want. Each section covers the dashboard first, then the SDK path for the same task, so you can manage memory interactively or from code.
+Your Walrus Memory account accumulates memories over time. See what you have stored, organize it with namespaces, renew memories before they expire, and delete the ones you no longer want, from the dashboard or through the SDK.
 
-## Before you begin
+## Prerequisites
 
-Connect the wallet that owns the memories you want to manage. The dashboard opens after you connect:
+- A Sui wallet that owns the memories you want to manage.
+- For SDK access, a delegate key and account ID from the dashboard. See [SDK Quickstart](/sdk/quick-start).
 
-| Network | Dashboard |
+Connect your wallet to open the dashboard:
+
+| **Network** | **Dashboard** |
 | --- | --- |
 | Mainnet | [memory.walrus.xyz](https://memory.walrus.xyz) |
 | Testnet | [staging.memory.walrus.xyz](https://staging.memory.walrus.xyz) |
 
-To manage memory from code, you also need a delegate key and your account ID, both available on the dashboard. See [SDK Quickstart](/sdk/quick-start) for setup.
-
-## Browse and search your memories
+## Browse and search
 
 Memories are not stored under names or folders you scroll through. They are stored by meaning, so you find them by asking for what you want rather than by browsing a list. This is what makes recall work for an agent, and it is how you search your own memory too.
 
@@ -69,32 +70,28 @@ Storing into one namespace never affects another, and recall in `personal` never
 Choose namespaces before you write at scale. Because recall and restore match a namespace exactly, splitting or merging memories across namespaces later means re-writing them. A small, stable set of namespaces is easier to manage than many overlapping ones.
 </Tip>
 
-## Renew memories before they expire
+## Renew memories
 
-A memory persists on Walrus for a fixed number of epochs, the storage period you paid for when you wrote it. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When a memory's epochs run out, Walrus drops the blob and the memory is gone. Renewal extends a memory's lifetime by paying for more epochs.
+A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory is gone. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so the content is never re-uploaded.
 
-Renewal extends the memory's underlying Walrus `Blob` object for more epochs. The blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content. Because renewal changes a blob's lifetime, it is blob lifecycle management rather than a recall or remember call.
-
-Today you renew at the storage layer, by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
+You renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
 
 <Warning>
 Renew before the expiry epoch, not after. Once a blob lapses, its content is no longer recoverable, so a lapsed memory cannot be renewed. Track expiry epochs and renew with a margin to spare.
 </Warning>
 
-## Delete memories you no longer want
+## Delete memories
 
-Deletion permanently removes a memory from Walrus Memory. You cannot undo it, so preview a memory before you delete it.
+Deletion permanently removes a memory from Walrus Memory. You cannot undo it, so preview a memory before you delete it. Delete from the dashboard or from code:
 
-You have two paths, depending on whether you want to click through the dashboard or run deletion from code:
-
-- **Dashboard:** Review and delete stored memories from the dashboard delete flow. See [Delete old memories](/guides/delete-old-memories).
-- **Programmatic:** The Security Delete API finds memories older than a cutoff, prepares a sponsored transaction, and deletes them in batches after a dry run. See [Delete memories programmatically](/guides/delete-memories-programmatically).
+1. **Dashboard:** Review and delete stored memories from the dashboard delete flow. See [Delete old memories](/guides/delete-old-memories).
+2. **Programmatic:** The Security Delete API finds memories older than a cutoff, prepares a sponsored transaction, and deletes them in batches after a dry run. See [Delete memories programmatically](/guides/delete-memories-programmatically).
 
 <Warning>
 Both deletion paths are permanent. Start with a preview in the dashboard or a dry run in the API, review every blob ID, and only then delete.
 </Warning>
 
-## Rebuild the index if it looks incomplete
+## Rebuild the index
 
 The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might be missing rows for those blobs, for example after a database was lost or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
 
@@ -106,11 +103,3 @@ console.log(`restored=${result.restored} skipped=${result.skipped} total=${resul
 ```
 
 Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
-
-## Related links
-
-- [Memory Space](/fundamentals/concepts/memory-space)
-- [Delete old memories](/guides/delete-old-memories)
-- [Delete memories programmatically](/guides/delete-memories-programmatically)
-- [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage)
-- [SDK Quickstart](/sdk/quick-start)
