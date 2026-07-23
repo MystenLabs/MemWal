@@ -83,9 +83,9 @@ a single memory, or renew all memories near expiry at once.
 Deleting a memory removes it permanently. Preview a memory before you delete it, because you
 cannot recover it afterward.
 
-- To delete through the dashboard, see [Delete old memories](/guides/delete-old-memories).
+- To delete through the dashboard, see [Delete Old Memories](/guides/delete-old-memories).
 - To delete in bulk from a script, see
-  [Delete memories programmatically](/guides/delete-memories-programmatically).
+  [Delete Memories Programmatically](/guides/delete-memories-programmatically).
 
 <Warning>
   Deletion is permanent. Neither the dashboard nor the API can restore a memory after you delete
