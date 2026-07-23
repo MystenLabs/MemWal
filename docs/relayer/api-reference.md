@@ -87,6 +87,27 @@ Stable relayer/API compatibility metadata.
 
 **Response:** the compatibility object documented in [Versioning and Compatibility](/relayer/versioning-and-compatibility#runtime-metadata).
 
+### `GET /config`
+
+Public deployment parameters that the SDK reads to build a Seal SessionKey client-side. Every field is non-secret.
+
+**Response:**
+
+```json
+{
+  "packageId": "0x...",
+  "network": "testnet",
+  "suiRpcUrl": "https://fullnode.testnet.sui.io",
+  "rateLimitDisabled": false
+}
+```
+
+`rateLimitDisabled` mirrors the server's benchmark-bypass setting so benchmark scripts can pre-flight the configuration.
+
+### `GET /metrics`
+
+Prometheus metrics for scraping. See [Observability](/relayer/observability) for the exported series and how to wire a scraper.
+
 ### `POST /sponsor`
 
 Proxy to the Seal/Walrus sidecar's `/sponsor` endpoint for sponsored transactions.
@@ -237,7 +258,7 @@ The optional `scoring_weights` object turns on composite ranking. The same objec
 }
 ```
 
-`score` only appears when the request includes `scoring_weights`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
+`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
 
 ### `POST /api/remember/manual`
 
