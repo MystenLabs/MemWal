@@ -4,8 +4,6 @@ description: Organize memories with namespaces, find them with recall, and resto
 keywords: [Walrus Memory, memory management, namespaces, recall, restore, search index, delegate key]
 ---
 
-## Overview
-
 You manage memories in Walrus Memory with your delegate key and the SDK. Group related memories
 into namespaces, find them by meaning with recall, and restore them from Walrus when the relayer
 has not indexed them.

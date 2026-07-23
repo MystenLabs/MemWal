@@ -4,7 +4,6 @@ description: What to expect the first time you sign in to Walrus Memory with a w
 keywords: [Walrus Memory, existing Walrus users, first sign-in, blob discovery, restore, re-upload, onchain visibility]
 ---
 
-
 If you already build on Walrus, you can sign in to Walrus Memory with the same Sui wallet. Your
 wallet stays the root of ownership, and any memories you created earlier through Walrus Memory
 reappear on their own. Data you stored on Walrus outside of Walrus Memory does not move across
@@ -22,7 +21,7 @@ When you connect your wallet, Walrus Memory looks up your account in the onchain
 
 - If the registry has a `MemWalAccount` for your wallet, your account already exists. You do
   not create a new one.
-- If this browser has no saved delegate key, create one to continue. The dashboard prompts you,
+- If the browser has no saved delegate key, create one to continue. The dashboard prompts you,
   and you can revoke old keys at any time.
 
 A delegate key is a lightweight key that your apps and agents use to reach Walrus Memory on your
