@@ -1,6 +1,7 @@
 ---
-title: "Existing Walrus Users"
-description: "What to expect the first time you sign in to Walrus Memory with a wallet you already use on Walrus, including blob discovery, re-upload, and onchain visibility."
+title: Existing Walrus Users
+description: What to expect the first time you sign in to Walrus Memory with a wallet you already use on Walrus, including blob discovery, re-upload, and onchain visibility.
+keywords: [Walrus Memory, existing Walrus users, first sign-in, blob discovery, restore, re-upload, onchain visibility]
 ---
 
 ## Overview
@@ -31,16 +32,17 @@ keys work, see [Ownership and Delegates](/fundamentals/concepts/ownership-and-ac
 
 ## Discover your existing memories
 
-Walrus Memory keeps a local index for fast search, but you can rebuild that index at any time.
-When a new device has no index, restore rediscovers your memories directly from the chain:
+The relayer keeps a search index over your memories, not your device, so recall stays fast. When
+you sign in, recall returns whatever the index holds for your wallet. When the relayer has not
+indexed memories you stored earlier, restore rediscovers them from Walrus and re-indexes them:
 
 1. Walrus Memory queries the Walrus blob objects your wallet owns and filters them by namespace
    metadata.
-2. It downloads the blobs it has not indexed yet, decrypts them with Seal, and re-embeds them.
-3. You can search your memories again through recall.
+2. It downloads the blobs the index does not have yet, decrypts them with Seal, and re-embeds them.
+3. Recall can find those memories again.
 
-Because restore reads from the chain, you recover your memories even with no local state. Restore
-one namespace at a time. For the full flow, see
+Because Walrus holds the permanent record, you recover your memories even if the relayer rebuilds
+the index from scratch. Restore one namespace at a time. For the full flow, see
 [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 Each call restores up to a set number of blobs, newest first. The default is 10, and the limit
@@ -72,8 +74,9 @@ To use existing content as memory, re-upload it through Walrus Memory:
   move or delete your existing data.
 
 <Tip>
-  Plan for re-upload as a one-time step when you adopt Walrus Memory. After that, restore keeps
-  your memories available across devices without any further upload.
+  Plan for re-upload as a one-time step when you adopt Walrus Memory. After that, recall reaches
+  your memories from any device, and restore rebuilds the index from Walrus if the relayer ever
+  loses it.
 </Tip>
 
 ## What others can see onchain

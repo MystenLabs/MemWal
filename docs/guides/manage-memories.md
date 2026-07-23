@@ -1,13 +1,14 @@
 ---
-title: "Manage Your Memories"
-description: "Organize memories with namespaces, find them with recall, and restore them across devices using the Walrus Memory SDK."
+title: Manage Your Memories
+description: Organize memories with namespaces, find them with recall, and restore them from Walrus using the Walrus Memory SDK.
+keywords: [Walrus Memory, memory management, namespaces, recall, restore, search index, delegate key]
 ---
 
 ## Overview
 
 You manage memories in Walrus Memory with your delegate key and the SDK. Group related memories
-into namespaces, find them by meaning with recall, and restore them onto a new device when your
-local index is empty.
+into namespaces, find them by meaning with recall, and restore them from Walrus when the relayer
+has not indexed them.
 
 <Info>
   Walrus Memory scopes every operation to your wallet and a single namespace, so you always work
@@ -65,10 +66,11 @@ for (const memory of result.results) {
 Pass a `namespace` to search a specific memory space, or omit it to use the client's default.
 Raise `limit` to return more matches. To move between memory spaces, change the namespace.
 
-## Restore memories on a new device
+## Restore missing memories
 
-Walrus Memory keeps a local index for fast search, but you can rebuild it from Walrus at any time.
-When a new device has no index, restore rediscovers your memories from the chain:
+The relayer keeps a search index over your memories so recall stays fast, while Walrus and Sui hold
+the permanent record. When the relayer has not indexed some memories, restore rediscovers them from
+Walrus and re-indexes them:
 
 ```ts
 // Restore up to 500 of the newest blobs in the "personal" namespace.
