@@ -55,8 +55,6 @@
           {
             "group": "Guides",
             "pages": [
-              "guides/manage-memories",
-              "guides/existing-walrus-users",
               "guides/delete-old-memories",
               "guides/delete-memories-programmatically"
             ]
