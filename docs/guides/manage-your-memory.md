@@ -68,7 +68,7 @@ Choose namespaces before you write at scale. Because recall and restore match a 
 
 ## Renew memories
 
-A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory is gone. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content.
+A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory disappears. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content.
 
 You renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
 
@@ -89,7 +89,7 @@ Both deletion paths are permanent. Start with a preview in the dashboard or a dr
 
 ## Rebuild the index
 
-The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might be missing rows for those blobs, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
+The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might lack rows for those blobs, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
 
 Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
@@ -98,4 +98,4 @@ const result = await memwal.restore("personal");
 console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
 ```
 
-Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
+Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of the namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. Restore is safe to run more than once, because it skips blobs the relayer already indexed. For the full restore flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
