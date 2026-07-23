@@ -1,10 +1,14 @@
 ---
-title: "Sign in as a Returning User"
-description: "What to expect when you return to Walrus Memory on a new device or as an existing Walrus user: first-sign-in memory discovery, the re-upload expectation, and what your wallet reveals onchain."
+title: Sign in as a Returning User
+description: What to expect when you return to Walrus Memory on a new device or as an existing Walrus user, covering first-sign-in memory discovery, the re-upload expectation, and what your wallet reveals onchain.
 keywords: [returning user, existing user, sign in, recovery, delegate key, restore, migration, re-upload, wallet visibility, privacy, MemWal, Walrus]
 ---
 
 Your memories live on Walrus and your account lives on Sui, so they persist no matter which device you sign in from. Only the delegate key your browser used last time stays behind. On a new device, expect to recover access, re-upload rather than import existing Walrus data, and see what your account reveals onchain.
+
+<Info>
+  **Post-GA:** Walrus Memory ships the full returning-user onboarding experience after GA. The delegate-key recovery flow below works today and matches the current dashboard behavior. The wider existing-user experience, including console visibility for existing Walrus assets, is on the near-term product roadmap.
+</Info>
 
 ## Your account is not tied to one device
 
@@ -55,7 +59,7 @@ Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10
 
 ## Existing Walrus data is not migrated
 
-If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design.
+If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design. Existing Walrus assets also do not appear in the console yet; surfacing them there is on the near-term product roadmap.
 
 A memory is not just a blob. When Walrus Memory stores a memory, it encrypts the content with Seal, attaches namespace metadata, and generates a vector embedding so the memory is searchable by meaning. An arbitrary blob you uploaded to Walrus through another tool has none of that structure, so Walrus Memory cannot treat it as a memory or return it from recall.
 

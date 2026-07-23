@@ -1,6 +1,6 @@
 ---
-title: "Tracking Agent-Owned Blobs and Storage"
-description: "How an autonomous agent keeps track of the Walrus blobs and storage resources it owns over time, from the moment a memory is written to expiry, renewal, or deletion."
+title: Tracking Agent-Owned Blobs and Storage
+description: How an autonomous agent keeps track of the Walrus blobs and storage resources it owns over time, from the moment the agent writes a memory to expiry, renewal, or deletion.
 keywords: [agent, blob, storage resource, ownership, lifetime, epoch, expiry, extend, renew, restore, namespace, tracking, MemWal, Walrus]
 ---
 
@@ -96,7 +96,7 @@ When the agent needs the details of a specific blob, such as its size or exact e
 
 Expiry is the one part of the lifecycle that fails silently. A blob does not warn the agent before it lapses, so the agent has to compare the current epoch against each blob's expiry epoch on a schedule.
 
-Renewal is an extend operation on the `Blob` object: the owner pays WAL for more epochs and the expiry epoch moves forward. A one-click renewal control in the dashboard is planned; today renewal happens at this storage layer, which [Manage your memory](/guides/manage-your-memory) covers from the memory side. For an agent that manages its own blobs, run the check as a loop:
+Renewal is an extend operation on the `Blob` object: the owner pays WAL for more epochs and the expiry epoch moves forward. New assets that you upload through the console renew automatically; Oyster handles the extension. The manual loop below is the self-managed case, for agents that own and manage their blobs, which [Manage Your Memory](/guides/manage-your-memory) covers from the memory side. For an agent that manages its own blobs, run the check as a loop:
 
 1. Read the current Walrus epoch.
 2. For each tracked blob, compare its expiry epoch against the current epoch plus a safety margin.

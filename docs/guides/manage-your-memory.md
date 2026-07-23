@@ -1,6 +1,6 @@
 ---
-title: "Manage Your Memory"
-description: "Browse, search, organize, renew, and delete the memories your Walrus Memory account holds, from the dashboard and through the SDK."
+title: Manage Your Memory
+description: Browse, search, organize, renew, and delete the memories your Walrus Memory account holds, from the dashboard and through the SDK.
 keywords: [manage memory, browse, search, delete, namespace, epoch, renew, extend, dashboard, MemWal, Walrus]
 ---
 
@@ -70,7 +70,10 @@ Choose namespaces before you write at scale. Because recall and restore match a 
 
 A memory persists on Walrus for the number of epochs you paid for. An epoch is about 2 weeks on Mainnet and about 1 day on Testnet. When the epochs run out, Walrus drops the blob and the memory disappears. Renewal extends the memory's underlying Walrus `Blob` object for more epochs: the blob keeps its blob ID and its place in the relayer's index, and only its expiry epoch moves forward, so renewal never re-uploads the content.
 
-You renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage). A one-click renewal control in the dashboard is planned; until it ships, renew through the storage-layer extend.
+Renewal covers two cases:
+
+1. **Console uploads:** New assets that you upload through the console renew automatically; Oyster handles the extension for you.
+2. **Self-managed and agent-owned assets:** Renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
 
 <Warning>
 Renew before the expiry epoch, not after. Once a blob lapses, its content is no longer recoverable, so a lapsed memory cannot be renewed. Track expiry epochs and renew with a margin to spare.
