@@ -68,8 +68,8 @@ Walrus Memory cannot search or decrypt them as memories.
 
 To use existing content as memory, re-upload it through Walrus Memory:
 
-- Call `remember` with the text you want to store. Walrus Memory embeds it, encrypts it, and
-  writes a new blob tagged for your memory space.
+- Call `remember` with the text you want to store. Walrus Memory embeds it and writes a new
+  blob tagged for your memory space.
 - The original blob stays where it is. Re-uploading creates a memory alongside it, and does not
   move or delete your existing data.
 
@@ -88,8 +88,7 @@ wallet address:
   objects for each memory.
 - Walrus Memory stores the namespace of a memory as blob metadata, so anyone can see namespace
   labels.
-- No one can see your memory content. Walrus Memory encrypts it, and only you or your
-  authorized delegates can decrypt it.
+- No one can see your memory content. Only you or your authorized delegates can decrypt it.
 
 <Warning>
   Choose namespace labels that you are comfortable leaving in public metadata. Keep sensitive
