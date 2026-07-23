@@ -62,7 +62,7 @@ await memwal.restore("personal", 500);
 ## Why Walrus Memory does not migrate blobs
 
 Walrus Memory does not import your existing Walrus blobs into memory. A raw Walrus blob is just
-bytes. A memory is an encrypted payload plus a vector embedding and namespace metadata that make
+bytes. A memory is your content plus a vector embedding and namespace metadata that make
 semantic recall possible. Blobs you stored through other tools carry none of that structure, so
 Walrus Memory cannot search or decrypt them as memories.
 
@@ -92,5 +92,5 @@ wallet address:
 
 <Warning>
   Choose namespace labels that you are comfortable leaving in public metadata. Keep sensitive
-  information out of a namespace name, because Walrus Memory does not encrypt the name.
+  information out of a namespace name, because anyone can read it.
 </Warning>
