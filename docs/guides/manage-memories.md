@@ -44,42 +44,12 @@ const memwal = MemWal.create({
 });
 ```
 
-## Browse and search your memories
+## Browse, search, and restore
 
-Recall finds memories by meaning rather than by keyword, and returns the closest matches within
-one namespace. Use it to review what you have stored:
+With your client ready, you manage memories through the SDK, always scoped to one namespace:
 
-```ts
-const result = await memwal.recall({
-  query: "food allergies",
-  limit: 20,
-  namespace: "personal",
-});
-
-for (const memory of result.results) {
-  console.log(memory.text);
-}
-```
-
-Pass a `namespace` to search a specific memory space, or omit it to use the client's default.
-Raise `limit` to return more matches. To move between memory spaces, change the namespace.
-
-## Restore missing memories
-
-The relayer keeps a search index over your memories so recall stays fast, while Walrus and Sui hold
-the permanent record. When the relayer has not indexed some memories, restore rediscovers them from
-Walrus and re-indexes them:
-
-```ts
-// Restore up to 500 of the newest blobs in the "personal" namespace.
-await memwal.restore("personal", 500);
-```
-
-Restore processes up to `limit` blobs per call, newest first, and defaults to 10. It does not page
-through older blobs on its own, so set a `limit` at least as large as the namespace you want to
-restore. For the full flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
-
-<Note>
-  Restore only rediscovers memories that Walrus Memory wrote, because it matches on the namespace
-  metadata that Walrus Memory attaches at upload.
-</Note>
+- **Find memories:** `recall` returns the closest matches by meaning. See
+  [Walrus Memory](/sdk/usage/memwal) for the recall API and its options.
+- **Restore a namespace:** `restore` rebuilds the relayer's search index from Walrus when the
+  index has fallen behind. See [How Storage Works](/fundamentals/architecture/how-storage-works)
+  for the full flow.
