@@ -4,7 +4,6 @@ description: What to expect the first time you sign in to Walrus Memory with a w
 keywords: [Walrus Memory, existing Walrus users, first sign-in, blob discovery, restore, re-upload, onchain visibility]
 ---
 
-## Overview
 
 If you already build on Walrus, you can sign in to Walrus Memory with the same Sui wallet. Your
 wallet stays the root of ownership, and any memories you created earlier through Walrus Memory
