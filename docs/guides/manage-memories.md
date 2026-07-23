@@ -37,7 +37,7 @@ const memwal = MemWal.create({
 });
 ```
 
-## Browse, search, and restore
+## Work with your memories
 
 With your client ready, you manage memories through the SDK, always scoped to one namespace:
 
