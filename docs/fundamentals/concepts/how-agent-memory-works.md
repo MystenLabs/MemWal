@@ -1,6 +1,6 @@
 ---
-title: "How AI Agent Memory Works"
-description: "How AI agents store and recall long-term memory: the difference between the context window and persistent memory, short-term versus long-term memory, and how semantic memory works with embeddings and vector search."
+title: How AI Agent Memory Works
+description: How AI agents store and recall long-term memory, covering the difference between the context window and persistent memory, short-term versus long-term memory, and how semantic memory works with embeddings and vector search.
 keywords: [agent memory, AI agent memory, long-term memory, short-term memory, context window, semantic memory, embeddings, vector search, retrieval-augmented generation, persistent memory]
 ---
 
@@ -8,9 +8,9 @@ AI agent memory is a durable, searchable store of what an agent has learned, kep
 
 ## The context window is not memory
 
-A large language model reads and writes through its context window, the block of tokens it sees on each request. Everything the model knows in the moment lives there, and when the request ends it is gone. The next request starts fresh unless you resend the earlier text.
+A large language model reads and writes through its context window, the block of tokens it sees on each request. Everything the model knows in the moment lives there, and it disappears when the request ends. The next request starts fresh unless you resend the earlier text.
 
-That makes the context window a poor substitute for memory. It is bounded, so an agent's entire history cannot fit into it, and padding it with old turns crowds out room for the current task. It is temporary, so nothing in it survives the request, and you must provide persistence from somewhere the model does not control. And it is costly to refill, because replaying a long history on every call spends tokens and latency on material that mostly has no bearing on the current question. Long-term memory sidesteps all three problems by keeping the agent's knowledge outside the prompt and pulling only the relevant pieces back into the context window when the agent needs them.
+That makes the context window a poor substitute for memory. It holds only a fixed token budget, so an agent's entire history cannot fit into it, and padding it with old turns crowds out room for the current task. It keeps nothing after the request ends, so you must provide persistence from somewhere the model does not control. And it costs tokens and latency to refill, because replaying a long history on every call spends both on material that mostly has no bearing on the current question. Long-term memory sidesteps all three problems by keeping the agent's knowledge outside the prompt and pulling only the relevant pieces back into the context window when the agent needs them.
 
 | **Aspect** | **Context window** | **Long-term memory** |
 | --- | --- | --- |
@@ -33,6 +33,6 @@ Not every memory is a conversation turn. Agents accumulate a few different kinds
 
 ## How Walrus Memory implements this
 
-Walrus Memory is a long-term memory layer built for agents. It runs the embed, store, and recall loop for you and adds durability, ownership, and verifiability that a plain database does not. Storing a memory with `remember` embeds and saves it, while `recall` embeds your query and returns the closest matches, scoped to a [memory space](/fundamentals/concepts/memory-space). The `analyze` operation goes further, extracting discrete facts from a longer passage and storing each as its own memory so that recall stays precise rather than returning one large blob. Because the system encrypts and stores memories on Walrus, they outlive any single process or provider and travel with the agent across apps, and because Sui enforces ownership and access onchain rather than whoever runs the server, control of a memory space stays with its owner. For the durability and ownership details, see [Persistent, Verifiable Memory](/fundamentals/concepts/verifiable-memory) and [Ownership and Access](/fundamentals/concepts/ownership-and-access).
+Walrus Memory is a long-term memory layer built for agents. It runs the embed, store, and recall loop for you and adds durability, ownership, and verifiability that a plain database does not. Storing a memory with `remember` embeds and saves it, while `recall` embeds your query and returns the closest matches, scoped to a [memory space](/fundamentals/concepts/memory-space). The `analyze` operation goes further, extracting discrete facts from a longer passage and storing each as its own memory so that recall stays precise rather than returning one large blob. Because Walrus stores memories durably, they outlive any single process or provider and travel with the agent across apps, and because Sui enforces ownership and access onchain rather than whoever runs the server, control of a memory space stays with its owner. For the durability and ownership details, see [Persistent, Verifiable Memory](/fundamentals/concepts/verifiable-memory) and [Ownership and Delegates](/fundamentals/concepts/ownership-and-access).
 
 To build this in practice, follow the [Agent Storage Loop](/sdk/agent-storage-loop) for the full write-confirm-recall loop, or [Headless SDK Setup](/sdk/headless-setup) to initialize memory in a server or agent runtime. To weigh Walrus Memory against vector databases and other options, see [Where to Store AI Agent Data](/fundamentals/concepts/where-to-store-agent-data).

@@ -1,6 +1,6 @@
 ---
-title: "Where to Store AI Agent Data"
-description: "A decision guide for where to store data for autonomous AI agents: provider-native memory, managed and self-hosted vector databases, and Walrus Memory, compared across persistence, portability, ownership, and verifiability."
+title: Where to Store AI Agent Data
+description: A decision guide for where to store data for autonomous AI agents, comparing provider-native memory, managed and self-hosted vector databases, and Walrus Memory across persistence, portability, ownership, and verifiability.
 keywords: [where to store AI agent data, AI agent data storage, data storage for AI agents, vector database for AI agents, agent memory storage, decision guide, Walrus Memory]
 ---
 
@@ -8,7 +8,7 @@ When you give an AI agent long-term memory, you have to decide where that data l
 
 ## The options
 
-Most teams choose among four approaches. Provider-native memory is the feature built into an agent platform or model provider. It is the least work to turn on, but the data lives inside that provider and follows its rules. A managed vector database, such as a hosted cloud vector store, hands the running of the database to a provider while you design the schema, generate embeddings, and manage access in your own application. A self-hosted vector database such as pgvector, Qdrant, or Chroma gives you full control of the stack in exchange for operating all of it yourself. Walrus Memory takes a different shape: it runs the embed, store, and recall loop for you, stores encrypted data on Walrus, and enforces ownership and access onchain through Sui.
+Most teams choose among four approaches. Provider-native memory is the feature built into an agent platform or model provider. It is the least work to turn on, but the data lives inside that provider and follows its rules. A managed vector database, such as a hosted cloud vector store, hands the running of the database to a provider while you design the schema, generate embeddings, and manage access in your own application. A self-hosted vector database such as pgvector, Qdrant, or Chroma gives you full control of the stack in exchange for operating all of it yourself. Walrus Memory takes a different shape: it runs the embed, store, and recall loop for you, stores your memories on Walrus, and enforces ownership and access onchain through Sui.
 
 ## Compare the approaches
 
@@ -21,7 +21,6 @@ The right choice depends on which properties your agent actually needs. The tabl
 | Portable across apps and providers | No, locked to the provider | You own the data, but you migrate it yourself | Yes, control follows the onchain account |
 | Ownership enforced independently | No, the provider decides | At the application layer, by your code | Yes, onchain through Sui |
 | Integrity independently verifiable | No | No | Yes, content-addressed blobs plus onchain records |
-| Encrypted before storage | Provider-dependent | You configure it | Yes, with Seal before it reaches Walrus |
 | Infrastructure you operate | None | Managed: the database. Self-hosted: the full stack | None by default, self-hosting optional |
 
 A vector database already gives you persistence and semantic recall, which is often all a single application needs. What sets Walrus Memory apart is that it adds portability, owner-controlled access enforced onchain, and verifiable integrity without asking you to run storage infrastructure.
@@ -34,6 +33,6 @@ These approaches are not mutually exclusive. An agent can keep a small local cac
 
 ## Where Walrus Memory fits against a vector database
 
-Teams often frame this decision as choosing the best vector database for AI agents, but a vector database and Walrus Memory solve overlapping but different problems. A vector database is a search index: it stores vectors and returns nearest neighbors. Walrus Memory uses a vector index internally for exactly that, then adds the layer most agent products end up needing anyway. The data outlives the index, because the encrypted memories live on Walrus and the vector index is only a cache that `restore` can rebuild, so losing the database does not lose the memory. Ownership stops being an application concern, because Sui smart contracts enforce who can read or write a memory space. That rule holds across apps and relayers rather than each application reimplementing it. And portability comes built in, because control follows the onchain account, so a user can move between apps or relayers without exporting and re-importing data. If you only need nearest-neighbor search inside one app, a vector database is simpler. If you need memory that is durable, portable, owner-controlled, and verifiable, that is what Walrus Memory adds on top.
+Teams often frame this decision as choosing the best vector database for AI agents, but a vector database and Walrus Memory solve overlapping but different problems. A vector database is a search index: it stores vectors and returns nearest neighbors. Walrus Memory uses a vector index internally for exactly that, then adds the layer most agent products end up needing anyway. The data outlives the index, because the memories live on Walrus and the vector index is a search layer that `restore` rebuilds from them, so losing the database does not lose the memory. Ownership stops being an application concern, because Sui smart contracts enforce who can read or write a memory space. That rule holds across apps and relayers rather than each application reimplementing it. And portability comes built in, because control follows the onchain account, so a user can move between apps or relayers without exporting and re-importing data. If you only need nearest-neighbor search inside one app, a vector database is simpler. If you need memory that is durable, portable, owner-controlled, and verifiable, that is what Walrus Memory adds on top.
 
 To go deeper, see [How AI Agent Memory Works](/fundamentals/concepts/how-agent-memory-works) for the concepts, [Persistent, Verifiable Memory](/fundamentals/concepts/verifiable-memory) for how durability and ownership work, and the [Agent Storage Loop](/sdk/agent-storage-loop) to build the write-confirm-recall loop with the SDK.
