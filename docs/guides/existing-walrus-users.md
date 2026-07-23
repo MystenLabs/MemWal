@@ -43,19 +43,14 @@ Because restore reads from the chain, you recover your memories even with no loc
 one namespace at a time. For the full flow, see
 [How Storage Works](/fundamentals/architecture/how-storage-works).
 
-Each call restores up to a set number of blobs, newest first. The default is 10, and restore does
-not page through older blobs on its own, so raise the `limit` to cover a larger namespace:
+Each call restores up to a set number of blobs, newest first. The default is 10, and the limit
+caps the onchain query itself, so calling restore repeatedly with the default does not reach older
+memories. Set a `limit` at least as large as the namespace you want to restore:
 
 ```ts
 // Restore up to 500 of the newest blobs in the "personal" namespace.
 await memwal.restore("personal", 500);
 ```
-
-<Warning>
-  Calling restore repeatedly with the default limit does not reach older memories, because the
-  limit caps the onchain query itself. Set a `limit` at least as large as the namespace you want
-  to restore.
-</Warning>
 
 <Note>
   Restore only rediscovers memories that Walrus Memory wrote, because it matches on the namespace

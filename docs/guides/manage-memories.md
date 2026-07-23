@@ -25,7 +25,7 @@ these values identify it:
 | Namespace | A label you choose to group related memories, for example `personal` or `work`. |
 | App ID | The Walrus Memory package ID, unique to each relayer deployment. |
 
-You manage the namespace day to day. One wallet can hold as many namespaces as you want, and
+You manage the namespace day to day. A single wallet can hold as many namespaces as you want, and
 memories in one namespace never mix with another. For more detail, see
 [Memory Space](/fundamentals/concepts/memory-space).
 
