@@ -26,7 +26,7 @@ The most common reasons to self-host include:
 
 ## Data isolation with namespaces
 
-With the current architecture, Walrus Memory isolates data strictly by **User (Owner address)** and **Namespace**. Because the relayer inherently scopes all vector searches and storage operations by `owner + namespace`, multiple agents or applications can safely share the same relayer deployment simply by using different namespaces or operating under different delegate keys.
+With the current architecture, Walrus Memory isolates data strictly by **User (Owner address)** and **Namespace**. The relayer scopes all vector searches and storage operations by `owner + namespace`, so multiple agents or applications can safely share the same relayer deployment by using different namespaces or operating under different delegate keys.
 
 ## Horizontal scaling
 
@@ -168,7 +168,7 @@ Use `SEAL_SERVER_CONFIGS` to opt into a committee key server. Committee entries 
 SEAL_SERVER_CONFIGS=[{"objectId":"0x...","weight":1,"aggregatorUrl":"https://seal-aggregator.example.com"}]
 ```
 
-Mysten's official testnet committee aggregator is:
+Mysten's official Testnet committee aggregator is:
 
 ```env
 SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98","weight":1,"aggregatorUrl":"https://seal-aggregator-testnet.mystenlabs.com"}]
@@ -177,7 +177,7 @@ SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de
 Although that committee is 3-of-5 internally, Seal exposes it to the SDK as one logical server config. The aggregator handles the internal committee threshold, so leave `SEAL_THRESHOLD` unset or set it to `1` when using this committee config. Because it uses a different key server object, do not switch an existing deployment to it until older data has been migrated or re-encrypted.
 
 <Warning>
-Changing Seal key server defaults only affects new encryption. If a deployment already has memories encrypted with the testnet independent key servers, keep those servers as the default or pin them with `SEAL_KEY_SERVERS` until the data has been migrated or re-encrypted. Otherwise, recall and restore for older blobs might fail to decrypt.
+Changing Seal key server defaults only affects new encryption. If a deployment already encrypted memories with the Testnet independent key servers, keep those servers as the default or pin them with `SEAL_KEY_SERVERS` until you migrate or re-encrypt the data. Otherwise, recall and restore for older blobs might fail to decrypt.
 </Warning>
 
 Use the official key server configuration where possible.
@@ -192,7 +192,7 @@ The relayer requires PostgreSQL with the `pgvector` extension. The relayer runs 
 
 - `vector_entries`: 1536-dimensional embeddings with HNSW index for cosine similarity search.
 - `delegate_key_cache`: Auth optimization (delegate key to account mapping).
-- `accounts`: Populated by the indexer (account to owner mapping).
+- `accounts`: The indexer populates this table (account to owner mapping).
 - `indexer_state`: Indexer cursor tracking.
 
 See [Database Sync](/indexer/database-sync) for the full schema.
