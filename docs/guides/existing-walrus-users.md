@@ -38,7 +38,7 @@ indexed memories you stored earlier, restore rediscovers them from Walrus and re
 
 1. Walrus Memory queries the Walrus blob objects your wallet owns and filters them by namespace
    metadata.
-2. It downloads the blobs the index does not have yet, decrypts them with Seal, and re-embeds them.
+2. It downloads the blobs the index does not have yet, decrypts them, and re-embeds them.
 3. Recall can find those memories again.
 
 Because Walrus holds the permanent record, you recover your memories even if the relayer rebuilds
@@ -68,8 +68,8 @@ Walrus Memory cannot search or decrypt them as memories.
 
 To use existing content as memory, re-upload it through Walrus Memory:
 
-- Call `remember` with the text you want to store. Walrus Memory embeds it, encrypts it with Seal,
-  and writes a new blob tagged for your memory space.
+- Call `remember` with the text you want to store. Walrus Memory embeds it, encrypts it, and
+  writes a new blob tagged for your memory space.
 - The original blob stays where it is. Re-uploading creates a memory alongside it, and does not
   move or delete your existing data.
 
@@ -88,7 +88,7 @@ wallet address:
   objects for each memory.
 - Walrus Memory stores the namespace of a memory as blob metadata, so anyone can see namespace
   labels.
-- No one can see your memory content. Walrus Memory encrypts it with Seal, and only you or your
+- No one can see your memory content. Walrus Memory encrypts it, and only you or your
   authorized delegates can decrypt it.
 
 <Warning>
