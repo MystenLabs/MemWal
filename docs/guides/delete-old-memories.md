@@ -1,18 +1,20 @@
 ---
-title: "Delete Old Memories"
+title: "Delete old memories"
 description: "Review and permanently delete memories from your Walrus Memory account."
 ---
 
 ## Overview
 
-Walrus Memory lets you review and permanently remove memories you no longer want to store.
-Preview your memories first, then delete any you want to clear.
+As part of ongoing security improvements, we're giving you the option to review and remove
+memories you no longer want stored on Walrus Memory. This guide shows you how to preview
+your memories and delete any you'd like to clear.
 
 <Warning>
-  You cannot undo a deletion. Preview your memories before you delete them.
+  Deleting a memory is permanent and you cannot undo it. Preview your memories before you
+  delete them.
 </Warning>
 
-## Prerequisites
+## Before you begin
 
 Connect the wallet that owns the memories you want to review. After you connect, the
 dashboard opens at `/dashboard`.
@@ -23,13 +25,13 @@ On the dashboard, scroll down to the **Delete memories** panel. The panel shows 
 memories your wallet has stored and their current status:
 
 - **Stored**: memories that you can delete.
-- **In progress**: memories that you selected for deletion and that Walrus Memory is now
-  deleting.
-- **Deleted**: memories that Walrus Memory removed.
+- **In progress**: memories that you have selected for deletion and that Walrus Memory is
+  in the process of deleting.
+- **Deleted**: memories that Walrus Memory has removed.
 
 Each memory appears as a row with these columns:
 
-| **Column** | **Description** |
+| Column | Description |
 | --- | --- |
 | Select | Checkbox that you use to choose the memory for deletion. |
 | Blob | The blob ID of the stored memory. |
@@ -45,8 +47,8 @@ row. The **Memory preview** window opens and shows the stored content. Close the
 when you finish.
 
 <Note>
-  Previewing helps you confirm that you delete the right memories, because you cannot reverse a
-  deletion.
+  Previewing helps you confirm that you are deleting the right memories, since you cannot
+  reverse a deletion.
 </Note>
 
 ## Select memories to delete
@@ -65,7 +67,7 @@ You can delete your selected memories, or delete all memories at once.
 - **Delete all (n)**: permanently deletes every memory on the list.
 
 <Warning>
-  Both actions delete permanently. You cannot recover deleted memories.
+  Both actions are permanent. You cannot recover deleted memories.
 </Warning>
 
 After you start a deletion, the panel shows progress as it works through the memories, for

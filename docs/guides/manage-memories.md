@@ -1,17 +1,17 @@
 ---
 title: "Manage Your Memories"
-description: "Browse, search, renew, and delete the memories your wallet has stored in Walrus Memory."
+description: "Organize memories with namespaces, find them with recall, and restore them across devices using the Walrus Memory SDK."
 ---
 
 ## Overview
 
-Every memory your wallet stores in Walrus Memory stays under your control. From the dashboard
-you can see what you have stored, group it by namespace, renew storage before it expires, and
-remove anything you no longer want.
+You manage memories in Walrus Memory with your delegate key and the SDK. Group related memories
+into namespaces, find them by meaning with recall, and restore them onto a new device when your
+local index is empty.
 
 <Info>
-  Walrus Memory encrypts memory content with Seal before it reaches Walrus. The dashboard
-  decrypts a memory only when you preview it, and only for the wallet that owns it.
+  Walrus Memory scopes every operation to your wallet and a single namespace, so you always work
+  within one memory space at a time.
 </Info>
 
 ## How Walrus Memory organizes memories
@@ -25,69 +25,61 @@ these values identify it:
 | Namespace | A label you choose to group related memories, for example `personal` or `work`. |
 | App ID | The Walrus Memory package ID, unique to each relayer deployment. |
 
-The namespace is the part you manage day to day. One wallet can hold as many namespaces as you
-want, and memories in one namespace never mix with another. When you browse, search, or restore,
-you always work within a single namespace at a time. For more detail, see
+You manage the namespace day to day. One wallet can hold as many namespaces as you want, and
+memories in one namespace never mix with another. For more detail, see
 [Memory Space](/fundamentals/concepts/memory-space).
 
 ## Prerequisites
 
-Connect the wallet that owns the memories you want to manage. After you connect, the dashboard
-opens at `/dashboard`.
+Create a client with your delegate key, account ID, relayer URL, and the namespace you want to
+manage. To set these up for the first time, see [Walrus Memory](/sdk/usage/memwal).
 
-## Browse your memories
+```ts
+import { MemWal } from "@mysten-incubation/memwal";
 
-The dashboard lists the memories your wallet has stored. Each memory appears as a row with these
-columns:
+const memwal = MemWal.create({
+  key: process.env.MEMWAL_PRIVATE_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  serverUrl: process.env.MEMWAL_SERVER_URL,
+  namespace: "personal",
+});
+```
 
-| **Column** | **Description** |
-| --- | --- |
-| Blob | The Walrus blob ID that holds the encrypted memory. |
-| Object | The onchain object ID for the blob. |
-| Created | The date you stored the memory. |
-| State | The current storage state, for example `stored` or `deletable`. |
-| Preview | Opens the decrypted content so you can confirm what a memory holds. |
+## Browse and search your memories
 
-Select **Preview** on any row to read the memory content. Walrus Memory decrypts it in your
-browser for that view only, then closes it again when you finish.
+Recall finds memories by meaning rather than by keyword, and returns the closest matches within
+one namespace. Use it to review what you have stored:
 
-## Filter by namespace
+```ts
+const result = await memwal.recall({
+  query: "food allergies",
+  limit: 20,
+  namespace: "personal",
+});
 
-Recall and restore both work within one namespace, so filter by namespace to find a memory
-quickly. Choose the namespace you want to inspect, and the dashboard shows only the memories you
-stored under that label. Switch namespaces to move between, for example, your `personal` and
-`work` memories.
+for (const memory of result.results) {
+  console.log(memory.text);
+}
+```
 
-<Tip>
-  If you are not sure which namespaces you have used, check the namespace values your app passes
-  when it calls `remember`. Each distinct value creates a separate memory space.
-</Tip>
+Pass a `namespace` to search a specific memory space, or omit it to use the client's default.
+Raise `limit` to return more matches. To move between memory spaces, change the namespace.
 
-## Renew storage before it expires
+## Restore memories on a new device
 
-Walrus stores each memory as a blob that lives for a set number of epochs. Each epoch lasts about
-2 weeks on Mainnet and about 1 day on Testnet. When the paid epochs run out, Walrus drops the blob
-and the memory disappears, so renew memories you want to keep before they expire.
+Walrus Memory keeps a local index for fast search, but you can rebuild it from Walrus at any time.
+When a new device has no index, restore rediscovers your memories from the chain:
 
-Renewing a memory extends the lifetime of its onchain `Blob` object for more epochs. You can renew
-a single memory, or renew all memories near expiry at once.
+```ts
+// Restore up to 500 of the newest blobs in the "personal" namespace.
+await memwal.restore("personal", 500);
+```
+
+Restore processes up to `limit` blobs per call, newest first, and defaults to 10. It does not page
+through older blobs on its own, so set a `limit` at least as large as the namespace you want to
+restore. For the full flow, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
 <Note>
-  Renewal extends existing storage. It does not change the memory content, the blob ID, or the
-  namespace. To learn who pays for the extended storage, see
-  [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
+  Restore only rediscovers memories that Walrus Memory wrote, because it matches on the namespace
+  metadata that Walrus Memory attaches at upload.
 </Note>
-
-## Delete memories
-
-Deleting a memory removes it permanently. Preview a memory before you delete it, because you
-cannot recover it afterward.
-
-- To delete through the dashboard, see [Delete Old Memories](/guides/delete-old-memories).
-- To delete in bulk from a script, see
-  [Delete Memories Programmatically](/guides/delete-memories-programmatically).
-
-<Warning>
-  Deletion is permanent. Neither the dashboard nor the API can restore a memory after you delete
-  it.
-</Warning>

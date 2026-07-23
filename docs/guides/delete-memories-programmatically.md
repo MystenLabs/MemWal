@@ -1,22 +1,22 @@
 ---
-title: "Delete Memories Programmatically"
-description: "Find and permanently delete old Walrus Memory blobs through the security delete API."
+title: "Delete memories programmatically"
+description: "Find and permanently delete old Walrus Memory blobs through the Security Delete API."
 ---
 
 ## Overview
 
-Use the security delete API to find memories a wallet owns, select memories older
+Use the Security Delete API to find memories owned by a wallet, select memories older
 than a cutoff date, and permanently delete them. The API prepares and sponsors the Sui
-transaction, and your wallet authenticates the requests and signs it.
+transaction; your wallet authenticates the requests and signs the prepared transaction.
 
 <Warning>
-  Deletion cannot be undone. Start with a dry run, review every blob ID, and only then
-  enable deletion.
+  Deletion is permanent. Start with the dry run in this guide, review every blob ID, and
+  only then enable deletion.
 </Warning>
 
 The deletion flow uses these endpoints:
 
-| **Step** | **Endpoint** | **Purpose** |
+| Step | Endpoint | Purpose |
 | --- | --- | --- |
 | 1 | `POST /api/security-delete-auth/challenge` | Request a single-use wallet challenge. |
 | 2 | `POST /api/security-delete-auth/verify` | Exchange the signed challenge for a short-lived Bearer token. |
@@ -24,12 +24,12 @@ The deletion flow uses these endpoints:
 | 4 | `POST /api/security-deletions` | Prepare a sponsored deletion transaction. |
 | 5 | `POST /api/security-deletions/{batchId}/submit` | Submit the wallet signature and execute the deletion. |
 
-## Prerequisites
+## Before you begin
 
 You need:
 
 - Node.js 20 or later.
-- The base URL of a MemWal deployment with the security delete API enabled.
+- The base URL of a MemWal deployment with the Security Delete API enabled.
 - The Sui private key for the wallet that owns the memories.
 
 The example uses an Ed25519 key. Keep the key in a secret manager or environment variable;
@@ -295,4 +295,4 @@ If submitting a batch times out or returns `RPC_UNAVAILABLE`, query
 replacement batch for the same blobs while its state is `executing`.
 
 To delete memories through the dashboard instead, see
-[Delete Old Memories](/guides/delete-old-memories).
+[Delete old memories](/guides/delete-old-memories).
