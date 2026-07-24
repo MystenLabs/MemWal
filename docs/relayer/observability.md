@@ -1,5 +1,34 @@
 ---
 title: "Observability"
+description: >-
+  Observability guide for production Walrus Memory relayers, covering structured logging, Prometheus metrics, recommended dashboards, alert rules, and APM integration for monitoring the relayer and its external dependencies.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - observability
+  - Prometheus metrics
+  - monitoring
+  - logging
+goal:
+  description: Set up production monitoring, dashboards, and alerts for a Walrus Memory relayer deployment.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What metrics does the Walrus Memory relayer expose?"
+  - "How do I monitor a MemWal relayer in production?"
+  - "What alerts should I set up for the Walrus Memory relayer?"
+answer: >-
+  The Walrus Memory relayer exposes Prometheus metrics at /metrics covering HTTP request volume, latency histograms, error counts, rate-limit denials, external service latency, sidecar failures, and PostgreSQL pool stats. Production deployments should use JSON structured logs with request correlation IDs and set up alerts for 5xx rates, latency regressions, Redis degradation, sidecar failures, and database saturation.
 ---
 
 Production relayers should emit structured logs, scrape Prometheus metrics, and send alerts for the external systems Walrus Memory depends on: PostgreSQL, Redis, Sui RPC, OpenAI-compatible embedding/LLM APIs, SEAL, Walrus, and the TypeScript sidecar.

@@ -1,6 +1,35 @@
 ---
 title: "Reference"
-description: "Complete reference for hooks, tools, CLI commands, configuration, and security."
+description: >-
+  Complete reference for the OpenClaw Walrus Memory plugin: hooks, tools, CLI commands, configuration options, and security.
+  Covers auto-recall, auto-capture, memory_search, memory_store, multi-agent isolation, and troubleshooting.
+keywords:
+  - OpenClaw
+  - Walrus Memory
+  - MemWal
+  - reference
+  - hooks
+  - CLI
+goal:
+  description: Look up detailed parameters, configuration options, and troubleshooting steps for the OpenClaw Walrus Memory plugin.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What configuration options does the OpenClaw Walrus Memory plugin support?
+  - How do I use the OpenClaw memwal CLI commands?
+  - How do I troubleshoot the OpenClaw memory plugin?
+answer: >-
+  The OpenClaw Walrus Memory plugin reference covers auto-recall (before_prompt_build hook with configurable maxRecallResults and minRelevance), auto-capture (agent_end hook with captureMaxMessages), two LLM tools (memory_search and memory_store, requiring tools.allow configuration), CLI commands (openclaw memwal search and openclaw memwal stats), full configuration options (privateKey, accountId, serverUrl, defaultNamespace, and tuning parameters), multi-agent namespace isolation, prompt injection protection, and troubleshooting for common issues.
 ---
 
 Complete reference for every plugin capability.

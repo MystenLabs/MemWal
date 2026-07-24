@@ -1,7 +1,34 @@
 ---
 title: Agent Storage Loop
-description: "A full headless agent storage loop on Testnet: set up the SDK with no interactive steps, batch writes with Quilt, encrypt with Seal, confirm the write landed, then recall."
-keywords: [agent, headless, autonomous, storage loop, Testnet, rememberBulk, Quilt, Seal, encryption, recall, verify, MemWal, SDK]
+description: >-
+  A full headless agent storage loop on Testnet: set up the SDK with no interactive steps, batch writes with Quilt, encrypt with Seal, confirm the write landed, then recall. Covers all four stages of the autonomous agent storage pattern.
+keywords:
+  - agent storage loop
+  - headless agent
+  - rememberBulk
+  - Walrus Memory
+  - MemWal
+  - batch writes
+goal:
+  description: Implement a complete headless agent storage loop that sets up, batch-writes, confirms durability, and recalls stored context.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I build a headless agent storage loop with Walrus Memory?
+  - How do I batch writes with rememberBulk in Walrus Memory?
+  - How do I confirm a memory write landed before depending on it?
+answer: >-
+  The agent storage loop has four stages: set up the client from environment variables, batch many small writes using rememberBulkAndWait (up to 20 items per call backed by Walrus Quilt), confirm each write reached a durable done state, and recall the stored context by semantic similarity. Client-managed encryption via MemWalManual is available when the agent must hold its own keys.
 ---
 
 This guide walks an autonomous agent through the complete storage loop on Testnet: set up the client with no interactive steps, batch many small writes, encrypt agent state, confirm each write landed before depending on it, then recall. Every step uses the real SDK surface, so you can lift the final script straight into a server or agent runtime.

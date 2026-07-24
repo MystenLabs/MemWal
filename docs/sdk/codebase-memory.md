@@ -1,7 +1,34 @@
 ---
 title: Codebase Memory for Coding Assistants
-description: "Give an AI coding assistant persistent memory of a codebase with the Walrus Memory SDK: scope memory per repository with namespaces, store code context, and recall the relevant pieces at query time."
-keywords: [codebase memory, coding assistant, cursor, code context, namespace, remember, recall, rememberBulk, RAG, SDK]
+description: >-
+  Give an AI coding assistant persistent memory of a codebase with the Walrus Memory SDK. Scope memory per repository with namespaces, store code context in batches, and recall the relevant pieces by semantic similarity at query time.
+keywords:
+  - codebase memory
+  - coding assistant
+  - Walrus Memory
+  - namespace
+  - rememberBulk
+  - RAG
+goal:
+  description: Build persistent codebase memory for an AI coding assistant using the Walrus Memory SDK with per-repository namespaces and semantic recall.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I give an AI coding assistant persistent codebase memory?
+  - How do I scope Walrus Memory per repository?
+  - Should I use the SDK or MCP server for codebase memory?
+answer: >-
+  Build codebase memory by scoping a namespace per repository, storing chunks of code and project context with rememberBulk, and recalling relevant pieces by semantic similarity at query time. Use sub-namespaces or keywords in text for finer organization. The SDK is best for building custom assistants, while the MCP server lets existing tools like Cursor access Walrus Memory without code.
 ---
 
 AI coding assistants like Cursor appear to remember a codebase because they retrieve relevant context at query time rather than holding an entire repository in the model's context window. You can build the same persistent, cross-session memory on Walrus Memory with the TypeScript SDK: store code and project context as memories, then recall the pieces that matter for each question.

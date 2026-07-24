@@ -1,6 +1,34 @@
 ---
 title: "Quick Start"
-description: "Install the Walrus Memory SDK and store your first memory in under a minute."
+description: >-
+  Install the Walrus Memory SDK, configure credentials, and store your first memory in under a minute. Covers installation for all three entry points and initial configuration.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - quick start
+  - installation
+  - first memory
+  - SDK setup
+goal:
+  description: Install the SDK, configure credentials, and successfully store and recall a first memory.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I install the Walrus Memory SDK?
+  - How do I store my first memory with MemWal?
+  - What configuration is needed for the Walrus Memory SDK?
+answer: >-
+  Install the Walrus Memory SDK via npm, pnpm, or yarn with @mysten-incubation/memwal. Generate an account ID and delegate key from memory.walrus.xyz, then use MemWal.create() with your key, accountId, and serverUrl to store and recall memories with the remember() and recall() methods.
 ---
 
 The Walrus Memory SDK gives your agents portable memory that works across apps, sessions, and workflows. Store, recall, and analyze context — fully under your control. It exposes three entry points:

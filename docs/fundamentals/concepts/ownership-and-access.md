@@ -1,6 +1,40 @@
 ---
 title: "Ownership & Delegates"
-description: "Programmable permissions and explicit ownership — how you control who can access and update memory."
+description: >-
+  Programmable permissions and explicit ownership in Walrus Memory. Covers how owners control
+  their memory through cryptographic keys, how delegates are granted access for agents and
+  services, and how access control is enforced onchain by Sui smart contracts.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - ownership
+  - delegates
+  - access control
+  - permissions
+  - Sui smart contract
+goal:
+  description: Understand how ownership and delegate access work in Walrus Memory
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does ownership work in Walrus Memory?
+  - What are delegates in MemWal and how do they get access?
+  - How is access control enforced in Walrus Memory?
+answer: >-
+  In Walrus Memory, memory is cryptographically owned by a Sui wallet address derived from the
+  user's private key. Owners can grant delegate access to other users, agents, or services,
+  enabling shared access and service delegation. All access control is enforced onchain by Sui
+  smart contracts, making it tamper-proof and verifiable.
 ---
 
 Walrus Memory puts you in full control of your memory. Programmable permissions and explicit ownership define how memory is shared, accessed, and updated — with delegate access for agents and workflows.

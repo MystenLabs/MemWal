@@ -1,5 +1,34 @@
 ---
 title: "Examples"
+description: >-
+  Practical Walrus Memory SDK examples covering basic store and recall, manual registration with pre-computed vectors, fact extraction with analyze(), AI middleware, and a research app pattern for structured memory.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - examples
+  - store and recall
+  - analyze
+  - AI middleware
+goal:
+  description: Follow working examples to store, recall, analyze, and use AI middleware with the Walrus Memory SDK.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I store and recall a memory with the Walrus Memory SDK?
+  - How do I extract facts from text with Walrus Memory?
+  - What does a basic Walrus Memory example look like?
+answer: >-
+  The basic example creates a MemWal client, stores a memory with remember(), waits for completion with waitForRememberJob(), and recalls it with recall(). Advanced examples cover manual registration for pre-computed vectors, fact extraction with analyze() for longer text, and AI middleware with withMemWal for automatic recall and save in AI pipelines.
 ---
 
 ## Basic: Store and Recall

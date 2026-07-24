@@ -1,6 +1,35 @@
 ---
 title: "NemoClaw/OpenClaw Plugin"
-description: "Give your OpenClaw AI agents portable, verifiable memory powered by Walrus Memory."
+description: >-
+  Give your OpenClaw AI agents portable, verifiable memory powered by Walrus Memory.
+  The plugin adds automatic recall and capture hooks alongside optional LLM tools and CLI commands.
+keywords:
+  - OpenClaw
+  - NemoClaw
+  - Walrus Memory
+  - MemWal
+  - agent memory
+  - plugin
+goal:
+  description: Understand what the Walrus Memory OpenClaw plugin provides and decide if it fits your use case.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the Walrus Memory plugin for OpenClaw?
+  - How does MemWal work with OpenClaw agents?
+  - What features does the OpenClaw memory plugin provide?
+answer: >-
+  The Walrus Memory plugin for OpenClaw adds portable, verifiable agent memory that works alongside OpenClaw's file-based memory. It automatically recalls relevant context and captures new facts in the background using hooks, with no user action needed. Features include SEAL-encrypted storage on Walrus, cross-app memory portability, multi-agent namespace isolation, prompt injection protection, optional LLM tools (memory_search, memory_store), and CLI commands for debugging.
 ---
 
 The Walrus Memory plugin adds **portable, verifiable agent memory** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed. Memory is not locked to a single runtime: it operates across agents, apps, and workflows.

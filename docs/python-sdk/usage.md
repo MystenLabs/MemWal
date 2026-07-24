@@ -1,6 +1,39 @@
 ---
 title: "Usage"
-description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the Walrus Memory Python SDK."
+description: >-
+  Async vs sync clients, namespace rules, manual methods, and AI middleware
+  for the Walrus Memory Python SDK. Covers MemWal, MemWalSync, and the async remember model.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - async
+  - sync
+  - namespace
+  - middleware
+goal:
+  description: Understand the difference between async and sync clients, configure namespaces, and choose the right entry point for your application.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the difference between MemWal and MemWalSync in the Python SDK?
+  - How do namespaces work in the Walrus Memory Python SDK?
+  - How does the async remember model work in MemWal?
+answer: >-
+  The Python SDK provides MemWal (async-native) and MemWalSync (synchronous wrapper)
+  with identical APIs. Namespaces isolate memories and can be set per-client or per-call.
+  The async remember model returns immediately with a job ID, and you can poll to completion
+  with `remember_and_wait` or `wait_for_remember_job`.
 ---
 
 The Python SDK exposes one relayer-backed client in two forms, plus middleware:

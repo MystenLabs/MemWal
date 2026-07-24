@@ -1,6 +1,38 @@
 ---
 title: "API Reference"
-description: "Full method signatures, result dataclasses, and utilities for the Walrus Memory Python SDK."
+description: >-
+  Full method signatures, result dataclasses, exceptions, and utility functions for
+  the Walrus Memory Python SDK. Covers MemWal, MemWalSync, middleware, and authentication.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - API reference
+  - method signatures
+  - dataclasses
+goal:
+  description: Look up the exact method signature, parameters, return type, or exception for any MemWal Python SDK API.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the method signatures for the MemWal Python SDK?
+  - What exceptions does the MemWal Python SDK raise?
+  - How does Ed25519 authentication work in the MemWal Python SDK?
+answer: >-
+  The MemWal Python SDK API reference documents all methods on MemWal and MemWalSync
+  including remember, recall, analyze, ask, restore, health, and lower-level manual methods.
+  It also covers result dataclasses, exception hierarchy, middleware wrappers, utility
+  functions for delegate key derivation, and the Ed25519 request signing protocol.
 ---
 
 See also:

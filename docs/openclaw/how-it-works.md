@@ -1,6 +1,35 @@
 ---
 title: "How It Works"
-description: "Architecture, message flow, and the mechanics behind auto-recall and auto-capture."
+description: >-
+  Architecture, message flow, and the mechanics behind auto-recall and auto-capture in the OpenClaw Walrus Memory plugin.
+  Covers hooks vs tools, multi-agent isolation, and security model.
+keywords:
+  - OpenClaw
+  - Walrus Memory
+  - MemWal
+  - architecture
+  - auto-recall
+  - auto-capture
+goal:
+  description: Understand the architecture, message flow, and hook mechanics of the Walrus Memory OpenClaw plugin.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does the OpenClaw Walrus Memory plugin work internally?
+  - What is the difference between hooks and tools in the OpenClaw memory plugin?
+  - How does multi-agent memory isolation work in OpenClaw?
+answer: >-
+  The OpenClaw Walrus Memory plugin operates through hooks (automatic callbacks on every conversation turn) and optional LLM-callable tools. The before_prompt_build hook searches Walrus Memory and injects relevant memories into the prompt context. The agent_end hook extracts facts from conversations after each turn and stores them as encrypted blobs on Walrus. Each agent gets its own memory namespace derived from its session key, with support for cryptographic isolation using separate Ed25519 keys.
 ---
 
 The plugin sits between OpenClaw's gateway and the Walrus Memory server. It operates through **hooks** — automatic callbacks that run on every conversation turn — and optional **tools** the LLM can call explicitly.

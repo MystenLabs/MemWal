@@ -1,7 +1,34 @@
 ---
 title: Production Readiness for Agent Storage
-description: "Patterns for running Walrus Memory in a production agent: idempotent writes, retries with backoff, confirming durability, bounding cost, key custody, and graceful degradation."
-keywords: [production, hardening, idempotency, retries, backoff, cost caps, key custody, failure handling, graceful degradation, agent, reliability, MemWal, SDK]
+description: >-
+  Patterns for running Walrus Memory in a production agent: idempotent writes, retries with exponential backoff, confirming write durability, bounding cost with batching and budgets, key custody best practices, and graceful degradation when memory is unavailable.
+keywords:
+  - production readiness
+  - idempotent writes
+  - retries
+  - cost management
+  - Walrus Memory
+  - MemWal
+goal:
+  description: Harden a Walrus Memory agent for production with idempotent writes, retry logic, cost caps, key custody, and graceful degradation patterns.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I make Walrus Memory writes idempotent?
+  - How do I handle retries and failures in a production MemWal agent?
+  - How do I control costs when using Walrus Memory in production?
+answer: >-
+  Production-harden a Walrus Memory agent by making writes idempotent with content hashing, retrying only transient failures with exponential backoff, confirming write durability before acting on memories, batching with rememberBulkAndWait to reduce costs, capping writes per cycle, loading keys from a secret manager, and degrading gracefully when the memory layer is unavailable.
 ---
 
 The SDK gives you the storage primitives. Running them in a long-lived agent, where there is no human to retry a failed write or notice a runaway bill, takes a few patterns on top. This guide collects the ones that matter most.

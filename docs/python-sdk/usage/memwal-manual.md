@@ -1,6 +1,39 @@
 ---
 title: "Manual Methods"
-description: "Lower-level remember_manual / recall_manual / embed for callers that manage their own vectors."
+description: >-
+  Lower-level remember_manual, recall_manual, and embed methods for callers that manage
+  their own vectors or have pre-uploaded Walrus blobs in the Python SDK.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - manual methods
+  - embed
+  - remember_manual
+  - recall_manual
+goal:
+  description: Use the lower-level manual methods to register pre-uploaded blobs, search with pre-computed vectors, and compute embeddings without storage.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use remember_manual and recall_manual in the MemWal Python SDK?
+  - How do I compute an embedding without storing a memory in MemWal?
+  - When should I use manual methods vs standard remember/recall in MemWal?
+answer: >-
+  The Python SDK provides lower-level manual methods on the same MemWal/MemWalSync client:
+  `embed` computes a vector without storing anything, `remember_manual` registers a
+  pre-uploaded blob with a pre-computed vector, and `recall_manual` searches with a
+  pre-computed query vector returning raw blob IDs and distances.
 ---
 
 <Note>

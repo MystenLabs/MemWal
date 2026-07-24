@@ -1,6 +1,36 @@
 ---
 title: "Delete old memories"
-description: "Review and permanently delete memories from your Walrus Memory account."
+description: >-
+  Review and permanently delete memories from your Walrus Memory account using
+  the dashboard's Delete memories panel, including preview, selection, and verification.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - delete memories
+  - dashboard
+  - memory management
+goal:
+  description: Use the dashboard to preview, select, and permanently delete memories from a Walrus Memory account, then verify the deletion.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I delete old memories from Walrus Memory?"
+  - "Can I preview memories before deleting them in MemWal?"
+  - "How do I verify that memories were deleted in Walrus Memory?"
+answer: >-
+  Connect your wallet to the Walrus Memory dashboard, navigate to the Delete memories panel,
+  preview individual memories, select them using checkboxes, and delete them. Deletion is
+  permanent and cannot be undone. Verify by checking the Deleted count and state in the panel.
 ---
 
 ## Overview

@@ -1,6 +1,40 @@
 ---
 title: "Memory Space"
-description: "The isolated unit of storage in Walrus Memory — how memories are organized, scoped, and retrieved."
+description: >-
+  The isolated unit of storage in Walrus Memory. A memory space is uniquely identified by
+  owner address, namespace, and app ID, ensuring full isolation between users, apps, and
+  deployments.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - memory space
+  - namespace
+  - app ID
+  - isolation
+  - scoping
+goal:
+  description: Understand how memory spaces work and how they provide isolation in Walrus Memory
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is a memory space in Walrus Memory?
+  - How are memories isolated between users and apps in MemWal?
+  - What is a namespace in Walrus Memory?
+answer: >-
+  A memory space is the isolated unit of storage in Walrus Memory, uniquely identified by
+  three values: the owner address (Sui wallet), a developer-defined namespace, and the app ID
+  (Walrus Memory package ID). This triple ensures that no two memory spaces overlap, providing
+  full isolation between users, applications, and deployments.
 ---
 
 A **memory space** is the isolated unit of storage in Walrus Memory. Think of it as a folder or bucket for your memories — you choose which memory space to store into and which to retrieve from.

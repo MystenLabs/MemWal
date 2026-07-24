@@ -1,7 +1,34 @@
 ---
-title: Gas Pool Maintenance Runbook
-description: How to diagnose and fix Enoki gas-pool failures on relayer pool wallets by consolidating or topping up SUI gas coins.
-keywords: [relayer, gas pool, Enoki, SUI, sponsored transaction, runbook]
+title: "Gas Pool Maintenance Runbook"
+description: >-
+  How to diagnose and fix Enoki gas-pool failures on Walrus Memory relayer pool wallets by consolidating fragmented SUI gas coins or topping up wallet balances when sponsored transactions fail.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - gas pool
+  - Enoki
+  - SUI
+  - sponsored transaction
+goal:
+  description: Diagnose gas-pool exhaustion on relayer pool wallets and restore healthy SUI balances through consolidation or top-up.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I fix gas pool exhausted errors on the Walrus Memory relayer?"
+  - "What causes Enoki dry_run_failed errors with balance split on MemWal?"
+  - "How do I consolidate SUI gas coins on relayer pool wallets?"
+answer: >-
+  Gas-pool exhaustion occurs when relayer pool wallets have no single SUI coin large enough for Enoki-sponsored Walrus transactions, typically due to coin fragmentation. The fix is to consolidate fragmented coins using sui client merge-coin or pay-all-sui, or top up the wallet with additional SUI so the largest coin exceeds the sponsored budget.
 ---
 
 When to use this: a **gas-pool alert** fires (the SUI gas pool maintenance

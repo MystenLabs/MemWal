@@ -1,5 +1,38 @@
 ---
 title: "Purpose"
+description: >-
+  Why the Walrus Memory indexer exists, how it eliminates expensive onchain RPC calls
+  by syncing account data to PostgreSQL, and the auth resolution priority flow.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - indexer
+  - purpose
+  - auth resolution
+  - PostgreSQL
+goal:
+  description: Understand why the indexer exists, how it works, and how the relayer resolves delegate key ownership through the auth resolution priority chain.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "Why does Walrus Memory need an indexer?"
+  - "How does the MemWal relayer resolve delegate key ownership?"
+  - "How do I configure and run the MemWal indexer?"
+answer: >-
+  The indexer eliminates expensive onchain registry scans by listening to Sui events and
+  syncing account data into PostgreSQL. The relayer resolves delegate keys using a priority
+  chain: PostgreSQL cache, indexed accounts, onchain registry scan, header hint, and config
+  fallback. The indexer is recommended for production but optional for development.
 ---
 
 The indexer keeps the backend in sync with onchain state so the relayer can resolve accounts quickly.

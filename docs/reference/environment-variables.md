@@ -1,5 +1,39 @@
 ---
 title: "Environment Variables"
+description: >-
+  Complete reference for all public environment variables used across Walrus Memory,
+  covering the client SDK, MCP server, self-hosted relayer, and frontend apps.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - environment variables
+  - configuration
+  - relayer
+  - MCP server
+goal:
+  description: Find the correct environment variable name, default value, and usage context for any Walrus Memory component.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What environment variables does the Walrus Memory relayer require?"
+  - "What is the difference between MEMWAL_PRIVATE_KEY and MEMWAL_KEY?"
+  - "What environment variables does the MemWal MCP server read?"
+answer: >-
+  Walrus Memory environment variables are grouped by component: client SDK conventions
+  (MEMWAL_PRIVATE_KEY, MEMWAL_ACCOUNT_ID, MEMWAL_SERVER_URL), MCP server variables
+  (MEMWAL_NAMESPACE, MEMWAL_MCP_DEBUG), required relayer variables (DATABASE_URL,
+  MEMWAL_PACKAGE_ID, SIDECAR_AUTH_TOKEN), and frontend build-time variables (VITE_* or
+  NEXT_PUBLIC_* prefixes).
 ---
 
 This page lists the supported, public environment variables across Walrus Memory, grouped by where you set it: the client SDKs, the MCP server, the self-hosted relayer, and frontend apps. Each entry notes its default and whether the variable is read automatically or is a name you wire into config yourself. Internal and test-only variables are intentionally omitted.

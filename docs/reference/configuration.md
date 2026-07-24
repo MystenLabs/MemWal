@@ -1,5 +1,38 @@
 ---
 title: "Configuration"
+description: >-
+  Reference for all Walrus Memory SDK configuration shapes including MemWalConfig,
+  MemWalManualConfig, and WithMemWalOptions, with field descriptions and behavioral rules.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - configuration
+  - SDK
+  - MemWalConfig
+  - WithMemWalOptions
+goal:
+  description: Choose the correct configuration shape for your Walrus Memory integration and understand each field's purpose and defaults.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What configuration options does the Walrus Memory SDK support?"
+  - "What is the difference between MemWalConfig and MemWalManualConfig?"
+  - "How do I configure withMemWal options for AI middleware?"
+answer: >-
+  The Walrus Memory SDK uses three configuration shapes: MemWalConfig for the standard
+  relayer-backed client, MemWalManualConfig for direct Sui signing and encryption, and
+  WithMemWalOptions for AI middleware. Each shape requires a delegate key and account ID,
+  with optional fields for server URL, namespace, SEAL, and Walrus settings.
 ---
 
 Use this page to pick the right config shape quickly.

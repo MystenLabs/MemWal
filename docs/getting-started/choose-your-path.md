@@ -1,5 +1,41 @@
 ---
 title: "Choose Your Path"
+description: >-
+  Walrus Memory supports several integration modes depending on how much control you need.
+  Compare the Default SDK, Managed Relayer, Manual Client Flow, AI Middleware, Self-Hosted
+  Relayer, and MCP Clients to pick the right path for your use case.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - integration modes
+  - SDK
+  - relayer
+  - manual client
+  - AI middleware
+  - MCP
+goal:
+  description: Understand the available Walrus Memory integration paths and choose the one that fits your use case
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the different ways to integrate Walrus Memory?
+  - Should I use the managed relayer or self-host for MemWal?
+  - How do I use Walrus Memory with the Vercel AI SDK?
+answer: >-
+  Walrus Memory offers six integration paths: the Default SDK for quick starts, Managed Relayer
+  for hosted infrastructure, Manual Client Flow for full client-side control over encryption,
+  AI Middleware for Vercel AI SDK integration, Self-Hosted Relayer for complete trust boundary
+  control, and MCP Clients for tool-use agents like Cursor and Claude Desktop.
 ---
 
 Walrus Memory supports several integration modes depending on how much control you need. Pick the one that fits your use case.

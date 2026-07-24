@@ -1,6 +1,42 @@
 ---
 title: "How Storage Works"
-description: "The lifecycle of a memory in Walrus Memory, from plaintext to encrypted blob on Walrus and searchable vector in the database."
+description: >-
+  The lifecycle of a memory in Walrus Memory, from plaintext to encrypted blob on Walrus and
+  searchable vector in the database. Covers the store flow (embedding, encryption, blob upload,
+  vector indexing), the recall flow, and the restore flow for rebuilding from Walrus.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - storage
+  - encryption
+  - SEAL
+  - vector embedding
+  - recall
+  - restore
+  - blob
+goal:
+  description: Understand how memories are stored, recalled, and restored in Walrus Memory
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Walrus Memory store and encrypt memories?
+  - How does semantic recall work in MemWal?
+  - How can I restore a lost Walrus Memory database?
+answer: >-
+  When you store a memory, the relayer generates a vector embedding, encrypts the content with
+  SEAL, uploads the encrypted blob to Walrus, and indexes the vector in PostgreSQL with pgvector.
+  Recall converts your query to an embedding and searches for the closest vectors scoped to your
+  memory space. If the database is lost, restore rebuilds it from Walrus blobs.
 ---
 
 When you call `memwal.remember(...)`, the relayer accepts a background job immediately and then stores the memory asynchronously. Here's what happens.

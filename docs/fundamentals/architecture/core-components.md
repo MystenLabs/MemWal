@@ -1,6 +1,43 @@
 ---
 title: "Core Components"
-description: "The six core components that make up the Walrus Memory system and how they interact."
+description: >-
+  The six core components that make up the Walrus Memory system and how they interact.
+  Covers the SDK, Relayer, Smart Contract, Indexer, Walrus storage layer, and the
+  Indexed Database with their responsibilities and relationships.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - architecture
+  - SDK
+  - relayer
+  - smart contract
+  - indexer
+  - Walrus
+  - pgvector
+goal:
+  description: Understand the six core components of Walrus Memory and how they work together
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the core components of the Walrus Memory architecture?
+  - How does the MemWal relayer work?
+  - What role does the Sui smart contract play in Walrus Memory?
+answer: >-
+  Walrus Memory consists of six core components: the TypeScript SDK (developer entry point),
+  the Relayer (backend service handling encryption, embeddings, and Web3 abstraction), the
+  Sui Smart Contract (onchain ownership and access control), the Indexer (syncs onchain state),
+  Walrus (decentralized encrypted blob storage), and the Indexed Database (PostgreSQL with
+  pgvector for semantic search).
 ---
 
 Walrus Memory is made up of six core components that work together to give your agents portable, verifiable memory that they fully control.

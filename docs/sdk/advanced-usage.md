@@ -1,5 +1,34 @@
 ---
 title: "Advanced Usage"
+description: >-
+  Advanced Walrus Memory SDK usage patterns including manual registration with pre-computed vectors, fact extraction with analyze(), and AI SDK middleware integration.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - advanced usage
+  - manual registration
+  - analyze
+  - AI middleware
+goal:
+  description: Use advanced SDK features like manual registration, analyze for fact extraction, and AI middleware integration.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use manual registration with pre-computed vectors in Walrus Memory?
+  - How does analyze() extract facts in Walrus Memory?
+  - When should I use advanced Walrus Memory features?
+answer: >-
+  Advanced Walrus Memory features include manual registration (rememberManual/recallManual) for pre-computed vectors and encrypted payloads, analyze() for LLM-based fact extraction from longer text, and withMemWal AI middleware for automatic recall before generation and auto-save after generation.
 ---
 
 ## Use This When

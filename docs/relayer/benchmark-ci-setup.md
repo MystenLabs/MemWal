@@ -1,3 +1,36 @@
+---
+title: "Benchmark CI Setup"
+description: >-
+  Configuration guide for the Walrus Memory relayer benchmark CI workflows, including GitHub Environment setup, Railway relayer URLs, test accounts, and manual benchmark execution.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - benchmark
+  - CI
+  - GitHub Actions
+  - performance testing
+goal:
+  description: Configure and run the relayer benchmark workflows in CI and locally.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I set up benchmark CI for the Walrus Memory relayer?"
+  - "What GitHub environments and secrets are needed for MemWal benchmarks?"
+  - "How do I run a manual recall latency benchmark against the relayer?"
+answer: >-
+  The relayer benchmark CI consists of a smoke workflow (pull requests, no secrets needed) and a live workflow (pushes to dev/staging and weekly runs). Live benchmarks run against Railway-hosted relayer endpoints using GitHub Environment secrets for delegate keys and account IDs, and results are uploaded as GitHub Actions artifacts.
+---
+
 # Benchmark CI Setup
 
 This document records how to configure the relayer benchmark workflows.

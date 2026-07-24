@@ -1,7 +1,34 @@
 ---
 title: Cookbook - Multi-Tenant Server Apps
-description: Serve many end users from one MemWalAccount using a delegate key on the server and a namespace per user wallet.
-keywords: [multi-tenant, SaaS, delegate key, namespace, server, Next.js, MemWalAccount]
+description: >-
+  Serve many end users from one MemWalAccount using a delegate key on the server and a namespace per user wallet. Covers the full pattern for SaaS-style apps with Next.js, security best practices, and delegate key lifecycle management.
+keywords:
+  - multi-tenant
+  - SaaS
+  - delegate key
+  - namespace
+  - Walrus Memory
+  - MemWal
+goal:
+  description: Implement a multi-tenant memory architecture where one MemWalAccount serves many users, isolated by per-wallet namespaces and secured with delegate keys.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I build a multi-tenant app with Walrus Memory?
+  - How do I isolate user memories in a SaaS app with MemWal?
+  - What is the security model for multi-tenant Walrus Memory apps?
+answer: >-
+  Use one MemWalAccount with a delegate key on the server and derive a deterministic namespace per authenticated user wallet. The server holds MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID as environment variables, computes the namespace from the verified wallet address, and never exposes the delegate key to the browser. Namespaces are data-organization boundaries, so cross-user isolation depends on proper server-side authentication.
 ---
 
 This is the pattern for SaaS-style apps where **one operator** runs a server that stores memory on behalf of **many end users**. For example, a Next.js app on Vercel where users connect a Sui wallet only for sign-in, and the server holds the credentials.

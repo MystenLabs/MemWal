@@ -1,6 +1,39 @@
 ---
 title: "Example Apps"
-description: "Short examples showing how each demo app uses Walrus Memory."
+description: >-
+  Short examples showing how each demo app in the MemWal repo uses Walrus Memory,
+  including the Playground, Chatbot, Noter, and Researcher integration patterns.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - example apps
+  - demo
+  - Playground
+  - Chatbot
+  - integration patterns
+goal:
+  description: Understand the different Walrus Memory integration patterns demonstrated by each example app and run them locally.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What example apps are included in the Walrus Memory repo?"
+  - "How does the MemWal Chatbot app integrate AI middleware with memory?"
+  - "How do I run the MemWal demo apps locally?"
+answer: >-
+  The MemWal repo includes four demo apps: Playground (full SDK playground), Chatbot
+  (AI middleware with persistent memory), Noter (note-to-memory extraction using analyze),
+  and Researcher (long-form research memory with session rehydration). Run them with
+  pnpm dev:app, pnpm dev:chatbot, pnpm dev:noter, or pnpm dev:researcher.
 ---
 
 The repo includes ready-to-run apps in `apps/` that show different Walrus Memory integration patterns.

@@ -1,7 +1,43 @@
 ---
 title: "How an Agent Funds Walrus Storage"
-description: "How an autonomous agent pays for Walrus storage, either by holding WAL directly or through sponsored storage such as the relayer."
-keywords: [funding, WAL, SUI, gas, sponsored storage, publisher, storage resources, upload relay, blob lifecycle, autonomous agent, MemWal, Walrus]
+description: >-
+  How an autonomous agent pays for Walrus storage, either by holding WAL directly or through
+  sponsored storage such as the relayer. Covers the two-token cost model (WAL and SUI), direct
+  funding, publisher sponsorship, sponsored transactions, and pre-funding patterns.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - funding
+  - WAL
+  - SUI
+  - gas
+  - sponsored storage
+  - publisher
+  - storage resources
+  - blob lifecycle
+goal:
+  description: Understand how Walrus storage is funded and choose the right funding model for your agent
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does an AI agent pay for Walrus storage?
+  - What is the difference between WAL and SUI costs for Walrus writes?
+  - What are the sponsored storage options for Walrus Memory?
+answer: >-
+  Walrus writes consume two tokens: WAL for storage fees and SUI for gas. Agents can hold WAL
+  directly for full autonomy, use a publisher or relayer that sponsors both costs, leverage Sui
+  sponsored transactions for gas-only sponsorship, or receive pre-funded WAL and storage resources
+  from a central treasury.
 ---
 
 Walrus Memory writes your encrypted memories to Walrus as blobs, as described in [How Storage Works](/fundamentals/architecture/how-storage-works). Someone has to pay for that storage. This page explains who, and the trade-offs between an agent holding WAL itself and having a third party sponsor the cost.

@@ -1,6 +1,37 @@
 ---
 title: "Run the Repo Locally"
-description: "Step-by-step guide to set up the Walrus Memory monorepo for local development."
+description: >-
+  Step-by-step guide to set up the Walrus Memory monorepo for local development,
+  including prerequisites, SDK build, running apps, and optional backend services.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - local development
+  - monorepo
+  - setup
+  - contributing
+goal:
+  description: Clone the MemWal monorepo, install dependencies, build the SDK, and run individual apps or backend services locally.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I set up the Walrus Memory monorepo for local development?"
+  - "Why do I need to run pnpm build:sdk before starting MemWal apps?"
+  - "What are the prerequisites for running MemWal locally?"
+answer: >-
+  Clone the repo, run pnpm install, then pnpm build:sdk to compile the SDK before starting
+  any app. The apps depend on the SDK compiled output, so skipping the build causes import
+  errors. Backend services like the relayer and indexer are optional for frontend development.
 ---
 
 ## Prerequisites

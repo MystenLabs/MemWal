@@ -1,5 +1,34 @@
 ---
 title: "Overview"
+description: >-
+  Overview of the Walrus Memory SDK surfaces for TypeScript and Python, including the three TypeScript entry points (MemWal, MemWalManual, withMemWal) and the Python client with middleware support.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - SDK overview
+  - TypeScript SDK
+  - Python SDK
+  - MemWalManual
+goal:
+  description: Understand the available SDK entry points and choose the right one for your project.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What SDK entry points does Walrus Memory offer?
+  - Should I use the TypeScript or Python Walrus Memory SDK?
+  - What is the difference between MemWal, MemWalManual, and withMemWal?
+answer: >-
+  Walrus Memory provides TypeScript and Python SDKs. The TypeScript SDK has three entry points: MemWal (recommended default, relayer-backed), MemWalManual (client-managed embeddings and local SEAL), and withMemWal (AI SDK middleware). The Python SDK mirrors the TypeScript MemWal client with async-native support and LangChain/OpenAI middleware.
 ---
 
 Walrus Memory exposes SDK surfaces for TypeScript and Python. The SDKs give your agents portable memory that works across apps, sessions, and workflows — fully under your control.

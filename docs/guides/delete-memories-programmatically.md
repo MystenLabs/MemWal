@@ -1,6 +1,38 @@
 ---
 title: "Delete memories programmatically"
-description: "Find and permanently delete old Walrus Memory blobs through the Security Delete API."
+description: >-
+  Find and permanently delete old Walrus Memory blobs through the Security Delete API
+  using a Node.js script with wallet authentication and sponsored Sui transactions.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - delete memories
+  - Security Delete API
+  - programmatic deletion
+  - Sui transaction
+goal:
+  description: Write and run a script that authenticates with a wallet, lists deletable memories older than a cutoff, and permanently deletes them through the Security Delete API.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I delete Walrus Memory blobs programmatically?"
+  - "What endpoints does the MemWal Security Delete API use?"
+  - "How do I authenticate with the Security Delete API to remove old memories?"
+answer: >-
+  Use the Security Delete API to authenticate with a wallet challenge, list deletable blobs,
+  and permanently remove them via sponsored Sui transactions. The flow involves requesting a
+  challenge, verifying the signed challenge for a Bearer token, listing blobs, preparing a
+  batch deletion transaction, and submitting the wallet signature.
 ---
 
 ## Overview

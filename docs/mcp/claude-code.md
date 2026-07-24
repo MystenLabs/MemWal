@@ -1,7 +1,35 @@
 ---
 title: Claude Code
-description: Add portable Walrus Memory to Claude Code as a full plugin with automatic memory, or as a plain MCP server.
-keywords: [MCP, Claude Code, Walrus Memory, MemWal, plugin, automatic memory]
+description: >-
+  Add portable Walrus Memory to Claude Code as a full plugin with automatic memory, or as a plain MCP server.
+  The plugin adds lifecycle hooks that make the agent prefer Walrus Memory over built-in memory.
+keywords:
+  - MCP
+  - Claude Code
+  - Walrus Memory
+  - MemWal
+  - plugin
+  - automatic memory
+goal:
+  description: Install and configure MemWal on Claude Code as either a plugin or MCP-only server.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Claude Code?
+  - How do I install the MemWal plugin on Claude Code?
+  - What is the difference between the MemWal plugin and MCP-only on Claude Code?
+answer: >-
+  To add Walrus Memory to Claude Code, install the MemWal plugin via the marketplace (/plugin marketplace add MystenLabs/MemWal, then /plugin install memwal@memwal-plugins), or add it as MCP-only with claude mcp add. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that reinforce automatic memory behavior and make the agent prefer Walrus Memory over Claude Code's built-in memory.
 ---
 
 Add MemWal to Claude Code so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).

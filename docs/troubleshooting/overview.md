@@ -1,7 +1,41 @@
 ---
-title: Troubleshooting and FAQ
-description: Resolve common Walrus Memory problems, including delegate-key authentication errors, MCP connection issues, and save timeouts.
-keywords: [Walrus Memory, MemWal, troubleshooting, AUTH_REJECTED, delegate key, MCP, timeout, memwal_analyze]
+title: "Troubleshooting and FAQ"
+description: >-
+  Resolve common Walrus Memory problems, including delegate-key authentication errors,
+  MCP connection issues, and save timeouts, with step-by-step fixes and a quick reference.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - troubleshooting
+  - AUTH_REJECTED
+  - delegate key
+  - MCP
+  - timeout
+  - memwal_analyze
+goal:
+  description: Diagnose and resolve common Walrus Memory issues including AUTH_REJECTED errors, MCP tool visibility problems, and save timeouts.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "Why am I getting AUTH_REJECTED errors in Walrus Memory?"
+  - "Why do only memwal_login tools appear in my MCP client?"
+  - "Why does memwal_analyze time out while recall works?"
+answer: >-
+  Most AUTH_REJECTED errors occur because the delegate key is not registered onchain,
+  the account ID does not match, or the client points at the wrong network. MCP tools
+  require a credentials file and a client restart to appear. Save timeouts do not mean
+  the save failed, as the relayer processes saves as background jobs; confirm with a
+  recall before retrying.
 ---
 
 <!--

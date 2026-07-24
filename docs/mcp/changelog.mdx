@@ -1,7 +1,34 @@
 ---
 title: Changelog
-description: Release history for the Walrus Memory MCP package.
-keywords: [MCP, Walrus Memory, MemWal, changelog, releases]
+description: >-
+  Release history for the Walrus Memory MCP package (@mysten-incubation/memwal-mcp).
+  Covers new features, bug fixes, and breaking changes across all versions.
+keywords:
+  - MCP
+  - Walrus Memory
+  - MemWal
+  - changelog
+  - releases
+goal:
+  description: Review the release history to understand what changed in each version of the MemWal MCP package.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the latest version of the MemWal MCP package?
+  - What changed in the MemWal MCP changelog?
+  - When was the automatic memory plugin added to MemWal MCP?
+answer: >-
+  The MemWal MCP package (@mysten-incubation/memwal-mcp) changelog tracks releases from the initial 0.0.1 through 0.0.5. Key additions include the automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity (0.0.5), proactive memory tools, memwal_remember_bulk and memwal_health tools, and fixes for plugin bundling and credential handling.
 ---
 
 ## 0.0.5
