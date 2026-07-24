@@ -13,7 +13,7 @@ keywords:
   - ask
   - restore
 goal:
-  description: Use the default MemWal client to store, recall, analyze, and ask questions against your agent's memory.
+  description: Call remember(), recall(), analyze(), and ask() on the Python MemWal client and understand the parameters, return values, and async vs. sync variants for each.
   requires:
     - has_frontmatter:
         - title

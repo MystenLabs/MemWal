@@ -10,7 +10,7 @@ keywords:
   - contributing
   - docs workflow
 goal:
-  description: Understand the documentation contribution workflow and apply the working rules before shipping doc changes.
+  description: Follow the docs contribution workflow — branch, edit, verify frontmatter, and open a PR — without breaking build or frontmatter validation rules.
   requires:
     - has_frontmatter:
         - title

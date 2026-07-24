@@ -10,7 +10,7 @@ keywords:
   - SDK methods
   - config
 goal:
-  description: Look up any SDK method signature, config option, or return type for the Walrus Memory clients.
+  description: Look up the exact method signature, parameter types, return type, and thrown errors for any Walrus Memory SDK method or config field before writing code that calls it.
   requires:
     - has_frontmatter:
         - title

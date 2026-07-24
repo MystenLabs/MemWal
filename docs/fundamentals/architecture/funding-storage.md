@@ -16,7 +16,7 @@ keywords:
   - storage resources
   - blob lifecycle
 goal:
-  description: Understand how Walrus storage is funded and choose the right funding model for your agent
+  description: Compare the storage funding models available, understand how WAL tokens are consumed per operation, and select the model that matches your agent's cost structure and user ownership requirements.
   requires:
     - has_frontmatter:
         - title

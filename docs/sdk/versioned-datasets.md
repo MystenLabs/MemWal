@@ -10,7 +10,7 @@ keywords:
   - blob ID
   - Walrus Memory
 goal:
-  description: Use Walrus content-addressing to build versioned datasets with immutable history and tamper-evident lineage for agent workflows.
+  description: Use Walrus content-addressing to store dataset versions with immutable blob IDs, track lineage onchain, and verify dataset integrity without trusting a central registry.
   requires:
     - has_frontmatter:
         - title

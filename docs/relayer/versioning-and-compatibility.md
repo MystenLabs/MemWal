@@ -10,7 +10,7 @@ keywords:
   - SemVer
   - deprecation policy
 goal:
-  description: Understand the relayer API versioning contract, check SDK compatibility, and follow the deprecation process for breaking changes.
+  description: Verify that your SDK version is compatible with your relayer, interpret versioning headers, and follow the deprecation timeline when upgrading across breaking changes.
   requires:
     - has_frontmatter:
         - title

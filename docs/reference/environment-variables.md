@@ -11,7 +11,7 @@ keywords:
   - relayer
   - MCP server
 goal:
-  description: Find the correct environment variable name, default value, and usage context for any Walrus Memory component.
+  description: Look up the exact environment variable name, expected value format, default, and which component uses it for any Walrus Memory SDK, relayer, or indexer setting.
   requires:
     - has_frontmatter:
         - title

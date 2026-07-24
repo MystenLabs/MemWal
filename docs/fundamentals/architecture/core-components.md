@@ -15,7 +15,7 @@ keywords:
   - Walrus
   - pgvector
 goal:
-  description: Understand the six core components of Walrus Memory and how they work together
+  description: Name and describe each of the six Walrus Memory components, explain the role each plays in a memory operation, and trace how they interact during store, recall, and restore.
   requires:
     - has_frontmatter:
         - title

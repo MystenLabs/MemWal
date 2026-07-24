@@ -10,7 +10,7 @@ keywords:
   - REST endpoints
   - authentication
 goal:
-  description: Understand how to authenticate with and call every relayer API endpoint.
+  description: Authenticate a request to the relayer using an Ed25519 delegate key, call each API endpoint with the correct parameters, and interpret the response or error codes.
   requires:
     - has_frontmatter:
         - title

@@ -10,7 +10,7 @@ keywords:
   - Mintlify
   - local development
 goal:
-  description: Run the Walrus Memory documentation site locally and build it for verification.
+  description: Start the Mintlify dev server, verify pages render correctly in the browser, and run the production build to catch broken links or frontmatter errors before opening a PR.
   requires:
     - has_frontmatter:
         - title

@@ -11,7 +11,7 @@ keywords:
   - auth resolution
   - PostgreSQL
 goal:
-  description: Understand why the indexer exists, how it works, and how the relayer resolves delegate key ownership through the auth resolution priority chain.
+  description: Explain why the indexer exists, trace the auth resolution priority chain the relayer uses to look up delegate key ownership, and predict what happens if the indexer falls behind.
   requires:
     - has_frontmatter:
         - title

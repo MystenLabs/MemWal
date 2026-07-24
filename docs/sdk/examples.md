@@ -10,7 +10,7 @@ keywords:
   - analyze
   - AI middleware
 goal:
-  description: Follow working examples to store, recall, analyze, and use AI middleware with the Walrus Memory SDK.
+  description: Run working SDK examples for storing, recalling, analyzing, and using AI middleware, and adapt them as starting points for your own integration.
   requires:
     - has_frontmatter:
         - title

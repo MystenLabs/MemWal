@@ -10,7 +10,7 @@ keywords:
   - GitHub Actions
   - performance testing
 goal:
-  description: Configure and run the relayer benchmark workflows in CI and locally.
+  description: Set up the relayer benchmark GitHub Actions workflow, run it locally to baseline performance, and interpret throughput and latency results.
   requires:
     - has_frontmatter:
         - title

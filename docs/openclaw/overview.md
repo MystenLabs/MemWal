@@ -11,7 +11,7 @@ keywords:
   - agent memory
   - plugin
 goal:
-  description: Understand what the Walrus Memory OpenClaw plugin provides and decide if it fits your use case.
+  description: Assess whether the OpenClaw Walrus Memory plugin fits your agent's needs, identify its key features (automatic recall, encrypted storage, user-owned), and decide whether to install it or use MCP-only.
   requires:
     - has_frontmatter:
         - title

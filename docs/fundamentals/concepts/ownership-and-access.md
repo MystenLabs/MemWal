@@ -13,7 +13,7 @@ keywords:
   - permissions
   - Sui smart contract
 goal:
-  description: Understand how ownership and delegate access work in Walrus Memory
+  description: Distinguish account ownership from delegate access, determine the right key type for each use case, and apply the access model to restrict or share memory across agents and apps.
   requires:
     - has_frontmatter:
         - title

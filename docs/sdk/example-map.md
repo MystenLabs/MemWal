@@ -9,7 +9,7 @@ keywords:
   - example map
   - getting started
 goal:
-  description: Find the right Walrus Memory SDK example for your use case by following the example map.
+  description: Use the example map to identify which SDK example matches your use case, then jump directly to the relevant code or guide.
   requires:
     - has_frontmatter:
         - title

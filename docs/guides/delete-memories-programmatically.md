@@ -11,7 +11,7 @@ keywords:
   - programmatic deletion
   - Sui transaction
 goal:
-  description: Write and run a script that authenticates with a wallet, lists deletable memories older than a cutoff, and permanently deletes them through the Security Delete API.
+  description: Write a script that signs with a wallet, lists memories older than a cutoff date, and permanently deletes them via the Security Delete API — suitable for scheduled cleanup jobs.
   requires:
     - has_frontmatter:
         - title

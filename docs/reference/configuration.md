@@ -11,7 +11,7 @@ keywords:
   - MemWalConfig
   - WithMemWalOptions
 goal:
-  description: Choose the correct configuration shape for your Walrus Memory integration and understand each field's purpose and defaults.
+  description: Find the correct configuration object shape for your Walrus Memory integration path, understand each required and optional field, and apply the right defaults for your environment.
   requires:
     - has_frontmatter:
         - title

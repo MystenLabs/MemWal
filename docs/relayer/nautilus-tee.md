@@ -10,7 +10,7 @@ keywords:
   - trusted execution environment
   - enclave deployment
 goal:
-  description: Deploy the Walrus Memory relayer in a TEE using the Nautilus reference template and understand the remaining steps for full attestation.
+  description: Deploy the Walrus Memory relayer inside a Nautilus TEE using the reference template, understand the attestation steps still required, and assess the remaining trust surface.
   requires:
     - has_frontmatter:
         - title

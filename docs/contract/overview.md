@@ -10,7 +10,7 @@ keywords:
   - Sui
   - onchain account
 goal:
-  description: Understand the Walrus Memory onchain account model, its key objects, functions, and how it manages identity and access control.
+  description: Map the MemWalAccount object model, identify the key onchain functions for creating and managing accounts, and explain how identity and access are enforced at the contract layer.
   requires:
     - has_frontmatter:
         - title

@@ -10,7 +10,7 @@ keywords:
   - hosted endpoint
   - getting started
 goal:
-  description: Connect to the managed Walrus Memory relayer and understand the trade-offs of using the shared hosted deployment.
+  description: Configure the SDK to use the managed Walrus Memory relayer, understand which data it can access and what that means for trust, and decide when to switch to a self-hosted alternative.
   requires:
     - has_frontmatter:
         - title

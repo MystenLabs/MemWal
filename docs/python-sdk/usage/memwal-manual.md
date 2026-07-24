@@ -12,7 +12,7 @@ keywords:
   - remember_manual
   - recall_manual
 goal:
-  description: Use the lower-level manual methods to register pre-uploaded blobs, search with pre-computed vectors, and compute embeddings without storage.
+  description: Call the manual Python SDK methods to register a pre-uploaded blob, search with a pre-computed embedding vector, and compute embeddings independently from storage.
   requires:
     - has_frontmatter:
         - title

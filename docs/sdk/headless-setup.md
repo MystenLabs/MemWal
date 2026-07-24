@@ -10,7 +10,7 @@ keywords:
   - environment variables
   - Walrus Memory
 goal:
-  description: Set up the Walrus Memory SDK in a headless server or agent environment by loading credentials from environment variables and validating connectivity at boot.
+  description: Initialize the Walrus Memory SDK in a headless server or agent process by loading credentials from environment variables, validating connectivity at boot, and handling credential errors gracefully.
   requires:
     - has_frontmatter:
         - title

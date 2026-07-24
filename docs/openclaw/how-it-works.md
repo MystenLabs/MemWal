@@ -11,7 +11,7 @@ keywords:
   - auto-recall
   - auto-capture
 goal:
-  description: Understand the architecture, message flow, and hook mechanics of the Walrus Memory OpenClaw plugin.
+  description: Trace a conversation turn through the OpenClaw plugin's before/after hooks, explain how automatic recall and save work without explicit tool calls, and differentiate hook-driven memory from manual tool invocations.
   requires:
     - has_frontmatter:
         - title

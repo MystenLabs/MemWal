@@ -12,7 +12,7 @@ keywords:
   - architecture
   - SEAL
 goal:
-  description: Understand why the Walrus Memory AccountRegistry is designed as a permanent append-only mapping and the security implications of this design.
+  description: Explain why the AccountRegistry is append-only, predict what breaks if entries were mutable, and apply this constraint when designing account and key lifecycle flows.
   requires:
     - has_frontmatter:
         - title

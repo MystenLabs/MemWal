@@ -11,7 +11,7 @@ keywords:
   - installation
   - Ed25519
 goal:
-  description: Install the memwal Python package, configure credentials, and store and recall your first memory.
+  description: Install the memwal Python package, create a MemWal client with your account credentials, call remember() to store a memory, and confirm recall() returns it.
   requires:
     - has_frontmatter:
         - title

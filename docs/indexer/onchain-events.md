@@ -11,7 +11,7 @@ keywords:
   - indexer
   - smart contract
 goal:
-  description: Understand the Sui events emitted by the Walrus Memory contract and which events the indexer currently processes.
+  description: List the onchain events emitted by the Walrus Memory contract, identify which ones the indexer currently processes, and understand the gap for events not yet covered.
   requires:
     - has_frontmatter:
         - title

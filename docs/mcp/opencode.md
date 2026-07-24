@@ -10,7 +10,7 @@ keywords:
   - MemWal
   - memory tools
 goal:
-  description: Install and configure MemWal on OpenCode as an MCP server.
+  description: Add the MemWal MCP server to OpenCode, authenticate with your account credentials, and verify memory tools are available in your OpenCode session.
   requires:
     - has_frontmatter:
         - title

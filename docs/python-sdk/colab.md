@@ -11,7 +11,7 @@ keywords:
   - notebook
   - tutorial
 goal:
-  description: Open and run the Walrus Memory Python SDK Colab notebook to interactively explore all SDK features.
+  description: Open the Walrus Memory Python SDK Colab notebook, run each cell to store and recall memories, and use it as an interactive reference before integrating the SDK into your own project.
   requires:
     - has_frontmatter:
         - title

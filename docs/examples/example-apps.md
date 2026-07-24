@@ -12,7 +12,7 @@ keywords:
   - Chatbot
   - integration patterns
 goal:
-  description: Understand the different Walrus Memory integration patterns demonstrated by each example app and run them locally.
+  description: Identify which example app matches your integration pattern, clone and run it locally, and use it as a starting point for your own Walrus Memory integration.
   requires:
     - has_frontmatter:
         - title

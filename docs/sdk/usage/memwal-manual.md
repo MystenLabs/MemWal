@@ -10,7 +10,7 @@ keywords:
   - key management
   - Walrus Memory
 goal:
-  description: Set up and use the MemWalManual client for client-managed embeddings and local SEAL encryption, including browser wallet integration and headless agent usage.
+  description: Initialize MemWalManual for browser wallet signing or headless agents, call registerEntry() with a pre-uploaded blob and pre-computed embedding, and use search() to run a vector query without storage.
   requires:
     - has_frontmatter:
         - title

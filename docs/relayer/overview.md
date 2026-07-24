@@ -10,7 +10,7 @@ keywords:
   - SEAL encryption
   - vector search
 goal:
-  description: Understand what the relayer does, how it is architected, and the trust boundary it operates within.
+  description: Describe what the relayer does at each step of a memory operation, explain its architecture (Rust Axum backend + TS sidecar), and identify the trust boundary it operates within.
   requires:
     - has_frontmatter:
         - title

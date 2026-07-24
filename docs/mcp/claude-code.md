@@ -11,7 +11,7 @@ keywords:
   - plugin
   - automatic memory
 goal:
-  description: Install and configure MemWal on Claude Code as either a plugin or MCP-only server.
+  description: Add MemWal to Claude Code as an automatic memory plugin or MCP-only server, authenticate with your account credentials, and confirm persistent memory is working across sessions.
   requires:
     - has_frontmatter:
         - title

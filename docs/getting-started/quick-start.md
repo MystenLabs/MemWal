@@ -12,7 +12,7 @@ keywords:
   - installation
   - setup
 goal:
-  description: Install the Walrus Memory SDK, configure credentials, and successfully store and recall a memory
+  description: Get a working end-to-end Walrus Memory integration: install the SDK, create an account at memory.walrus.xyz, call remember() to store a memory, and confirm recall() returns it.
   requires:
     - has_frontmatter:
         - title

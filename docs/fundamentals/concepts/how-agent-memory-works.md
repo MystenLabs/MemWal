@@ -14,7 +14,7 @@ keywords:
   - retrieval-augmented generation
   - persistent memory
 goal:
-  description: Understand the difference between the context window and persistent memory, distinguish short-term from long-term memory, and explain how semantic recall with embeddings and vector search works.
+  description: Explain why the LLM context window is not memory, contrast short-term context with persistent long-term storage, and trace how embedding generation and vector search power semantic recall.
   requires:
     - has_frontmatter:
         - title

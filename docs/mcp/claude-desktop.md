@@ -10,7 +10,7 @@ keywords:
   - MemWal
   - memory tools
 goal:
-  description: Install and configure MemWal on Claude Desktop as an MCP server.
+  description: Add the MemWal MCP server to Claude Desktop's configuration, authenticate, and verify that memory tools are available in your Claude Desktop session.
   requires:
     - has_frontmatter:
         - title

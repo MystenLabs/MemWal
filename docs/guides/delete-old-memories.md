@@ -10,7 +10,7 @@ keywords:
   - dashboard
   - memory management
 goal:
-  description: Use the dashboard to preview, select, and permanently delete memories from a Walrus Memory account, then verify the deletion.
+  description: Use the memory.walrus.xyz dashboard to preview and select stale memories, permanently delete them, and verify they no longer appear in recall results.
   requires:
     - has_frontmatter:
         - title

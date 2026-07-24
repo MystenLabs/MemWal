@@ -13,7 +13,7 @@ keywords:
   - isolation
   - scoping
 goal:
-  description: Understand how memory spaces work and how they provide isolation in Walrus Memory
+  description: Use namespaces to scope agent memory within an account, prevent cross-namespace data leakage, and design a namespace strategy for multi-agent or multi-user deployments.
   requires:
     - has_frontmatter:
         - title

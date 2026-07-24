@@ -11,7 +11,7 @@ keywords:
   - installation
   - plugin setup
 goal:
-  description: Install, configure, and verify the Walrus Memory plugin for OpenClaw in a few minutes.
+  description: Install the OpenClaw Walrus Memory plugin, connect it to your account, and run a test conversation to confirm automatic recall and save are working.
   requires:
     - has_frontmatter:
         - title

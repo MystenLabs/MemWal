@@ -11,7 +11,7 @@ keywords:
   - setup
   - contributing
 goal:
-  description: Clone the MemWal monorepo, install dependencies, build the SDK, and run individual apps or backend services locally.
+  description: Clone the MemWal monorepo, install dependencies with pnpm, build the SDK, and start whichever app or backend service you need for local development.
   requires:
     - has_frontmatter:
         - title

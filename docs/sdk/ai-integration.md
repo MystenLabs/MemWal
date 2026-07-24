@@ -10,7 +10,7 @@ keywords:
   - Walrus Memory
   - MemWal
 goal:
-  description: Set up the withMemWal AI SDK middleware to add automatic memory recall and save to LLM generation pipelines.
+  description: Wrap a Vercel AI SDK generateText or streamText call with withMemWal to inject relevant memories into every prompt and persist notable outputs automatically.
   requires:
     - has_frontmatter:
         - title

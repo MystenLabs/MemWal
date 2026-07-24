@@ -10,7 +10,7 @@ keywords:
   - analyze
   - restore
 goal:
-  description: Use the default MemWal client to store, recall, analyze, and restore memories through the relayer.
+  description: Call remember(), recall(), analyze(), and restore() on the default MemWal client and understand the parameters and return values for each operation.
   requires:
     - has_frontmatter:
         - title

@@ -12,7 +12,7 @@ keywords:
   - verifiable memory
   - agent coordination
 goal:
-  description: Understand what Walrus Memory is, its core features, and how it fits into AI agent workflows
+  description: Explain the core problem Walrus Memory solves, describe its key capabilities (portable, verifiable, permissioned), and assess whether it fits your agent's memory requirements.
   requires:
     - has_frontmatter:
         - title

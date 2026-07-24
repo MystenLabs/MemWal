@@ -12,7 +12,7 @@ keywords:
   - transports
   - self-hosting
 goal:
-  description: Look up detailed parameters, CLI flags, transports, and configuration options for the MemWal MCP package.
+  description: Look up the exact CLI flags, transport options, tool parameters, and configuration schema for the @mysten-incubation/memwal-mcp package.
   requires:
     - has_frontmatter:
         - title

@@ -13,7 +13,7 @@ keywords:
   - timeout
   - memwal_analyze
 goal:
-  description: Diagnose and resolve common Walrus Memory issues including AUTH_REJECTED errors, MCP tool visibility problems, and save timeouts.
+  description: Diagnose and fix the three most common Walrus Memory failures: AUTH_REJECTED (key misconfiguration), missing MCP tools (client connectivity), and remember() timeouts (relayer or Walrus delays).
   requires:
     - has_frontmatter:
         - title

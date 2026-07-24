@@ -10,7 +10,7 @@ keywords:
   - SEAL access control
   - delegate permissions
 goal:
-  description: Understand the layered permission model of Walrus Memory accounts, including what owners and delegates can do and how SEAL access control is enforced.
+  description: Distinguish what owners vs. delegates can do in a MemWalAccount, explain how SEAL enforces per-blob access control, and apply the permission model when designing multi-user agent workflows.
   requires:
     - has_frontmatter:
         - title

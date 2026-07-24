@@ -12,7 +12,7 @@ keywords:
   - namespace
   - middleware
 goal:
-  description: Understand the difference between async and sync clients, configure namespaces, and choose the right entry point for your application.
+  description: Choose between the async MemWal and sync SyncMemWal clients, configure the correct namespace for your data scope, and wire up the client in your Python application.
   requires:
     - has_frontmatter:
         - title

@@ -11,7 +11,7 @@ keywords:
   - method signatures
   - dataclasses
 goal:
-  description: Look up the exact method signature, parameters, return type, or exception for any MemWal Python SDK API.
+  description: Look up the exact method signature, parameter types, return value, and exception type for any MemWal Python SDK method before writing code that calls it.
   requires:
     - has_frontmatter:
         - title

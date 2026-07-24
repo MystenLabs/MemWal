@@ -10,7 +10,7 @@ keywords:
   - MemWalManual
   - withMemWal
 goal:
-  description: Understand when to use each Walrus Memory client and how to configure namespaces properly.
+  description: Select the right Walrus Memory client (MemWal, MemWalManual, or withMemWal) for your use case, configure a namespace that scopes memory correctly, and avoid common setup mistakes.
   requires:
     - has_frontmatter:
         - title

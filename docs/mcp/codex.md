@@ -11,7 +11,7 @@ keywords:
   - plugin
   - automatic memory
 goal:
-  description: Install and configure MemWal on Codex as either a plugin or MCP-only server.
+  description: Add MemWal to Codex as a plugin or MCP-only server, authenticate with your account credentials, and confirm memory tools are available in your Codex session.
   requires:
     - has_frontmatter:
         - title

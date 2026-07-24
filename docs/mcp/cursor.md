@@ -11,7 +11,7 @@ keywords:
   - plugin
   - automatic memory
 goal:
-  description: Install and configure MemWal on Cursor as an MCP server with optional plugin hooks.
+  description: Add MemWal to Cursor's MCP configuration, optionally enable plugin lifecycle hooks for automatic memory, and verify persistent recall is working across Cursor sessions.
   requires:
     - has_frontmatter:
         - title

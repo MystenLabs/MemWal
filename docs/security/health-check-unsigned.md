@@ -12,7 +12,7 @@ keywords:
   - unauthenticated endpoint
   - API design
 goal:
-  description: Understand why the health and version endpoints are intentionally left unauthenticated and the security trade-offs involved.
+  description: Explain the deliberate security decision to leave /health and /version unauthenticated, identify what information they expose, and assess whether this is appropriate for your threat model.
   requires:
     - has_frontmatter:
         - title

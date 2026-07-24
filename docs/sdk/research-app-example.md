@@ -10,7 +10,7 @@ keywords:
   - remember
   - recall
 goal:
-  description: Store structured research findings and recall them effectively in later sessions using the Walrus Memory SDK.
+  description: Use the research app example to store structured findings with the SDK, structure recalls to surface relevant prior research, and extend the pattern for your own knowledge-accumulation workflow.
   requires:
     - has_frontmatter:
         - title

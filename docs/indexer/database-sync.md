@@ -11,7 +11,7 @@ keywords:
   - pgvector
   - database sync
 goal:
-  description: Understand the database tables, indexes, and similarity search mechanism used by the Walrus Memory indexer and relayer.
+  description: Identify the PostgreSQL tables and indexes that power the indexer and relayer, explain how pgvector HNSW enables cosine similarity search, and locate relevant tables when debugging lookup failures.
   requires:
     - has_frontmatter:
         - title

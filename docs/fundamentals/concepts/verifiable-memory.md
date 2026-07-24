@@ -14,7 +14,7 @@ keywords:
   - onchain ownership
   - durability
 goal:
-  description: Understand why Walrus Memory is persistent and verifiable, and how to verify each property
+  description: Explain what makes a Walrus Memory entry persistent and tamper-evident, identify the onchain and offchain mechanisms that enable verification, and run a spot-check against a real memory entry.
   requires:
     - has_frontmatter:
         - title

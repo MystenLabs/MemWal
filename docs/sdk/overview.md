@@ -10,7 +10,7 @@ keywords:
   - Python SDK
   - MemWalManual
 goal:
-  description: Understand the available SDK entry points and choose the right one for your project.
+  description: Compare the three SDK entry points — default MemWal, manual MemWalManual, and AI middleware withMemWal — and select the one that matches your trust model and tech stack.
   requires:
     - has_frontmatter:
         - title

@@ -10,7 +10,7 @@ keywords:
   - monitoring
   - logging
 goal:
-  description: Set up production monitoring, dashboards, and alerts for a Walrus Memory relayer deployment.
+  description: Instrument a Walrus Memory relayer with Prometheus metrics, build a Grafana dashboard to track request rates and latency, and configure alerts for production anomalies.
   requires:
     - has_frontmatter:
         - title

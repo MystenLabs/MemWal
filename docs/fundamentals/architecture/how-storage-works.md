@@ -15,7 +15,7 @@ keywords:
   - restore
   - blob
 goal:
-  description: Understand how memories are stored, recalled, and restored in Walrus Memory
+  description: Trace a memory through the full storage lifecycle — embedding, encryption, Walrus upload, vector indexing, semantic recall, and restore — and explain what each step produces.
   requires:
     - has_frontmatter:
         - title

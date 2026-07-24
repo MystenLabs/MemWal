@@ -11,7 +11,7 @@ keywords:
   - plugin
   - automatic memory
 goal:
-  description: Install and configure MemWal on Antigravity as either a plugin or MCP-only server.
+  description: Add MemWal to Antigravity as a plugin with lifecycle hooks or as a standalone MCP server, authenticate with your account credentials, and verify the connection with a test recall.
   requires:
     - has_frontmatter:
         - title

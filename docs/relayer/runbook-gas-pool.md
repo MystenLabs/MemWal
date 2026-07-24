@@ -10,7 +10,7 @@ keywords:
   - SUI
   - sponsored transaction
 goal:
-  description: Diagnose gas-pool exhaustion on relayer pool wallets and restore healthy SUI balances through consolidation or top-up.
+  description: Detect gas-pool exhaustion from relayer metrics or logs, consolidate fragmented SUI across pool wallets, and top up balances to restore healthy operation.
   requires:
     - has_frontmatter:
         - title

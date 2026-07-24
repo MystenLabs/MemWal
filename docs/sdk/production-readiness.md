@@ -10,7 +10,7 @@ keywords:
   - Walrus Memory
   - MemWal
 goal:
-  description: Harden a Walrus Memory agent for production with idempotent writes, retry logic, cost caps, key custody, and graceful degradation patterns.
+  description: Harden a Walrus Memory integration for production: add idempotent writes, configure retry and timeout logic, cap costs, secure key custody, and add graceful degradation when the relayer is unreachable.
   requires:
     - has_frontmatter:
         - title

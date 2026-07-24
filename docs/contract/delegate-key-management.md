@@ -10,7 +10,7 @@ keywords:
   - key management
   - authentication
 goal:
-  description: Generate, register, use, and revoke delegate keys for Walrus Memory SDK authentication.
+  description: Generate a delegate key pair, register it onchain to a MemWalAccount, authenticate SDK requests with it, and revoke it when access should end.
   requires:
     - has_frontmatter:
         - title

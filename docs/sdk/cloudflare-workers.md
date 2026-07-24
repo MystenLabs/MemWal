@@ -10,7 +10,7 @@ keywords:
   - bundle size
   - Walrus Memory
 goal:
-  description: Deploy the Walrus Memory SDK on Cloudflare Workers with the correct configuration and crash-isolation patterns.
+  description: Configure the Walrus Memory SDK to run inside a Cloudflare Worker, apply the crash-isolation patterns needed for edge execution, and verify memory operations work within Workers' constraints.
   requires:
     - has_frontmatter:
         - title

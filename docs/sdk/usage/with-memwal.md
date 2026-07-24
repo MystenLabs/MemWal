@@ -10,7 +10,7 @@ keywords:
   - auto-save
   - Walrus Memory
 goal:
-  description: Integrate Walrus Memory into a Vercel AI SDK app using the withMemWal middleware for automatic recall and save.
+  description: Wrap a Vercel AI SDK streamText or generateText call with withMemWal, configure the recall and save filters, and verify that relevant memories are injected and notable outputs are persisted.
   requires:
     - has_frontmatter:
         - title

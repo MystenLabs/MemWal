@@ -13,7 +13,7 @@ keywords:
   - onchain enforcement
   - authentication
 goal:
-  description: Understand where trust lives in the Walrus Memory architecture and how to mitigate relayer trust
+  description: Map where trust is placed at each step of a memory operation, identify what the relayer can and cannot access, and apply trust-mitigation strategies like TEE deployment or the manual client.
   requires:
     - has_frontmatter:
         - title

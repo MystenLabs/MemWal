@@ -10,7 +10,7 @@ keywords:
   - analyze
   - AI middleware
 goal:
-  description: Use advanced SDK features like manual registration, analyze for fact extraction, and AI middleware integration.
+  description: Call registerEntry() to store a pre-uploaded blob, use analyze() to extract and store structured facts from long content, and wire up withMemWal middleware for automatic recall in AI generation pipelines.
   requires:
     - has_frontmatter:
         - title

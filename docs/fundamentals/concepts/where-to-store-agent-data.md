@@ -11,7 +11,7 @@ keywords:
   - decision guide
   - Walrus Memory
 goal:
-  description: Evaluate the trade-offs between provider-native memory, vector databases, and Walrus Memory and choose the right storage approach for an AI agent based on persistence, portability, ownership, and verifiability requirements.
+  description: Compare provider-native memory, vector databases, and Walrus Memory across persistence, portability, ownership, and verifiability — then select the right store for your agent's data requirements.
   requires:
     - has_frontmatter:
         - title

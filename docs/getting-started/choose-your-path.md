@@ -14,7 +14,7 @@ keywords:
   - AI middleware
   - MCP
 goal:
-  description: Understand the available Walrus Memory integration paths and choose the one that fits your use case
+  description: Compare the four integration paths — default SDK, manual client, AI middleware, and MCP server — and pick the one that matches your trust model, tech stack, and control requirements.
   requires:
     - has_frontmatter:
         - title

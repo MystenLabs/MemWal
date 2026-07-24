@@ -11,7 +11,7 @@ keywords:
   - automatic memory
   - agent memory
 goal:
-  description: Understand the two installation paths (plugin vs MCP-only) and choose the right client-specific setup for MemWal.
+  description: Choose between the plugin installation path (with automatic before/after hooks) and the MCP-only path, then navigate to the correct client-specific setup guide for your AI tool.
   requires:
     - has_frontmatter:
         - title

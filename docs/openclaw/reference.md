@@ -11,7 +11,7 @@ keywords:
   - hooks
   - CLI
 goal:
-  description: Look up detailed parameters, configuration options, and troubleshooting steps for the OpenClaw Walrus Memory plugin.
+  description: Look up the exact configuration fields, hook parameters, and troubleshooting steps for the @mysten-incubation/oc-memwal OpenClaw plugin.
   requires:
     - has_frontmatter:
         - title

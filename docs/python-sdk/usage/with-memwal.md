@@ -12,7 +12,7 @@ keywords:
   - middleware
   - with_memwal
 goal:
-  description: Wrap an existing LangChain or OpenAI client with automatic Walrus Memory recall and save middleware.
+  description: Wrap an existing LangChain or OpenAI client with with_memwal() to inject relevant memories before each LLM call and persist notable outputs after each response.
   requires:
     - has_frontmatter:
         - title

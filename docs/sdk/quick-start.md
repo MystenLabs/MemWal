@@ -10,7 +10,7 @@ keywords:
   - first memory
   - SDK setup
 goal:
-  description: Install the SDK, configure credentials, and successfully store and recall a first memory.
+  description: Install @mysten-incubation/memwal, configure your account ID, delegate key, and relayer URL, then call remember() and recall() to confirm end-to-end connectivity.
   requires:
     - has_frontmatter:
         - title
