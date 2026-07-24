@@ -29,6 +29,23 @@ The vector entry in the relayer database is the only object in this list that is
 
 A blob moves through a predictable set of states from the moment the agent writes it. The agent's job is to know which state each blob is in and act before the blob expires.
 
+```mermaid
+flowchart TD
+    W["Write: reserve, register, certify"] --> R["Record identifiers:
+    blob ID, Blob object ID,
+    namespace, expiry epoch"]
+    R --> M["Monitor: current epoch
+    vs expiry minus margin"]
+    M -->|outside margin| M
+    M -->|inside margin| D{"Keep this blob?"}
+    D -->|renew| E["Extend Blob object:
+    pay WAL for more epochs"]
+    E --> U["Record new expiry epoch"]
+    U --> M
+    D -->|let lapse| X["Network drops blob:
+    content becomes unrecoverable"]
+```
+
 <Steps>
   <Step>
     ### Register and certify
@@ -51,7 +68,7 @@ A blob moves through a predictable set of states from the moment the agent write
   <Step>
     ### Renew or drop
 
-    Before a blob expires, the agent either extends its lifetime for more epochs or lets it lapse. When the agent lets a blob lapse, the network drops it and its content is no longer recoverable. An agent with durable memory runs an extend-before-expiry loop.
+    Before a blob expires, the agent either extends its lifetime for more epochs or lets it lapse. When the agent lets a blob lapse, the network drops it and no one can recover its content. An agent with durable memory runs an extend-before-expiry loop.
   </Step>
 </Steps>
 

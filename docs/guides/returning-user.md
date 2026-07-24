@@ -14,7 +14,7 @@ Your memories live on Walrus and your account lives on Sui, so they persist no m
 
 Walrus Memory stores your memories as encrypted blobs on Walrus and records your account and its permissions on Sui. Neither depends on your browser. When you connect the same wallet again, whether a week later or on a different machine, the same account and the same memories are still yours.
 
-The one thing that stays local is the delegate key. A delegate key is a keypair your account authorizes to read and write memory on your behalf. The dashboard keeps it in the browser you created it in, so a new browser starts without it. This is expected, and recovering is a single step.
+The one thing that stays local is the delegate key. A delegate key is a keypair your account authorizes to read and write memory on your behalf. The dashboard keeps it in the browser you created it in, so a new browser starts without it. Expect this; recovering takes a single step.
 
 ## First sign-in on a new device
 
@@ -44,7 +44,7 @@ When you connect your wallet on a device that has no saved delegate key, the das
 Losing a delegate key does not lose your memories. The key is a credential for reaching your account, not the account itself. Create a new one and your memories are still there. If a lost key might be exposed, remove it from your account on the dashboard so it can no longer act on your behalf.
 </Note>
 
-### Your memories are already searchable
+### Recall already reaches your memories
 
 The search index lives in the relayer's database, not your browser, scoped to your account and namespace. Once you have a delegate key on the new device, recall reaches your existing memories straight away, with nothing to rebuild.
 
@@ -57,11 +57,11 @@ console.log(`restored=${result.restored} skipped=${result.skipped} total=${resul
 
 Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10), so `total` is the number of blobs it inspected in that call, not a full count of your namespace. Restore has no pagination cursor, so repeating a call at the same limit re-inspects the same newest blobs and returns nothing new. To rebuild a large namespace, rerun restore with a progressively higher `limit` until `restored` stops increasing. For how restore works, see [How Storage Works](/fundamentals/architecture/how-storage-works).
 
-## Existing Walrus data is not migrated
+## Walrus Memory does not migrate existing data
 
 If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design. Existing Walrus assets also do not appear in the console yet; surfacing them there is on the near-term product roadmap.
 
-A memory is not just a blob. When Walrus Memory stores a memory, it encrypts the content with Seal, attaches namespace metadata, and generates a vector embedding so the memory is searchable by meaning. An arbitrary blob you uploaded to Walrus through another tool has none of that structure, so Walrus Memory cannot treat it as a memory or return it from recall.
+A memory is not just a blob. When Walrus Memory stores a memory, it encrypts the content with Seal, attaches namespace metadata, and generates a vector embedding so recall can match the memory by meaning. An arbitrary blob you uploaded to Walrus through another tool has none of that structure, so Walrus Memory cannot treat it as a memory or return it from recall.
 
 To bring existing content into Walrus Memory, write it through the SDK, which produces a proper memory:
 
@@ -79,12 +79,12 @@ This boundary runs the other way too. Deleting a memory in Walrus Memory does no
 
 Walrus Memory keeps your content private but your ownership public. Know which is which before you rely on it.
 
-- **Your memory content is encrypted.** Walrus Memory Seal-encrypts every memory before it reaches Walrus, and only your account's owner and delegates can decrypt it. No one else reads your memories, including the relayer operator when you use client-managed encryption.
-- **Your ownership is public.** The `Blob` objects your wallet owns are visible on Sui, along with metadata such as blob IDs, sizes, expiry epochs, and the namespace label. Anyone inspecting the chain can see that your address owns blobs and how many, even though they cannot read the contents.
-- **Namespace labels are not secret.** A namespace is an organizing label attached as metadata, not a private field. Avoid putting sensitive information in a namespace name.
+- **Walrus Memory keeps your content private.** It Seal-encrypts every memory before the memory reaches Walrus, and only your account's owner and delegates can decrypt it. No one else reads your memories, including the relayer operator when you use client-managed encryption.
+- **Anyone can see your ownership.** Sui shows the `Blob` objects your wallet owns, along with metadata such as blob IDs, sizes, expiry epochs, and the namespace label. Anyone inspecting the chain can see that your address owns blobs and how many, even though they cannot read the contents.
+- **Anyone can read namespace labels.** A namespace is an organizing label attached as metadata, not a private field. Avoid putting sensitive information in a namespace name.
 
 <Warning>
-Treat namespace names and the fact that your wallet owns memory as public. Keep anything sensitive inside the memory content, which is encrypted, and never in a namespace label or other metadata, which is not.
+Treat namespace names and the fact that your wallet owns memory as public. Keep anything sensitive inside the memory content, which Walrus Memory encrypts, and never in a namespace label or other metadata, which it does not.
 </Warning>
 
 For the full ownership and access model, see [Ownership and Delegates](/fundamentals/concepts/ownership-and-access).
