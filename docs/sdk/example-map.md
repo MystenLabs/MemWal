@@ -16,7 +16,7 @@ goal:
         - description
         - keywords
       label: Has required frontmatter fields
-    - min_words: 300
+    - min_words: 25
       label: Needs more content depth
     - has_questions: true
       label: Needs questions for AI search visibility

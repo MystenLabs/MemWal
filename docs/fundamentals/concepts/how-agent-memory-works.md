@@ -1,7 +1,38 @@
 ---
 title: How AI Agent Memory Works
-description: How AI agents store and recall long-term memory, covering the difference between the context window and persistent memory, short-term versus long-term memory, and how semantic memory works with embeddings and vector search.
-keywords: [agent memory, AI agent memory, long-term memory, short-term memory, context window, semantic memory, embeddings, vector search, retrieval-augmented generation, persistent memory]
+description: >-
+  How AI agents store and recall long-term memory, covering the difference between the context window and persistent memory, short-term versus long-term memory, and how semantic memory works with embeddings and vector search.
+keywords:
+  - agent memory
+  - AI agent memory
+  - long-term memory
+  - short-term memory
+  - context window
+  - semantic memory
+  - embeddings
+  - vector search
+  - retrieval-augmented generation
+  - persistent memory
+goal:
+  description: Understand the difference between the context window and persistent memory, distinguish short-term from long-term memory, and explain how semantic recall with embeddings and vector search works.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does AI agent memory work?
+  - What is the difference between the context window and long-term memory for AI agents?
+  - How do embeddings and vector search enable semantic recall in agent memory?
+answer: >-
+  AI agent memory is a durable, searchable store kept outside the model so it survives across sessions. The context window is not memory because it resets on every request, holds a fixed token budget, and costs tokens to refill. Long-term memory uses embeddings and vector search to store and retrieve by meaning rather than exact keywords, letting an agent recall relevant context even when the query and the stored text share no words.
 ---
 
 AI agent memory is a durable, searchable store of what an agent has learned, kept outside the model so it survives across sessions, apps, and workflows. A model on its own starts every session blank, with no record of the last conversation or the decisions it made, and memory is the layer that gives it continuity.
