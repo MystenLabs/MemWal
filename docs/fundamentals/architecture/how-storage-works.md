@@ -19,26 +19,6 @@ When you call `memwal.remember(...)`, the relayer accepts a background job immed
   </figcaption>
 </figure>
 
-```mermaid
-sequenceDiagram
-    participant App as Your App
-    participant Relayer as Relayer
-    participant SEAL as SEAL
-    participant Walrus as Walrus
-    participant DB as Indexed Database
-
-    App->>Relayer: plaintext memory
-    Relayer->>DB: create remember job
-    Relayer-->>App: job_id + running status
-    Relayer->>Relayer: generate vector embedding
-    Relayer->>SEAL: encrypt content
-    SEAL-->>Relayer: encrypted payload
-    Relayer->>Walrus: upload blob + namespace metadata
-    Walrus-->>Relayer: blob ID
-    Relayer->>DB: store vector + blob ID + owner + namespace
-    Relayer->>DB: mark job done
-```
-
 <Steps>
   <Step>
     ### Embedding
@@ -80,25 +60,6 @@ sequenceDiagram
   </figcaption>
 </figure>
 
-```mermaid
-sequenceDiagram
-    participant App as Your App
-    participant Relayer as Relayer
-    participant DB as Indexed Database
-    participant Walrus as Walrus
-    participant SEAL as SEAL
-
-    App->>Relayer: query ("What does this user prefer?")
-    Relayer->>Relayer: generate query embedding
-    Relayer->>DB: vector search (owner + namespace)
-    DB-->>Relayer: matching blob IDs
-    Relayer->>Walrus: download encrypted blobs
-    Walrus-->>Relayer: encrypted payloads
-    Relayer->>SEAL: decrypt
-    SEAL-->>Relayer: plaintext results
-    Relayer-->>App: matching memories
-```
-
 1. The relayer converts your query into a vector embedding.
 2. It searches the database for the closest matching vectors using pgvector's cosine distance operator (`<=>`), scoped to your memory space (`owner + namespace`).
 3. It downloads the matching encrypted blobs from Walrus concurrently.
@@ -124,26 +85,6 @@ If a blob has expired on Walrus (returns 404), the relayer automatically deletes
 </figure>
 
 If the local database is lost or incomplete, the restore flow rebuilds it from Walrus, the permanent source of truth.
-
-```mermaid
-sequenceDiagram
-    participant App as Your App
-    participant Relayer as Relayer
-    participant Chain as Sui Chain
-    participant Walrus as Walrus
-    participant DB as Indexed Database
-
-    App->>Relayer: restore("my-namespace")
-    Relayer->>Chain: query blobs by owner + namespace
-    Chain-->>Relayer: blob IDs (on-chain metadata)
-    Relayer->>DB: check which blobs already exist locally
-    DB-->>Relayer: existing blob IDs
-    Relayer->>Walrus: download missing blobs
-    Walrus-->>Relayer: encrypted payloads
-    Relayer->>Relayer: SEAL decrypt + re-embed
-    Relayer->>DB: insert new vector entries
-    Relayer-->>App: restored count
-```
 
 1. The relayer queries onchain Walrus blob objects that the user owns, filtered by namespace metadata.
 2. It compares against the local database to find which blobs it already indexed.
