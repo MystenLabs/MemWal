@@ -8,7 +8,7 @@ When you call `memwal.remember(...)`, the relayer accepts a background job immed
 ## Storing a memory
 
 <figure>
-  <iframe src="https://docs.wal.app/diagrams/interactive_walrus-memory-remember_v1.html"
+  <iframe src="/diagrams/interactive_walrus-memory-remember_v1.html"
     style={{width:'100%',height:'710px',border:'0'}}
     title="Walrus Memory Remember: the agent embeds a new memory into a vector, encrypts it client-side with Seal, stores it on Walrus as a durable blob, and indexes it in pgvector by its vector and blob ID."
     loading="lazy"></iframe>
@@ -48,7 +48,7 @@ When you call `memwal.remember(...)`, the relayer accepts a background job immed
 ## Recalling a memory
 
 <figure>
-  <iframe src="https://docs.wal.app/diagrams/interactive_walrus-memory-recall_v1.html"
+  <iframe src="/diagrams/interactive_walrus-memory-recall_v1.html"
     style={{width:'100%',height:'710px',border:'0'}}
     title="Walrus Memory Recall: the relayer embeds a query, searches pgvector for nearest neighbors, fetches the matching Walrus blobs by blob ID, decrypts them with Seal, and returns them to the agent context."
     loading="lazy"></iframe>
@@ -73,7 +73,7 @@ If a blob has expired on Walrus (returns 404), the relayer automatically deletes
 ## Restoring a memory space
 
 <figure>
-  <iframe src="https://docs.wal.app/diagrams/interactive_walrus-memory-restore_v1.html"
+  <iframe src="/diagrams/interactive_walrus-memory-restore_v1.html"
     style={{width:'100%',height:'710px',border:'0'}}
     title="Walrus Memory Restore: the relayer re-reads the durable Seal-encrypted blobs on Walrus and re-indexes them to rebuild the pgvector search cache, because the blobs are the source of truth and the index is a derived cache."
     loading="lazy"></iframe>
@@ -95,7 +95,7 @@ Restore is incremental and idempotent, so you can call it multiple times safely.
 
 ## Two layers, one system
 
-| Layer | Stores | Purpose |
+| **Layer** | **Stores** | **Purpose** |
 |-------|--------|---------|
 | **Walrus** | Encrypted blobs | Durable, decentralized source of truth |
 | **PostgreSQL + pgvector** | Vector embeddings + metadata | Fast semantic search for recall |
