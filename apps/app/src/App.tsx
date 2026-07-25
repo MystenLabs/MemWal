@@ -237,6 +237,16 @@ function RoutePending() {
  *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 
+function parsePendingMcpConnectPath(pending: string) {
+  try {
+    const params = JSON.parse(pending) as Record<string, string>
+    const qs = new URLSearchParams(params).toString()
+    return qs ? `/connect/mcp?${qs}` : null
+  } catch {
+    return null
+  }
+}
+
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
  *  root). If a /connect/mcp flow was interrupted by that redirect, resume it
  *  by restoring the saved query string; otherwise go to the dashboard. */
@@ -245,11 +255,8 @@ function PostAuthRedirect() {
   if (pending) {
     // Consume once — prevents a redirect loop on later visits to `/`.
     sessionStorage.removeItem(MCP_CONNECT_STORAGE_KEY)
-    try {
-      const params = JSON.parse(pending) as Record<string, string>
-      const qs = new URLSearchParams(params).toString()
-      if (qs) return <Navigate to={`/connect/mcp?${qs}`} replace />
-    } catch { /* fall through to dashboard */ }
+    const resumePath = parsePendingMcpConnectPath(pending)
+    if (resumePath) return <Navigate to={resumePath} replace />
   }
   return <Navigate to="/dashboard" replace />
 }
