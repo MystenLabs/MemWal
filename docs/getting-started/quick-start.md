@@ -1,5 +1,7 @@
 ---
-title: "Quick Start"
+title: Quick Start
+description: Get Walrus Memory running with the TypeScript SDK, from install to your first stored and recalled memory.
+keywords: [quick start, TypeScript SDK, install, delegate key, account ID, relayer, remember, recall]
 ---
 
 The fastest way to get Walrus Memory running is through the TypeScript SDK.
@@ -8,7 +10,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
 
 - [Node.js](https://nodejs.org/) v18+ or [Bun](https://bun.sh/) v1+
 
-## Quick Start
+## Quick start
 
 <Steps>
   <Step>
@@ -99,7 +101,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     The following endpoints are provided as a public good by Walrus Foundation.
     </Note>
 
-    | App | URL |
+    | **App** | **URL** |
     | --- | --- |
     | **Walrus Memory Playground** | [memory.walrus.xyz](https://memory.walrus.xyz) |
 
@@ -115,7 +117,7 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     Following endpoints are provided as public good by Walrus Foundation.
     </Note>
 
-    | Network | Relayer URL |
+    | **Network** | **Relayer URL** |
     | --- | --- |
     | **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
     | **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
@@ -164,6 +166,8 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     console.log(result.results);
     ```
 
-    That's it - you're up and running.
+    You're up and running.
   </Step>
 </Steps>
+
+If Walrus Memory is useful to you, [a star on the GitHub repo](https://github.com/MystenLabs/MemWal) helps others find it.
