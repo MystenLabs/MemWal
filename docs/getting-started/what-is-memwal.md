@@ -143,7 +143,7 @@ The repo ships with ready-to-run apps in the [`/apps`](https://github.com/Mysten
 
 See [Example Apps](/examples/example-apps) for short code examples from each app.
 
-If Walrus Memory is useful to you, [a star on the GitHub repo](https://github.com/MystenLabs/MemWal) helps others find it.
+If Walrus Memory is useful to you, [a star on the GitHub repo ⭐](https://github.com/MystenLabs/MemWal) helps others find it.
 
 ## Explore the docs
 

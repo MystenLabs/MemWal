@@ -200,4 +200,4 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
   </Step>
 </Steps>
 
-If Walrus Memory is useful to you, [a star on the GitHub repo](https://github.com/MystenLabs/MemWal) helps others find it.
+If Walrus Memory is useful to you, [a star on the GitHub repo ⭐](https://github.com/MystenLabs/MemWal) helps others find it.
