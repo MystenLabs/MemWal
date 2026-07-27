@@ -1,5 +1,34 @@
 ---
 title: "API Reference"
+description: >-
+  Complete HTTP API reference for the Walrus Memory relayer, including authentication headers, public routes, and all protected endpoints for remember, recall, analyze, ask, and restore operations.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - API reference
+  - relayer API
+  - REST endpoints
+  - authentication
+goal:
+  description: Authenticate a request to the relayer using an Ed25519 delegate key, call each API endpoint with the correct parameters, and interpret the response or error codes.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What are the Walrus Memory relayer API endpoints?"
+  - "How do I authenticate requests to the MemWal relayer?"
+  - "What is the request and response format for the remember and recall APIs?"
+answer: >-
+  The Walrus Memory relayer exposes public routes (health, version, sponsor) and protected routes (remember, recall, analyze, ask, restore) that require Ed25519 signed headers. Authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
 ---
 
 The Rust relayer exposes these routes. Routes are defined in `services/server/src/main.rs`.

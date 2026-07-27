@@ -1,5 +1,34 @@
 ---
 title: "Delegate Key Management"
+description: >-
+  Guide to the delegate key lifecycle in Walrus Memory, covering key generation, onchain registration, SDK usage, revocation, limits, and account deactivation as an emergency kill switch.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - delegate key
+  - Ed25519
+  - key management
+  - authentication
+goal:
+  description: Generate a delegate key pair, register it onchain to a MemWalAccount, authenticate SDK requests with it, and revoke it when access should end.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I create and register a delegate key for Walrus Memory?"
+  - "How do I revoke a MemWal delegate key?"
+  - "What is the delegate key limit per Walrus Memory account?"
+answer: >-
+  Delegate keys are lightweight Ed25519 keypairs used for Walrus Memory SDK authentication. They are generated client-side, registered onchain in a MemWalAccount by the owner, and verified by the relayer on every request. Each account supports up to 20 delegate keys, and the owner can revoke any key or deactivate the entire account as an emergency kill switch.
 ---
 
 Delegate keys are lightweight Ed25519 keys used for SDK authentication. They are registered onchain in a `MemWalAccount` and verified by the relayer on every request.

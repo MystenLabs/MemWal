@@ -1,7 +1,41 @@
 ---
 title: Persistent, Verifiable Memory
-description: "Why memory stored on Walrus Memory is both durable and verifiable: content-addressed blob IDs, onchain-enforced ownership, and decentralized availability, and how to inspect each property yourself."
-keywords: [verifiable memory, persistent memory, content addressing, blob id, onchain ownership, durability, availability, AI agents, trust]
+description: >-
+  Why memory stored on Walrus Memory is both durable and verifiable. Covers content-addressed
+  blob IDs for integrity, onchain-enforced ownership on Sui, decentralized durability on Walrus,
+  and how to inspect each property yourself.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - verifiable memory
+  - persistent memory
+  - content addressing
+  - blob ID
+  - onchain ownership
+  - durability
+goal:
+  description: Explain what makes a Walrus Memory entry persistent and tamper-evident, identify the onchain and offchain mechanisms that enable verification, and run a spot-check against a real memory entry.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How is memory verified in Walrus Memory?
+  - What makes MemWal memory persistent and tamper-proof?
+  - How can I verify that my stored memories have not been altered?
+answer: >-
+  Walrus Memory provides persistent, verifiable memory through three independent properties:
+  content-addressed writes (blob IDs derived from stored bytes prove integrity), onchain-enforced
+  ownership (Sui smart contracts control account access independent of the relayer), and
+  decentralized durability (encrypted blobs on Walrus survive loss of the relayer database).
 ---
 
 An AI agent is only as trustworthy as the memory it acts on. If memory can be silently altered, or if the service holding it can rewrite history or lock you out, the agent's decisions cannot be trusted. Walrus Memory gives agents memory that is both **persistent** (it outlives any single process or provider) and **verifiable** (you can confirm the stored data is intact and who controls it).

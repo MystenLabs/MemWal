@@ -1,17 +1,49 @@
 ---
-title: Troubleshooting and FAQ
-description: Resolve common Walrus Memory problems, including delegate-key authentication errors, MCP connection issues, and save timeouts.
-keywords: [Walrus Memory, MemWal, troubleshooting, AUTH_REJECTED, delegate key, MCP, timeout, memwal_analyze]
+title: "Troubleshooting and FAQ"
+description: >-
+  Resolve common Walrus Memory problems, including delegate-key authentication errors,
+  MCP connection issues, and save timeouts, with step-by-step fixes and a quick reference.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - troubleshooting
+  - AUTH_REJECTED
+  - delegate key
+  - MCP
+  - timeout
+  - memwal_analyze
+goal:
+  description: "Diagnose and fix the three most common Walrus Memory failures: AUTH_REJECTED (key misconfiguration), missing MCP tools (client connectivity), and remember() timeouts (relayer or Walrus delays)."
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "Why am I getting AUTH_REJECTED errors in Walrus Memory?"
+  - "Why do only memwal_login tools appear in my MCP client?"
+  - "Why does memwal_analyze time out while recall works?"
+answer: >-
+  Most AUTH_REJECTED errors occur because the delegate key is not registered onchain,
+  the account ID does not match, or the client points at the wrong network. MCP tools
+  require a credentials file and a client restart to appear. Save timeouts do not mean
+  the save failed, as the relayer processes saves as background jobs; confirm with a
+  recall before retrying.
 ---
 
-<!--
-Source: BEDU-612, seeded from a Walrus Memory Discord support thread.
+{/* Source: BEDU-612, seeded from a Walrus Memory Discord support thread.
 The 401 reporter self-resolved without recording the exact fix, so the AUTH_REJECTED
 entry documents all known causes from the authentication model rather than a single
 confirmed one. Confirm the specific fix with the reporter before treating that entry
 as final. Grounded in: contract/delegate-key-management, relayer/api-reference,
-sdk/api-reference, mcp/reference, getting-started/quick-start.
--->
+sdk/api-reference, mcp/reference, getting-started/quick-start. */}
 
 This page collects the support questions that come up most often and the fastest way to resolve each one. Every entry lists the symptom you observe, the cause behind it, and the fix to apply.
 
