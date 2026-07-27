@@ -8,6 +8,8 @@ The repo includes ready-to-run apps in `apps/` that show different Walrus Memory
 
 ## Run locally
 
+Each app needs its own environment file and database setup before it starts; the chatbot, noter, and researcher pages below cover the exact steps. After configuring an app, run it from the repo root:
+
 ```bash
 pnpm dev:app
 pnpm dev:chatbot

@@ -30,7 +30,16 @@ From the repo root:
 
 ```bash
 pnpm install
+cp apps/researcher/.env.example apps/researcher/.env
+```
+
+Fill in the required values in `apps/researcher/.env`: `OPENROUTER_API_KEY`, `POSTGRES_URL` (a PostgreSQL database with the pgvector extension), `AUTH_SECRET`, and the Walrus Memory values from the dashboard (`MEMWAL_PRIVATE_KEY`, `MEMWAL_ACCOUNT_ID`, `MEMWAL_SERVER_URL`). `REDIS_URL`, `BLOB_READ_WRITE_TOKEN`, and the Enoki zkLogin variables are optional.
+
+With the environment configured, apply the database migrations and start the app:
+
+```bash
+pnpm --filter researcher db:migrate
 pnpm dev:researcher
 ```
 
-The [researcher source](https://github.com/MystenLabs/MemWal/tree/main/apps/researcher) documents its environment variables and setup.
+The [researcher source](https://github.com/MystenLabs/MemWal/tree/main/apps/researcher) documents each variable.

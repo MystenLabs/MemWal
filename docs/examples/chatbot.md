@@ -30,7 +30,16 @@ From the repo root:
 
 ```bash
 pnpm install
+cp apps/chatbot/.env.example apps/chatbot/.env
+```
+
+Fill in `apps/chatbot/.env`: `AUTH_SECRET`, `OPENROUTER_API_KEY`, `BLOB_READ_WRITE_TOKEN`, `POSTGRES_URL`, `REDIS_URL`, and the Walrus Memory values from the dashboard (`MEMWAL_PRIVATE_KEY`, `MEMWAL_ACCOUNT_ID`, `MEMWAL_SERVER_URL`). Run `pnpm --filter chatbot verify:memwal` to catch credential mismatches before the first relayer call.
+
+With the environment configured, apply the database migrations and start the app:
+
+```bash
+pnpm --filter chatbot db:migrate
 pnpm dev:chatbot
 ```
 
-The app needs a model provider key and, for memory, a delegate key and account ID from the dashboard. The [chatbot source](https://github.com/MystenLabs/MemWal/tree/main/apps/chatbot) documents its environment variables.
+The app runs on [localhost:3001](http://localhost:3001). The [chatbot source](https://github.com/MystenLabs/MemWal/tree/main/apps/chatbot) documents each variable.
