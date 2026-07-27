@@ -228,7 +228,7 @@ Search for memories matching a natural language query. Returns decrypted plainte
 }
 ```
 
-`limit` defaults to `10`. `namespace` defaults to `"default"`. `scoring_weights` is optional; omit it to keep the plain cosine-distance order.
+`limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` is optional; omit it to keep the plain cosine-distance order.
 
 #### Scoring weights
 
@@ -287,7 +287,7 @@ Register a client-encrypted payload. The client sends Seal-encrypted data (base6
 
 ### `POST /api/recall/manual`
 
-Search with a precomputed query vector. Returns index hits only; the client handles downloading and decrypting. The request accepts the same optional `scoring_weights` object as [`POST /api/recall`](#scoring-weights).
+Search with a precomputed query vector. Returns index hits only; the client handles downloading and decrypting. The request accepts the same optional `scoring_weights` object as [`POST /api/recall`](#scoring-weights), and the server applies the same `limit` cap of `100`.
 
 **Request:**
 
@@ -460,4 +460,4 @@ Return the memory count and stored byte total for one namespace, scoped to the a
 
 ## MCP transports
 
-The relayer also proxies Model Context Protocol traffic to its Node sidecar. `GET`, `POST`, and `DELETE` on `/api/mcp` serve the Streamable HTTP transport, and `GET /api/mcp/sse` plus `POST /api/mcp/messages` serve the legacy SSE transport. These routes use bearer authentication instead of signed headers. See [Reference](/mcp/reference) for transport details and client configuration.
+The relayer also proxies Model Context Protocol traffic to its Node sidecar. `GET`, `POST`, `DELETE`, and `OPTIONS` on `/api/mcp` serve the Streamable HTTP transport, and `GET /api/mcp/sse` plus `POST /api/mcp/messages` serve the legacy SSE transport. These routes use bearer authentication instead of signed headers. See [Reference](/mcp/reference) for transport details and client configuration.

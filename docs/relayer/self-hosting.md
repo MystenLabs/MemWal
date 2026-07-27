@@ -109,7 +109,7 @@ By default, the relayer enforces rate limits and storage quotas through Redis to
 - `SEAL_SERVER_CONFIGS` and `SEAL_KEY_SERVERS` are optional overrides for encrypt and decrypt; prefer `SEAL_SERVER_CONFIGS` for custom committees
 - `WALRUS_AGGREGATOR_URLS` can add comma-separated proxy or aggregator candidates for cold-read tail racing after Redis cache misses
 - `WALRUS_SKIP_CONSISTENCY_CHECK=false` by default; enable only for trusted Walrus Memory-written cold reads after accepting the consistency tradeoff
-- The sidecar Walrus upload route defaults storage `epochs` by network: `50` on `testnet`, `2` on `mainnet` (unless the request passes `epochs`)
+- The sidecar Walrus upload route defaults storage `epochs` by network: `5` on `testnet`, `3` on `mainnet` (unless the request passes `epochs`). Both the request value and the `WALRUS_STORAGE_EPOCHS` override cap at `15`; an over-cap override falls back to the network default
 - `SEAL_THRESHOLD` defaults to `min(2, total configured server weight)`. A single committee server config defaults to threshold `1`.
 
 ### Server keys
