@@ -1,7 +1,34 @@
 ---
 title: "MemWalManual"
-description: "Client-managed embeddings and local SEAL operations."
-keywords: [MemWalManual, client-side encryption, SEAL, agent state, key management, autonomous agent, suiPrivateKey, walletSigner, embeddings, recall]
+description: >-
+  Client-managed embeddings and local SEAL operations with MemWalManual. The client handles embedding and encryption locally while the relayer manages upload, vector registration, and search. Ideal for Web3-native users who want to minimize trust in the relayer.
+keywords:
+  - MemWalManual
+  - client-side encryption
+  - SEAL
+  - agent state
+  - key management
+  - Walrus Memory
+goal:
+  description: Initialize MemWalManual for browser wallet signing or headless agents, call registerEntry() with a pre-uploaded blob and pre-computed embedding, and use search() to run a vector query without storage.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use MemWalManual for client-side encryption?
+  - What is the difference between MemWal and MemWalManual?
+  - How do I integrate MemWalManual with a browser wallet?
+answer: >-
+  MemWalManual is the client-managed entry point where the client handles embedding calls and local SEAL operations while the relayer manages upload relay, vector registration, and search. It supports both suiPrivateKey for headless agents and walletSigner for browser integration, and is recommended for Web3-native users who want plaintext to never leave the client.
 ---
 
 Use when the client must handle embedding calls and local SEAL operations. The relayer still handles

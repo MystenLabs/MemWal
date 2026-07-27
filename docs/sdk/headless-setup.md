@@ -1,7 +1,34 @@
 ---
 title: Headless SDK Setup
-description: "Initialize the Walrus Memory SDK in a server or agent runtime with no interactive or browser steps, loading credentials from the environment."
-keywords: [headless, server, agent runtime, setup, MemWal.create, environment variables, delegate key, accountId, MemWalManual, SDK]
+description: >-
+  Initialize the Walrus Memory SDK in a server or agent runtime with no interactive or browser steps. Covers credential generation, environment variable configuration, health checks at boot, and when to use the manual client.
+keywords:
+  - headless setup
+  - server runtime
+  - agent runtime
+  - MemWal
+  - environment variables
+  - Walrus Memory
+goal:
+  description: Initialize the Walrus Memory SDK in a headless server or agent process by loading credentials from environment variables, validating connectivity at boot, and handling credential errors gracefully.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I set up the Walrus Memory SDK in a server without a browser?
+  - How do I initialize MemWal from environment variables?
+  - When should I use MemWalManual instead of the default client in a headless setup?
+answer: >-
+  Generate credentials once via the dashboard, then load the delegate key and account ID from environment variables at startup. Use MemWal.create() with key, accountId, serverUrl, and namespace, and call health() to confirm the relayer is reachable before serving traffic. Use MemWalManual only when the runtime must hold its own keys and keep plaintext entirely client-side.
 ---
 
 A server or agent runtime has no human to click through a wallet or paste a key at a prompt. The Walrus Memory SDK initializes entirely from configuration, so you can drop it into a backend service, a cron job, or an autonomous agent. For the full write-confirm-recall loop that builds on this setup, see [Agent Storage Loop](/sdk/agent-storage-loop).

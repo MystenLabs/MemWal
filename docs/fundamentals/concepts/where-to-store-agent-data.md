@@ -1,7 +1,35 @@
 ---
 title: Where to Store AI Agent Data
-description: A decision guide for where to store data for autonomous AI agents, comparing provider-native memory, managed and self-hosted vector databases, and Walrus Memory across persistence, portability, ownership, and verifiability.
-keywords: [where to store AI agent data, AI agent data storage, data storage for AI agents, vector database for AI agents, agent memory storage, decision guide, Walrus Memory]
+description: >-
+  A decision guide for where to store data for autonomous AI agents, comparing provider-native memory, managed and self-hosted vector databases, and Walrus Memory across persistence, portability, ownership, and verifiability.
+keywords:
+  - where to store AI agent data
+  - AI agent data storage
+  - data storage for AI agents
+  - vector database for AI agents
+  - agent memory storage
+  - decision guide
+  - Walrus Memory
+goal:
+  description: Compare provider-native memory, vector databases, and Walrus Memory across persistence, portability, ownership, and verifiability — then select the right store for your agent's data requirements.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - Where should I store data for my AI agent?
+  - How does Walrus Memory compare to a vector database for agent storage?
+  - What are the trade-offs between provider-native memory, vector databases, and Walrus Memory?
+answer: >-
+  The main options for AI agent data storage are provider-native memory, managed or self-hosted vector databases, and Walrus Memory. Vector databases provide persistence and semantic recall but require you to manage portability and access control yourself. Walrus Memory adds durable storage on Walrus, onchain ownership enforcement through Sui, cross-app portability, and verifiable integrity without requiring you to operate storage infrastructure.
 ---
 
 When you give an AI agent long-term memory, you have to decide where that data lives. The choice shapes what the agent can do later: whether its memory survives a restart, moves with the user to another app, stays under the user's control, and can be trusted.

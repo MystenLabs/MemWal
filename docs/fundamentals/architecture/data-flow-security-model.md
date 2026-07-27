@@ -1,7 +1,40 @@
 ---
 title: Trust and Security Model
-description: Where trust lives in Walrus Memory, from onchain enforcement to relayer trust and the deployment options that reduce it.
-keywords: [trust model, security model, trust boundary, relayer trust, Seal encryption, delegate keys, TEE, self-hosting, onchain enforcement]
+description: >-
+  Where trust lives in Walrus Memory and how to mitigate it. Covers onchain enforcement of
+  ownership and delegates, the relayer trust trade-off, mitigation options including self-hosting
+  and manual client flow, and the Ed25519 authentication flow.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - security model
+  - trust model
+  - encryption
+  - onchain enforcement
+  - authentication
+goal:
+  description: Map where trust is placed at each step of a memory operation, identify what the relayer can and cannot access, and apply trust-mitigation strategies like TEE deployment or the manual client.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Walrus Memory handle security and trust?
+  - What does the MemWal relayer see and how can you reduce that trust?
+  - How does authentication work in Walrus Memory?
+answer: >-
+  Walrus Memory splits security between onchain enforcement (ownership, delegate authorization,
+  access control through Sui smart contracts) and offchain operations (encryption, embeddings handled
+  by the relayer). Trust in the relayer can be mitigated by self-hosting, running in a TEE, or
+  using the manual client flow where the relayer never sees plaintext data.
 ---
 
 Walrus Memory's security model is split between onchain enforcement and offchain operations. Understanding where trust lives helps you make informed decisions about your deployment.
