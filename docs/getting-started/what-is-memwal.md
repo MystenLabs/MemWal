@@ -1,7 +1,39 @@
 ---
 title: What is Walrus Memory?
-description: Portable agent memory that travels with your agent across apps, sessions, and workflows.
-keywords: [Walrus Memory, agent memory, portable memory, ownership, delegate access, verifiable, remember, recall]
+description: >-
+  Walrus Memory enables AI agents to operate reliably across apps and sessions without losing context.
+  It provides portable, verifiable, and fully controlled memory that lets agents handle complex workflows
+  and coordinate using data they can trust.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - AI agent memory
+  - portable memory
+  - verifiable memory
+  - agent coordination
+goal:
+  description: Explain the core problem Walrus Memory solves, describe its key capabilities (portable, verifiable, permissioned), and assess whether it fits your agent's memory requirements.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is Walrus Memory?
+  - How does Walrus Memory help AI agents retain context across sessions?
+  - What are the core features of MemWal?
+answer: >-
+  Walrus Memory (MemWal) is a portable, verifiable memory layer for AI agents that persists context
+  across apps, sessions, and workflows. It provides programmable access control, agent coordination
+  through shared memory spaces, and memory integrity that can be independently verified without
+  centralized trust.
 ---
 
 <Note>

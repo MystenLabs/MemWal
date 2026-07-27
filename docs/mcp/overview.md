@@ -1,7 +1,35 @@
 ---
 title: MCP
-description: Portable, verifiable agent memory for any MCP client, as a plain MCP server or as a plugin with automatic memory.
-keywords: [MCP, Walrus Memory, MemWal, plugin, automatic memory, agent]
+description: >-
+  Portable, verifiable agent memory for any MCP client, as a plain MCP server or as a plugin with automatic memory.
+  Works with Claude Code, Codex, Cursor, Antigravity, Claude Desktop, and OpenCode.
+keywords:
+  - MCP
+  - Walrus Memory
+  - MemWal
+  - plugin
+  - automatic memory
+  - agent memory
+goal:
+  description: Choose between the plugin installation path (with automatic before/after hooks) and the MCP-only path, then navigate to the correct client-specific setup guide for your AI tool.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the MemWal MCP server and how does it work?
+  - What is the difference between the MemWal plugin and MCP-only installation?
+  - Which MCP clients support the MemWal automatic memory plugin?
+answer: >-
+  The MemWal MCP server exposes portable Walrus Memory as Model Context Protocol tools so AI agents can save and recall memories on their own. It can be installed as a plugin (with lifecycle hooks for automatic memory) on Claude Code, Codex, Cursor, and Antigravity, or as an MCP-only server on any MCP-aware client. Available tools include memwal_remember, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, and memwal_logout.
 ---
 
 The **MemWal MCP server** exposes your portable Walrus Memory as Model Context Protocol tools, so an AI agent can decide when to save and recall memories on its own. It works with any MCP-aware client, and on **Claude Code**, **Codex**, **Cursor**, and **Antigravity** it can be installed as a **plugin** that adds automatic memory through lifecycle hooks.

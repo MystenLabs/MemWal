@@ -1,5 +1,34 @@
 ---
 title: "Smart Contract Overview"
+description: >-
+  Overview of the Walrus Memory smart contract (memwal::account) deployed on Sui, covering the onchain account model, key objects (AccountRegistry, MemWalAccount, DelegateKey), entry and view functions, events, and error codes.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - smart contract
+  - Move module
+  - Sui
+  - onchain account
+goal:
+  description: Map the MemWalAccount object model, identify the key onchain functions for creating and managing accounts, and explain how identity and access are enforced at the contract layer.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What does the Walrus Memory smart contract manage?"
+  - "What are the key objects in the MemWal onchain account model?"
+  - "What entry functions does the Walrus Memory Move module expose?"
+answer: >-
+  The Walrus Memory smart contract (memwal::account) is a Move module on Sui that manages onchain identity, delegate key authorization, SEAL access control, and account lifecycle (activation/deactivation). Key objects include AccountRegistry (prevents duplicate accounts), MemWalAccount (stores owner, delegate keys, and active status), and DelegateKey (Ed25519 public key with label and derived Sui address).
 ---
 
 The smart contract (`memwal::account`) defines the onchain account model for Walrus Memory. It is a Move module deployed on Sui.

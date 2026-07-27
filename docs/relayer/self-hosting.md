@@ -1,5 +1,34 @@
 ---
 title: "Self-Hosting"
+description: >-
+  Guide to self-hosting the Walrus Memory relayer, covering environment variables, database setup, horizontal scaling, Docker deployment, and SEAL key server configuration for running your own dedicated MemWal backend.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - self-hosting
+  - relayer deployment
+  - environment variables
+  - SEAL configuration
+goal:
+  description: "Deploy a self-hosted Walrus Memory relayer: provision a database with pgvector, configure a server wallet, set environment variables, and verify health before routing SDK traffic to it."
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I self-host the Walrus Memory relayer?"
+  - "What environment variables are required for a self-hosted MemWal relayer?"
+  - "How do I configure SEAL key servers for a self-hosted Walrus Memory deployment?"
+answer: >-
+  Self-hosting the Walrus Memory relayer involves running the Rust relayer with its TypeScript sidecar, pointed at a PostgreSQL database with pgvector. Required environment variables include DATABASE_URL, MEMWAL_PACKAGE_ID, MEMWAL_REGISTRY_ID, a server Sui private key, and SIDECAR_AUTH_TOKEN. Horizontal scaling is supported by sharing the same database, Redis cluster, and key pool across multiple instances behind a load balancer.
 ---
 
 Self-hosting means running your own relayer — either pointing at an existing Walrus Memory package ID or deploying an entirely new Walrus Memory instance with your own contract, database, and server wallet.

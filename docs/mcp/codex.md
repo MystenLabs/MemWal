@@ -1,7 +1,35 @@
 ---
 title: Codex
-description: Add portable Walrus Memory to OpenAI Codex as a full plugin with automatic memory, or as a plain MCP server.
-keywords: [MCP, Codex, Walrus Memory, MemWal, plugin, automatic memory]
+description: >-
+  Add portable Walrus Memory to OpenAI Codex as a full plugin with automatic memory, or as a plain MCP server.
+  The plugin adds lifecycle hooks that reinforce automatic recall and save behavior.
+keywords:
+  - MCP
+  - Codex
+  - Walrus Memory
+  - MemWal
+  - plugin
+  - automatic memory
+goal:
+  description: Add MemWal to Codex as a plugin or MCP-only server, authenticate with your account credentials, and confirm memory tools are available in your Codex session.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Codex?
+  - How do I install the MemWal plugin on Codex?
+  - How do I configure MemWal hooks for Codex?
+answer: >-
+  To add Walrus Memory to Codex, install the MemWal plugin by running the install script (node packages/mcp/plugin/scripts/install_codex_hooks.mjs), which merges hooks into ~/.codex/hooks.json and registers the MCP server in ~/.codex/config.toml. Alternatively, add it as MCP-only by configuring [mcp_servers.memwal] in config.toml. The plugin requires enabling the codex_hooks feature flag. Do not combine both installation methods to avoid duplicate server errors.
 ---
 
 Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).

@@ -1,7 +1,37 @@
 ---
 title: Quick Start
-description: Get Walrus Memory running with the TypeScript SDK, from install to your first stored and recalled memory.
-keywords: [quick start, TypeScript SDK, install, delegate key, account ID, relayer, remember, recall]
+description: >-
+  Get Walrus Memory running in minutes using the TypeScript SDK, from installing the SDK and
+  generating credentials to configuring the client and storing and recalling your first memory.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - quick start
+  - TypeScript SDK
+  - installation
+  - setup
+goal:
+  description: "Get a working end-to-end Walrus Memory integration: install the SDK, create an account at memory.walrus.xyz, call remember() to store a memory, and confirm recall() returns it."
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do you get started with Walrus Memory?
+  - How do you install the MemWal TypeScript SDK?
+  - How do you store and recall your first memory with MemWal?
+answer: >-
+  To get started with Walrus Memory, install the @mysten-incubation/memwal TypeScript SDK,
+  generate an account ID and delegate key from the Walrus Memory Playground, choose a relayer
+  endpoint, configure the SDK client, and call remember/recall to store and retrieve memories.
 ---
 
 The fastest way to get Walrus Memory running is through the TypeScript SDK.
