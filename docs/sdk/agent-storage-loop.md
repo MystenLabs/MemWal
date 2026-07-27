@@ -10,7 +10,7 @@ keywords:
   - MemWal
   - batch writes
 goal:
-  description: Implement a complete headless agent storage loop: initialize the SDK from env vars, batch-write a set of memories, poll until durability is confirmed, then run a recall to verify the stored content.
+  description: "Implement a complete headless agent storage loop: initialize the SDK from env vars, batch-write a set of memories, poll until durability is confirmed, then run a recall to verify the stored content."
   requires:
     - has_frontmatter:
         - title

@@ -12,7 +12,7 @@ keywords:
   - installation
   - setup
 goal:
-  description: Get a working end-to-end Walrus Memory integration: install the SDK, create an account at memory.walrus.xyz, call remember() to store a memory, and confirm recall() returns it.
+  description: "Get a working end-to-end Walrus Memory integration: install the SDK, create an account at memory.walrus.xyz, call remember() to store a memory, and confirm recall() returns it."
   requires:
     - has_frontmatter:
         - title

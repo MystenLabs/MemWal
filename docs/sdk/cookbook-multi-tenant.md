@@ -10,7 +10,7 @@ keywords:
   - Walrus Memory
   - MemWal
 goal:
-  description: Design a multi-tenant memory architecture: create one MemWalAccount, isolate each end user with a per-wallet namespace, and secure access with scoped delegate keys.
+  description: "Design a multi-tenant memory architecture: create one MemWalAccount, isolate each end user with a per-wallet namespace, and secure access with scoped delegate keys."
   requires:
     - has_frontmatter:
         - title

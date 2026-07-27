@@ -13,7 +13,7 @@ keywords:
   - timeout
   - memwal_analyze
 goal:
-  description: Diagnose and fix the three most common Walrus Memory failures: AUTH_REJECTED (key misconfiguration), missing MCP tools (client connectivity), and remember() timeouts (relayer or Walrus delays).
+  description: "Diagnose and fix the three most common Walrus Memory failures: AUTH_REJECTED (key misconfiguration), missing MCP tools (client connectivity), and remember() timeouts (relayer or Walrus delays)."
   requires:
     - has_frontmatter:
         - title
@@ -38,14 +38,12 @@ answer: >-
   recall before retrying.
 ---
 
-<!--
-Source: BEDU-612, seeded from a Walrus Memory Discord support thread.
+{/* Source: BEDU-612, seeded from a Walrus Memory Discord support thread.
 The 401 reporter self-resolved without recording the exact fix, so the AUTH_REJECTED
 entry documents all known causes from the authentication model rather than a single
 confirmed one. Confirm the specific fix with the reporter before treating that entry
 as final. Grounded in: contract/delegate-key-management, relayer/api-reference,
-sdk/api-reference, mcp/reference, getting-started/quick-start.
--->
+sdk/api-reference, mcp/reference, getting-started/quick-start. */}
 
 This page collects the support questions that come up most often and the fastest way to resolve each one. Every entry lists the symptom you observe, the cause behind it, and the fix to apply.
 

@@ -10,7 +10,7 @@ keywords:
   - environment variables
   - SEAL configuration
 goal:
-  description: Deploy a self-hosted Walrus Memory relayer: provision a database with pgvector, configure a server wallet, set environment variables, and verify health before routing SDK traffic to it.
+  description: "Deploy a self-hosted Walrus Memory relayer: provision a database with pgvector, configure a server wallet, set environment variables, and verify health before routing SDK traffic to it."
   requires:
     - has_frontmatter:
         - title

@@ -10,7 +10,7 @@ keywords:
   - rememberBulk
   - RAG
 goal:
-  description: Add persistent codebase memory to an AI coding assistant: namespace memories per repository, store code explanations and decisions with remember(), and surface them with semantic recall().
+  description: "Add persistent codebase memory to an AI coding assistant: namespace memories per repository, store code explanations and decisions with remember(), and surface them with semantic recall()."
   requires:
     - has_frontmatter:
         - title
