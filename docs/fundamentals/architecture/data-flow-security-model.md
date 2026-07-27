@@ -9,10 +9,10 @@ Walrus Memory's security model is split between onchain enforcement and offchain
 <figure>
   <iframe src="https://docs.wal.app/diagrams/interactive_trust-boundary_v1.html"
     style={{width:'100%',height:'440px',border:'0'}}
-    title="Walrus Memory trust boundary: the client holds plaintext and keys and encrypts with Seal before anything leaves its control; only ciphertext reaches the relayer and the public Walrus network, and Sui enforces ownership and delegation. The relayer sits inside the trusted boundary for manual, self-hosted, and TEE deployments, and outside it for a managed relayer."
+    title="Walrus Memory trust boundary across four deployment models. In the default relayer-backed flow the relayer receives plaintext and encrypts with Seal before storing on Walrus: a managed relayer sits outside your trust boundary, a self-hosted relayer keeps the flow inside your infrastructure, and a TEE relayer processes plaintext only inside an attested enclave. Only the manual client flow encrypts with Seal on the client, so the relayer handles only ciphertext. Sui enforces ownership and delegation in every mode."
     loading="lazy"></iframe>
   <figcaption>
-    Data on Walrus is public and immutable, so confidentiality comes entirely from client-side Seal encryption, and ownership and delegate rules on Sui enforce access. The diagram cycles through four deployment models. With a manual, self-hosted, or TEE relayer, any pre-encryption plaintext stays inside your trust boundary. With a managed relayer, the relayer sits in the untrusted zone, so encrypt client-side before sending and the service only ever handles ciphertext.
+    Data on Walrus is public and immutable, so confidentiality comes from Seal encryption before upload, and ownership and delegate rules on Sui enforce access. The diagram cycles through four deployment models, which differ in where plaintext lives. A managed relayer receives plaintext, generates embeddings, and encrypts before storing, so you trust its operator. Self-hosting keeps that same flow inside infrastructure you control. A TEE relayer processes plaintext only inside an attested enclave, and you must verify the attestation. Only the manual client flow encrypts on the client, so the relayer handles only ciphertext and precomputed vectors.
   </figcaption>
 </figure>
 
