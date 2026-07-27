@@ -1,7 +1,34 @@
 ---
 title: API Reference
-description: Complete reference for the Walrus Memory relayer HTTP API, covering authentication, memory routes, admin routes, and the MCP transport endpoints.
-keywords: [Walrus Memory, relayer, API reference, endpoints, authentication, remember, recall, restore, forget, stats, scoring weights]
+description: >-
+  Complete HTTP API reference for the Walrus Memory relayer, including authentication headers, public routes, the protected endpoints for remember, recall, analyze, ask, restore, forget, and stats, and the MCP transport endpoints.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - API reference
+  - relayer API
+  - REST endpoints
+  - authentication
+goal:
+  description: Authenticate a request to the relayer using an Ed25519 delegate key, call each API endpoint with the correct parameters, and interpret the response or error codes.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What are the Walrus Memory relayer API endpoints?"
+  - "How do you authenticate requests to the MemWal relayer?"
+  - "What is the request and response format for the remember and recall APIs?"
+answer: >-
+  The Walrus Memory relayer exposes public routes (health, version, config, metrics, sponsor) and protected routes (remember, recall, analyze, ask, restore, forget, stats) that require Ed25519 signed headers, plus MCP transport endpoints that use bearer authentication. Signed authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
 ---
 
 The Rust relayer exposes these routes. The route table lives in `services/server/src/main.rs`.

@@ -1,6 +1,40 @@
 ---
 title: "Walrus Memory"
-description: "The recommended default Python client — relayer handles embeddings, SEAL, and storage."
+description: >-
+  The recommended default Python client for Walrus Memory. The relayer handles embeddings,
+  SEAL encryption, and Walrus storage while the SDK signs requests and sends text.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - remember
+  - recall
+  - analyze
+  - ask
+  - restore
+goal:
+  description: Call remember(), recall(), analyze(), and ask() on the Python MemWal client and understand the parameters, return values, and async vs. sync variants for each.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use the MemWal Python client to store and recall memories?
+  - What core methods does the MemWal Python client provide?
+  - How do I restore missing indexed entries from Walrus in Python?
+answer: >-
+  The MemWal Python client is the recommended default that delegates embeddings, SEAL
+  encryption, and Walrus storage to the relayer. Core methods include `remember`,
+  `recall`, `analyze`, `ask`, and `restore`. Each method accepts an optional namespace
+  override and works with both async MemWal and sync MemWalSync.
 ---
 
 The recommended default client. The relayer handles embeddings, SEAL encryption, Walrus upload, and vector indexing. The SDK only signs requests and sends text.

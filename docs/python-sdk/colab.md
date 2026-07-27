@@ -1,6 +1,38 @@
 ---
 title: "Colab Notebook"
-description: "Run the Walrus Memory Python SDK from Google Colab."
+description: >-
+  Run the Walrus Memory Python SDK from Google Colab. A notebook-first walkthrough
+  covering installation, credential configuration, all SDK methods, and middleware integrations.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - Google Colab
+  - notebook
+  - tutorial
+goal:
+  description: Open the Walrus Memory Python SDK Colab notebook, run each cell to store and recall memories, and use it as an interactive reference before integrating the SDK into your own project.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 100
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - Is there a Colab notebook for the Walrus Memory Python SDK?
+  - How do I try the MemWal Python SDK without local setup?
+  - What does the Walrus Memory Python SDK Colab notebook cover?
+answer: >-
+  The Walrus Memory Python SDK Colab notebook provides a runnable walkthrough covering
+  installation, secure credential loading, health checks, remember/recall, bulk operations,
+  analyze, ask, embed, manual methods, restore, OpenAI/LangChain middleware, and
+  troubleshooting. It defaults to staging for test credentials.
 ---
 
 Use the runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) when you want a notebook-first walkthrough.

@@ -67,6 +67,8 @@
           {
             "group": "Concepts",
             "pages": [
+              "fundamentals/concepts/how-agent-memory-works",
+              "fundamentals/concepts/where-to-store-agent-data",
               "fundamentals/concepts/memory-space",
               "fundamentals/concepts/ownership-and-access",
               "fundamentals/concepts/verifiable-memory"
