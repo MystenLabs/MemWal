@@ -204,7 +204,7 @@ SEAL_SERVER_CONFIGS=[{"objectId":"0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de
 Although that committee is 3-of-5 internally, Seal exposes it to the SDK as one logical server config. The aggregator handles the internal committee threshold, so leave `SEAL_THRESHOLD` unset or set it to `1` when using this committee config. Because it uses a different key server object, do not switch an existing deployment to it until older data has been migrated or re-encrypted.
 
 <Warning>
-Changing Seal key server defaults only affects new encryption. If a deployment already encrypted memories with the Testnet independent key servers, keep those servers as the default or pin them with `SEAL_KEY_SERVERS` until you migrate or re-encrypt the data. Otherwise, recall and restore for older blobs might fail to decrypt.
+Changing Seal key server defaults only affects new encryption. If a deployment has already encrypted memories with the Testnet independent key servers, keep those servers as the default or pin them with `SEAL_KEY_SERVERS` until you migrate or re-encrypt the data. Otherwise, recall and restore for older blobs might fail to decrypt.
 </Warning>
 
 Use the official key server configuration where possible.
