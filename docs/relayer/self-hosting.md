@@ -24,9 +24,9 @@ goal:
     - has_answer: true
       label: Needs answer summary for AI citation
 questions:
-  - "How do you self-host the Walrus Memory relayer?"
+  - "How do I self-host the Walrus Memory relayer?"
   - "What environment variables are required for a self-hosted MemWal relayer?"
-  - "How do you configure Seal key servers for a self-hosted Walrus Memory deployment?"
+  - "How do I configure Seal key servers for a self-hosted Walrus Memory deployment?"
 answer: >-
   Self-hosting the Walrus Memory relayer involves running the Rust relayer with its TypeScript sidecar, pointed at a PostgreSQL database with pgvector. Required environment variables include DATABASE_URL, MEMWAL_PACKAGE_ID, MEMWAL_REGISTRY_ID, a server Sui private key, and SIDECAR_AUTH_TOKEN. You scale horizontally by sharing the same database, Redis cluster, and key pool across multiple instances behind a load balancer.
 ---

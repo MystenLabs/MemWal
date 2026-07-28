@@ -25,7 +25,7 @@ goal:
       label: Needs answer summary for AI citation
 questions:
   - "What are the Walrus Memory relayer API endpoints?"
-  - "How do you authenticate requests to the MemWal relayer?"
+  - "How do I authenticate requests to the MemWal relayer?"
   - "What is the request and response format for the remember and recall APIs?"
 answer: >-
   The Walrus Memory relayer exposes public routes (health, version, config, metrics, sponsor) and protected routes (remember, recall, analyze, ask, restore, forget, stats) that require Ed25519 signed headers, plus MCP transport endpoints that use bearer authentication. Signed authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
