@@ -66,6 +66,22 @@ export function isMoveAbortBalanceSplit(message: string): boolean {
     return /moveabort/i.test(message) && /balance.*split|split.*balance/i.test(message);
 }
 
+/**
+ * Detect the `0x2::coin::destroy_zero` abort (ENonZero, abort code 0) that the
+ * Walrus register PTB raises when the WAL payment coin still holds a non-zero
+ * remainder. The `@mysten/walrus` `#withWal` helper pre-funds an *exact* WAL
+ * amount (`storageUnits × price × epochs`) computed from the client's cached
+ * `systemState`, then asserts the coin is empty via `destroy_zero`. When the
+ * on-chain storage/write price drops between the cached read and execution, the
+ * contract deducts less WAL than we split off, leaving change that trips
+ * `destroy_zero`. It is not input-specific — refreshing the Walrus client so the
+ * next attempt re-reads the live price clears it, so callers treat it as
+ * transient rather than a permanent MoveAbort.
+ */
+export function isMoveAbortWalDestroyZero(message: string): boolean {
+    return /moveabort/i.test(message) && /destroy_zero/i.test(message);
+}
+
 export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
     if (!ENOKI_API_KEY) {
         throw new Error("ENOKI_API_KEY is not configured");
