@@ -28,7 +28,7 @@ goal:
 questions:
   - "What example apps are included in the Walrus Memory repo?"
   - "How does the MemWal Chatbot app integrate AI middleware with memory?"
-  - "How do you run the MemWal demo apps locally?"
+  - "How do I run the MemWal demo apps locally?"
 answer: >-
   The MemWal repo includes four demo apps: Playground (full SDK playground), Chatbot
   (AI middleware with persistent memory), Noter (note-to-memory extraction using analyze),
