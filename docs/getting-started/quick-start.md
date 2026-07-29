@@ -25,9 +25,9 @@ goal:
     - has_answer: true
       label: Needs answer summary for AI citation
 questions:
-  - How do you get started with Walrus Memory?
-  - How do you install the MemWal TypeScript SDK?
-  - How do you store and recall your first memory with MemWal?
+  - How do I get started with Walrus Memory?
+  - How do I install the MemWal TypeScript SDK?
+  - How do I store and recall my first memory with MemWal?
 answer: >-
   To get started with Walrus Memory, install the @mysten-incubation/memwal TypeScript SDK,
   generate an account ID and delegate key from the Walrus Memory Playground, choose a relayer

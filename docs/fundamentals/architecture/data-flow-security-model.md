@@ -28,7 +28,7 @@ goal:
       label: Needs answer summary for AI citation
 questions:
   - How does Walrus Memory handle security and trust?
-  - What does the MemWal relayer see and how can you reduce that trust?
+  - What does the MemWal relayer see and how can I reduce that trust?
   - How does authentication work in Walrus Memory?
 answer: >-
   Walrus Memory splits security between onchain enforcement (ownership, delegate authorization,
