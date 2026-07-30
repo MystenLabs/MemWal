@@ -141,16 +141,27 @@ test("stats snapshot reflects acquired/released slots", () => {
     // current behavior produces (ip 1.1.1.1 still has an `opens` entry).
 });
 
-test("clientIpFromRequest prefers first hop in x-forwarded-for", () => {
+test("clientIpFromRequest uses the relayer's single sanitized value", () => {
+    // Normal case: the relayer forwards exactly one resolved client IP.
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: "203.0.113.5, 10.0.0.1, 127.0.0.1" })),
+        clientIpFromRequest(fakeReq({ xff: "203.0.113.5" })),
         "203.0.113.5"
     );
 });
 
-test("clientIpFromRequest trims whitespace around the first hop", () => {
+test("clientIpFromRequest takes the rightmost hop, never the client-forgeable leftmost", () => {
+    // Defense-in-depth: if a multi-value chain ever reaches the sidecar, the
+    // leftmost value is attacker-controlled — we must take the rightmost
+    // (nearest-to-relayer) entry instead. See issue #360.
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: "  203.0.113.5  , 10.0.0.1" })),
+        clientIpFromRequest(fakeReq({ xff: "1.2.3.4, 10.0.0.1, 203.0.113.5" })),
+        "203.0.113.5"
+    );
+});
+
+test("clientIpFromRequest trims whitespace around the value", () => {
+    assert.equal(
+        clientIpFromRequest(fakeReq({ xff: "  203.0.113.5  " })),
         "203.0.113.5"
     );
 });
@@ -167,9 +178,11 @@ test("clientIpFromRequest falls back to req.ip when XFF is empty string", () => 
 });
 
 test("clientIpFromRequest handles array-valued XFF (rare but legal)", () => {
+    // Array = multiple XFF headers; use the last header, then its rightmost
+    // (nearest-to-relayer) hop.
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: ["203.0.113.5, 10.0.0.1"] })),
-        "203.0.113.5"
+        clientIpFromRequest(fakeReq({ xff: ["1.2.3.4", "203.0.113.5, 10.0.0.1"] })),
+        "10.0.0.1"
     );
 });
 

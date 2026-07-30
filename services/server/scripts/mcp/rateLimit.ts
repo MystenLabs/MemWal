@@ -67,16 +67,29 @@ export function loadRateLimitConfigFromEnv(): RateLimitConfig {
 }
 
 /**
- * Best-effort client IP. Honor the relayer's `x-forwarded-for` (first hop is
- * the original caller), fall back to express's `req.ip`. Returns "unknown"
- * if neither is available — counters still apply, just bucketed together.
+ * Best-effort client IP for per-IP bucketing.
+ *
+ * Trust boundary: the sidecar is reachable ONLY over loopback from the Rust
+ * relayer, which resolves the real client IP behind its trusted proxies and
+ * forwards it as a SINGLE-value `x-forwarded-for` (see
+ * `services/server/src/mcp_proxy.rs::inject_forwarded_for`). So that value is
+ * authoritative here. We must NOT take the leftmost hop of a multi-value
+ * chain — that was the spoofable path in issue #360. As defense-in-depth
+ * against any regression that lets a chain through, take the RIGHTMOST
+ * (nearest-to-relayer) entry, never the leftmost/client-controlled one. Falls
+ * back to express's `req.ip` (loopback in tests), then "unknown".
  */
 export function clientIpFromRequest(req: Request): string {
     const fwd = req.headers["x-forwarded-for"];
-    const raw = Array.isArray(fwd) ? fwd[0] : fwd;
+    // Multiple XFF headers arrive as an array; the last one is nearest to us.
+    const raw = Array.isArray(fwd) ? fwd[fwd.length - 1] : fwd;
     if (typeof raw === "string" && raw.length > 0) {
-        const first = raw.split(",")[0]?.trim();
-        if (first) return first;
+        const parts = raw
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+        const last = parts[parts.length - 1];
+        if (last) return last;
     }
     return req.ip ?? "unknown";
 }

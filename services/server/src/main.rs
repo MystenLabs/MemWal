@@ -1,5 +1,6 @@
 mod alerts;
 mod auth;
+mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;

@@ -272,6 +272,14 @@ pub struct Config {
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
     pub sidecar_secret: Option<String>,
+    /// Number of trusted reverse proxies sitting in front of the relayer.
+    /// Used to resolve the real client IP from `X-Forwarded-For` for per-IP
+    /// rate limiting (see [`crate::client_ip::resolve_client_ip`]). On Railway
+    /// the edge proxy is one hop, so `1` is correct in production; `0` means
+    /// the relayer is directly exposed and no `X-Forwarded-For` value is
+    /// trusted. Set it to the *actual* hop count — a value larger than reality
+    /// lets clients spoof their rate-limit bucket (GitHub issue #360).
+    pub trusted_proxy_hops: usize,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
@@ -387,6 +395,13 @@ impl Config {
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            // Default 1 = one edge proxy (Railway) in front of the relayer in
+            // production. Override with TRUSTED_PROXY_HOPS=0 when the relayer is
+            // directly exposed. An invalid / non-numeric value falls back to 1.
+            trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(1),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
