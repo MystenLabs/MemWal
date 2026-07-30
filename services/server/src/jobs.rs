@@ -1695,6 +1695,17 @@ impl WalletJobError {
         if has_lock_anchor || corroborated_lock {
             return WalletJobError::ObjectLockedUntilEpoch(msg.to_string());
         }
+        // Postgres B-tree index-row-size failure (e.g. an oversized namespace
+        // producing an over-limit `(owner, namespace)` entry). This is
+        // deterministic: the same input fails the insert on every attempt, so
+        // retrying only re-runs the upload and never indexes. Classify Permanent
+        // so it aborts after one attempt instead of consuming the retry budget.
+        // Anchored before the generic MoveAbort catch (a Postgres error is not a
+        // MoveAbort, but keeping specific anchors above the catch matches the
+        // convention used by the object-lock arm above).
+        if lower.contains("index row requires") && lower.contains("maximum size") {
+            return WalletJobError::Permanent(msg.to_string());
+        }
         if lower.contains("moveabort") || lower.contains("move abort") {
             return WalletJobError::Permanent(msg.to_string());
         }
@@ -2621,6 +2632,21 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 msg
             );
         }
+    }
+
+    #[test]
+    fn classify_index_row_size_error_as_permanent() {
+        // A Postgres B-tree index-row-size failure (e.g. an oversized namespace)
+        // is deterministic: retrying only re-runs the paid upload and never
+        // indexes. It must classify Permanent (abort after one attempt), not the
+        // default Transient. The string is the real error from the #493 repro.
+        let msg = "Internal Error: Failed to insert plaintext vector: error \
+                   returned from database: index row requires 21816 bytes, \
+                   maximum size is 8191";
+        assert!(
+            WalletJobError::classify_sidecar_error(msg).is_permanent(),
+            "index-row-size error must be Permanent, not Transient"
+        );
     }
 
     #[test]

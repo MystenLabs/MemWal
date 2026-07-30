@@ -64,6 +64,22 @@ pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
 /// Delay before racing a cold Walrus read against the next configured aggregator.
 pub const DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS: u64 = 150;
 
+/// Default cap on request `namespace` byte length (env `MAX_NAMESPACE_BYTES`).
+/// ~3x headroom over the largest namespace seen in real data and well under the
+/// composite-index entry limit; rejects no legitimate namespace while stopping
+/// the pathological oversized input that fails the insert after paid work.
+pub const DEFAULT_MAX_NAMESPACE_BYTES: usize = 512;
+
+/// Hard ceiling the `MAX_NAMESPACE_BYTES` env override is clamped to. The whole
+/// point of the cap is that an oversized namespace can never reach the
+/// `(owner, namespace)` B-tree insert; an operator who set the override absurdly
+/// high would silently defeat that, leaving only the retry-classifier backstop.
+/// So the configured value is clamped to this ceiling, which is itself kept well
+/// under the Postgres index-entry limit (~8KB) with room for the `owner` half of
+/// the composite key. Raising the default within [default, ceiling] is fine;
+/// exceeding the ceiling is not a supported configuration.
+pub const MAX_NAMESPACE_BYTES_CEILING: usize = 2048;
+
 pub const MAX_SECURITY_DELETE_EXECUTE_IN_FLIGHT: usize = 64;
 
 /// Process-local admission gate for deletion transactions that all mutate
@@ -251,6 +267,15 @@ pub struct Config {
     pub walrus_aggregator_url: String,
     /// Number of Walrus storage epochs requested for new uploads.
     pub walrus_storage_epochs: u32,
+    /// Maximum byte length accepted for a request `namespace` on the write path.
+    /// A namespace past this is rejected 400 before any embed/encrypt/upload,
+    /// so an oversized `(owner, namespace)` index entry can never fail the
+    /// insert after paid work has run. Env `MAX_NAMESPACE_BYTES`
+    /// (default `DEFAULT_MAX_NAMESPACE_BYTES`), clamped to
+    /// `MAX_NAMESPACE_BYTES_CEILING` so the override can't disable the cap.
+    /// Well under the B-tree index-entry limit; the largest real namespace
+    /// observed is far smaller.
+    pub max_namespace_bytes: usize,
     /// Ordered aggregator candidates used for cold Walrus reads. The primary
     /// `walrus_aggregator_url` is always first; `WALRUS_AGGREGATOR_URLS`
     /// appends additional low-latency/proxy endpoints for tail-race reads.
@@ -360,6 +385,10 @@ impl Config {
             walrus_publisher_url,
             walrus_aggregator_url,
             walrus_storage_epochs: configured_walrus_storage_epochs(&network),
+            // Clamp the override to the ceiling so the cap can't be
+            // misconfigured into a no-op (see MAX_NAMESPACE_BYTES_CEILING).
+            max_namespace_bytes: env_number("MAX_NAMESPACE_BYTES", DEFAULT_MAX_NAMESPACE_BYTES)
+                .min(MAX_NAMESPACE_BYTES_CEILING),
             walrus_aggregator_urls,
             walrus_skip_consistency_check: env_bool("WALRUS_SKIP_CONSISTENCY_CHECK"),
             walrus_aggregator_race_after_ms: std::env::var("WALRUS_AGGREGATOR_RACE_AFTER_MS")
@@ -1483,6 +1512,7 @@ mod tests {
             walrus_publisher_url: "https://publisher.example".into(),
             walrus_aggregator_url: "https://aggregator.example".into(),
             walrus_storage_epochs: 3,
+            max_namespace_bytes: DEFAULT_MAX_NAMESPACE_BYTES,
             walrus_aggregator_urls: vec!["https://aggregator.example".into()],
             walrus_skip_consistency_check: false,
             walrus_aggregator_race_after_ms: 150,

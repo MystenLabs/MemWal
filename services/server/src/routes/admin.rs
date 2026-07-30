@@ -434,6 +434,12 @@ pub async fn restore(
     if body.namespace.is_empty() {
         return Err(AppError::BadRequest("namespace cannot be empty".into()));
     }
+    // Restore rebuilds the `(owner, namespace)` index from on-chain blobs and
+    // re-inserts each via `insert_vector` below. Reject an oversized namespace
+    // before that download/decrypt/re-embed work — otherwise the same
+    // index-row-size insert failure this guards against would strike here too,
+    // and (unlike remember/analyze) this path is not behind the upload pause.
+    super::validate_namespace(&body.namespace, state.config.max_namespace_bytes)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;

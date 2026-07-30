@@ -79,6 +79,8 @@ pub async fn analyze(
             MAX_ANALYZE_TEXT_BYTES
         )));
     }
+    // Reject an oversized namespace before extraction / any index write.
+    super::validate_namespace(&body.namespace, state.config.max_namespace_bytes)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;

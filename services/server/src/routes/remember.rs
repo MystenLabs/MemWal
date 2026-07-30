@@ -628,6 +628,10 @@ pub async fn remember(
             MAX_REMEMBER_TEXT_BYTES
         )));
     }
+    // Reject an oversized namespace before any paid work — an over-limit
+    // `(owner, namespace)` index entry would otherwise fail the insert only
+    // after embed/encrypt/upload have already run.
+    super::validate_namespace(&body.namespace, state.config.max_namespace_bytes)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -749,6 +753,13 @@ pub async fn remember_bulk(
                 i, MAX_REMEMBER_TEXT_BYTES
             )));
         }
+        super::validate_namespace(&item.namespace, state.config.max_namespace_bytes)
+            .map_err(|_| {
+                AppError::BadRequest(format!(
+                    "items[{}].namespace exceeds maximum length of {} bytes",
+                    i, state.config.max_namespace_bytes
+                ))
+            })?;
     }
 
     let owner = &auth.owner;
@@ -894,6 +905,8 @@ pub async fn remember_manual(
     if body.vector.is_empty() {
         return Err(AppError::BadRequest("vector cannot be empty".into()));
     }
+    // Reject an oversized namespace before the Walrus upload + index write.
+    super::validate_namespace(&body.namespace, state.config.max_namespace_bytes)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -1065,6 +1078,7 @@ mod tests {
             walrus_publisher_url: "http://localhost:9001".to_string(),
             walrus_aggregator_url: "http://localhost:9002".to_string(),
             walrus_storage_epochs: 3,
+            max_namespace_bytes: crate::types::DEFAULT_MAX_NAMESPACE_BYTES,
             walrus_aggregator_urls: vec!["http://localhost:9002".to_string()],
             walrus_skip_consistency_check: false,
             walrus_aggregator_race_after_ms: crate::types::DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS,

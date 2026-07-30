@@ -53,6 +53,31 @@ pub async fn uploads_paused() -> (axum::http::StatusCode, axum::Json<serde_json:
     )
 }
 
+/// Reject a namespace whose byte length exceeds `max_bytes` before any paid
+/// work (embed / encrypt / upload) runs.
+///
+/// `vector_entries` carries a composite B-tree index on `(owner, namespace)`;
+/// a namespace past the index-entry byte limit makes the final insert fail
+/// *after* the memory was already embedded, encrypted, and uploaded — so the
+/// request must be rejected up front, at every write handler, not discovered
+/// downstream. The bound is a byte count (`len()` on a `str` is UTF-8 bytes),
+/// matching the on-disk index-row constraint. `max_bytes` is caller-supplied
+/// (`config.max_namespace_bytes`) so the cap has a single source of truth.
+///
+/// Length only: the namespace reaches storage exclusively as a bound SQL
+/// parameter, so there is no injection surface a character check would close.
+/// An empty namespace has length 0 and passes (handlers treat empty as the
+/// default namespace).
+pub fn validate_namespace(namespace: &str, max_bytes: usize) -> Result<(), AppError> {
+    if namespace.len() > max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "namespace exceeds maximum length of {} bytes",
+            max_bytes
+        )));
+    }
+    Ok(())
+}
+
 // ============================================================
 // Wallet-job enqueue (used by remember + analyze)
 // ============================================================
@@ -217,7 +242,7 @@ pub(super) fn zip_search_hit_fields_onto_hydrated(
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_bounded_results, truncate_str};
+    use super::{collect_bounded_results, truncate_str, validate_namespace};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -278,5 +303,47 @@ mod tests {
         let s = "🦀hello";
         let t = truncate_str(s, 2);
         assert_eq!(t, ""); // can't include partial emoji
+    }
+
+    #[test]
+    fn validate_namespace_accepts_at_and_below_cap() {
+        // Exactly the cap passes (boundary); below passes; empty passes.
+        assert!(validate_namespace("", 512).is_ok());
+        assert!(validate_namespace("default", 512).is_ok());
+        assert!(validate_namespace(&"a".repeat(512), 512).is_ok());
+    }
+
+    #[test]
+    fn validate_namespace_rejects_over_cap() {
+        // cap+1 fails (off-by-one guard); a pathological namespace fails hard.
+        assert!(validate_namespace(&"a".repeat(513), 512).is_err());
+        assert!(validate_namespace(&"x".repeat(2 * 1024 * 1024), 512).is_err());
+    }
+
+    #[test]
+    fn validate_namespace_allows_real_data_characters() {
+        // Real production namespaces use `:` (timestamps), `@`, space, `#`.
+        // There is no charset check, so these must all pass under the cap.
+        for ns in [
+            "2026-07-30T12:34:56Z",
+            "user@example.com",
+            "some namespace with spaces",
+            "tag#1",
+        ] {
+            assert!(
+                validate_namespace(ns, 512).is_ok(),
+                "expected ok for real-data namespace: {ns}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_namespace_counts_bytes_not_chars() {
+        // The cap is a byte bound (matches the on-disk index-row limit), so a
+        // multi-byte namespace is measured in UTF-8 bytes: "é" is 2 bytes.
+        let ns = "é".repeat(300); // 600 bytes, 300 chars
+        assert_eq!(ns.len(), 600);
+        assert!(validate_namespace(&ns, 512).is_err()); // 600 > 512
+        assert!(validate_namespace(&ns, 700).is_ok()); // 600 <= 700
     }
 }
