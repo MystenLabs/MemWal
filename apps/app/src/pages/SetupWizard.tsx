@@ -22,7 +22,13 @@ import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
+import {
+    getDelegateKeyFields,
+    getMoveFields,
+    type AccountObjectFields,
+    type DynamicFieldObjectFields,
+    type RegistryObjectFields,
+} from '../utils/suiFields'
 
 type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -56,24 +62,53 @@ function hexToBytes(hex: string): Uint8Array {
 
 async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
     try {
-        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
-    } catch (err) {
-        console.warn('[getAccountObjectId] lookup failed, treating as no-account', err)
+        const registryObj = await suiClient.getObject({
+            id: config.memwalRegistryId,
+            options: { showContent: true },
+        })
+        const fields = getMoveFields<RegistryObjectFields>(registryObj?.data?.content)
+        if (fields) {
+            const tableId = fields?.accounts?.fields?.id?.id
+            if (tableId) {
+                const dynField = await suiClient.getDynamicFieldObject({
+                    parentId: tableId,
+                    name: { type: 'address', value: ownerAddress },
+                })
+                const dynFields = getMoveFields<DynamicFieldObjectFields>(dynField?.data?.content)
+                if (dynFields?.value) return dynFields.value
+            }
+        }
+    } catch {
         return null
     }
+
+    return null
 }
 
-type AccountJson = { delegate_keys?: { public_key?: unknown }[] }
-
 async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<number> {
-    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
-    return json?.delegate_keys?.length ?? 0
+    const obj = await suiClient.getObject({
+        id: accountId,
+        options: { showContent: true },
+    })
+    const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
+    if (fields) return (fields.delegate_keys ?? []).length
+
+    return 0
 }
 
 async function getRegisteredDelegatePublicKeys(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<string[]> {
-    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
-    if (json?.delegate_keys) {
-        return json.delegate_keys.map((k) => publicKeyToHex(k.public_key))
+    const obj = await suiClient.getObject({
+        id: accountId,
+        options: { showContent: true },
+    })
+    const fields = getMoveFields<AccountObjectFields>(obj?.data?.content)
+    if (fields) {
+        const keys = fields.delegate_keys ?? []
+        return keys.map((k) => {
+            const f = getDelegateKeyFields(k)
+            const pkBytes: number[] = f.public_key ?? []
+            return bytesToHex(pkBytes)
+        })
     }
 
     return []

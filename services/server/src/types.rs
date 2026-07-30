@@ -117,10 +117,7 @@ pub struct AppState {
     /// Shared Sui gRPC client for onchain delegate-key verification, built
     /// once at startup when `SUI_GRPC_URL` is set (`None` keeps the JSON-RPC
     /// path). This client is intentionally independent of security deletion's
-    /// quota gate. Constructing `sui_rpc::Client` parses the OS root-cert
-    /// store and opens a fresh TLS channel, so it must NOT be rebuilt per
-    /// request — it is `Clone` (shares the underlying tonic channel),
-    /// mirroring how `http_client` reuses one pooled reqwest client.
+    /// quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
