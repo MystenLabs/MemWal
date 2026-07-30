@@ -1,11 +1,9 @@
 /**
- * Sui client compatibility layer. App.tsx's shared SuiClientProvider stays on
- * JSON-RPC (see the comment there for why), but callers may still receive a
- * SuiGrpcClient — e.g. the security-delete subsystem's own scoped client
- * (utils/suiClientFactory.ts). The two have different getObject and
- * dynamic-field shapes, so these helpers keep that cross-transport
- * compatibility at one boundary rather than letting every call site assume
- * one shape unconditionally.
+ * Sui client compatibility layer — App.tsx's SuiClientProvider hands out a
+ * SuiGrpcClient for real networks and a SuiJsonRpcClient only for the explicit
+ * local browser E2E escape hatch. The two have different getObject and
+ * dynamic-field shapes, so these helpers keep that test-only compatibility at
+ * one boundary.
  */
 
 import { isSuiGrpcClient, type SuiGrpcClient } from '@mysten/sui/grpc'

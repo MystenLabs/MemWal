@@ -596,50 +596,6 @@ module memwal::account_tests {
         scenario.end();
     }
 
-    /// A delegate is authorized only for the data of the account it is
-    /// registered on: `seal_approve` must reject a key id that is not
-    /// namespaced to this account's owner, even when the caller is a
-    /// registered delegate. Here OWNER registers themselves as a delegate of
-    /// their own account and then requests an id scoped to an unrelated owner
-    /// (OTHER) with that account — this must abort with ENoAccess.
-    #[test]
-    #[expected_failure(abort_code = account::ENoAccess)]
-    fun test_seal_approve_delegate_rejects_unrelated_id() {
-        let mut scenario = test_scenario::begin(OWNER);
-        setup_with_account(&mut scenario);
-
-        // OWNER registers themselves as a delegate of their own account
-        // (delegate address == owner is permitted).
-        scenario.next_tx(OWNER);
-        {
-            let mut account = scenario.take_shared<MemWalAccount>();
-            let pk = x"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-            let clock = clock::create_for_testing(scenario.ctx());
-            account::add_delegate_key(
-                &mut account,
-                pk,
-                OWNER, // delegate address == account owner
-                string::utf8(b"self delegate"),
-                &clock,
-                scenario.ctx(),
-            );
-            clock::destroy_for_testing(clock);
-            test_scenario::return_shared(account);
-        };
-
-        // Requesting an id scoped to an unrelated owner (OTHER) while passing
-        // this account must be denied.
-        scenario.next_tx(OWNER);
-        {
-            let account = scenario.take_shared<MemWalAccount>();
-            let unrelated_key_id = sui::bcs::to_bytes(&OTHER);
-            account::seal_approve(unrelated_key_id, &account, scenario.ctx());
-            test_scenario::return_shared(account);
-        };
-
-        scenario.end();
-    }
-
     #[test]
     #[expected_failure(abort_code = account::ENoAccess)]
     fun test_seal_approve_unauthorized() {

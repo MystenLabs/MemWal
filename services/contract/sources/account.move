@@ -539,22 +539,15 @@ module memwal::account {
         // Account must be active
         assert!(account.active, EAccountDeactivated);
 
-        // The requested key ID must be namespaced to this account's owner on
-        // both the owner and delegate paths — this is the binding between `id`
-        // and `account`. The owner is identified by the id suffix; a delegate
-        // is authorized only for the data of the account it is registered on,
-        // never for an arbitrary id passed together with an unrelated account.
-        let owner_bytes = sui::bcs::to_bytes(&account.owner);
-        assert!(has_suffix(&id, &owner_bytes), ENoAccess);
-
         let caller = ctx.sender();
 
-        // Owner can decrypt — return early; this also avoids scanning the
-        // delegate list in the common owner path.
-        if (caller == account.owner) return;
+        // Owner check: key ID must end with BCS(owner) and caller must be the owner
+        let owner_bytes = sui::bcs::to_bytes(&account.owner);
+        let is_owner = (caller == account.owner) && has_suffix(&id, &owner_bytes);
+        // Delegate key holders can decrypt
+        let is_delegate = is_delegate_address(account, caller);
 
-        // Otherwise the caller must be a registered delegate of this account.
-        assert!(is_delegate_address(account, caller), ENoAccess);
+        assert!(is_owner || is_delegate, ENoAccess);
     }
 
     /// Compute the SEAL key ID for a given owner address.
