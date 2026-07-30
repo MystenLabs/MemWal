@@ -11,36 +11,39 @@ import { randomUUID } from "crypto";
 import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { SealClient } from "@mysten/seal";
-import { WalrusClient } from "@mysten/walrus";
+import { WalrusClient, type WalrusClientConfig } from "@mysten/walrus";
 import {
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_SERVER_CONFIGS,
+    SIDECAR_SUI_TX_CLIENT,
     SUI_GRPC_URL,
     SUI_NETWORK,
     SUI_RPC_URL,
     SUI_TYPE,
     UPLOAD_RELAY_TIP_CACHE_TTL_MS,
     WALRUS_CLIENT_MAX_AGE_MS,
+    WALRUS_STAKING_POOL_ID,
+    WALRUS_SYSTEM_OBJECT_ID,
     WALRUS_UPLOAD_RELAY_URL,
 } from "./config.js";
 import { shortAddress } from "./util.js";
 
-// JSON-RPC client. Only used by the blob query/restore path as the fallback
-// when SUI_GRPC_URL is unset — with gRPC enabled that path runs on
-// listOwnedObjects/getDynamicField instead (see routes/walrus-query.ts).
-export const suiJsonRpcClient = new SuiJsonRpcClient({
-    url: SUI_RPC_URL,
-    network: SUI_NETWORK,
-});
+// Non-testnet JSON-RPC compatibility client. It is deliberately not even
+// constructed on testnet, preventing accidental reads through a retired API.
+export const suiJsonRpcClient = SUI_NETWORK === "testnet"
+    ? null
+    : new SuiJsonRpcClient({
+        url: SUI_RPC_URL,
+        network: SUI_NETWORK,
+    });
 
 // Shared core client for the write path (Walrus register/certify, SEAL, the
-// Enoki sponsor build). Sui sunsets JSON-RPC on 2026-07-31, so this moves to
-// gRPC when SUI_GRPC_URL is set; otherwise it stays on JSON-RPC so enabling gRPC
-// is an explicit, reversible opt-in. Only the core API is used here, which both
-// clients implement (WalrusClient/SealClient take `ClientWithCoreApi`).
-export const suiClient = SUI_GRPC_URL
+// Enoki sponsor build). Testnet always uses gRPC; non-testnet deployments may
+// retain the explicit compatibility selection. Only the shared core API is
+// consumed by WalrusClient/SealClient.
+export const suiClient = SUI_GRPC_URL && SIDECAR_SUI_TX_CLIENT !== "jsonrpc"
     ? new SuiGrpcClient({ network: SUI_NETWORK, baseUrl: SUI_GRPC_URL })
-    : suiJsonRpcClient;
+    : suiJsonRpcClient!;
 
 export const sealClient = new SealClient({
     suiClient: suiClient as any,
@@ -50,14 +53,26 @@ export const sealClient = new SealClient({
 });
 
 function createWalrusClient(): WalrusClient {
-    return new WalrusClient({
-        network: SUI_NETWORK,
+    // WalrusClient only resolves package/staking ids itself for
+    // "mainnet"/"testnet" — anything else (e.g. a devstack localnet) needs
+    // them supplied directly via packageConfig.
+    const baseConfig = {
         suiClient: suiClient as any,
         uploadRelay: {
             host: WALRUS_UPLOAD_RELAY_URL,
             sendTip: { max: 10_000_000 },
         },
-    });
+    };
+    const config: WalrusClientConfig = WALRUS_SYSTEM_OBJECT_ID && WALRUS_STAKING_POOL_ID
+        ? {
+            ...baseConfig,
+            packageConfig: {
+                systemObjectId: WALRUS_SYSTEM_OBJECT_ID,
+                stakingPoolId: WALRUS_STAKING_POOL_ID,
+            },
+        }
+        : { ...baseConfig, network: SUI_NETWORK as "mainnet" | "testnet" };
+    return new WalrusClient(config);
 }
 
 let walrusClient = createWalrusClient();
@@ -188,6 +203,9 @@ export async function getUploadRelayTipAddress(): Promise<string | null> {
  * @mysten/sui client minor versions used by this sidecar.
  */
 export async function suiRpc<T>(method: string, params: unknown[]): Promise<T> {
+    if (SUI_NETWORK === "testnet") {
+        throw new Error(`Sui JSON-RPC method ${method} is disabled on testnet; use the gRPC client`);
+    }
     const resp = await fetch(SUI_RPC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

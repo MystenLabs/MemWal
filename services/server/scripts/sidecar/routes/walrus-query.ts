@@ -6,12 +6,8 @@
 import express, { type Express } from "express";
 import { bcs } from "@mysten/sui/bcs";
 import { JSON_LIMIT_METADATA, WALRUS_PACKAGE_ID } from "../config.js";
-// When SUI_GRPC_URL is set, `suiClient` is the gRPC client and this path uses
-// listOwnedObjects (server-side type filter) + getDynamicField, so no JSON-RPC
-// index method is needed. Without SUI_GRPC_URL it falls back to the original
-// JSON-RPC path (getOwnedObjects, getDynamicFieldObject,
-// suix_queryTransactionBlocks) — same explicit, reversible opt-in as the
-// write path.
+// Testnet always uses listOwnedObjects + getDynamicField over gRPC. The legacy
+// JSON-RPC query path remains reachable only for non-testnet compatibility.
 import { suiClient, suiJsonRpcClient, suiRpc } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
@@ -242,7 +238,7 @@ async function fetchBlobMetadataEntries(objectId: string): Promise<Array<{ key: 
 
     const dynField = await withRpcRetry<any>(
         `[query-blobs] getDynamicField ${objectId}`,
-        () => suiJsonRpcClient.getDynamicFieldObject({
+        () => suiJsonRpcClient!.getDynamicFieldObject({
             parentId: objectId,
             name: {
                 type: "vector<u8>",
@@ -296,7 +292,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 let hasMore = true;
 
                 while (hasMore) {
-                    const result = await suiJsonRpcClient.getOwnedObjects({
+                    const result = await suiJsonRpcClient!.getOwnedObjects({
                         owner,
                         filter: { StructType: WALRUS_BLOB_TYPE },
                         options: { showContent: true },

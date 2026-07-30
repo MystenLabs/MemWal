@@ -296,6 +296,7 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
+            &state.config.package_id,
             &cached_account_id,
             pk_bytes,
         )
@@ -333,6 +334,7 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
+            &state.config.package_id,
             exact_account_id,
             pk_bytes,
         )
@@ -356,12 +358,22 @@ async fn resolve_account(
         return Ok((exact_account_id.to_string(), owner));
     }
 
-    // Strategy 3: Scan AccountRegistry on-chain only when no exact account id
-    // is available.
+    // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
+    // serves JSON-RPC, so fail closed when a modern signed x-account-id hint
+    // is absent instead of silently contacting a retired endpoint.
+    if state.config.sui_network == "testnet" {
+        return Err(
+            "x-account-id is required for delegate-key authentication on testnet".to_string(),
+        );
+    }
+
+    // Non-testnet compatibility path: scan AccountRegistry only when no exact
+    // account id is available.
     match find_account_by_delegate_key(
         &state.http_client,
         &state.config.sui_rpc_url,
         &state.config.registry_id,
+        &state.config.package_id,
         pk_bytes,
     )
     .await

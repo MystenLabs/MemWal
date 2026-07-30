@@ -16,8 +16,7 @@ import {
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
-import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
-import { SuiGrpcClient } from '@mysten/sui/grpc'
+import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
@@ -36,25 +35,31 @@ import '@mysten/dapp-kit/dist/index.css'
 // Network config
 // ============================================================
 
-const { networkConfig } = createNetworkConfig({
-  testnet: { url: getJsonRpcFullnodeUrl('testnet'), network: 'testnet' },
-  mainnet: { url: getJsonRpcFullnodeUrl('mainnet'), network: 'mainnet' },
-})
-
-// Opt-in gRPC client for the active network (VITE_SUI_GRPC_URL), mirroring the
-// sidecar's SUI_GRPC_URL migration (services/server/scripts/sidecar/config.ts)
-// for the same JSON-RPC sunset (2026-07-31; testnet's public JSON-RPC endpoint
-// already returns 404 today). Empty keeps the existing JSON-RPC client
-// unchanged. Every useSuiClient() consumer (account lookups, tx build) must
-// handle both client shapes — see utils/suiClientCompat.ts. Execution happens
-// server-side via the sponsor sidecar (useSponsoredTransaction.ts), so no
-// client-side execute compat is needed.
-function createClientForNetwork(name: string, cfg: any) {
-  if (name === config.suiNetwork && config.suiGrpcUrl) {
-    return new SuiGrpcClient({ network: name, baseUrl: config.suiGrpcUrl }) as unknown as SuiJsonRpcClient
+// The app-wide client stays on JSON-RPC. Every existing consumer of the provider
+// client (SetupWizard, ConnectMcp, account resolution) is written against
+// JSON-RPC request shapes: `getObject({ id, options })` and
+// `getDynamicFieldObject`, which the gRPC client neither accepts nor provides.
+// Swapping the shared client would break them silently, because dapp-kit's types
+// hard-code SuiJsonRpcClient and hide the mismatch from the compiler.
+//
+// gRPC is scoped to the deletion subsystem, which owns its own client. The Seal
+// and Walrus SDKs the deletion preview uses accept either transport, so nothing
+// in that path needs the shared client to be gRPC.
+// VITE_SUI_RPC_URL overrides the public fullnode for the active network only
+// (mirrors the relayer's SUI_RPC_URL — the public mainnet pool serves
+// stale/slow reads under load). Other networks keep the public default.
+function jsonRpcUrlFor(network: 'testnet' | 'mainnet'): string {
+  if (network === config.suiNetwork && config.suiRpcUrl) {
+    return config.suiRpcUrl
   }
-  return new SuiJsonRpcClient(cfg)
+  return getJsonRpcFullnodeUrl(network)
 }
+
+const { networkConfig } = createNetworkConfig({
+  testnet: { url: jsonRpcUrlFor('testnet'), network: 'testnet' },
+  mainnet: { url: jsonRpcUrlFor('mainnet'), network: 'mainnet' },
+  localnet: { url: config.suiRpcUrl || 'http://127.0.0.1:9000', network: 'localnet' },
+})
 
 const queryClient = new QueryClient()
 
@@ -242,15 +247,16 @@ const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
  *  by restoring the saved query string; otherwise go to the dashboard. */
 function PostAuthRedirect() {
   const pending = sessionStorage.getItem(MCP_CONNECT_STORAGE_KEY)
+  let connectQuery = ''
   if (pending) {
     // Consume once — prevents a redirect loop on later visits to `/`.
     sessionStorage.removeItem(MCP_CONNECT_STORAGE_KEY)
     try {
       const params = JSON.parse(pending) as Record<string, string>
-      const qs = new URLSearchParams(params).toString()
-      if (qs) return <Navigate to={`/connect/mcp?${qs}`} replace />
+      connectQuery = new URLSearchParams(params).toString()
     } catch { /* fall through to dashboard */ }
   }
+  if (connectQuery) return <Navigate to={`/connect/mcp?${connectQuery}`} replace />
   return <Navigate to="/dashboard" replace />
 }
 
@@ -298,7 +304,7 @@ export default function App() {
     <BrowserRouter>
       <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiNetwork} createClient={createClientForNetwork}>
+        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiClientNetwork}>
           <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <DelegateKeyProvider>

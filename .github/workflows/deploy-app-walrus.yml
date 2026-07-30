@@ -59,6 +59,10 @@ jobs:
           fi
         env:
           VITE_SUI_NETWORK: mainnet
+          # The app's Sui client is gRPC. Left unset it falls back to the public
+          # mainnet fullnode (see App.tsx); set the repo variable to point at a
+          # dedicated endpoint.
+          VITE_SUI_GRPC_URL: ${{ vars.VITE_SUI_GRPC_URL }}
           VITE_MEMWAL_SERVER_URL: ${{ vars.VITE_MEMWAL_SERVER_URL }}
           VITE_MEMWAL_PACKAGE_ID: ${{ vars.VITE_MEMWAL_PACKAGE_ID }}
           VITE_MEMWAL_REGISTRY_ID: ${{ vars.VITE_MEMWAL_REGISTRY_ID }}
