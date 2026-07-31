@@ -1,5 +1,20 @@
 # @mysten-incubation/memwal
 
+## 0.1.0
+
+### Added
+
+- Added sponsor authorization helpers for sponsored transaction flows.
+- Added migration-aware account/manual configuration, including registry and current Sui transaction result support.
+
+### Security
+
+- Recalled AI memory is now nonce-delimited, explicitly untrusted data rather than content injected directly into the system role.
+
+### Fixed
+
+- Improved account transaction result handling and failure diagnostics across legacy and current Sui response shapes.
+
 ## 0.0.7
 
 ### Patch Changes

@@ -5,11 +5,13 @@ import {
   useWallets,
   useConnectWallet,
   useCurrentAccount,
+  useSignPersonalMessage,
   useSignTransaction,
   useSuiClient,
 } from "@mysten/dapp-kit";
 import { isEnokiWallet } from "@mysten/enoki";
 import { Transaction } from "@mysten/sui/transactions";
+import { createSponsorAuthorization } from "@mysten-incubation/memwal";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -59,11 +61,17 @@ async function sponsoredSignAndExecute(
   signTransaction: (args: {
     transaction: Transaction;
   }) => Promise<{ signature: string }>,
+  signPersonalMessage: (message: Uint8Array) => Promise<{ signature: string }>,
 ): Promise<{ digest: string }> {
   const kindBytes = await transaction.build({
     client: suiClient as any,
     onlyTransactionKind: true,
   });
+  const authorization = await createSponsorAuthorization(
+    sender,
+    kindBytes,
+    signPersonalMessage,
+  );
 
   const sponsorRes = await fetch(
     `${enokiConfig.memwalServerUrl}/sponsor`,
@@ -73,6 +81,7 @@ async function sponsoredSignAndExecute(
       body: JSON.stringify({
         transactionBlockKindBytes: uint8ArrayToBase64(kindBytes),
         sender,
+        ...authorization,
       }),
     },
   );
@@ -91,7 +100,7 @@ async function sponsoredSignAndExecute(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ digest: sponsored.digest, signature }),
+      body: JSON.stringify({ digest: sponsored.digest, sender, signature }),
     },
   );
 
@@ -120,6 +129,7 @@ export function EnokiLoginCard() {
   const currentAccount = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutateAsync: signTransaction } = useSignTransaction();
+  const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
 
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState("");
@@ -136,6 +146,30 @@ export function EnokiLoginCard() {
 
   const [pendingSetup, setPendingSetup] = useState(false);
 
+  const proveWalletOwnership = useCallback(
+    async (address: string): Promise<string> => {
+      const challengeRes = await fetch("/api/auth/enoki/challenge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ suiAddress: address }),
+      });
+      if (!challengeRes.ok) {
+        throw new Error("Unable to verify wallet ownership. Please try again.");
+      }
+
+      const { message } = await challengeRes.json();
+      if (typeof message !== "string") {
+        throw new Error("Invalid wallet verification challenge.");
+      }
+
+      const { signature } = await signPersonalMessage({
+        message: new TextEncoder().encode(message),
+      });
+      return signature;
+    },
+    [signPersonalMessage],
+  );
+
   const runSetup = useCallback(
     async (address: string) => {
       // Prevent double-run
@@ -145,10 +179,14 @@ export function EnokiLoginCard() {
       try {
         // Phase 1: Check if returning user with stored credentials
         setStep("creating-session");
+        const checkSignature = await proveWalletOwnership(address);
         const checkRes = await fetch("/api/auth/enoki", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ suiAddress: address }),
+          body: JSON.stringify({
+            suiAddress: address,
+            signature: checkSignature,
+          }),
         });
 
         if (!checkRes.ok) {
@@ -169,22 +207,13 @@ export function EnokiLoginCard() {
         // Step: Generate delegate keypair
         setStep("generating-key");
         const ed = await import("@noble/ed25519");
-        const { blake2b } = await import("@noble/hashes/blake2b");
 
         const privateKeyRaw = new Uint8Array(32);
         crypto.getRandomValues(privateKeyRaw);
         const publicKeyRaw = await ed.getPublicKeyAsync(privateKeyRaw);
 
         const privateKeyHex = bytesToHex(privateKeyRaw);
-        const publicKeyHex = bytesToHex(publicKeyRaw);
-
-        // Derive Sui address for delegate key: blake2b256(0x00 || pubkey)
-        const addrInput = new Uint8Array(33);
-        addrInput[0] = 0x00; // Ed25519 scheme flag
-        addrInput.set(publicKeyRaw, 1);
-        const addressBytes = blake2b(addrInput, { dkLen: 32 });
-        const delegateSuiAddress =
-          "0x" + bytesToHex(new Uint8Array(addressBytes));
+        // Contract derives the delegate's Sui address on-chain from the public key.
 
         // Step: On-chain registration
         setStep("registering-onchain");
@@ -233,8 +262,8 @@ export function EnokiLoginCard() {
             target: `${enokiConfig.memwalPackageId}::account::add_delegate_key`,
             arguments: [
               tx.object(knownAccountId),
+              tx.object(enokiConfig.memwalRegistryId),
               tx.pure("vector<u8>", pubKeyBytes),
-              tx.pure("address", delegateSuiAddress),
               tx.pure("string", "Researcher"),
               tx.object("0x6"),
             ],
@@ -244,6 +273,7 @@ export function EnokiLoginCard() {
             address,
             suiClient,
             sign,
+            (message) => signPersonalMessage({ message }),
           );
           await suiClient.waitForTransaction({ digest: result.digest });
         } else {
@@ -261,6 +291,7 @@ export function EnokiLoginCard() {
             address,
             suiClient,
             sign,
+            (message) => signPersonalMessage({ message }),
           );
           await suiClient.waitForTransaction({
             digest: createResult.digest,
@@ -293,8 +324,8 @@ export function EnokiLoginCard() {
             target: `${enokiConfig.memwalPackageId}::account::add_delegate_key`,
             arguments: [
               tx2.object(knownAccountId!),
+              tx2.object(enokiConfig.memwalRegistryId),
               tx2.pure("vector<u8>", pubKeyBytes),
-              tx2.pure("address", delegateSuiAddress),
               tx2.pure("string", "Researcher"),
               tx2.object("0x6"),
             ],
@@ -304,12 +335,14 @@ export function EnokiLoginCard() {
             address,
             suiClient,
             sign,
+            (message) => signPersonalMessage({ message }),
           );
           await suiClient.waitForTransaction({ digest: addResult.digest });
         }
 
         // Step: Create server session + store credentials for returning login
         setStep("creating-session");
+        const registrationSignature = await proveWalletOwnership(address);
         const res = await fetch("/api/auth/enoki", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -317,6 +350,7 @@ export function EnokiLoginCard() {
             suiAddress: address,
             privateKey: privateKeyHex,
             accountId: knownAccountId!,
+            signature: registrationSignature,
           }),
         });
 
@@ -340,7 +374,13 @@ export function EnokiLoginCard() {
         setupRunningRef.current = false;
       }
     },
-    [suiClient, signTransaction, router],
+    [
+      suiClient,
+      signTransaction,
+      signPersonalMessage,
+      router,
+      proveWalletOwnership,
+    ],
   );
 
   // When wallet connects after Google OAuth, continue the setup

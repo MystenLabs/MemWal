@@ -86,6 +86,13 @@ struct WalrusUploadRequest {
     owner: String,
     namespace: String,
     package_id: String,
+    seal_abi: SealAbi,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_package_id: Option<String>,
     epochs: u64,
     defer_transfer: bool,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
@@ -116,6 +123,8 @@ struct WalrusUploadErrorResponse {
 pub struct SetMetadataBatchEntry {
     pub blob_object_id: String,
     pub namespace: String,
+    #[serde(rename = "encryptedData", skip_serializing_if = "Option::is_none")]
+    pub encrypted_data: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -124,9 +133,47 @@ struct SetMetadataBatchRequest {
     blobs: Vec<SetMetadataBatchEntry>,
     owner: String,
     package_id: String,
+    seal_abi: SealAbi,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_package_id: Option<String>,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     key_index: usize,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SealAbi {
+    V1New,
+}
+
+pub enum SealPersistence<'a> {
+    V1New {
+        account_id: &'a str,
+        registry_id: &'a str,
+        policy_package_id: &'a str,
+    },
+}
+
+fn seal_persistence_fields(
+    persistence: SealPersistence<'_>,
+) -> (SealAbi, Option<String>, Option<String>, Option<String>) {
+    match persistence {
+        SealPersistence::V1New {
+            account_id,
+            registry_id,
+            policy_package_id,
+        } => (
+            SealAbi::V1New,
+            Some(account_id.to_string()),
+            Some(registry_id.to_string()),
+            Some(policy_package_id.to_string()),
+        ),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -156,6 +203,7 @@ pub async fn upload_blob(
     package_id: &str,
     agent_id: Option<&str>,
     job_id: Option<&str>,
+    seal_persistence: SealPersistence<'_>,
 ) -> Result<UploadResult, UploadBlobError> {
     upload_blob_inner(
         client,
@@ -170,6 +218,7 @@ pub async fn upload_blob(
         agent_id,
         job_id,
         false,
+        seal_persistence,
     )
     .await
 }
@@ -188,10 +237,13 @@ async fn upload_blob_inner(
     agent_id: Option<&str>,
     job_id: Option<&str>,
     defer_transfer: bool,
+    seal_persistence: SealPersistence<'_>,
 ) -> Result<UploadResult, UploadBlobError> {
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
+    let (seal_abi, account_id, registry_id, policy_package_id) =
+        seal_persistence_fields(seal_persistence);
     let mut req = client.post(&url).json(&WalrusUploadRequest {
         data: data_b64,
         key_index,
@@ -199,6 +251,10 @@ async fn upload_blob_inner(
         owner: owner_address.to_string(),
         namespace: namespace.to_string(),
         package_id: package_id.to_string(),
+        seal_abi,
+        account_id,
+        registry_id,
+        policy_package_id,
         epochs,
         defer_transfer,
         agent_id: agent_id.map(|s| s.to_string()),
@@ -302,6 +358,7 @@ async fn upload_blob_inner(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn set_metadata_batch(
     client: &reqwest::Client,
     sidecar_url: &str,
@@ -311,12 +368,19 @@ pub async fn set_metadata_batch(
     package_id: &str,
     agent_id: Option<&str>,
     blobs: Vec<SetMetadataBatchEntry>,
+    seal_persistence: SealPersistence<'_>,
 ) -> Result<usize, AppError> {
     let url = format!("{}/walrus/set-metadata-batch", sidecar_url);
+    let (seal_abi, account_id, registry_id, policy_package_id) =
+        seal_persistence_fields(seal_persistence);
     let mut req = client.post(&url).json(&SetMetadataBatchRequest {
         blobs,
         owner: owner_address.to_string(),
         package_id: package_id.to_string(),
+        seal_abi,
+        account_id,
+        registry_id,
+        policy_package_id,
         agent_id: agent_id.map(|s| s.to_string()),
         key_index,
     });
@@ -468,6 +532,16 @@ pub async fn download_blob_from_aggregators(
     skip_consistency_check: bool,
     race_after: Duration,
 ) -> Result<Vec<u8>, AppError> {
+    if !is_valid_blob_id(blob_id) {
+        // Internal, NOT BlobNotFound: BlobNotFound triggers reactive index
+        // cleanup in the engine, and a malformed id is a data/config problem,
+        // not proof the blob is gone from Walrus.
+        return Err(AppError::Internal(format!(
+            "Invalid Walrus blob id (expected base64url charset): {:?}",
+            blob_id
+        )));
+    }
+
     let aggregator_urls: Vec<String> = aggregator_urls
         .iter()
         .map(|url| url.trim())
@@ -660,6 +734,17 @@ async fn download_blob_from_aggregator(
     Ok(bytes.to_vec())
 }
 
+/// Walrus blob IDs are unpadded URL-safe base64 (a u256, 43 chars in
+/// practice). Validate the charset before the id is interpolated into an
+/// aggregator URL path so a corrupted or hostile stored id (containing
+/// `/`, `..`, `?`, `#`, …) cannot change the request target.
+fn is_valid_blob_id(blob_id: &str) -> bool {
+    !blob_id.is_empty()
+        && blob_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> AppError {
     if !errors.is_empty()
         && errors
@@ -688,8 +773,51 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::aggregate_download_errors;
+    use super::{aggregate_download_errors, is_valid_blob_id};
     use crate::types::AppError;
+
+    #[test]
+    fn valid_blob_ids_pass_charset_check() {
+        // Real Walrus blob ids are unpadded base64url of a u256 (43 chars).
+        assert!(is_valid_blob_id(
+            "M4hsZGQ1oCchKzYnnhDMV-ZKvhWsp2SS1G7xI6PzQxs"
+        ));
+        assert!(is_valid_blob_id("abc123_-XYZ"));
+    }
+
+    #[test]
+    fn invalid_blob_ids_are_rejected() {
+        for bad in [
+            "",
+            "../secrets",
+            "id/with/slashes",
+            "id?query=1",
+            "id#fragment",
+            "id with spaces",
+            "id\nnewline",
+            "id+plus=", // standard base64 charset is not base64url
+        ] {
+            assert!(!is_valid_blob_id(bad), "should reject blob id: {:?}", bad);
+        }
+    }
+
+    #[tokio::test]
+    async fn download_rejects_invalid_blob_id_before_any_request() {
+        let client = reqwest::Client::new();
+        let err = super::download_blob_from_aggregators(
+            &client,
+            &["https://aggregator.invalid".to_string()],
+            "../../../etc/passwd",
+            false,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        // Must be Internal, not BlobNotFound — BlobNotFound would trigger
+        // reactive index cleanup in the engine.
+        assert!(matches!(err, AppError::Internal(_)));
+    }
 
     #[test]
     fn aggregate_download_errors_preserves_not_found_cleanup_signal() {

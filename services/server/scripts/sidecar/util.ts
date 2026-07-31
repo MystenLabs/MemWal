@@ -2,8 +2,37 @@
  * Small dependency-free helpers shared across the sidecar.
  */
 
+import { appendFileSync, writeFileSync } from "node:fs";
+
 export function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Test-only lost-response window after a durable side effect has completed.
+ *
+ * Marker file format (one shot per process tree):
+ *   line 1: the job id whose response is being delayed
+ *   line 2: "released", appended just before the delayed response is sent
+ * A marker WITHOUT the "released" line proves a kill landed inside the
+ * ambiguous window (side effect durable, response never reached the caller).
+ */
+export async function delayInjectedResponseOnce(enabled: boolean, jobId: string): Promise<void> {
+    const ms = Number(process.env.SIDECAR_FAULT_RESPONSE_DELAY_MS || 0);
+    if (!enabled || !Number.isSafeInteger(ms) || ms <= 0) return;
+    const marker = process.env.SIDECAR_FAULT_MARKER_FILE;
+    if (!marker) throw new Error("SIDECAR_FAULT_MARKER_FILE is required for response fault injection");
+    try {
+        writeFileSync(marker, `${jobId}\n`, { flag: "wx", mode: 0o600 });
+    } catch (error: any) {
+        if (error?.code === "EEXIST") return;
+        throw error;
+    }
+    console.warn(`[fault-injection] delaying durable response for job=${jobId} by ${ms}ms`);
+    await sleep(ms);
+    // The delayed response is about to be released to the caller; from here on
+    // a crash is an ordinary consumed-response restart, not the ambiguous window.
+    appendFileSync(marker, "released\n");
 }
 
 export function errorMessage(err: unknown): string {

@@ -79,6 +79,7 @@ pub async fn analyze(
             MAX_ANALYZE_TEXT_BYTES
         )));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -227,7 +228,7 @@ pub async fn analyze(
                         // (e.g. sidecar 5xx) or timeout, log and fall back.
                         match tokio::time::timeout(
                             std::time::Duration::from_millis(FETCH_TIMEOUT_MS),
-                            state.engine.fetch_batch(owner, &hit_refs, &auth),
+                            state.engine.fetch_batch(owner, namespace, &hit_refs, &auth),
                         )
                         .await
                         {
@@ -379,6 +380,7 @@ pub async fn analyze(
             .map(|fact| {
                 let state = Arc::clone(&state);
                 let owner = owner.clone();
+                let account_id = auth.account_id.clone();
                 let namespace = namespace.clone();
                 let agent_pk = auth.public_key.clone();
                 let fact = fact.clone();
@@ -393,6 +395,7 @@ pub async fn analyze(
                         .engine
                         .store_blob(
                             &owner,
+                            &account_id,
                             &namespace,
                             fact.text.as_bytes(),
                             &vector,
@@ -446,11 +449,13 @@ pub async fn analyze(
     //   - No plaintext stored in job payload
     //   - Exact ciphertext size known for quota check
     let auth_pubkey_base = auth.public_key.clone();
+    let account_id = auth.account_id.clone();
     let prep_tasks: Vec<_> = facts
         .iter()
         .map(|fact| {
             let state = Arc::clone(&state);
             let owner = owner.clone();
+            let account_id = account_id.clone();
             let fact = fact.clone();
             async move {
                 let embed_fut = state.embedder.embed(&fact.text);
@@ -460,6 +465,7 @@ pub async fn analyze(
                     state.config.sidecar_secret.as_deref(),
                     fact.text.as_bytes(),
                     &owner,
+                    &account_id,
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -524,6 +530,7 @@ pub async fn analyze(
                 owner: owner.clone(),
                 namespace: namespace.clone(),
                 package_id: state.config.package_id.clone(),
+                account_id: account_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
                 epochs: state.config.walrus_storage_epochs,
@@ -583,7 +590,7 @@ mod tests {
     fn analyze_text_strictly_smaller_than_remember() {
         // Analyze does fact extraction in a single LLM call without
         // chunking, so its ceiling must stay below remember's.
-        assert!(MAX_ANALYZE_TEXT_BYTES < MAX_REMEMBER_TEXT_BYTES);
+        const { assert!(MAX_ANALYZE_TEXT_BYTES < MAX_REMEMBER_TEXT_BYTES) }
     }
 
     // ── Analyze concurrency + weight ────────────────────

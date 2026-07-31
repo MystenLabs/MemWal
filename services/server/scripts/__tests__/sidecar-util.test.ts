@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+    delayInjectedResponseOnce,
     dedupeAddresses,
     errorMessage,
     errorName,
@@ -10,6 +14,42 @@ import {
     shortAddress,
     truncateForLog,
 } from "../sidecar/util.js";
+
+test("durable response fault marker names one job and records the release", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "memwal-fault-"));
+    const marker = join(dir, "job");
+    process.env.SIDECAR_FAULT_RESPONSE_DELAY_MS = "50";
+    process.env.SIDECAR_FAULT_MARKER_FILE = marker;
+    try {
+        const delayed = delayInjectedResponseOnce(true, "legacy-entry-a");
+        // The marker is written synchronously before the delay starts: inside
+        // the ambiguous window it holds only the job line, no "released".
+        assert.equal(readFileSync(marker, "utf8"), "legacy-entry-a\n");
+        await delayed;
+        // "released" is appended just before the delayed response is sent.
+        assert.equal(readFileSync(marker, "utf8"), "legacy-entry-a\nreleased\n");
+        // One-shot: later jobs neither delay nor rewrite the marker.
+        await delayInjectedResponseOnce(true, "legacy-entry-b");
+        assert.equal(readFileSync(marker, "utf8"), "legacy-entry-a\nreleased\n");
+    } finally {
+        delete process.env.SIDECAR_FAULT_RESPONSE_DELAY_MS;
+        delete process.env.SIDECAR_FAULT_MARKER_FILE;
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("response fault injection requires a durable marker", async () => {
+    process.env.SIDECAR_FAULT_RESPONSE_DELAY_MS = "1";
+    delete process.env.SIDECAR_FAULT_MARKER_FILE;
+    try {
+        await assert.rejects(
+            delayInjectedResponseOnce(true, "legacy-entry-a"),
+            /SIDECAR_FAULT_MARKER_FILE is required/,
+        );
+    } finally {
+        delete process.env.SIDECAR_FAULT_RESPONSE_DELAY_MS;
+    }
+});
 
 test("shortAddress truncates long addresses and passes short values through", () => {
     assert.equal(

@@ -217,11 +217,11 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     }, [accountObjectId, address, preview, signer, suiClient])
 
     if (!config.securityDeleteEnabled || !address) return null
-    return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete memories" subtitle={`Memories stored on Walrus by this wallet: ${visibleCounts.deletable}`} action={
+    return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
         <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
     }>
         <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
-        <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> stored, <strong>{visibleCounts.deleting}</strong> in progress, <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> deleted</div>
+        <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
         <div className="sd-tabs" role="tablist">
             <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} onClick={() => selectTab('risk')}>Stored</button>
             <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Deleted</button>

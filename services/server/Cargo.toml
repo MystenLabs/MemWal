@@ -3,6 +3,11 @@ name = "memwal-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Lets the HTTP-only GitHub Actions E2E boot before the new contract is
+# published. It only changes debug builds; release builds stay fail-closed.
+ci-offline-onchain = []
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }

@@ -8,6 +8,118 @@ pub struct VectorDb {
     pool: PgPool,
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::VectorDb;
+
+    static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("DATABASE_URL").ok()
+    }
+
+    async fn test_db() -> Option<VectorDb> {
+        let database_url = test_database_url()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&database_url)
+            .await
+            .expect("test database should be available");
+
+        // This test needs only the vector-entry schema. Avoid migrations for
+        // unrelated job tables, whose test setup runs concurrently in this
+        // binary and has a separate lock.
+        let _guard = VECTOR_SCHEMA_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        for migration in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_add_namespace.sql"),
+            include_str!("../../migrations/003_rate_limiter.sql"),
+            include_str!("../../migrations/008_benchmark_plaintext.sql"),
+            include_str!("../../migrations/009_importance_signal.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+
+        Some(VectorDb { pool })
+    }
+
+    #[tokio::test]
+    async fn expired_blob_cleanup_is_namespace_scoped() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xexpired-cleanup-owner-{suffix}");
+        let blob_id = format!("expired-cleanup-blob-{suffix}");
+        let queried_namespace = format!("queried-{suffix}");
+        let other_namespace = format!("other-{suffix}");
+        let vector = vec![0.0; 1536];
+
+        db.insert_vector(
+            &format!("queried-row-{suffix}"),
+            &owner,
+            &queried_namespace,
+            &blob_id,
+            &vector,
+            1,
+            0.5,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("other-row-{suffix}"),
+            &owner,
+            &other_namespace,
+            &blob_id,
+            &vector,
+            1,
+            0.5,
+        )
+        .await
+        .unwrap();
+
+        // Models the reactive Walrus-404 cleanup triggered while reading
+        // `queried_namespace`. A reused ciphertext in another namespace must
+        // remain indexed.
+        assert_eq!(
+            db.delete_by_blob_id(&blob_id, &owner, &queried_namespace)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT namespace, blob_id FROM vector_entries
+             WHERE owner = $1 ORDER BY namespace",
+        )
+        .bind(&owner)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remaining,
+            vec![(other_namespace, blob_id)],
+            "the cleanup must not delete an identical blob_id in another namespace"
+        );
+    }
+}
+
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     if result.is_ok() {
         "ok"
@@ -109,6 +221,7 @@ impl VectorDb {
     /// on the new `importance` column (migration 009) so the recall
     /// `CompositeRanker` can weight it into the composite score when
     /// `scoring_weights.importance` is non-zero.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_vector(
         &self,
         id: &str,
@@ -163,6 +276,7 @@ impl VectorDb {
     ///
     /// BENCHMARK MODE IS NOT FOR PRODUCTION USE — storing plaintext
     /// memories defeats SEAL's confidentiality guarantee.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_vector_plaintext(
         &self,
         id: &str,
@@ -224,21 +338,25 @@ impl VectorDb {
     /// Returns `Ok(None)` when the row exists but `plaintext` is NULL (a
     /// production row in a benchmark DB — shouldn't happen, handled gracefully).
     ///
-    /// scoped to `owner` so a recall hit on one user's
-    /// blob can't surface another user's plaintext. The upstream
-    /// `search_similar` already filters by owner; this is defence-in-depth
-    /// against a bug there.
+    /// Scoped to `owner` + `namespace` so a recall hit cannot surface a
+    /// different tenant's plaintext even when the same blob_id is reused.
+    /// The upstream `search_similar` already applies both filters; this is
+    /// defence-in-depth against a bug there.
     pub async fn fetch_plaintext_by_blob_id(
         &self,
         blob_id: &str,
         owner: &str,
+        namespace: &str,
     ) -> Result<Option<String>, AppError> {
         let started = std::time::Instant::now();
         let result: Result<Option<(Option<String>,)>, AppError> = sqlx::query_as(
-            "SELECT plaintext FROM vector_entries WHERE blob_id = $1 AND owner = $2 LIMIT 1",
+            "SELECT plaintext FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+             LIMIT 1",
         )
         .bind(blob_id)
         .bind(owner)
+        .bind(namespace)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)));
@@ -269,21 +387,24 @@ impl VectorDb {
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
-            sqlx::query_as(
-                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
+        #[allow(clippy::type_complexity)]
+        let result: Result<
+            Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
              LIMIT $4",
-            )
-            .bind(embedding)
-            .bind(owner)
-            .bind(namespace)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        )
+        .bind(embedding)
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),
@@ -388,17 +509,27 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Delete a vector entry by blob_id (used for expired blob cleanup).
+    /// Delete vector entries for one expired blob within an owner + namespace.
     /// Called reactively when Walrus returns 404 during blob download.
-    /// Requires owner to prevent cross-user blob deletion.
-    pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
+    /// Both owner and namespace are required so cleanup cannot cross either
+    /// isolation boundary when ciphertext is reused in multiple rows.
+    pub async fn delete_by_blob_id(
+        &self,
+        blob_id: &str,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
-        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
-            .bind(blob_id)
-            .bind(owner)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
+        let result = sqlx::query(
+            "DELETE FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3",
+        )
+        .bind(blob_id)
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
         crate::observability::observe_db(
             "vector.delete_by_blob_id",
             db_status(&result),
@@ -409,9 +540,10 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!(
-                "deleted expired blob from DB: blob_id={}, owner={}, rows={}",
+                "deleted expired blob from DB: blob_id={}, owner={}, namespace={}, rows={}",
                 blob_id,
                 owner,
+                namespace,
                 rows
             );
         }

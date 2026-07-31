@@ -141,18 +141,32 @@ test("stats snapshot reflects acquired/released slots", () => {
     // current behavior produces (ip 1.1.1.1 still has an `opens` entry).
 });
 
-test("clientIpFromRequest prefers first hop in x-forwarded-for", () => {
+test("clientIpFromRequest accepts one sanitized forwarded IP", () => {
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: "203.0.113.5, 10.0.0.1, 127.0.0.1" })),
+        clientIpFromRequest(fakeReq({ xff: "203.0.113.5" })),
         "203.0.113.5"
     );
 });
 
-test("clientIpFromRequest trims whitespace around the first hop", () => {
+test("clientIpFromRequest rejects forwarded chains and falls back to peer", () => {
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: "  203.0.113.5  , 10.0.0.1" })),
-        "203.0.113.5"
+        clientIpFromRequest(fakeReq({
+            xff: "192.0.2.66, 203.0.113.5",
+            ip: "127.0.0.1",
+        })),
+        "127.0.0.1"
     );
+});
+
+test("clientIpFromRequest rejects malformed forwarded values", () => {
+    assert.equal(
+        clientIpFromRequest(fakeReq({ xff: "not-an-ip", ip: "127.0.0.1" })),
+        "127.0.0.1"
+    );
+});
+
+test("clientIpFromRequest accepts IPv6", () => {
+    assert.equal(clientIpFromRequest(fakeReq({ xff: "2001:db8::1" })), "2001:db8::1");
 });
 
 test("clientIpFromRequest falls back to req.ip when XFF is missing", () => {
@@ -166,9 +180,9 @@ test("clientIpFromRequest falls back to req.ip when XFF is empty string", () => 
     );
 });
 
-test("clientIpFromRequest handles array-valued XFF (rare but legal)", () => {
+test("clientIpFromRequest accepts a single array-valued forwarded IP", () => {
     assert.equal(
-        clientIpFromRequest(fakeReq({ xff: ["203.0.113.5, 10.0.0.1"] })),
+        clientIpFromRequest(fakeReq({ xff: ["203.0.113.5"] })),
         "203.0.113.5"
     );
 });

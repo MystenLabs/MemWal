@@ -1,0 +1,105 @@
+name: create-migration-caps-tx
+
+permissions:
+  contents: read
+
+# Build the UNSIGNED transaction bytes that mint one MigrationCap per hot-wallet
+# and distribute them, in one atomic tx. Every cap is bound to the allowlist Merkle
+# root. Nothing is executed on-chain — the base64 output is meant to be signed
+# later (multisig / ledger / offline) and then submitted separately.
+#
+# No sui CLI needed: this is pure @mysten/sui over gRPC.
+on:
+  workflow_dispatch:
+    inputs:
+      sender:
+        description: "AdminCap holder / signer address (0x + 64 hex)."
+        required: true
+        type: string
+      package_id:
+        description: "Published memwal package id (from the publish step)."
+        required: true
+        type: string
+      admin_cap_id:
+        description: "AdminCap object id held by the sender (from the publish step)."
+        required: true
+        type: string
+      registry_id:
+        description: "Shared AccountRegistry object id (from the publish step)."
+        required: true
+        type: string
+      allowlist_root:
+        description: "32-byte hex Merkle root (the `root` from migration-allowlist.json) baked into every cap. The registry must already have this exact root pinned (pin_allowlist_root) — minting before any pin aborts EAllowlistRootNotPinned, a different root aborts EAllowlistRootMismatch."
+        required: true
+        type: string
+      recipients:
+        description: 'Hot-wallet addresses, one MigrationCap each (max 1000). Either inline JSON — ["0x..","0x.."] — or a path to a .json file in the repo, e.g. scripts/recipients.json (use the path for big lists: inline inputs cap at ~64KB).'
+        required: true
+        type: string
+      grpc_url:
+        description: "gRPC-web base URL of a fullnode (no JSON-RPC)."
+        required: true
+        type: string
+      network:
+        description: "Sui network."
+        required: true
+        default: mainnet
+        type: choice
+        options: [mainnet, testnet]
+      gas_budget:
+        description: "Gas budget in MIST."
+        required: true
+        default: "5000000000"
+        type: string
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # Configure required reviewers on both governance environments before use.
+    environment: walrus-memory-migration-governance-${{ inputs.network }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned migration-caps tx
+        env:
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          ADMIN_CAP_ID: ${{ inputs.admin_cap_id }}
+          REGISTRY_ID: ${{ inputs.registry_id }}
+          ALLOWLIST_ROOT: ${{ inputs.allowlist_root }}
+          RECIPIENTS_JSON: ${{ inputs.recipients }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          OUT: unsigned-caps-tx.b64
+        run: pnpm tx:create-caps
+
+      - name: Summary
+        env:
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          REGISTRY_ID: ${{ inputs.registry_id }}
+          ALLOWLIST_ROOT: ${{ inputs.allowlist_root }}
+        run: |
+          {
+            echo "### Unsigned migration-caps tx"
+            echo "Sender: \`$SENDER\` · package: \`$PACKAGE_ID\` · registry: \`$REGISTRY_ID\`"
+            echo "Allowlist root: \`$ALLOWLIST_ROOT\`"
+            echo '```'
+            cat unsigned-caps-tx.b64
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-caps-tx
+          path: unsigned-caps-tx.b64

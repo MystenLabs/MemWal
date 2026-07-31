@@ -21,6 +21,7 @@
  * // Add the delegate key
  * await addDelegateKey({
  *     packageId: "0x...",
+ *     registryId: "0x...",
  *     accountId: account.accountId,
  *     publicKey: delegate.publicKey,
  *     label: "My Laptop",
@@ -56,6 +57,10 @@ interface TxContext {
     signer: any;
     address: string;
     Transaction: any;
+}
+
+function transactionData(result: any): any {
+    return result?.Transaction ?? result?.FailedTransaction ?? result;
 }
 
 async function buildTxContext(opts: {
@@ -120,27 +125,46 @@ async function signAndExecute(
     ctx: TxContext,
     tx: any,
 ): Promise<{ digest: string; effects: any }> {
+    let executionResult: any;
+
     if ("signAndExecuteTransaction" in ctx.signer && typeof ctx.signer.signAndExecuteTransaction === "function" && "address" in ctx.signer) {
         // WalletSigner mode
-        const result = await ctx.signer.signAndExecuteTransaction({ transaction: tx });
-        // Wait for transaction to be confirmed
-        const txResult = await ctx.suiClient.waitForTransaction({
-            digest: result.digest,
-            options: { showEffects: true, showObjectChanges: true },
+        executionResult = await ctx.signer.signAndExecuteTransaction({ transaction: tx });
+    } else {
+        // Keypair mode
+        executionResult = await ctx.suiClient.signAndExecuteTransaction({
+            signer: ctx.signer,
+            transaction: tx,
         });
-        return { digest: result.digest, effects: txResult };
     }
 
-    // Keypair mode
-    const result = await ctx.suiClient.signAndExecuteTransaction({
-        signer: ctx.signer,
-        transaction: tx,
-    });
+    const digest = transactionData(executionResult)?.digest;
+    if (typeof digest !== "string" || !digest) {
+        throw new Error("Transaction submission returned no digest");
+    }
+
+    // Execution can return a digest even when the Move transaction aborts.
+    // Send both option dialects: legacy JSON-RPC ignores `include`, while the
+    // v2 clients ignore `options`. Both clients can wait by digest.
     const txResult = await ctx.suiClient.waitForTransaction({
-        digest: result.digest,
+        digest,
+        include: { effects: true, objectTypes: true },
         options: { showEffects: true, showObjectChanges: true },
     });
-    return { digest: result.digest, effects: txResult };
+    const txData = transactionData(txResult);
+    const status = txData?.status ?? txData?.effects?.status;
+    const success = status?.success === true ||
+        (status?.success === undefined && status?.status === "success");
+    if (!success) {
+        const detail = typeof status?.error === "string"
+            ? status.error
+            : status?.error
+              ? JSON.stringify(status.error)
+              : "missing execution status";
+        throw new Error(`Transaction ${digest} failed: ${detail}`);
+    }
+
+    return { digest, effects: txResult };
 }
 
 // ============================================================
@@ -174,7 +198,8 @@ export async function createAccount(
 
     // Extract the created Walrus Memory account object ID from object changes
     let accountId = "";
-    const objectChanges = effects?.objectChanges ?? [];
+    const txData = transactionData(effects);
+    const objectChanges = txData?.objectChanges ?? [];
     for (const change of objectChanges) {
         if (
             change.type === "created" &&
@@ -186,8 +211,22 @@ export async function createAccount(
     }
 
     if (!accountId) {
+        const objectTypes = txData?.objectTypes ?? {};
+        const changedObjects = txData?.effects?.changedObjects ?? [];
+        for (const change of changedObjects) {
+            if (
+                change.idOperation === "Created" &&
+                objectTypes[change.objectId]?.includes("::account::MemWalAccount")
+            ) {
+                accountId = change.objectId;
+                break;
+            }
+        }
+    }
+
+    if (!accountId) {
         // Fallback: try to find from effects
-        const created = effects?.effects?.created ?? [];
+        const created = txData?.effects?.created ?? [];
         for (const obj of created) {
             if (obj.owner?.Shared !== undefined) {
                 accountId = obj.reference?.objectId ?? "";
@@ -210,7 +249,8 @@ export async function createAccount(
 /**
  * Add a delegate key to a MemWalAccount.
  *
- * Calls `{packageId}::account::add_delegate_key(account, public_key, sui_address, label, clock)`.
+ * Calls `{packageId}::account::add_delegate_key(account, registry, public_key, label, clock)`.
+ * The contract derives the Sui address from the Ed25519 public key on-chain.
  * Only the account owner can add delegate keys.
  *
  * @param opts.publicKey - Ed25519 public key (32 bytes Uint8Array or hex string)
@@ -246,8 +286,8 @@ export async function addDelegateKey(
         target: `${opts.packageId}::account::add_delegate_key`,
         arguments: [
             tx.object(opts.accountId),
+            tx.object(opts.registryId),
             tx.pure("vector<u8>", Array.from(pkBytes)),
-            tx.pure("address", suiAddress),
             tx.pure("string", opts.label),
             tx.object(SUI_CLOCK),
         ],
@@ -269,8 +309,11 @@ export async function addDelegateKey(
 /**
  * Remove a delegate key from a MemWalAccount.
  *
- * Calls `{packageId}::account::remove_delegate_key(account, public_key)`.
+ * Calls `{packageId}::account::remove_delegate_key(account, registry, public_key)`.
  * Only the account owner can remove delegate keys.
+ *
+ * Forward-only: this stops the key from reading memories saved *after* removal,
+ * but memories already saved stay readable by it until re-encrypted.
  *
  * @param opts.publicKey - Ed25519 public key to remove (32 bytes Uint8Array or hex string)
  */
@@ -294,6 +337,7 @@ export async function removeDelegateKey(
         target: `${opts.packageId}::account::remove_delegate_key`,
         arguments: [
             tx.object(opts.accountId),
+            tx.object(opts.registryId),
             tx.pure("vector<u8>", Array.from(pkBytes)),
         ],
     });

@@ -1,0 +1,201 @@
+name: finalize-tx
+
+permissions:
+  contents: read
+
+# Build the UNSIGNED transaction bytes that finalize the migration —
+# account::finalize_migration(&AdminCap, &mut AccountRegistry, &Clock,
+# evidence_sha256, evidence_expires_at_ms), a one-way latch that permanently
+# closes the legacy import path. Nothing is executed on-chain — the base64 output
+# must be reviewed, signed, and submitted while the completion pod still holds
+# its locks and the on-chain evidence deadline remains fresh.
+#
+# No sui CLI needed: this is pure @mysten/sui over gRPC.
+#
+# Burning the spent MigrationCap is a separate tx signed by the wallet that owns
+# the cap (the controller's), not this one.
+on:
+  workflow_dispatch:
+    inputs:
+      sender:
+        description: "AdminCap holder / signer address (the multisig, 0x + 64 hex)."
+        required: true
+        type: string
+      package_id:
+        description: "Published memwal package id."
+        required: true
+        type: string
+      admin_cap_id:
+        description: "AdminCap object id held by the sender."
+        required: true
+        type: string
+      registry_id:
+        description: "Shared AccountRegistry object id to finalize."
+        required: true
+        type: string
+      source_package_id:
+        description: "Reviewed legacy package id recorded in the completion evidence."
+        required: true
+        type: string
+      source_registry_id:
+        description: "Reviewed legacy AccountRegistry id recorded in the completion evidence."
+        required: true
+        type: string
+      db_cutover_rev:
+        description: "Immutable source-dataset revision recorded in the completion evidence."
+        required: true
+        type: string
+      walrus_package_id:
+        description: "Reviewed Walrus package id recorded in the completion evidence."
+        required: true
+        type: string
+      walrus_retention_epochs:
+        description: "Reviewed Walrus retention policy. Mainnet must be 15 epochs."
+        required: true
+        default: "15"
+        type: string
+      seal_encrypt_committee_identity:
+        description: 'Exact reviewed Seal encrypt committee JSON: {"servers":[{"objectId":"0x..","weight":1}],"threshold":1}.'
+        required: true
+        type: string
+      source_inventory:
+        description: "Exact reviewed schema-v1 source inventory emitted after V1 relayer writes are paused."
+        required: true
+        type: string
+      completion_evidence_download_url:
+        description: "Short-lived HTTPS URL for the exact fresh completion evidence emitted by the still-running completion-report Job."
+        required: true
+        type: string
+      completion_evidence_sha256:
+        description: "Independently reviewed lowercase SHA-256 of the completion evidence file."
+        required: true
+        type: string
+      manifest_sha256:
+        description: "Independently reviewed lowercase SHA-256 of the pinned migration manifest."
+        required: true
+        type: string
+      grpc_url:
+        description: "gRPC-web base URL of a fullnode (no JSON-RPC)."
+        required: true
+        type: string
+      network:
+        description: "Sui network."
+        required: true
+        default: mainnet
+        type: choice
+        options: [mainnet, testnet]
+      gas_budget:
+        description: "Gas budget in MIST."
+        required: true
+        default: "500000000"
+        type: string
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment before mainnet use.
+    environment: walrus-memory-migration-governance-${{ inputs.network }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Materialize reviewed source inventory and Seal policy
+        env:
+          SOURCE_INVENTORY: ${{ inputs.source_inventory }}
+          SEAL_ENCRYPT_COMMITTEE_IDENTITY: ${{ inputs.seal_encrypt_committee_identity }}
+        run: |
+          umask 077
+          printf '%s' "$SOURCE_INVENTORY" > source-inventory.json
+          printf '%s' "$SEAL_ENCRYPT_COMMITTEE_IDENTITY" > seal-encrypt-committee-identity.json
+
+      - name: Download exact reviewed completion evidence
+        env:
+          COMPLETION_EVIDENCE_DOWNLOAD_URL: ${{ inputs.completion_evidence_download_url }}
+          COMPLETION_EVIDENCE_SHA256: ${{ inputs.completion_evidence_sha256 }}
+        run: |
+          umask 077
+          [[ "$COMPLETION_EVIDENCE_DOWNLOAD_URL" == https://* ]] || { echo "completion evidence URL must use HTTPS"; exit 1; }
+          [[ "$COMPLETION_EVIDENCE_DOWNLOAD_URL" != *$'\n'* && "$COMPLETION_EVIDENCE_DOWNLOAD_URL" != *$'\r'* ]] || { echo "completion evidence URL must be one line"; exit 1; }
+          [[ "$COMPLETION_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "completion evidence SHA-256 must be 64 lowercase hex characters"; exit 1; }
+          echo "::add-mask::$COMPLETION_EVIDENCE_DOWNLOAD_URL"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --fail --location --silent --show-error \
+            --output completion-evidence.json "$COMPLETION_EVIDENCE_DOWNLOAD_URL"
+          test -s completion-evidence.json
+          printf '%s  %s\n' "$COMPLETION_EVIDENCE_SHA256" completion-evidence.json | sha256sum --check --strict -
+
+      - name: Hash reviewed inputs
+        id: evidence
+        run: |
+          echo "sha256=$(sha256sum completion-evidence.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "source_inventory_sha256=$(sha256sum source-inventory.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "seal_sha256=$(sha256sum seal-encrypt-committee-identity.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned finalize tx
+        env:
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          ADMIN_CAP_ID: ${{ inputs.admin_cap_id }}
+          REGISTRY_ID: ${{ inputs.registry_id }}
+          SOURCE_PACKAGE_ID: ${{ inputs.source_package_id }}
+          SOURCE_REGISTRY_ID: ${{ inputs.source_registry_id }}
+          DB_CUTOVER_REV: ${{ inputs.db_cutover_rev }}
+          WALRUS_PACKAGE_ID: ${{ inputs.walrus_package_id }}
+          WALRUS_RETENTION_EPOCHS: ${{ inputs.walrus_retention_epochs }}
+          SEAL_ENCRYPT_COMMITTEE_IDENTITY: seal-encrypt-committee-identity.json
+          SOURCE_INVENTORY_JSON: source-inventory.json
+          COMPLETION_EVIDENCE_JSON: completion-evidence.json
+          COMPLETION_EVIDENCE_SHA256: ${{ inputs.completion_evidence_sha256 }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          OUT: unsigned-finalize-tx.b64
+        run: pnpm tx:finalize
+
+      - name: Summary
+        env:
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          REGISTRY_ID: ${{ inputs.registry_id }}
+          SOURCE_PACKAGE_ID: ${{ inputs.source_package_id }}
+          SOURCE_REGISTRY_ID: ${{ inputs.source_registry_id }}
+          DB_CUTOVER_REV: ${{ inputs.db_cutover_rev }}
+          WALRUS_PACKAGE_ID: ${{ inputs.walrus_package_id }}
+          WALRUS_RETENTION_EPOCHS: ${{ inputs.walrus_retention_epochs }}
+          COMPLETION_EVIDENCE_SHA256: ${{ steps.evidence.outputs.sha256 }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          SOURCE_INVENTORY_SHA256: ${{ steps.evidence.outputs.source_inventory_sha256 }}
+          SEAL_ENCRYPT_COMMITTEE_SHA256: ${{ steps.evidence.outputs.seal_sha256 }}
+        run: |
+          {
+            echo "### Unsigned finalize tx"
+            echo "Sender: \`$SENDER\` · package: \`$PACKAGE_ID\` · registry: \`$REGISTRY_ID\`"
+            echo "Source package: \`$SOURCE_PACKAGE_ID\` · source registry: \`$SOURCE_REGISTRY_ID\`"
+            echo "Database cutover revision: \`$DB_CUTOVER_REV\`"
+            echo "Walrus package: \`$WALRUS_PACKAGE_ID\` · retention epochs: \`$WALRUS_RETENTION_EPOCHS\`"
+            echo "Reviewed source inventory SHA-256: \`$SOURCE_INVENTORY_SHA256\`"
+            echo "Seal encrypt committee SHA-256: \`$SEAL_ENCRYPT_COMMITTEE_SHA256\`"
+            echo "Completion evidence SHA-256: \`$COMPLETION_EVIDENCE_SHA256\`"
+            echo "Migration manifest SHA-256: \`$MANIFEST_SHA256\`"
+            echo '```'
+            cat unsigned-finalize-tx.b64
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-finalize-tx
+          path: |
+            unsigned-finalize-tx.b64
+            completion-evidence.json
+            source-inventory.json
+            seal-encrypt-committee-identity.json

@@ -1,6 +1,6 @@
 # memwal
 
-## Unreleased
+## 0.1.5
 
 ### Added
 
@@ -9,6 +9,10 @@
 ### Fixed
 
 - Fixed `MemWalSync` reuse inside notebooks so repeated calls do not reuse an HTTP transport from a closed event loop.
+
+### Security
+
+- Recalled AI memory is now nonce-delimited, explicitly untrusted JSON data with a fixed trust instruction instead of a system-role memory injection.
 
 ## 0.1.4
 

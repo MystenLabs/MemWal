@@ -351,10 +351,14 @@ export interface MemWalManualConfig {
     embeddingApiBase?: string;
     /** Embedding model name (default: text-embedding-3-small) */
     embeddingModel?: string;
-    /** Walrus Memory contract package ID on Sui */
+    /** Immutable first-published package ID used by SEAL encryption and SessionKey */
     packageId: string;
+    /** Current package containing account::seal_approve (defaults to packageId) */
+    sealPolicyPackageId?: string;
     /** Walrus Memory account object ID (for SEAL seal_approve) */
     accountId: string;
+    /** AccountRegistry shared object ID passed to SEAL seal_approve */
+    registryId: string;
     /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
     /**
@@ -391,10 +395,14 @@ export interface MemWalManualConfig {
 export interface WalletSigner {
     /** Wallet address (Sui address, 0x...) */
     address: string;
-    /** Sign and execute a transaction, returns the digest */
+    /** Sign and execute a transaction, returning either the legacy or v2 result shape */
     signAndExecuteTransaction: (input: {
         transaction: any;
-    }) => Promise<{ digest: string }>;
+    }) => Promise<
+        | { digest: string }
+        | { $kind: "Transaction"; Transaction: { digest: string }; FailedTransaction?: never }
+        | { $kind: "FailedTransaction"; Transaction?: never; FailedTransaction: { digest: string } }
+    >;
     /** Sign a personal message (for SEAL SessionKey) */
     signPersonalMessage: (input: {
         message: Uint8Array;
@@ -471,6 +479,8 @@ export interface CreateAccountResult {
 export interface AddDelegateKeyOpts extends AccountTxOpts {
     /** Walrus Memory account object ID */
     accountId: string;
+    /** AccountRegistry shared object ID */
+    registryId: string;
     /** Ed25519 public key (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
     /** Human-readable label (e.g. "MacBook Pro", "Production Server") */
@@ -491,6 +501,8 @@ export interface AddDelegateKeyResult {
 export interface RemoveDelegateKeyOpts extends AccountTxOpts {
     /** Walrus Memory account object ID */
     accountId: string;
+    /** AccountRegistry shared object ID */
+    registryId: string;
     /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
 }

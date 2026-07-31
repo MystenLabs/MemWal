@@ -7,19 +7,3 @@ export function parseSuiNetwork(value: string | undefined): SuiNetwork {
     }
     throw new Error(`unsupported SUI_NETWORK=${value}; expected mainnet, testnet, devnet, or localnet`);
 }
-
-export function validateSuiTransportPolicy(input: {
-    network: SuiNetwork;
-    grpcUrl: string;
-    txClientOverride: string;
-}): void {
-    if (input.network !== "testnet") return;
-    if (!input.grpcUrl) {
-        throw new Error("SUI_GRPC_URL is required when SUI_NETWORK=testnet; JSON-RPC is not supported");
-    }
-    if (input.txClientOverride === "jsonrpc") {
-        throw new Error(
-            "SIDECAR_SUI_TX_CLIENT=jsonrpc is localnet-only and cannot be used when SUI_NETWORK=testnet",
-        );
-    }
-}

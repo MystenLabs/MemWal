@@ -18,9 +18,40 @@ import {
     ENOKI_INVALIDATED_MAX_DELAY_MS,
     SUI_TYPE,
 } from "./config.js";
-import { executeWithEnokiSponsor } from "./enoki.js";
+import {
+    executeWithEnokiSponsor,
+    type EnokiFallbackPolicy,
+} from "./enoki.js";
 import { sidecarMetrics } from "./state.js";
+import { FinalizedTransactionFailure } from "./retry/rpc.js";
 import { errorMessage, sleep, truncateForLog } from "./util.js";
+
+export const DURABLE_WALLET_FALLBACK_POLICY: EnokiFallbackPolicy = {
+    // Testnet can direct-sign when Enoki is absent. Once sponsorship begins,
+    // never submit a second transaction after an ambiguous response.
+    directSignIfUnconfigured: true,
+    directSignAfterSponsorFailure: false,
+    gasMode: "addressBalance",
+};
+
+export function assertFinalizedTransactionSuccess(result: any, label: string): any {
+    if (
+        result?.$kind === "FailedTransaction"
+        && result.FailedTransaction?.status?.success === false
+    ) {
+        throw new FinalizedTransactionFailure(`${label} was not successful`);
+    }
+    if (
+        result?.$kind === "Transaction"
+        && result.Transaction?.status?.success === true
+    ) {
+        return result.Transaction;
+    }
+
+    // Unknown SDK shapes do not prove that submission had no side effect.
+    // Keep the journal marker so reconciliation remains query-only.
+    throw new Error(`${label} returned an unexpected finalization result`);
+}
 
 const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
 const GAS_INTENT_TYPE = "gas";
@@ -64,15 +95,13 @@ export function patchGasCoinIntents(tx: Transaction): void {
  * fallback). Wraps `executeWithEnokiSponsor` with metrics + lock-error
  * detection for the validation canary.
  */
-export async function submitWalletTransaction(
-    tx: Transaction,
-    signer: Ed25519Keypair,
-    allowedAddresses?: string[],
-): Promise<string> {
+export async function trackWalletSubmission<T>(
+    submit: () => Promise<T>,
+): Promise<T> {
     try {
-        const digest = await executeWithEnokiSponsor(tx, signer, allowedAddresses);
+        const result = await submit();
         sidecarMetrics.walletSubmittedTotal += 1;
-        return digest;
+        return result;
     } catch (err: any) {
         const msg = err?.message || String(err);
         if (isWalrusObjectLockEquivocation(msg)) {
@@ -90,6 +119,24 @@ export async function submitWalletTransaction(
         }
         throw err;
     }
+}
+
+export async function submitWalletTransaction(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    allowedAddresses?: string[],
+    fallbackPolicy?: EnokiFallbackPolicy,
+    onSubmissionStarted?: () => void,
+): Promise<string> {
+    return trackWalletSubmission(() =>
+        executeWithEnokiSponsor(
+            tx,
+            signer,
+            allowedAddresses,
+            fallbackPolicy,
+            onSubmissionStarted,
+        ),
+    );
 }
 
 function getEnokiInvalidatedRetryDelayMs(attempt: number): number | null {
@@ -113,10 +160,18 @@ export async function submitRebuildableWalletTransaction(
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
     logContext: Record<string, unknown> = {},
+    fallbackPolicy?: EnokiFallbackPolicy,
+    onSubmissionStarted?: () => void,
 ): Promise<string> {
     for (let attempt = 1; ; attempt += 1) {
         try {
-            return await submitWalletTransaction(buildTransaction(), signer, allowedAddresses);
+            return await submitWalletTransaction(
+                buildTransaction(),
+                signer,
+                allowedAddresses,
+                fallbackPolicy,
+                onSubmissionStarted,
+            );
         } catch (err: unknown) {
             const message = errorMessage(err);
             const reason = classifyEnokiSponsoredTransactionInvalidation(message);

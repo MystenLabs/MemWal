@@ -18,8 +18,7 @@ import { errorMessage } from "../util.js";
  * the transaction is submitted — effects status is not part of that
  * contract — so callers that key irreversible side-effects off "execute
  * returned 200" must verify effects
- * themselves. Uses the core getTransaction API, which has the same shape on
- * the gRPC and JSON-RPC clients.
+ * themselves. Uses the gRPC core getTransaction API.
  */
 async function verifyExecutedTransaction(
     digest: string,
