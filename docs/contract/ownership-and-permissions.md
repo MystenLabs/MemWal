@@ -1,5 +1,34 @@
 ---
 title: "Ownership and Permissions"
+description: >-
+  Explains the ownership and permission model for Walrus Memory accounts, including owner capabilities, delegate key permissions, SEAL access control via seal_approve, and how the onchain contract and relayer enforce the permission boundary together.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - ownership
+  - permissions
+  - SEAL access control
+  - delegate permissions
+goal:
+  description: Distinguish what owners vs. delegates can do in a MemWalAccount, explain how SEAL enforces per-blob access control, and apply the permission model when designing multi-user agent workflows.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What permissions do Walrus Memory account owners have?"
+  - "What can delegate keys do in MemWal?"
+  - "How does SEAL access control work in Walrus Memory?"
+answer: >-
+  Walrus Memory uses a layered permission model where the account owner has full control (manage keys, activate/deactivate), delegates can store and recall memories but cannot modify account settings, and the SEAL seal_approve function grants decryption access to owners and registered delegates on active accounts. The relayer verifies every request against the onchain contract, ensuring that permissions are cryptographically enforced on Sui.
 ---
 
 ## Owner

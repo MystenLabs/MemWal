@@ -1,6 +1,38 @@
 ---
 title: "Quick Start"
-description: "Install the Walrus Memory Python SDK and store your first memory in under a minute."
+description: >-
+  Install the Walrus Memory Python SDK and store your first memory in under a minute.
+  Covers installation, configuration, environment presets, and a complete async example.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - quick start
+  - installation
+  - Ed25519
+goal:
+  description: Install the memwal Python package, create a MemWal client with your account credentials, call remember() to store a memory, and confirm recall() returns it.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I install the Walrus Memory Python SDK?
+  - How do I store and recall a memory with MemWal in Python?
+  - What are the MemWal Python SDK entry points and when should I use each one?
+answer: >-
+  Install the Walrus Memory Python SDK with `pip install memwal`. Create a client
+  with `MemWal.create()` using your Ed25519 delegate key and account ID, then call
+  `remember_and_wait()` to store a memory and `recall()` to retrieve it. Use the
+  `env` preset (`staging` or `prod`) to connect to the hosted relayer.
 ---
 
 The Walrus Memory Python SDK (`memwal` on PyPI) gives your agents portable memory that works across apps, sessions, and workflows. Store, recall, and analyze context — fully under your control. It mirrors the TypeScript `MemWal` client: same relayer, same Ed25519 auth, same methods.

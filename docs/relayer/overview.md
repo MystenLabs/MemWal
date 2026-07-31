@@ -1,5 +1,34 @@
 ---
-title: "Overview"
+title: "Relayer Overview"
+description: >-
+  The Walrus Memory relayer is the backend service that turns SDK calls into memory operations. It handles authentication, embedding, SEAL encryption, Walrus storage, and vector search on behalf of the user via delegate keys.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - relayer
+  - backend architecture
+  - SEAL encryption
+  - vector search
+goal:
+  description: Describe what the relayer does at each step of a memory operation, explain its architecture (Rust Axum backend + TS sidecar), and identify the trust boundary it operates within.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What does the Walrus Memory relayer do?"
+  - "How is the MemWal relayer architected?"
+  - "What is the trust boundary of the Walrus Memory relayer?"
+answer: >-
+  The Walrus Memory relayer is a Rust (Axum) backend service with a TypeScript sidecar that authenticates requests via Ed25519 delegate keys, generates embeddings, encrypts data through SEAL, uploads encrypted blobs to Walrus, and stores searchable vectors in PostgreSQL with pgvector. It supports rate limiting, a key pool for parallel uploads, and can be self-hosted or run in a TEE for reduced trust requirements.
 ---
 
 The relayer is the backend that turns SDK calls into memory operations. Using a delegate key signed by the client, it handles the critical workflows — embedding, encryption, storage, and search — on behalf of the user.
@@ -56,6 +85,10 @@ flowchart LR
 ```
 
 The sidecar is started automatically when the Rust server boots and communicates over HTTP on `localhost:9000` (configurable via `SIDECAR_URL`). If the sidecar fails to start, the relayer exits immediately.
+
+### Sui RPC transport
+
+The relayer reaches Sui over JSON-RPC by default. Ahead of the Sui JSON-RPC sunset in July 2026, setting `SUI_GRPC_URL` to a Sui gRPC fullnode URL switches the relayer to gRPC. This is opt-in and off by default: with `SUI_GRPC_URL` empty, the relayer keeps using JSON-RPC. When set, both the write path (Walrus register and certify, Seal, and Enoki build) and the blob query and restore path run on gRPC, so it is a single reversible switch. For configuration details, see [Self-Hosting](/relayer/self-hosting) and the [Environment Variables](/reference/environment-variables) reference.
 
 ## Key Pool
 
