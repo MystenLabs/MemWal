@@ -1,5 +1,6 @@
 mod alerts;
 mod auth;
+mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;
@@ -259,6 +260,13 @@ async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
 
 #[tokio::main]
 async fn main() {
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    assert_eq!(
+        std::env::var("CI").as_deref(),
+        Ok("true"),
+        "ci-offline-onchain is restricted to CI test processes"
+    );
+
     // Load .env file (optional, won't error if missing)
     dotenvy::dotenv().ok();
 
@@ -272,7 +280,11 @@ async fn main() {
     }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
-    tracing::info!("  package id: {}", config.package_id);
+    tracing::info!("  package type-origin id: {}", config.package_id);
+    tracing::info!(
+        "  SEAL policy package id: {}",
+        config.seal_policy_package_id
+    );
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!(
         "  memwal account: {}",
@@ -289,9 +301,11 @@ async fn main() {
         config.rate_limit.max_storage_bytes / 1_048_576
     );
     tracing::info!(
-        "  sponsor rate limit: {}/min, {}/hr per IP+sender",
+        "  sponsor rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
+        config.sponsor_rate_limit.global_per_minute,
+        config.sponsor_rate_limit.global_per_hour,
     );
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
@@ -593,8 +607,9 @@ async fn main() {
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
-    // General delegate-key verification keeps its existing independent gRPC
-    // client; security deletion owns a separate quota-gated client below.
+    // General delegate-key verification and the boot-time SEAL policy check
+    // share this independent gRPC client; security deletion owns a separate
+    // quota-gated client below.
     let sui_grpc_client = config.sui_grpc_url.as_deref().map(|url| {
         sui_rpc::Client::new(url)
             .unwrap_or_else(|e| panic!("SUI_GRPC_URL {url} is not a valid gRPC endpoint: {e}"))
@@ -602,6 +617,45 @@ async fn main() {
     if let Some(url) = config.sui_grpc_url.as_deref() {
         tracing::info!("  Sui gRPC: {}", url);
     }
+
+    #[cfg(not(all(feature = "ci-offline-onchain", debug_assertions)))]
+    {
+        let policy_client = sui_grpc_client.as_ref().unwrap_or_else(|| {
+            panic!("SUI_GRPC_URL is required to validate MEMWAL_SEAL_POLICY_PACKAGE_ID")
+        });
+        storage::sui::verify_seal_policy_package(
+            policy_client,
+            &config.package_id,
+            &config.seal_policy_package_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("invalid SEAL policy package configuration: {error}"));
+        tracing::info!("  SEAL policy package lineage and ABI verified");
+
+        // Fail closed if MEMWAL_PACKAGE_ID is an upgraded/current package rather
+        // than the immutable type-origin encoded in AccountRegistry. Delegate-key
+        // verification uses this id to reject foreign lookalike Move objects.
+        storage::sui::verify_registry_type_origin(
+            &http_client,
+            &config.sui_rpc_url,
+            sui_grpc_client.as_ref(),
+            &config.registry_id,
+            &config.package_id,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "MEMWAL_PACKAGE_ID must be the immutable type-origin package id for registry {}: {}",
+                config.registry_id, error
+            )
+        });
+        tracing::info!("  package type-origin invariant verified from AccountRegistry");
+    }
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    {
+        tracing::warn!("  CI-only build: onchain startup validation is disabled");
+    }
+
     type SecurityDeleteSui = Option<Arc<dyn sui::SuiApi>>;
     type SecurityDeleteVerifier = Arc<dyn security_delete_auth::WalletSignatureVerifier>;
     let (security_delete_sui, security_delete_background_sui, security_delete_wallet_verifier): (
@@ -627,6 +681,23 @@ async fn main() {
         (
             Some(Arc::new(client.clone())),
             Some(Arc::new(client.background())),
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else if let Some(url) = config.sui_grpc_url.as_deref() {
+        // Sponsor authorization also uses this verifier. Keep zkLogin and
+        // multisig verification available even when security deletion itself
+        // is disabled by delegating JWK handling to the fullnode.
+        let client = sui::SuiClient::new(
+            url,
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize sponsor signature verifier")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid sponsor signature RPC controls");
+        (
+            None,
+            None,
             Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
         )
     } else {
@@ -660,6 +731,9 @@ async fn main() {
         ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        registry_scan_semaphore: tokio::sync::Semaphore::new(
+            crate::types::REGISTRY_SCAN_MAX_CONCURRENT,
+        ),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
@@ -774,7 +848,7 @@ async fn main() {
         });
     }
 
-    // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
+    // Worker 1: deserialize legacy rows and fail them closed for reconciliation.
     {
         let worker_state = state.clone();
         let storage = job_storage.clone();
@@ -795,7 +869,7 @@ async fn main() {
         tracing::info!("  Apalis: worker 'meta-transfer' spawned (concurrency=2)");
     }
 
-    // Worker 2: RememberJob (legacy full pipeline)
+    // Worker 2: deserialize legacy rows and fail them closed before upload.
     {
         let worker_state = state.clone();
         let storage = remember_job_storage.clone();
@@ -911,7 +985,7 @@ async fn main() {
     // caps are enforced independently and a mismatch silently rejects valid
     // requests.
     let protected_routes = Router::new()
-        .route("/api/remember", post(routes::uploads_paused))
+        .route("/api/remember", post(routes::remember))
         .route(
             "/api/remember/{job_id}",
             axum::routing::get(routes::remember_status),
@@ -921,14 +995,14 @@ async fn main() {
             post(routes::remember_bulk_status),
         )
         .route("/api/recall", post(routes::recall))
-        .route("/api/remember/manual", post(routes::uploads_paused))
+        .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
         // Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
         .route(
             "/api/remember/bulk",
-            post(routes::uploads_paused).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+            post(routes::remember_bulk).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
-        .route("/api/analyze", post(routes::uploads_paused))
+        .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
         // admin/harness endpoints — namespace delete + stats.
@@ -947,7 +1021,8 @@ async fn main() {
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
-    // Sponsor routes — body limits + IP rate limit middleware
+    // Security-delete has its own server-side sponsor and does not use these
+    // routes.
     let sponsor_routes = Router::new()
         .route(
             "/sponsor",

@@ -18,12 +18,15 @@
  *   server.ts        — bootstrap + graceful shutdown
  *
  * Endpoints:
- *   GET  /health                     → liveness + upload-limiter state (no auth)
+ *   GET  /health                     → local liveness (no auth)
+ *   GET  /ready                      → Sui/Walrus execution identity + limits (no auth)
  *   GET  /metrics/wallet             → wallet-execution counters (no auth)
  *   /mcp/*                           → MCP session routes (own auth; see mcp/)
- *   POST /seal/encrypt               → { data, owner, packageId } → { encryptedData }
- *   POST /seal/decrypt               → { data, packageId, accountId } → { decryptedData }
- *   POST /seal/decrypt-batch         → { items[], packageId, accountId } → { results[], errors[] }
+ *   POST /seal/encrypt               → { data, owner, packageId, accountId } → { encryptedData }
+ *   POST /migration/seal/encrypt     → migration-only inactive-account encryption
+ *   POST /e2e/legacy/seal/encrypt    → optional pre-v4 E2E seed encryption
+ *   POST /seal/decrypt               → { data, packageId, policyPackageId?, registryId?, accountId, sealAbi } → { decryptedData }
+ *   POST /seal/decrypt-batch         → { items[], packageId, policyPackageId?, registryId?, accountId, sealAbi } → { results[], errors[] }
  *   POST /walrus/upload              → { data, keyIndex, owner?, ... } → { blobId, objectId }
  *   POST /walrus/set-metadata-batch  → { blobs[], owner, keyIndex } → { transferred, digest }
  *   POST /walrus/set-metadata        → legacy single-blob variant

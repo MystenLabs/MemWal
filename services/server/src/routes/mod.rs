@@ -39,20 +39,6 @@ use crate::types::*;
 
 use apalis::prelude::Storage as _;
 
-/// Temporary response for every endpoint that can create a new Walrus memory.
-///
-/// Keep this at the routing boundary so paused requests cannot start request
-/// validation, extraction, database writes, or background upload jobs.
-pub const UPLOADS_PAUSED_MESSAGE: &str =
-    "New uploads to Walrus Memory are paused while we conduct a security upgrade";
-
-pub async fn uploads_paused() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    (
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(serde_json::json!({ "error": UPLOADS_PAUSED_MESSAGE })),
-    )
-}
-
 // ============================================================
 // Wallet-job enqueue (used by remember + analyze)
 // ============================================================
@@ -124,24 +110,6 @@ where
         .collect()
 }
 
-#[cfg(test)]
-mod uploads_paused_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn returns_security_upgrade_message_with_service_unavailable_status() {
-        let (status, axum::Json(body)) = uploads_paused().await;
-
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "error": "New uploads to Walrus Memory are paused while we conduct a security upgrade"
-            })
-        );
-    }
-}
-
 // ============================================================
 // Reactive expired-blob cleanup
 // ============================================================
@@ -150,25 +118,32 @@ mod uploads_paused_tests {
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
 ///
-/// `owner` is required so the DELETE is scoped to the caller's rows.
-/// The DB layer enforces `WHERE blob_id = $1 AND owner = $2`, so an expired
-/// blob discovered via one user's recall cannot delete another user's entry
-/// even if blob_ids collided.
-pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &str) {
-    match db.delete_by_blob_id(blob_id, owner).await {
+/// `owner` and `namespace` are required so the DELETE is scoped to the
+/// caller's isolated rows. The DB layer enforces all three predicates, so an
+/// expired blob discovered in one namespace cannot delete another entry even
+/// if the owner and blob_id are identical.
+pub(super) async fn cleanup_expired_blob(
+    db: &VectorDb,
+    blob_id: &str,
+    owner: &str,
+    namespace: &str,
+) {
+    match db.delete_by_blob_id(blob_id, owner, namespace).await {
         Ok(rows) => {
             tracing::info!(
-                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
+                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={} namespace={}",
                 rows,
                 blob_id,
-                owner
+                owner,
+                namespace
             );
         }
         Err(e) => {
             tracing::error!(
-                "reactive cleanup failed for blob_id={} owner={}: {}",
+                "reactive cleanup failed for blob_id={} owner={} namespace={}: {}",
                 blob_id,
                 owner,
+                namespace,
                 e
             );
         }

@@ -14,11 +14,13 @@ import {
   useWallets,
   useConnectWallet,
   useCurrentAccount,
+  useSignPersonalMessage,
   useSignTransaction,
   useSuiClient,
 } from "@mysten/dapp-kit";
 import { isEnokiWallet } from "@mysten/enoki";
 import { Transaction } from "@mysten/sui/transactions";
+import { createSponsorAuthorization } from "@mysten-incubation/memwal";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/shared/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
@@ -63,11 +65,17 @@ async function sponsoredSignAndExecute(
   signTransaction: (args: {
     transaction: Transaction;
   }) => Promise<{ signature: string }>,
+  signPersonalMessage: (message: Uint8Array) => Promise<{ signature: string }>,
 ): Promise<{ digest: string }> {
   const kindBytes = await transaction.build({
     client: suiClient as any,
     onlyTransactionKind: true,
   });
+  const authorization = await createSponsorAuthorization(
+    sender,
+    kindBytes,
+    signPersonalMessage,
+  );
 
   const sponsorRes = await fetch(`${enokiConfig.memwalServerUrl}/sponsor`, {
     method: "POST",
@@ -75,6 +83,7 @@ async function sponsoredSignAndExecute(
     body: JSON.stringify({
       transactionBlockKindBytes: uint8ArrayToBase64(kindBytes),
       sender,
+      ...authorization,
     }),
   });
 
@@ -92,7 +101,7 @@ async function sponsoredSignAndExecute(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ digest: sponsored.digest, signature }),
+      body: JSON.stringify({ digest: sponsored.digest, sender, signature }),
     },
   );
 
@@ -110,6 +119,7 @@ export function EnokiLoginCard() {
   const currentAccount = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutateAsync: signTransaction } = useSignTransaction();
+  const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
   const { connectEnoki } = useAuth();
 
   const [step, setStep] = useState<Step>("idle");
@@ -146,21 +156,13 @@ export function EnokiLoginCard() {
         // Phase 2: First-time user — generate key + register on-chain
         setStep("generating-key");
         const ed = await import("@noble/ed25519");
-        const { blake2b } = await import("@noble/hashes/blake2.js");
 
         const privateKeyRaw = new Uint8Array(32);
         crypto.getRandomValues(privateKeyRaw);
         const publicKeyRaw = await ed.getPublicKeyAsync(privateKeyRaw);
 
         const privateKeyHex = bytesToHex(privateKeyRaw);
-
-        // Derive Sui address for delegate key
-        const addrInput = new Uint8Array(33);
-        addrInput[0] = 0x00;
-        addrInput.set(publicKeyRaw, 1);
-        const addressBytes = blake2b(addrInput, { dkLen: 32 });
-        const delegateSuiAddress =
-          "0x" + bytesToHex(new Uint8Array(addressBytes));
+        // Contract derives the delegate's Sui address on-chain from the public key.
 
         // On-chain registration
         setStep("registering-onchain");
@@ -205,13 +207,19 @@ export function EnokiLoginCard() {
             target: `${enokiConfig.memwalPackageId}::account::add_delegate_key`,
             arguments: [
               tx.object(knownAccountId),
+              tx.object(enokiConfig.memwalRegistryId),
               tx.pure("vector<u8>", pubKeyBytes),
-              tx.pure("address", delegateSuiAddress),
               tx.pure("string", "Noter"),
               tx.object("0x6"),
             ],
           });
-          const result = await sponsoredSignAndExecute(tx, address, suiClient, sign);
+          const result = await sponsoredSignAndExecute(
+            tx,
+            address,
+            suiClient,
+            sign,
+            (message) => signPersonalMessage({ message }),
+          );
           await suiClient.waitForTransaction({ digest: result.digest });
         } else {
           const tx = new Transaction();
@@ -222,7 +230,13 @@ export function EnokiLoginCard() {
               tx.object("0x6"),
             ],
           });
-          const createResult = await sponsoredSignAndExecute(tx, address, suiClient, sign);
+          const createResult = await sponsoredSignAndExecute(
+            tx,
+            address,
+            suiClient,
+            sign,
+            (message) => signPersonalMessage({ message }),
+          );
           await suiClient.waitForTransaction({ digest: createResult.digest });
 
           const txDetails = await suiClient.getTransactionBlock({
@@ -248,13 +262,19 @@ export function EnokiLoginCard() {
             target: `${enokiConfig.memwalPackageId}::account::add_delegate_key`,
             arguments: [
               tx2.object(knownAccountId),
+              tx2.object(enokiConfig.memwalRegistryId),
               tx2.pure("vector<u8>", pubKeyBytes),
-              tx2.pure("address", delegateSuiAddress),
               tx2.pure("string", "Noter"),
               tx2.object("0x6"),
             ],
           });
-          const addResult = await sponsoredSignAndExecute(tx2, address, suiClient, sign);
+          const addResult = await sponsoredSignAndExecute(
+            tx2,
+            address,
+            suiClient,
+            sign,
+            (message) => signPersonalMessage({ message }),
+          );
           await suiClient.waitForTransaction({ digest: addResult.digest });
         }
 
@@ -278,7 +298,7 @@ export function EnokiLoginCard() {
         setupRunningRef.current = false;
       }
     },
-    [suiClient, signTransaction, connectEnoki],
+    [suiClient, signTransaction, signPersonalMessage, connectEnoki],
   );
 
   useEffect(() => {

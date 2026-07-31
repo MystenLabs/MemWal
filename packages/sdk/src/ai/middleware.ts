@@ -25,6 +25,10 @@ import type { LanguageModelV2 } from "@ai-sdk/provider";
 import { wrapLanguageModel } from "ai";
 import { MemWal } from "../memwal.js";
 import type { MemWalConfig, RecallMemory } from "../types.js";
+import {
+    formatUntrustedMemories,
+    UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION,
+} from "./untrusted-memory.js";
 
 // ============================================================
 // Config
@@ -60,7 +64,7 @@ export interface WithMemWalOptions extends MemWalConfig {
  * BEFORE each LLM call:
  * - Uses the last user message as a search query
  * - Recalls relevant memories (server: search → download → decrypt)
- * - Injects relevant memories into the system prompt
+ * - Injects relevant memories as nonce-delimited, untrusted user data
  *
  * AFTER each LLM call:
  * - Analyzes and saves important facts (server: LLM extract → embed → encrypt → Walrus → store)
@@ -101,7 +105,7 @@ export function withMemWal(
 
                     if (relevant.length === 0) return params;
 
-                    const memoryContext = formatMemories(relevant);
+                    const memoryContext = formatUntrustedMemories(relevant);
                     const enrichedPrompt = injectMemoryContext(
                         params.prompt,
                         memoryContext
@@ -177,21 +181,15 @@ function findLastUserMessage(
     return null;
 }
 
-function formatMemories(memories: RecallMemory[]): string {
-    const lines = memories.map(
-        (m) => `- ${m.text} (relevance: ${(1 - m.distance).toFixed(2)})`
-    );
-    return `[Memory Context] The following are known facts about this user from their personal memory store. Use these facts to answer the user's question:\n${lines.join("\n")}`;
-}
-
-function injectMemoryContext(
+export function injectMemoryContext(
     prompt: unknown,
     memoryContext: string
 ): unknown {
     if (!Array.isArray(prompt)) return prompt;
 
-    // Insert memory as a separate system message right before the last user message
-    // This ensures the LLM sees it prominently, not buried in a long system prompt
+    // Keep the fixed trust policy in a system message, but recalled bytes only
+    // in a separate user message. No memory-controlled text receives system
+    // priority.
     const lastUserIndex = prompt.reduce(
         (idx: number, m: any, i: number) => (m.role === "user" ? i : idx),
         -1
@@ -199,13 +197,30 @@ function injectMemoryContext(
 
     if (lastUserIndex > 0) {
         const result = [...prompt];
-        result.splice(lastUserIndex, 0, {
-            role: "system" as const,
-            content: memoryContext,
-        });
+        result.splice(
+            lastUserIndex,
+            0,
+            {
+                role: "system" as const,
+                content: UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION,
+            },
+            {
+                role: "user" as const,
+                content: [{ type: "text" as const, text: memoryContext }],
+            }
+        );
         return result;
     }
 
-    // Fallback: prepend as system message
-    return [{ role: "system" as const, content: memoryContext }, ...prompt];
+    return [
+        {
+            role: "system" as const,
+            content: UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION,
+        },
+        {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: memoryContext }],
+        },
+        ...prompt,
+    ];
 }

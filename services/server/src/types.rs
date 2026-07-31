@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
+/// Namespace values participate in a composite PostgreSQL B-tree index.
+/// Keep them small enough that caller input can never exceed an index tuple.
+pub const MAX_NAMESPACE_BYTES: usize = 255;
 
 /// Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
@@ -89,6 +92,17 @@ impl SecurityDeleteExecutionGate {
     }
 }
 
+/// Default cap on AccountRegistry pages walked by the auth fallback scan
+/// (Strategy 3 in `auth::resolve_account`). 50 accounts per page → 1000
+/// accounts. Override via MEMWAL_REGISTRY_SCAN_MAX_PAGES.
+pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
+
+/// Max concurrent AccountRegistry fallback scans. Auth runs BEFORE the
+/// rate limiter, so unauthenticated unknown-key traffic could otherwise
+/// stack unbounded full-registry scans (each page fans out one
+/// `sui_getObject` per candidate account).
+pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -115,9 +129,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
     /// Shared Sui gRPC client for onchain delegate-key verification, built
-    /// once at startup when `SUI_GRPC_URL` is set (`None` keeps the JSON-RPC
-    /// path). This client is intentionally independent of security deletion's
-    /// quota gate.
+    /// once at startup. This client is intentionally independent of security
+    /// deletion's quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
@@ -145,9 +158,14 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    /// Apalis storage for RememberJob — legacy full async pipeline.
-    /// Kept so the legacy worker can drain any rows enqueued before the
-    /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
+    /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).
+    /// Auth runs before the rate limiter, so this — plus the per-scan page
+    /// cap (`Config::registry_scan_max_pages`) — is what stops unknown-key
+    /// floods from stacking unbounded registry walks. `try_acquire` only:
+    /// saturation rejects the request rather than queueing.
+    pub registry_scan_semaphore: tokio::sync::Semaphore,
+    /// Apalis storage for legacy RememberJob payloads. Kept so the worker can
+    /// fail unfenced rows closed and surface them for reconciliation.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
     /// Single Apalis storage for WalletJob. Routing dimension was previously a
@@ -231,11 +249,8 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
-    /// gRPC endpoint for onchain account/delegate-key verification. When set,
-    /// verify_delegate_key_onchain uses gRPC instead of JSON-RPC; empty keeps
-    /// the JSON-RPC path unchanged (mirrors the sidecar's SUI_GRPC_URL opt-in
-    /// from the write-path gRPC migration — JSON-RPC sunsets 2026-07-31, and
-    /// testnet's public JSON-RPC endpoint already returns 404).
+    /// Required gRPC endpoint for boot-time SEAL policy validation and onchain
+    /// account/delegate-key verification.
     pub sui_grpc_url: Option<String>,
     /// network name (mainnet/testnet/devnet). Surfaced via
     /// `GET /config` so the SDK can select the matching Sui fullnode
@@ -263,8 +278,19 @@ pub struct Config {
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
     /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
     pub sui_private_keys: Vec<String>,
+    /// Immutable original-publish package ID. This is the Move type origin and
+    /// the SEAL ciphertext namespace; it must not change across upgrades.
     pub package_id: String,
+    /// Package version whose `account::seal_approve` policy is executed for
+    /// decrypts. Defaults to `package_id`, but moves to the latest published
+    /// package after an upgrade without changing the ciphertext namespace.
+    pub seal_policy_package_id: String,
     pub registry_id: String,
+    /// Max AccountRegistry pages (50 accounts each) the auth fallback scan
+    /// walks before giving up (MEMWAL_REGISTRY_SCAN_MAX_PAGES, default 20).
+    /// Bounds the RPC fan-out an unknown delegate key can trigger; clients
+    /// past the cap must send the x-account-id hint instead.
+    pub registry_scan_max_pages: u32,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
@@ -273,6 +299,9 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
+    /// ignores caller-supplied XFF and uses the direct peer address.
+    pub trusted_proxy_hops: usize,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
     /// when true, select `PlaintextEngine` instead of
@@ -335,6 +364,9 @@ impl Config {
             std::env::var("WALRUS_AGGREGATOR_URLS").ok().as_deref(),
         );
         let (sui_rpc_requests_per_window, sui_rpc_window) = sui_rpc_quota_from_env();
+        let package_id = std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set");
+        let seal_policy_package_id =
+            nonempty_env("MEMWAL_SEAL_POLICY_PACKAGE_ID").unwrap_or_else(|| package_id.clone());
 
         Self {
             port: std::env::var("PORT")
@@ -377,15 +409,27 @@ impl Config {
                 let single = std::env::var("SERVER_SUI_PRIVATE_KEY").ok().map(|k| vec![k]);
                 multi.or(single).unwrap_or_default()
             },
-            package_id: std::env::var("MEMWAL_PACKAGE_ID")
-                .expect("MEMWAL_PACKAGE_ID must be set"),
+            package_id,
+            seal_policy_package_id,
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
+            registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                // 0 would silently disable the Strategy 3 fallback scan;
+                // clamp to at least one page.
+                .map(|v| v.max(1))
+                .unwrap_or(DEFAULT_REGISTRY_SCAN_MAX_PAGES),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|hops| *hops <= 32)
+                .unwrap_or(0),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
             benchmark_mode: std::env::var("BENCHMARK_MODE")
@@ -653,6 +697,10 @@ pub struct SponsorRateLimitConfig {
     pub per_minute: i64,
     /// Max sponsor requests per hour per IP (default: 30)
     pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by changing client input.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the sponsor budget.
+    pub global_per_hour: i64,
 }
 
 impl Default for SponsorRateLimitConfig {
@@ -660,6 +708,8 @@ impl Default for SponsorRateLimitConfig {
         Self {
             per_minute: 10,
             per_hour: 30,
+            global_per_minute: 100,
+            global_per_hour: 1000,
         }
     }
 }
@@ -675,6 +725,16 @@ impl SponsorRateLimitConfig {
         if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
             }
         }
         c
@@ -789,6 +849,19 @@ fn default_limit() -> usize {
 
 fn default_namespace() -> String {
     "default".to_string()
+}
+
+pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
+    if namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+    if namespace.len() > MAX_NAMESPACE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "namespace exceeds maximum length of {} bytes",
+            MAX_NAMESPACE_BYTES
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1278,21 +1351,25 @@ pub struct ConfigResponse {
 
 /// POST /sponsor — validated request body forwarded to sidecar
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SponsorRequest {
     pub sender: String,
-    #[serde(rename = "transactionBlockKindBytes")]
     pub transaction_block_kind_bytes: String,
+    #[serde(default)]
+    pub auth_signature: Option<String>,
+    #[serde(default)]
+    pub auth_timestamp: Option<i64>,
+    #[serde(default)]
+    pub auth_nonce: Option<String>,
 }
 
 /// POST /sponsor/execute — validated request body forwarded to sidecar.
-/// `sender` is optional — when present it is validated and counted against
-/// the per-sender rate limit bucket (same axis as POST /sponsor).
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SponsorExecuteRequest {
     pub digest: String,
     pub signature: String,
-    /// Sui address of the transaction sender (0x + 64 hex). Optional but
-    /// recommended — enables per-sender rate limiting on this endpoint too.
+    #[serde(default)]
     pub sender: Option<String>,
 }
 
@@ -1486,11 +1563,14 @@ mod tests {
             sui_private_key: None,
             sui_private_keys: Vec::new(),
             package_id: "0x1".into(),
+            seal_policy_package_id: "0x1".into(),
             registry_id: "0x2".into(),
+            registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
             sidecar_secret: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
             enable_memory_deletion: false,
@@ -1978,6 +2058,8 @@ mod tests {
         let config = SponsorRateLimitConfig::default();
         assert_eq!(config.per_minute, 10);
         assert_eq!(config.per_hour, 30);
+        assert_eq!(config.global_per_minute, 100);
+        assert_eq!(config.global_per_hour, 1000);
     }
 
     #[test]
@@ -2176,6 +2258,14 @@ mod tests {
         // recall response). Failing this test = ack the change.
         assert_eq!(ScoringWeights::default().recency, 0.0);
         assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    #[test]
+    fn namespace_validation_rejects_empty_and_oversized_values() {
+        assert!(validate_namespace("default").is_ok());
+        assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES)).is_ok());
+        assert!(validate_namespace("").is_err());
+        assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)).is_err());
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────

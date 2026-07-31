@@ -20,6 +20,7 @@
  * =============================================================================
  */
 import type { Request } from "express";
+import { isIP } from "node:net";
 
 export interface RateLimitConfig {
     /** Hard cap on total concurrent MCP sessions across all IPs. */
@@ -67,18 +68,20 @@ export function loadRateLimitConfigFromEnv(): RateLimitConfig {
 }
 
 /**
- * Best-effort client IP. Honor the relayer's `x-forwarded-for` (first hop is
- * the original caller), fall back to express's `req.ip`. Returns "unknown"
- * if neither is available — counters still apply, just bucketed together.
+ * The Rust relayer has already resolved its trusted-proxy boundary and sends
+ * exactly one canonical IP. Reject chains and malformed values here rather
+ * than reinterpreting attacker-controlled XFF. Direct sidecar tests fall back
+ * to Express's peer IP.
  */
 export function clientIpFromRequest(req: Request): string {
     const fwd = req.headers["x-forwarded-for"];
-    const raw = Array.isArray(fwd) ? fwd[0] : fwd;
-    if (typeof raw === "string" && raw.length > 0) {
-        const first = raw.split(",")[0]?.trim();
-        if (first) return first;
+    const raw = Array.isArray(fwd) && fwd.length === 1 ? fwd[0] : fwd;
+    if (typeof raw === "string") {
+        const candidate = raw.trim();
+        if (!candidate.includes(",") && isIP(candidate) !== 0) return candidate;
     }
-    return req.ip ?? "unknown";
+    const peer = req.ip?.trim();
+    return peer && isIP(peer) !== 0 ? peer : "unknown";
 }
 
 interface IpState {

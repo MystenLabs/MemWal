@@ -11,6 +11,7 @@
 //! closure (`crate::...` references reachable from it) needs them to
 //! resolve.
 mod alerts;
+mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;

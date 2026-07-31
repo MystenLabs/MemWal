@@ -5,7 +5,7 @@
 
 import { shutdownMcpSessions } from "../mcp/index.js";
 import { createSidecarApp } from "./app.js";
-import { SIDECAR_HOST, SIDECAR_PORT } from "./config.js";
+import { SIDECAR_HOST, SIDECAR_PORT, SIDECAR_SHUTDOWN_TIMEOUT_MS } from "./config.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "./state.js";
 import { truncateForLog } from "./util.js";
 
@@ -39,9 +39,9 @@ export function startSidecarServer(): void {
             process.exit(0);
         });
         setTimeout(() => {
-            console.error("[sidecar] forced exit after 5s");
+            console.error(`[sidecar] forced exit after ${SIDECAR_SHUTDOWN_TIMEOUT_MS}ms`);
             process.exit(1);
-        }, 5_000).unref();
+        }, SIDECAR_SHUTDOWN_TIMEOUT_MS).unref();
     }
     process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
     process.on("SIGINT", () => void gracefulShutdown("SIGINT"));

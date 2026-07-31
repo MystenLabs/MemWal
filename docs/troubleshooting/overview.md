@@ -4,14 +4,14 @@ description: Resolve common Walrus Memory problems, including delegate-key authe
 keywords: [Walrus Memory, MemWal, troubleshooting, AUTH_REJECTED, delegate key, MCP, timeout, memwal_analyze]
 ---
 
-<!--
+{/*
 Source: BEDU-612, seeded from a Walrus Memory Discord support thread.
 The 401 reporter self-resolved without recording the exact fix, so the AUTH_REJECTED
 entry documents all known causes from the authentication model rather than a single
 confirmed one. Confirm the specific fix with the reporter before treating that entry
 as final. Grounded in: contract/delegate-key-management, relayer/api-reference,
 sdk/api-reference, mcp/reference, getting-started/quick-start.
--->
+*/}
 
 This page collects the support questions that come up most often and the fastest way to resolve each one. Every entry lists the symptom you observe, the cause behind it, and the fix to apply.
 
@@ -53,7 +53,7 @@ To triage quickly, confirm 3 things in order: the key is listed under the correc
 </Tip>
 
 <Info>
-A version mismatch is rarely the cause here. The relayer reports its minimum supported SDK version, which is TypeScript 0.0.4 at the time of writing, so 0.0.7 is supported. A true version mismatch surfaces as `MemWalCompatibilityError` rather than `AUTH_REJECTED`.
+A version mismatch is rarely the cause here. The relayer reports its minimum supported SDK version, which is TypeScript 0.0.4 at the time of writing, so 0.1.0 is supported. A true version mismatch surfaces as `MemWalCompatibilityError` rather than `AUTH_REJECTED`.
 </Info>
 
 ## MCP connection issues

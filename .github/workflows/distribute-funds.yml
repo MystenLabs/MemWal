@@ -1,0 +1,189 @@
+name: distribute-funds
+
+# Pay every wallet listed in scripts/distribute-funds.<network>.json the same
+# amount of SUI and WAL, into their address balances (never as coin objects —
+# writers fail closed on coin fallback), in one atomic transaction. The network
+# input picks the file, so a mainnet run can never read the testnet list.
+#
+# Unlike the other *-tx workflows, this one MOVES REAL FUNDS: the sender is a hot
+# key in the SUI_FUNDER_KEY secret, so there is nothing to sign offline. The
+# sender address is derived from that key inside the script and is never passed
+# in, so funds can only leave the wallet the secret actually controls.
+#
+# Runs default to dry_run: the payout is simulated and the balances checked, but
+# nothing is sent. A paid run also requires a <=15-minute-old snapshot collected
+# from all live writer /ready endpoints and refuses any missing, extra, changed,
+# or reordered writer or wallet.
+#
+# The WAL coin type is read off chain from the network's walrus deployment (its
+# system object), never hardcoded — mainnet and testnet WAL are different
+# packages.
+#
+# No sui CLI needed: this is pure @mysten/sui over gRPC.
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      mist_per_address:
+        description: "SUI per address, in MIST (1 SUI = 1e9 MIST). e.g. 3000000000 = 3 SUI."
+        required: true
+        type: string
+      frost_per_address:
+        description: "WAL per address, in FROST (1 WAL = 1e9 FROST). e.g. 1500000000 = 1.5 WAL."
+        required: true
+        type: string
+      grpc_url:
+        description: "gRPC-web base URL of a fullnode (no JSON-RPC). e.g. https://fullnode.mainnet.sui.io:443"
+        required: true
+        type: string
+      network:
+        description: "Sui network."
+        required: true
+        default: mainnet
+        type: choice
+        options: [mainnet, testnet]
+      gas_budget:
+        description: "Gas budget in MIST. Checked on top of the SUI payout."
+        required: true
+        default: "5000000000"
+        type: string
+      dry_run:
+        description: "Simulate and check balances without sending. Untick to move real funds."
+        required: true
+        default: true
+        type: boolean
+      live_writer_addresses_json:
+        description: "Fresh JSON from collect-live-writer-addresses.sh. Required when dry_run is false."
+        required: false
+        type: string
+      funding_journal_json:
+        description: "Previous funding-journal.json contents to reconcile/resume the exact signed transaction. Requires dry_run=false."
+        required: false
+        type: string
+
+# One payout at a time: concurrent runs would fight over the sender's coins.
+concurrency: ${{ github.workflow }}
+
+jobs:
+  distribute:
+    # A selected feature branch controls this workflow's script. Never expose
+    # the hot funder key until the reviewed workflow is on the default branch.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # Configure both environments with required reviewers. Keep SUI_FUNDER_KEY
+    # as an environment secret rather than a repository-wide Actions secret.
+    environment: walrus-memory-migration-funding-${{ inputs.network }}
+    steps:
+      - name: Initialize journal artifact
+        env:
+          NETWORK: ${{ inputs.network }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          umask 077
+          jq -n \
+            --arg network "$NETWORK" \
+            --arg runId "$RUN_ID" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            '{schemaVersion: 1, kind: "walrus-memory-funding", status: "workflow-started", network: $network, runId: $runId, runAttempt: $runAttempt}' \
+            > "$RUNNER_TEMP/funding-journal.json"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Prepare or simulate funding
+        env:
+          SUI_FUNDER_KEY: ${{ secrets.SUI_FUNDER_KEY }}
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          MIST_PER_ADDRESS: ${{ inputs.mist_per_address }}
+          FROST_PER_ADDRESS: ${{ inputs.frost_per_address }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FUNDING_PREPARE_ONLY: ${{ !inputs.dry_run }}
+          LIVE_WRITER_ADDRESSES_JSON: ${{ inputs.live_writer_addresses_json }}
+          FUNDING_JOURNAL_JSON: ${{ inputs.funding_journal_json }}
+          FUNDING_JOURNAL_OUT: ${{ runner.temp }}/funding-journal.json
+        # The script reports to stderr, so --silent leaves the digest alone on stdout.
+        run: pnpm --silent distribute:funds > "$RUNNER_TEMP/funding-digest.txt"
+
+      # A paid transaction is not submitted until its exact signed bytes and
+      # signature are stored outside this runner. If upload fails, the next step
+      # is skipped and no funds move.
+      - name: Upload prepared funding journal
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: funding-journal-prepared-${{ inputs.network }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/funding-journal.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Submit or reconcile funding
+        if: ${{ !inputs.dry_run }}
+        env:
+          SUI_FUNDER_KEY: ${{ secrets.SUI_FUNDER_KEY }}
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          MIST_PER_ADDRESS: ${{ inputs.mist_per_address }}
+          FROST_PER_ADDRESS: ${{ inputs.frost_per_address }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          DRY_RUN: "false"
+          FUNDING_PREPARE_ONLY: "false"
+          LIVE_WRITER_ADDRESSES_JSON: ${{ inputs.live_writer_addresses_json }}
+          FUNDING_JOURNAL_OUT: ${{ runner.temp }}/funding-journal.json
+        run: |
+          FUNDING_JOURNAL_JSON="$(cat "$RUNNER_TEMP/funding-journal.json")"
+          export FUNDING_JOURNAL_JSON
+          pnpm --silent distribute:funds > "$RUNNER_TEMP/funding-digest.txt"
+
+      - name: Summary
+        if: always()
+        env:
+          NETWORK: ${{ inputs.network }}
+          MIST_PER_ADDRESS: ${{ inputs.mist_per_address }}
+          FROST_PER_ADDRESS: ${{ inputs.frost_per_address }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          status="$(jq -r '.status // "unknown"' "$RUNNER_TEMP/funding-journal.json")"
+          digest="$(jq -r '.transaction.digest // empty' "$RUNNER_TEMP/funding-journal.json")"
+          {
+            echo "### distribute-funds ($NETWORK)"
+            echo "Per address: \`$MIST_PER_ADDRESS\` MIST + \`$FROST_PER_ADDRESS\` FROST · dry run: \`$DRY_RUN\`"
+            echo "Journal status: \`$status\`"
+            case "$status" in
+              succeeded)
+                echo "Funding succeeded at digest: \`$digest\`"
+                ;;
+              failed)
+                echo "The journaled payout failed atomically on chain at digest: \`$digest\`; no recipient was partially funded, but gas may have been charged."
+                ;;
+              simulated)
+                echo "Dry run completed; no transaction was signed or submitted."
+                ;;
+              prepared)
+                echo "Funding outcome is unresolved. Do not create another payout. Download the journal and resume with its exact contents in funding_journal_json."
+                echo "Prepared digest: \`$digest\`"
+                ;;
+              *)
+                echo "Funding did not reach a durable prepared transaction. Inspect the step log."
+                ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload funding journal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: funding-journal-final-${{ inputs.network }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/funding-journal.json
+          if-no-files-found: error
+          retention-days: 30

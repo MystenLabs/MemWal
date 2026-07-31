@@ -16,7 +16,12 @@ import {
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
-import { getJsonRpcFullnodeUrl } from '@mysten/sui/jsonRpc'
+import {
+  getJsonRpcFullnodeUrl,
+  SuiJsonRpcClient,
+  type SuiJsonRpcClientOptions,
+} from '@mysten/sui/jsonRpc'
+import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { config } from './config'
@@ -35,19 +40,10 @@ import '@mysten/dapp-kit/dist/index.css'
 // Network config
 // ============================================================
 
-// The app-wide client stays on JSON-RPC. Every existing consumer of the provider
-// client (SetupWizard, ConnectMcp, account resolution) is written against
-// JSON-RPC request shapes: `getObject({ id, options })` and
-// `getDynamicFieldObject`, which the gRPC client neither accepts nor provides.
-// Swapping the shared client would break them silently, because dapp-kit's types
-// hard-code SuiJsonRpcClient and hide the mismatch from the compiler.
-//
-// gRPC is scoped to the deletion subsystem, which owns its own client. The Seal
-// and Walrus SDKs the deletion preview uses accept either transport, so nothing
-// in that path needs the shared client to be gRPC.
 // VITE_SUI_RPC_URL overrides the public fullnode for the active network only
 // (mirrors the relayer's SUI_RPC_URL — the public mainnet pool serves
-// stale/slow reads under load). Other networks keep the public default.
+// stale/slow reads under load). VITE_SUI_GRPC_URL takes precedence for the
+// active real network; the explicit local browser suite remains JSON-RPC.
 function jsonRpcUrlFor(network: 'testnet' | 'mainnet'): string {
   if (network === config.suiNetwork && config.suiRpcUrl) {
     return config.suiRpcUrl
@@ -60,6 +56,16 @@ const { networkConfig } = createNetworkConfig({
   mainnet: { url: jsonRpcUrlFor('mainnet'), network: 'mainnet' },
   localnet: { url: config.suiRpcUrl || 'http://127.0.0.1:9000', network: 'localnet' },
 })
+
+// Opt-in gRPC for the active network. Every provider consumer uses the shared
+// compatibility helpers in utils/suiClientCompat.ts; sponsored execution stays
+// server-side, so the browser never needs a cross-transport execute shim.
+function createClientForNetwork(name: string, cfg: SuiJsonRpcClientOptions) {
+  if (name !== 'localnet' && name === config.suiNetwork && config.suiGrpcUrl) {
+    return new SuiGrpcClient({ network: name, baseUrl: config.suiGrpcUrl }) as unknown as SuiJsonRpcClient
+  }
+  return new SuiJsonRpcClient(cfg)
+}
 
 const queryClient = new QueryClient()
 
@@ -304,7 +310,11 @@ export default function App() {
     <BrowserRouter>
       <AnalyticsTracker />
       <QueryClientProvider client={queryClient}>
-        <SuiClientProvider networks={networkConfig} defaultNetwork={config.suiClientNetwork}>
+        <SuiClientProvider
+          networks={networkConfig}
+          defaultNetwork={config.suiClientNetwork}
+          createClient={createClientForNetwork}
+        >
           <RegisterEnokiWallets />
           <WalletProvider autoConnect>
             <DelegateKeyProvider>

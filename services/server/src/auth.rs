@@ -9,7 +9,9 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::storage::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
+use crate::storage::sui::{
+    find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
+};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing
@@ -230,8 +232,13 @@ pub async fn verify_signature(
                     .with_expiration(redis::SetExpiry::EX(600)),
             )
             .await
-            .unwrap_or(None); // if Redis is down, fail-open for nonce check only
-                              // (signature + timestamp still protect against most replays)
+            .unwrap_or(None); // A Redis error maps to None here, which is
+                              // indistinguishable from "nonce already seen" below —
+                              // i.e. the request is REJECTED (fail-CLOSED). That is
+                              // deliberate: replay protection holds even when Redis
+                              // is down, at the availability cost that a Redis
+                              // outage 401s all signed traffic through this
+                              // middleware until Redis recovers.
 
         if set_result.is_none() {
             // NX failed = nonce already exists = replay attempt
@@ -296,9 +303,9 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
-            &state.config.package_id,
             &cached_account_id,
             pk_bytes,
+            &state.config.package_id,
         )
         .await
         {
@@ -334,9 +341,9 @@ async fn resolve_account(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
-            &state.config.package_id,
             exact_account_id,
             pk_bytes,
+            &state.config.package_id,
         )
         .await
         .map_err(|e| {
@@ -368,13 +375,33 @@ async fn resolve_account(
     }
 
     // Non-testnet compatibility path: scan AccountRegistry only when no exact
-    // account id is available.
+    // account id is available. The scan runs before the rate limiter, so use
+    // an in-process concurrency permit so
+    // unknown-key floods can't stack unbounded scans, and a per-scan page
+    // cap (MEMWAL_REGISTRY_SCAN_MAX_PAGES) inside the scan itself. Both
+    // rejection messages name the x-account-id remediation, but they surface
+    // only in server logs: the middleware collapses every auth failure to a
+    // bare 401 (no oracle). A key past the page cap therefore cannot
+    // self-resolve — operators must diagnose the lockout from the warn logs
+    // and either raise the cap or have the client send the header hint,
+    // which Strategy 2 verifies directly without any scan.
+    let _scan_permit = match state.registry_scan_semaphore.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err(
+                "registry scan concurrency limit reached; retry, or send the x-account-id \
+                 header hint to skip the registry scan"
+                    .to_string(),
+            );
+        }
+    };
     match find_account_by_delegate_key(
         &state.http_client,
         &state.config.sui_rpc_url,
         &state.config.registry_id,
-        &state.config.package_id,
         pk_bytes,
+        &state.config.package_id,
+        state.config.registry_scan_max_pages,
     )
     .await
     {
@@ -385,6 +412,13 @@ async fn resolve_account(
                 .cache_delegate_key(public_key_hex, &account_id, &owner)
                 .await;
             return Ok((account_id, owner));
+        }
+        Err(e @ OnchainVerifyError::ScanCapExceeded(_)) => {
+            tracing::warn!("registry scan capped: {}", e);
+            return Err(format!(
+                "{}; send the x-account-id header hint to authenticate without a scan",
+                e
+            ));
         }
         Err(e) => {
             tracing::debug!("registry scan did not find key: {}", e);

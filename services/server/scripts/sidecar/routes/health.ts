@@ -1,36 +1,127 @@
 /**
  * Unauthenticated observability endpoints.
  *
- * Both are registered BEFORE the shared-secret middleware (see app.ts):
- * /health must always be reachable for liveness probes, and
+ * All are registered BEFORE the shared-secret middleware (see app.ts):
+ * /health is local liveness, /ready validates upload execution identity, and
  * /metrics/wallet is scraped by operators without a token.
  */
 
 import type { Express, Request, Response as ExpressResponse } from "express";
 import {
+    DURABLE_UPLOAD_PROTOCOL_VERSION,
     ENOKI_API_KEY,
+    SEAL_COMMITTEE_IDENTITY,
+    SEAL_SERVER_CONFIGS,
+    SEAL_THRESHOLD,
+    SERVER_SUI_ADDRESSES,
+    SERVER_SUI_PRIVATE_KEYS,
+    SUI_CHAIN_IDENTIFIER,
     SUI_NETWORK,
+    WALRUS_PACKAGE_ID,
     WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
     WALRUS_UPLOAD_MAX_CONCURRENCY,
     WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
 } from "../config.js";
+import { getWalletBalanceSnapshot, getWalrusClient, suiClient } from "../clients.js";
 import { getUploadCounts } from "../concurrency.js";
-import { sidecarMetrics, sidecarStartedAtMs } from "../state.js";
+import { sidecarLog } from "../log.js";
+import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
+import { errorMessage } from "../util.js";
+
+const READINESS_CACHE_MS = 30_000;
+const READINESS_RPC_TIMEOUT_MS = 5_000;
+export type UploadExecutionIdentity = { chainIdentifier: string; walrusPackageId: string };
+let readinessPromise: Promise<UploadExecutionIdentity> | undefined;
+let cachedIdentity: { value: UploadExecutionIdentity; checkedAtMs: number } | undefined;
+
+export function executionIdentity(): Promise<UploadExecutionIdentity> {
+    if (cachedIdentity && Date.now() - cachedIdentity.checkedAtMs < READINESS_CACHE_MS) {
+        return Promise.resolve(cachedIdentity.value);
+    }
+    readinessPromise ??= Promise.all([
+        suiClient.ledgerService.getServiceInfo({}, { timeout: READINESS_RPC_TIMEOUT_MS }),
+        getWalrusClient().getBlobType(),
+    ])
+        .then(([{ response }, blobType]) => {
+            if (!response.chainId) throw new Error("Sui gRPC service info has no chain id");
+            if (response.chainId !== SUI_CHAIN_IDENTIFIER) {
+                throw new Error(`Sui endpoint chain id does not match ${SUI_NETWORK}`);
+            }
+            const expectedBlobType = `${WALRUS_PACKAGE_ID}::blob::Blob`;
+            if (blobType !== expectedBlobType) {
+                throw new Error(`Walrus SDK blob type ${blobType} does not match ${expectedBlobType}`);
+            }
+            const value = {
+                chainIdentifier: response.chainId,
+                walrusPackageId: WALRUS_PACKAGE_ID,
+            };
+            cachedIdentity = { value, checkedAtMs: Date.now() };
+            return value;
+        })
+        .finally(() => {
+            readinessPromise = undefined;
+        });
+    return readinessPromise;
+}
+
+export function parseUploadExecutionIdentity(value: unknown): UploadExecutionIdentity | null {
+    if (!value || typeof value !== "object") return null;
+    const { chainIdentifier, walrusPackageId } = value as Record<string, unknown>;
+    if (typeof chainIdentifier !== "string" || !chainIdentifier
+        || typeof walrusPackageId !== "string" || !walrusPackageId) {
+        return null;
+    }
+    return { chainIdentifier, walrusPackageId };
+}
+
+export async function assertUploadExecutionIdentity(
+    expected: UploadExecutionIdentity,
+): Promise<void> {
+    const actual = await executionIdentity();
+    if (actual.chainIdentifier === expected.chainIdentifier
+        && actual.walrusPackageId === expected.walrusPackageId) {
+        return;
+    }
+    throw Object.assign(
+        new Error(`upload execution identity mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`),
+        { code: "UNAVAILABLE" },
+    );
+}
 
 export function registerHealthRoute(app: Express): void {
     app.get("/health", (_req: Request, res: ExpressResponse) => {
-        const uploads = getUploadCounts();
-        res.json({
-            status: "ok",
-            uptimeMs: Date.now() - sidecarStartedAtMs,
-            activeWalrusUploads: uploads.active,
-            queuedWalrusUploads: uploads.queued,
-            walrusUploadLimits: {
-                globalCapacity: WALRUS_UPLOAD_MAX_CONCURRENCY,
-                perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
-                acquireTimeoutMs: WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
-            },
-        });
+        res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
+    });
+
+    app.get("/ready", async (_req: Request, res: ExpressResponse) => {
+        try {
+            const identity = await executionIdentity();
+            const uploads = getUploadCounts();
+            res.json({
+                status: "ok",
+                uptimeMs: Date.now() - sidecarStartedAtMs,
+                activeWalrusUploads: uploads.active,
+                queuedWalrusUploads: uploads.queued,
+                serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
+                serverKeyAddresses: SERVER_SUI_ADDRESSES,
+                suiNetwork: SUI_NETWORK,
+                uploadProtocolVersion: DURABLE_UPLOAD_PROTOCOL_VERSION,
+                durableUploadDirectSign: !ENOKI_API_KEY,
+                durableUploadAddressBalance: true,
+                uploadExecutionIdentity: identity,
+                sealCommitteeIdentity: SEAL_COMMITTEE_IDENTITY,
+                sealServerCount: SEAL_SERVER_CONFIGS.length,
+                sealThreshold: SEAL_THRESHOLD,
+                walrusUploadLimits: {
+                    globalCapacity: WALRUS_UPLOAD_MAX_CONCURRENCY,
+                    perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
+                    acquireTimeoutMs: WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+                },
+            });
+        } catch (error) {
+            sidecarLog("error", "readiness_identity_failed", { error: errorMessage(error) });
+            res.status(503).json({ status: "error", error: "Upload execution identity unavailable" });
+        }
     });
 }
 
@@ -44,11 +135,14 @@ export function registerHealthRoute(app: Express): void {
 // Values are integer counters that monotonically increase; clients compute
 // deltas.
 export function registerWalletMetricsRoute(app: Express): void {
-    app.get("/metrics/wallet", (_req: Request, res: ExpressResponse) => {
-        res.json({
-            ...sidecarMetrics,
-            enokiEnabled: !!ENOKI_API_KEY,
-            suiNetwork: SUI_NETWORK,
-        });
+    app.get("/metrics/wallet", async (_req: Request, res: ExpressResponse) => {
+        const snapshot = sidecarStateSnapshot();
+        try {
+            const balances = await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES);
+            res.json({ ...snapshot, ...balances });
+        } catch (error) {
+            sidecarLog("warn", "wallet_balance_metrics_failed", { error: errorMessage(error) });
+            res.json(snapshot);
+        }
     });
 }

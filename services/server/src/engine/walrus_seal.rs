@@ -6,10 +6,13 @@
 //!
 //! - **store_blob**: pick a Sui key (round-robin pool) → `walrus::upload_blob`
 //!   the prepared ciphertext → `db.insert_vector`.
-//! - **fetch_one**: Redis blob-cache lookup → on miss, `walrus::download_blob`
-//!   + cache write-back → `seal::seal_decrypt` → UTF-8. Reactive cleanup of
-//!   the index row (scoped to `owner`) on Walrus 404 / permanent decrypt
-//!   failure. Returns `Ok(None)` for "gone", not an error.
+//! - **fetch_one**: Redis blob-cache lookup → on miss,
+//!   `walrus::download_blob` with cache write-back → `seal::seal_decrypt` →
+//!   UTF-8. Reactive cleanup of the index row (scoped to `owner` and
+//!   `namespace`) on
+//!   Walrus 404 only — the blob is provably gone. Decrypt failures never
+//!   delete: they are logged and dropped. Returns `Ok(None)` for "gone",
+//!   not an error.
 //! - **fetch_batch**: per-id cache lookup, then `seal::seal_decrypt_batch`
 //!   the cache-cold blobs in chunks of 25; same cleanup-on-404 semantics;
 //!   returns `(hydrated, dropped_count)` so callers can tell "no matches"
@@ -91,23 +94,24 @@ impl WalrusSealEngine {
     }
 
     /// Reactively delete an expired blob's index row. Best-effort —
-    /// errors logged, not propagated. Scoped to `owner` so a
-    /// blob discovered via one user's recall can't delete another's row.
-    async fn cleanup_expired_blob(&self, blob_id: &str, owner: &str) {
-        match self.db.delete_by_blob_id(blob_id, owner).await {
+    /// errors logged, not propagated. Scoped to `owner` + `namespace` so a
+    /// blob discovered via one recall can't delete another isolated row.
+    async fn cleanup_expired_blob(&self, blob_id: &str, owner: &str, namespace: &str) {
+        match self.db.delete_by_blob_id(blob_id, owner, namespace).await {
             Ok(rows) => {
                 if rows > 0 {
                     tracing::info!(
-                        "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
-                        rows, blob_id, owner
+                        "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={} namespace={}",
+                        rows, blob_id, owner, namespace
                     );
                 }
             }
             Err(e) => {
                 tracing::error!(
-                    "reactive cleanup failed for blob_id={} owner={}: {}",
+                    "reactive cleanup failed for blob_id={} owner={} namespace={}: {}",
                     blob_id,
                     owner,
+                    namespace,
                     e
                 );
             }
@@ -184,7 +188,12 @@ impl WalrusSealEngine {
     /// a Redis hit, `false` on a cold fetch from Walrus. Returns `None` if
     /// the blob is gone (Walrus 404 → reactive cleanup) or any other
     /// download error.
-    async fn fetch_ciphertext(&self, blob_id: &str, owner: &str) -> Option<(Vec<u8>, bool)> {
+    async fn fetch_ciphertext(
+        &self,
+        blob_id: &str,
+        owner: &str,
+        namespace: &str,
+    ) -> Option<(Vec<u8>, bool)> {
         if let Some(ciphertext) = self.cache_get(blob_id).await {
             return Some((ciphertext, true));
         }
@@ -203,7 +212,7 @@ impl WalrusSealEngine {
             }
             Err(AppError::BlobNotFound(msg)) => {
                 tracing::warn!("Blob expired, cleaning up: {}", msg);
-                self.cleanup_expired_blob(blob_id, owner).await;
+                self.cleanup_expired_blob(blob_id, owner, namespace).await;
                 None
             }
             Err(e) => {
@@ -224,6 +233,7 @@ impl MemoryEngine for WalrusSealEngine {
     async fn store_blob(
         &self,
         owner: &str,
+        account_id: &str,
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
@@ -255,6 +265,11 @@ impl MemoryEngine for WalrusSealEngine {
             &self.config.package_id,
             agent_public_key,
             None,
+            walrus::SealPersistence::V1New {
+                account_id,
+                registry_id: &self.config.registry_id,
+                policy_package_id: &self.config.seal_policy_package_id,
+            },
         )
         .await?;
         let blob_id = upload.blob_id;
@@ -297,6 +312,7 @@ impl MemoryEngine for WalrusSealEngine {
     async fn fetch_one(
         &self,
         owner: &str,
+        namespace: &str,
         blob_id: &str,
         distance: f64,
         auth: &AuthInfo,
@@ -305,7 +321,7 @@ impl MemoryEngine for WalrusSealEngine {
 
         // Step 1: cache → Walrus. (fetch_one doesn't aggregate cache stats —
         // a single blob's hit/miss isn't worth a log line; the span carries it.)
-        let ciphertext = match self.fetch_ciphertext(blob_id, owner).await {
+        let ciphertext = match self.fetch_ciphertext(blob_id, owner, namespace).await {
             Some((c, _was_cached)) => c,
             None => return Ok(None),
         };
@@ -318,6 +334,8 @@ impl MemoryEngine for WalrusSealEngine {
             &ciphertext,
             &credential,
             &self.config.package_id,
+            &self.config.seal_policy_package_id,
+            &self.config.registry_id,
             &auth.account_id,
         )
         .await
@@ -365,6 +383,7 @@ impl MemoryEngine for WalrusSealEngine {
     async fn fetch_batch(
         &self,
         owner: &str,
+        namespace: &str,
         hits: &[(String, f64)],
         auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
@@ -387,14 +406,14 @@ impl MemoryEngine for WalrusSealEngine {
             let blob_id = blob_id.clone();
             let distance = *distance;
             async move {
-                self.fetch_ciphertext(&blob_id, owner)
-                    .await
-                    .map(|(ciphertext, was_cached)| Fetched {
+                self.fetch_ciphertext(&blob_id, owner, namespace).await.map(
+                    |(ciphertext, was_cached)| Fetched {
                         blob_id,
                         distance,
                         ciphertext,
                         was_cached,
-                    })
+                    },
+                )
             }
         });
         let fetched: Vec<Fetched> = futures::future::join_all(fetch_tasks)
@@ -430,6 +449,8 @@ impl MemoryEngine for WalrusSealEngine {
                 chunk,
                 &credential,
                 &self.config.package_id,
+                &self.config.seal_policy_package_id,
+                &self.config.registry_id,
                 &auth.account_id,
             )
             .await
@@ -447,50 +468,14 @@ impl MemoryEngine for WalrusSealEngine {
         }
         let seal_ms = seal_start.elapsed().as_millis();
 
-        // Step 3: assemble results; permanent decrypt failures trigger cleanup.
-        let mut results = Vec::new();
-        let mut decrypt_drops = 0usize;
-        for (f, outcome) in fetched.iter().zip(decrypted) {
-            match outcome {
-                DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
-                    Ok(text) => results.push(HydratedMemory {
-                        blob_id: f.blob_id.clone(),
-                        text,
-                        distance: f.distance,
-                        // Engine doesn't fetch created_at / importance;
-                        // recall handler zips them on. See HydratedMemory.
-                        created_at: None,
-                        importance: None,
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Invalid UTF-8 in decrypted data for blob {}: {}",
-                            f.blob_id,
-                            e
-                        );
-                        decrypt_drops += 1;
-                    }
-                },
-                DecryptOutcome::Failed { error, permanent } => {
-                    if permanent {
-                        tracing::warn!(
-                            "SEAL decrypt permanently failed for blob {}, cleaning up: {}",
-                            f.blob_id,
-                            error
-                        );
-                        self.cleanup_expired_blob(&f.blob_id, owner).await;
-                    } else {
-                        tracing::warn!(
-                            "SEAL decrypt transient failure for blob {}: {}",
-                            f.blob_id,
-                            error
-                        );
-                    }
-                    decrypt_drops += 1;
-                }
-                DecryptOutcome::Missing => decrypt_drops += 1,
-            }
-        }
+        // Step 3: assemble results. Decrypt failures (permanent or
+        // transient) are logged and dropped — never deleted. See
+        // `assemble_decrypted` for why.
+        let pairs: Vec<(String, f64)> = fetched
+            .iter()
+            .map(|f| (f.blob_id.clone(), f.distance))
+            .collect();
+        let (results, decrypt_drops) = assemble_decrypted(&pairs, decrypted);
 
         tracing::info!(
             "engine.fetch_batch: decrypted {} of {} fetched ({} dropped: {} download, {} decrypt) walrus={}ms seal={}ms",
@@ -509,6 +494,72 @@ impl MemoryEngine for WalrusSealEngine {
             FetchTimings { walrus_ms, seal_ms },
         ))
     }
+}
+
+// ============================================================
+// Pure decrypt-outcome assembly
+// ============================================================
+
+/// Fold batch-decrypt outcomes into hydrated memories. Returns
+/// `(results, decrypt_drops)`.
+///
+/// Pure — no DB handle, so index-row deletion is structurally impossible
+/// from a decrypt failure. That is deliberate: the sidecar's "permanent"
+/// classification keys off error strings ("Not enough shares",
+/// "InvalidCiphertext", "InvalidPersonalMessageSignature") that also
+/// arise from SEAL committee / authorization mismatches, so treating a
+/// permanent decrypt failure as "blob gone" would silently prune valid
+/// index rows (e.g. migrated memories) on a config error. Reactive
+/// deletion is reserved for the Walrus 404 path in `fetch_ciphertext`,
+/// where the blob is provably gone. The permanent/transient distinction
+/// is kept for logging.
+fn assemble_decrypted(
+    fetched: &[(String, f64)],
+    outcomes: Vec<DecryptOutcome>,
+) -> (Vec<HydratedMemory>, usize) {
+    let mut results = Vec::new();
+    let mut decrypt_drops = 0usize;
+    for ((blob_id, distance), outcome) in fetched.iter().zip(outcomes) {
+        match outcome {
+            DecryptOutcome::Ok(plaintext) => match String::from_utf8(plaintext) {
+                Ok(text) => results.push(HydratedMemory {
+                    blob_id: blob_id.clone(),
+                    text,
+                    distance: *distance,
+                    // Engine doesn't fetch created_at / importance;
+                    // recall handler zips them on. See HydratedMemory.
+                    created_at: None,
+                    importance: None,
+                }),
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid UTF-8 in decrypted data for blob {}: {}",
+                        blob_id,
+                        e
+                    );
+                    decrypt_drops += 1;
+                }
+            },
+            DecryptOutcome::Failed { error, permanent } => {
+                if permanent {
+                    tracing::warn!(
+                        "SEAL decrypt permanently failed for blob {} (dropped, index row kept): {}",
+                        blob_id,
+                        error
+                    );
+                } else {
+                    tracing::warn!(
+                        "SEAL decrypt transient failure for blob {}: {}",
+                        blob_id,
+                        error
+                    );
+                }
+                decrypt_drops += 1;
+            }
+            DecryptOutcome::Missing => decrypt_drops += 1,
+        }
+    }
+    (results, decrypt_drops)
 }
 
 // ============================================================
@@ -560,7 +611,89 @@ fn write_decision(ciphertext_len: usize, max_bytes: usize, ttl_secs: u64) -> Cac
 
 #[cfg(test)]
 mod tests {
-    use super::{read_decision, write_decision, CacheReadDecision, CacheWriteDecision};
+    use super::{
+        assemble_decrypted, read_decision, write_decision, CacheReadDecision, CacheWriteDecision,
+        DecryptOutcome,
+    };
+
+    // ── decrypt-outcome assembly ───────────────────────────────────
+
+    #[test]
+    fn assemble_hydrates_ok_outcomes() {
+        let fetched = vec![("blob-a".to_string(), 0.1), ("blob-b".to_string(), 0.2)];
+        let outcomes = vec![
+            DecryptOutcome::Ok(b"alpha".to_vec()),
+            DecryptOutcome::Ok(b"beta".to_vec()),
+        ];
+
+        let (results, drops) = assemble_decrypted(&fetched, outcomes);
+
+        assert_eq!(drops, 0);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].blob_id, "blob-a");
+        assert_eq!(results[0].text, "alpha");
+        assert_eq!(results[1].blob_id, "blob-b");
+        assert_eq!(results[1].text, "beta");
+    }
+
+    #[test]
+    fn assemble_permanent_decrypt_failure_drops_without_delete() {
+        // Regression guard for the migrated-memory data-loss bug: a
+        // "permanent" decrypt failure (e.g. "Not enough shares" from a
+        // SEAL committee/authorization mismatch) must be dropped from
+        // results exactly like a transient one — NOT treated as "blob
+        // gone" and deleted. `assemble_decrypted` takes no DB handle,
+        // so a delete cannot even be expressed here; this test locks in
+        // that the permanent path routes through it.
+        let fetched = vec![("blob-a".to_string(), 0.1), ("blob-b".to_string(), 0.2)];
+        let outcomes = vec![
+            DecryptOutcome::Ok(b"alpha".to_vec()),
+            DecryptOutcome::Failed {
+                error: "Not enough shares".to_string(),
+                permanent: true,
+            },
+        ];
+
+        let (results, drops) = assemble_decrypted(&fetched, outcomes);
+
+        assert_eq!(results.len(), 1, "permanent failure must be dropped");
+        assert_eq!(results[0].blob_id, "blob-a");
+        assert_eq!(drops, 1);
+    }
+
+    #[test]
+    fn assemble_transient_and_permanent_failures_drop_identically() {
+        let fetched = vec![("blob-a".to_string(), 0.1), ("blob-b".to_string(), 0.2)];
+        let outcomes = vec![
+            DecryptOutcome::Failed {
+                error: "timeout".to_string(),
+                permanent: false,
+            },
+            DecryptOutcome::Failed {
+                error: "InvalidCiphertext".to_string(),
+                permanent: true,
+            },
+        ];
+
+        let (results, drops) = assemble_decrypted(&fetched, outcomes);
+
+        assert!(results.is_empty());
+        assert_eq!(drops, 2);
+    }
+
+    #[test]
+    fn assemble_missing_and_invalid_utf8_count_as_drops() {
+        let fetched = vec![("blob-a".to_string(), 0.1), ("blob-b".to_string(), 0.2)];
+        let outcomes = vec![
+            DecryptOutcome::Missing,
+            DecryptOutcome::Ok(vec![0xff, 0xfe]), // invalid UTF-8
+        ];
+
+        let (results, drops) = assemble_decrypted(&fetched, outcomes);
+
+        assert!(results.is_empty());
+        assert_eq!(drops, 2);
+    }
 
     // ── read-side cap ──────────────────────────────────────────────
 

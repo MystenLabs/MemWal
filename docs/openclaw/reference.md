@@ -1,6 +1,35 @@
 ---
 title: "Reference"
-description: "Complete reference for hooks, tools, CLI commands, configuration, and security."
+description: >-
+  Complete reference for the OpenClaw Walrus Memory plugin: hooks, tools, CLI commands, configuration options, and security.
+  Covers auto-recall, auto-capture, memory_search, memory_store, multi-agent isolation, and troubleshooting.
+keywords:
+  - OpenClaw
+  - Walrus Memory
+  - MemWal
+  - reference
+  - hooks
+  - CLI
+goal:
+  description: Look up the exact configuration fields, hook parameters, and troubleshooting steps for the @mysten-incubation/oc-memwal OpenClaw plugin.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What configuration options does the OpenClaw Walrus Memory plugin support?
+  - How do I use the OpenClaw memwal CLI commands?
+  - How do I troubleshoot the OpenClaw memory plugin?
+answer: >-
+  The OpenClaw Walrus Memory plugin reference covers auto-recall (before_prompt_build hook with configurable maxRecallResults and minRelevance), auto-capture (agent_end hook with captureMaxMessages), two LLM tools (memory_search and memory_store, requiring tools.allow configuration), CLI commands (openclaw memwal search and openclaw memwal stats), full configuration options (privateKey, accountId, serverUrl, defaultNamespace, and tuning parameters), multi-agent namespace isolation, prompt injection protection, and troubleshooting for common issues.
 ---
 
 Complete reference for every plugin capability.
@@ -171,9 +200,9 @@ Each OpenClaw agent gets its own memory namespace derived from the session key. 
 | Researcher | `agent:researcher:uuid-456` | `researcher` |
 | Coder | `agent:coder:uuid-789` | `coder` |
 
-All recall, capture, and tool operations are scoped to the current namespace. One agent cannot see another agent's memories.
+All recall, capture, and tool operations are scoped to the current namespace by the plugin and server. This is an organization boundary, not an on-chain authorization boundary.
 
-**Namespace isolation** uses the same Ed25519 key with server-side filtering. For stronger separation, Walrus Memory also supports **cryptographic isolation** — assigning different keys to different agents so they literally cannot decrypt each other's memories.
+Every delegate key is authorized for the whole MemWal account. Separate delegate keys improve key custody and attribution, but cryptographic isolation requires separate MemWal accounts.
 
 ## Prompt Injection Protection
 

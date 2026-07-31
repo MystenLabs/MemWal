@@ -1,0 +1,113 @@
+name: publish-tx
+
+permissions:
+  contents: read
+
+# Build the UNSIGNED transaction bytes to publish the memwal contract.
+# Nothing is executed on-chain — the base64 output is meant to be signed later
+# (multisig / ledger / offline) and then submitted separately.
+on:
+  workflow_dispatch:
+    inputs:
+      sender:
+        description: "Publisher/signer address (0x + 64 hex). init transfers the AdminCap here."
+        required: true
+        type: string
+      upgrade_cap_recipient:
+        description: "Separate cold/timelocked recipient for UpgradeCap; must differ from sender."
+        required: true
+        type: string
+      grpc_url:
+        description: "gRPC-web base URL of a fullnode (no JSON-RPC)."
+        required: true
+        type: string
+      network:
+        description: "Sui network."
+        required: true
+        default: mainnet
+        type: choice
+        options: [mainnet, testnet]
+      gas_budget:
+        description: "Gas budget in MIST."
+        required: true
+        default: "500000000"
+        type: string
+      epoch:
+        description: "Epoch to anchor the validity window to (valid during epoch..epoch+1). Only applies if gas is paid from the sender's address balance. Leave empty to use the epoch live at build time."
+        required: false
+        type: string
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # Configure required reviewers on both governance environments before use.
+    environment: walrus-memory-migration-governance-${{ inputs.network }}
+    env:
+      SUI_VERSION: testnet-v1.74.0
+      SUI_ARCHIVE_SHA256: d635102d533f678a97a787ad644fec7a804f21fc4e1926dc7caa165b37a622ae
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # sui is only needed here to compile the Move package
+      # (`sui move build --dump-bytecode-as-base64`).
+      - name: Install pinned Sui CLI
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" \
+            --output sui.tgz
+          echo "$SUI_ARCHIVE_SHA256  sui.tgz" | sha256sum --check --strict
+          tar -xzf sui.tgz
+          sui_bin="$(find . -maxdepth 2 -type f -name sui -perm -u+x | head -n1)"
+          test -n "$sui_bin"
+          cp "$sui_bin" "$HOME/.local/bin/sui"
+          chmod +x "$HOME/.local/bin/sui"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Sui version
+        run: sui --version
+
+      - name: Build unsigned publish tx
+        env:
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          SENDER: ${{ inputs.sender }}
+          UPGRADE_CAP_RECIPIENT: ${{ inputs.upgrade_cap_recipient }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          BUILD_ENV: ${{ inputs.network }}
+          EPOCH: ${{ inputs.epoch }}
+          OUT: unsigned-publish-tx.b64
+        run: pnpm tx:publish
+
+      - name: Summary
+        env:
+          SENDER: ${{ inputs.sender }}
+          UPGRADE_CAP_RECIPIENT: ${{ inputs.upgrade_cap_recipient }}
+          NETWORK: ${{ inputs.network }}
+          EPOCH: ${{ inputs.epoch }}
+        run: |
+          {
+            echo "### Unsigned publish tx"
+            echo "Sender: \`$SENDER\` · network: \`$NETWORK\`"
+            echo "UpgradeCap recipient: \`$UPGRADE_CAP_RECIPIENT\`"
+            echo "Epoch: \`${EPOCH:-live at build time}\` (only applies if gas came from the address balance)"
+            echo '```'
+            cat unsigned-publish-tx.b64
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-publish-tx
+          path: unsigned-publish-tx.b64
