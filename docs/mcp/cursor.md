@@ -1,7 +1,35 @@
 ---
 title: Cursor
-description: Add portable Walrus Memory to Cursor through the MemWal MCP server.
-keywords: [MCP, Cursor, Walrus Memory, MemWal, plugin, automatic memory]
+description: >-
+  Add portable Walrus Memory to Cursor through the MemWal MCP server.
+  Cursor supports MCP-only installation and optional lifecycle hooks via its plugin system.
+keywords:
+  - MCP
+  - Cursor
+  - Walrus Memory
+  - MemWal
+  - plugin
+  - automatic memory
+goal:
+  description: Add MemWal to Cursor's MCP configuration, optionally enable plugin lifecycle hooks for automatic memory, and verify persistent recall is working across Cursor sessions.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Cursor?
+  - How do I configure the MemWal MCP server for Cursor?
+  - Does Cursor support MemWal lifecycle hooks?
+answer: >-
+  To add Walrus Memory to Cursor, configure the MemWal MCP server in ~/.cursor/mcp.json using npx -y @mysten-incubation/memwal-mcp as the command. Cursor also supports optional lifecycle hooks via its plugin system for session start, before prompt, and post-tool events. The MCP-only setup already provides proactive save and recall through tool descriptions, so the hooks are optional reinforcement.
 ---
 
 Add MemWal to Cursor so the agent can save and recall durable facts. The **MCP server** (memory tools, below) works on every Cursor version; Cursor's plugin system can also add **lifecycle hooks** for extra reinforcement (see [Lifecycle hooks](#lifecycle-hooks-plugin)).

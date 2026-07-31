@@ -44,7 +44,22 @@
               "getting-started/what-is-memwal",
               "getting-started/quick-start",
               "getting-started/choose-your-path",
-              "examples/example-apps"
+              "examples/example-apps",
+              "examples/chatbot",
+              "examples/noter",
+              "examples/researcher"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/delete-old-memories",
+              "guides/delete-memories-programmatically"
             ]
           }
         ]
@@ -55,8 +70,11 @@
           {
             "group": "Concepts",
             "pages": [
+              "fundamentals/concepts/how-agent-memory-works",
+              "fundamentals/concepts/where-to-store-agent-data",
               "fundamentals/concepts/memory-space",
-              "fundamentals/concepts/ownership-and-access"
+              "fundamentals/concepts/ownership-and-access",
+              "fundamentals/concepts/verifiable-memory"
             ]
           },
           {
@@ -71,12 +89,14 @@
         ]
       },
       {
-        "tab": "SDK",
+        "tab": "TypeScript SDK",
         "groups": [
           {
-            "group": "SDK",
+            "group": "TypeScript SDK",
             "pages": [
+              "sdk/overview",
               "sdk/quick-start",
+              "sdk/headless-setup",
               {
                 "group": "Usage",
                 "root": "sdk/usage",
@@ -86,11 +106,17 @@
                   "sdk/usage/with-memwal"
                 ]
               },
+              "sdk/advanced-usage",
+              "sdk/ai-integration",
               "sdk/cookbook-multi-tenant",
+              "sdk/codebase-memory",
               "sdk/cloudflare-workers",
               "sdk/agent-storage-loop",
               "sdk/production-readiness",
               "sdk/versioned-datasets",
+              "sdk/example-map",
+              "sdk/examples",
+              "sdk/research-app-example",
               "sdk/api-reference",
               "sdk/changelog"
             ]

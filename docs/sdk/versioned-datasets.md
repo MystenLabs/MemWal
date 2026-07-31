@@ -1,7 +1,34 @@
 ---
 title: Versioned Datasets and Lineage
-description: How Walrus content-addressing gives agent datasets immutable version history and tamper-evident lineage for free, with a worked example.
-keywords: [versioning, lineage, content addressing, immutable, dataset, provenance, blob id, audit, AI workflows, agent, MemWal, SDK]
+description: >-
+  How Walrus content-addressing gives agent datasets immutable version history and tamper-evident lineage for free. Includes a worked example of a versioned agent dataset with parent-child blob ID tracking.
+keywords:
+  - versioned datasets
+  - lineage
+  - content addressing
+  - immutable
+  - blob ID
+  - Walrus Memory
+goal:
+  description: Use Walrus content-addressing to store dataset versions with immutable blob IDs, track lineage onchain, and verify dataset integrity without trusting a central registry.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Walrus provide version history for datasets?
+  - How do I track dataset lineage with Walrus Memory?
+  - What is content-addressing and how does it enable versioning?
+answer: >-
+  Every write to Walrus produces a blob ID derived from the stored bytes, so blobs are immutable and each revision is a separate, permanently addressable object. This gives datasets automatic version history without maintaining a version table. Track lineage by recording parent blob IDs alongside each new version, creating a tamper-evident chain that proves which exact data an agent acted on.
 ---
 
 When an agent stores a dataset, a model artifact, or a snapshot of its own state, it usually needs more than the latest copy. It needs the history: which version it acted on, what changed between revisions, and proof that a past version has not been altered. On Walrus, that history comes for free from how storage works, with no version table to maintain.
