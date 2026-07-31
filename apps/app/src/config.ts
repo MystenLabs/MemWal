@@ -37,6 +37,11 @@ export const config = {
     // Target of the security-upgrade banner's "guide to removing data" link.
     securityGuideUrl: import.meta.env.VITE_SECURITY_GUIDE_URL as string ||
         'https://docs.wal.app/walrus-memory/guides/delete-old-memories',
+    // Date the v1 → v1_new security migration completed. Shown in the
+    // security banner and the pre-migration delete card. The default is a
+    // placeholder until the migration completion date is known.
+    migrationCompletedDate: import.meta.env.VITE_MIGRATION_COMPLETED_DATE as string ||
+        'July XX, 2026',
     memwalServerUrl: import.meta.env.VITE_MEMWAL_SERVER_URL as string || 'http://localhost:8000',
     suiNetwork: (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') as 'testnet' | 'mainnet',
     // The local browser suite gets a distinct dapp-kit/wallet chain identity;

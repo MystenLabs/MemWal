@@ -568,6 +568,7 @@ export default function Playground() {
                 embeddingApiBase,
                 packageId: config.memwalPackageId,
                 accountId: accountObjectId || '',
+                registryId: config.memwalRegistryId,
                 suiNetwork: config.suiNetwork,
                 ...(config.sealKeyServers.length > 0 ? { sealKeyServers: [...config.sealKeyServers] } : {}),
             })
@@ -1039,6 +1040,7 @@ const memwal = MemWalManual.create({
   embeddingApiBase: "https://openrouter.ai/api/v1",
   packageId: "${config.memwalPackageId.slice(0, 10)}...",
   accountId: "${(accountObjectId || '').slice(0, 10)}...",
+  registryId: "${config.memwalRegistryId.slice(0, 10)}...",
 })
 
 // client does:

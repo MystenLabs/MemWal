@@ -29,6 +29,15 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = resolve(__dirname, "../dist/bin/memwal-mcp.js");
+const EXPECTED_BEARER = "a".repeat(64);
+const EXPECTED_ACCOUNT_ID = "0x" + "3".repeat(64);
+
+function hasBridgeAuth(req) {
+    return (
+        req.headers.authorization === `Bearer ${EXPECTED_BEARER}` &&
+        req.headers["x-memwal-account-id"] === EXPECTED_ACCOUNT_ID
+    );
+}
 
 /** Mock relayer. The first SSE session is born dead — it emits the endpoint
  * event so the bridge thinks it's up, then never sends another byte. The
@@ -51,6 +60,11 @@ function startMockRelayer() {
             return;
         }
         if (req.method === "GET" && url.pathname === "/api/mcp/sse") {
+            if (!hasBridgeAuth(req)) {
+                res.writeHead(401);
+                res.end();
+                return;
+            }
             sseGetCount += 1;
             const sessionId = `session-${sseGetCount}`;
             const alive = sseGetCount !== 1; // first session is born dead
@@ -80,6 +94,11 @@ function startMockRelayer() {
             return;
         }
         if (req.method === "POST" && url.pathname === "/api/mcp/messages") {
+            if (!hasBridgeAuth(req)) {
+                res.writeHead(401);
+                res.end();
+                return;
+            }
             const sessionId = url.searchParams.get("sessionId");
             const session = sessions.get(sessionId);
             let body = "";
@@ -146,11 +165,11 @@ function startMockRelayer() {
 
 function makeCreds(relayerUrl) {
     return {
-        delegatePrivateKey: "a".repeat(64),
+        delegatePrivateKey: EXPECTED_BEARER,
         delegatePublicKeyHex: "b".repeat(64),
         delegateAddress: "0x" + "1".repeat(64),
         walletAddress: "0x" + "2".repeat(64),
-        accountId: "0x" + "3".repeat(64),
+        accountId: EXPECTED_ACCOUNT_ID,
         packageId: "0x" + "4".repeat(64),
         relayerUrl,
         label: "Watchdog Test",

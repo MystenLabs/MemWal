@@ -39,11 +39,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm --filter @mysten-incubation/memwal typecheck
-
-      - name: Build SDK
-        run: pnpm build:sdk
+      - name: Test and build SDK
+        run: pnpm --filter @mysten-incubation/memwal test
 
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)

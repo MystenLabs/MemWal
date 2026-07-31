@@ -6,8 +6,12 @@ use axum::{
 };
 use percent_encoding::percent_decode_str;
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::types::{AppError, AppState, AuthInfo};
+use crate::{
+    client_ip::canonical_client_ip,
+    types::{AppError, AppState, AuthInfo},
+};
 
 // ============================================================
 // Sponsor Rate Limit Result
@@ -187,6 +191,7 @@ local now          = tonumber(ARGV[2])
 local limit        = tonumber(ARGV[3])
 local weight       = tonumber(ARGV[4])
 local ttl          = tonumber(ARGV[5])
+local request_id   = ARGV[6]
 
 -- 1. Prune entries outside the window
 redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
@@ -200,8 +205,10 @@ if count + weight > limit then
 end
 
 for i = 0, weight - 1 do
-    local member = tostring(now + i * 0.001)
-    redis.call('ZADD', key, now + i * 0.001, member)
+    -- ZSET members, unlike scores, must be unique. A timestamp-only member
+    -- collapses concurrent requests that arrive in the same millisecond.
+    local member = request_id .. ':' .. tostring(i)
+    redis.call('ZADD', key, now, member)
 end
 redis.call('EXPIRE', key, ttl)
 
@@ -232,6 +239,9 @@ async fn check_and_record_window(
     weight: i64,
     ttl_seconds: i64,
 ) -> Result<WindowCheckResult, redis::RedisError> {
+    // The UUID keeps members distinct across concurrent requests, processes,
+    // and replicas even when they share an identical millisecond timestamp.
+    let request_id = Uuid::new_v4().to_string();
     let result: i64 = redis::Script::new(SLIDING_WINDOW_LUA)
         .key(key)
         .arg(window_start)
@@ -239,6 +249,7 @@ async fn check_and_record_window(
         .arg(limit)
         .arg(weight)
         .arg(ttl_seconds)
+        .arg(request_id)
         .invoke_async(redis)
         .await?;
 
@@ -666,35 +677,32 @@ fn stable_hash_i64(s: &str) -> i64 {
 }
 
 // ============================================================
-// Sponsor — per-sender rate limit (called from routes)
+// Sponsor — deployment-wide budget limit
 // ============================================================
 
-/// Check whether a sender (Sui address) has exceeded the sponsor rate limits.
+/// Check whether the deployment has exceeded its sponsor budget limits.
 ///
 /// Uses a sliding-window counter in Redis just like the authenticated route
-/// middleware, but keyed by sender address rather than owner/delegate-key.
+/// middleware, but keyed by fixed server-controlled identifiers. Unlike a
+/// caller-supplied sender address, these keys cannot be rotated by an attacker.
 ///
 /// Returns `SponsorRlResult::Allowed` when the request can proceed, or the
 /// appropriate `MinuteLimitExceeded` / `HourLimitExceeded` variant otherwise.
 ///
-/// On Redis error, falls back to the in-memory token-bucket
-/// fallback. Returns `Err(())` only if both Redis and the fallback are
-/// unavailable (lock poisoned), in which case callers should deny or log.
-pub async fn check_sender_rate_limit(
+/// Returns `Err(())` on Redis failure so callers can fail closed. A per-process
+/// fallback would not enforce a deployment-wide cap across replicas.
+pub async fn check_global_sponsor_rate_limit(
     state: &crate::types::AppState,
-    sender: &str,
     per_minute: i64,
     per_hour: i64,
 ) -> Result<SponsorRlResult, ()> {
     let now = chrono::Utc::now().timestamp_millis() as f64;
     let mut redis = state.redis.clone();
 
-    let min_key = format!("rate:sponsor:min:{}", sender);
-    let hr_key = format!("rate:sponsor:hr:{}", sender);
+    let min_key = "rate:sponsor:global:min";
+    let hr_key = "rate:sponsor:global:hr";
     let min_window_start = now - 60_000.0;
     let hr_window_start = now - 3_600_000.0;
-
-    let mut redis_down = false;
 
     // --- Atomic check-and-record for minute bucket ---
     match check_and_record_window(
@@ -709,56 +717,40 @@ pub async fn check_sender_rate_limit(
     .await
     {
         Ok(WindowCheckResult::Denied) => {
-            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
+            crate::observability::record_rate_limit_denial("sponsor_global_burst");
             return Ok(SponsorRlResult::MinuteLimitExceeded);
         }
         Err(e) => {
-            tracing::warn!("check_sender_rate_limit: Redis error (minute): {} — switching to in-memory fallback", e);
-            redis_down = true;
+            tracing::error!(
+                "check_global_sponsor_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
         }
         Ok(WindowCheckResult::Allowed) => {}
     }
 
     // --- Atomic check-and-record for hour bucket ---
-    if !redis_down {
-        match check_and_record_window(
-            &mut redis,
-            &hr_key,
-            hr_window_start,
-            now + 0.1,
-            per_hour,
-            1, // weight = 1 per sponsor request
-            3700,
-        )
-        .await
-        {
-            Ok(WindowCheckResult::Denied) => {
-                crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
-                return Ok(SponsorRlResult::HourLimitExceeded);
-            }
-            Err(e) => {
-                tracing::warn!("check_sender_rate_limit: Redis error (hour): {} — switching to in-memory fallback", e);
-                redis_down = true;
-            }
-            Ok(WindowCheckResult::Allowed) => {}
-        }
-    }
-
-    // --- In-memory fallback when Redis is down ---
-    if redis_down {
-        crate::observability::record_rate_limit_fallback("sponsor_sender");
-        let mut fallback = state.fallback_rate_limit.lock().await;
-        if !fallback.can_consume(&min_key, 1.0, per_minute as f64, 60.0) {
-            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
-            return Ok(SponsorRlResult::MinuteLimitExceeded);
-        }
-        if !fallback.can_consume(&hr_key, 1.0, per_hour as f64, 3600.0) {
-            crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1, // weight = 1 per sponsor request
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("sponsor_global_sustained");
             return Ok(SponsorRlResult::HourLimitExceeded);
         }
-        fallback.consume(&min_key, 1.0, per_minute as f64, 60.0);
-        fallback.consume(&hr_key, 1.0, per_hour as f64, 3600.0);
-        return Ok(SponsorRlResult::Allowed);
+        Err(e) => {
+            tracing::error!("check_global_sponsor_rate_limit: Redis error (hour): {}", e);
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
     }
 
     Ok(SponsorRlResult::Allowed)
@@ -840,15 +832,13 @@ pub async fn charge_explicit_weight(
 // Sponsor Rate Limit Middleware (IP-based, unauthenticated)
 // ============================================================
 
-/// Rate limiting middleware for the unauthenticated `/sponsor` routes.
+/// Pre-authentication rate limiting middleware for the public `/sponsor` routes.
 ///
 /// Enforces a per-IP sliding-window limit using the same Redis counters as
 /// the authenticated middleware. Defaults: 10 req/min, 30 req/hr per IP.
 ///
-/// On Redis error, falls back to the in-memory token-bucket
-/// instead of failing open. If the fallback mutex is also unavailable,
-/// returns 503 (fail-closed). Per-sender limits in the route handler itself
-/// provide an additional backstop.
+/// Redis errors return 503. A local fallback cannot provide consistent abuse
+/// protection across replicas, so the sponsor path intentionally fails closed.
 pub async fn sponsor_rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -860,23 +850,15 @@ pub async fn sponsor_rate_limit_middleware(
         return next.run(request).await;
     }
 
-    // Extract client IP from X-Forwarded-For (set by reverse proxy) or
-    // fall back to the direct connection address stored by axum.
-    let ip: Option<String> = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string())
-        });
-
-    let ip = match ip {
-        Some(ip) => ip,
+    // XFF is ignored by default. Only walk back through the explicitly
+    // configured number of trusted proxy hops, using the same resolver as
+    // the MCP proxy path.
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
         None => {
             // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
             tracing::warn!("sponsor_rate_limit_middleware: cannot determine client IP, denying");
@@ -892,8 +874,6 @@ pub async fn sponsor_rate_limit_middleware(
     let hr_key = format!("rate:sponsor:ip:hr:{}", ip);
     let min_window_start = now - 60_000.0;
     let hr_window_start = now - 3_600_000.0;
-
-    let mut redis_down = false;
 
     // --- Atomic check-and-record for minute bucket (IP-based) ---
     match check_and_record_window(
@@ -916,58 +896,66 @@ pub async fn sponsor_rate_limit_middleware(
             return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
         }
         Err(e) => {
-            tracing::warn!("sponsor_rate_limit_middleware: Redis error (minute bucket): {} — switching to in-memory fallback", e);
-            redis_down = true;
+            tracing::error!(
+                "sponsor_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
         }
         Ok(WindowCheckResult::Allowed) => {}
     }
 
     // --- Atomic check-and-record for hour bucket (IP-based) ---
-    if !redis_down {
-        match check_and_record_window(
-            &mut redis,
-            &hr_key,
-            hr_window_start,
-            now + 0.1,
-            config.per_hour,
-            1,
-            3700,
-        )
-        .await
-        {
-            Ok(WindowCheckResult::Denied) => {
-                tracing::warn!(
-                    "sponsor rate limit [IP/hr]: ip={} denied (limit={})",
-                    ip,
-                    config.per_hour
-                );
-                return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
-            }
-            Err(e) => {
-                tracing::warn!("sponsor_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
-                redis_down = true;
-            }
-            Ok(WindowCheckResult::Allowed) => {}
-        }
-    }
-
-    // --- In-memory fallback when Redis is down ---
-    if redis_down {
-        tracing::warn!("sponsor_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
-        crate::observability::record_rate_limit_fallback("sponsor_ip");
-        let mut fallback = state.fallback_rate_limit.lock().await;
-
-        if !fallback.can_consume(&min_key, 1.0, config.per_minute as f64, 60.0) {
-            return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
-        }
-        if !fallback.can_consume(&hr_key, 1.0, config.per_hour as f64, 3600.0) {
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "sponsor rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.per_hour
+            );
             return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
         }
+        Err(e) => {
+            tracing::error!(
+                "sponsor_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
 
-        fallback.consume(&min_key, 1.0, config.per_minute as f64, 60.0);
-        fallback.consume(&hr_key, 1.0, config.per_hour as f64, 3600.0);
-
-        return next.run(request).await;
+    match check_global_sponsor_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response(
+                "sponsor_global_burst",
+                config.global_per_minute,
+                "min",
+                60,
+            );
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "sponsor_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
     }
 
     next.run(request).await
@@ -1085,6 +1073,87 @@ mod tests {
             SLIDING_WINDOW_LUA.contains("EXPIRE"),
             "Lua script must refresh TTL"
         );
+        assert!(
+            SLIDING_WINDOW_LUA.contains("request_id .. ':' .. tostring(i)"),
+            "Lua script must use a unique request ID for every ZSET member"
+        );
+    }
+
+    /// Regression test for same-millisecond concurrent requests. This talks to
+    /// a real Redis instance because Redis ZSET member de-duplication and Lua
+    /// atomicity cannot be faithfully covered by a mock.
+    ///
+    /// Run with:
+    /// TEST_REDIS_URL=redis://127.0.0.1:6379 \
+    ///   cargo test concurrent_same_millisecond_requests_respect_limit -- --ignored
+    #[tokio::test]
+    #[ignore = "requires TEST_REDIS_URL pointing to a real Redis instance"]
+    async fn concurrent_same_millisecond_requests_respect_limit() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .expect("TEST_REDIS_URL must be set when running Redis integration tests");
+        let client = redis::Client::open(redis_url).expect("valid TEST_REDIS_URL");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connect to test Redis");
+        let key = format!("test:rate-limit:concurrent:{}", Uuid::new_v4());
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("clear test key");
+
+        const REQUESTS: usize = 32;
+        const LIMIT: i64 = 10;
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let barrier = Arc::new(tokio::sync::Barrier::new(REQUESTS + 1));
+        let mut tasks = Vec::with_capacity(REQUESTS);
+
+        for _ in 0..REQUESTS {
+            let mut task_connection = connection.clone();
+            let task_key = key.clone();
+            let task_barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                task_barrier.wait().await;
+                check_and_record_window(
+                    &mut task_connection,
+                    &task_key,
+                    now - 60_000.0,
+                    now,
+                    LIMIT,
+                    1,
+                    120,
+                )
+                .await
+            }));
+        }
+
+        barrier.wait().await;
+        let mut allowed = 0;
+        for task in tasks {
+            if task
+                .await
+                .expect("rate-limit task panicked")
+                .expect("Redis script failed")
+                == WindowCheckResult::Allowed
+            {
+                allowed += 1;
+            }
+        }
+
+        let cardinality: i64 = redis::cmd("ZCARD")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("read test bucket cardinality");
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("clean test key");
+
+        assert_eq!(allowed, LIMIT);
+        assert_eq!(cardinality, LIMIT);
     }
 
     /// Verify that WindowCheckResult variants are correctly defined.

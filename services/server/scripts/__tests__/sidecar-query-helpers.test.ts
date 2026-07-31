@@ -1,10 +1,384 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
+    assertCompletionBlobObject,
+    assertCompletionBlobResponse,
     blobIdFromRaw,
+    blobIdMatchesRequested,
+    blobObjectMatchesRegistration,
+    chainBlobIdFromRaw,
     isWalrusBlobObjectType,
+    isVerifiedNonexistentSource,
     ownerMatchesRecipient,
+    readBlobObject,
+    strictWalrusEpoch,
 } from "../sidecar/routes/walrus-query.js";
+import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
+import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
+import {
+    assertAddressBalanceRegisterTransaction,
+    createdBlobObjectIdFromTransaction,
+    executePreparedRegisterTransaction,
+    readUploadBlobObject,
+    type PreparedRegisterTransaction,
+    validatePreparedRegisterTransaction,
+} from "../sidecar/routes/walrus-upload-journal.js";
+import { classifyDurableSideEffectError, NoSideEffectError } from "../sidecar/retry/rpc.js";
+import { uploadWalrusBlobWithEffectsRetry } from "../sidecar/routes/walrus-upload.js";
+import { metadataReceiptAlreadyApplied } from "../sidecar/routes/walrus-metadata.js";
+import { sidecarMetrics } from "../sidecar/state.js";
+import { DURABLE_WALLET_FALLBACK_POLICY } from "../sidecar/wallet.js";
+
+async function preparedRegisterFixture(funding: "addressBalance" | "coin" | "mixedLegacy" = "addressBalance"): Promise<{
+    signer: Ed25519Keypair;
+    prepared: PreparedRegisterTransaction;
+}> {
+    const signer = new Ed25519Keypair();
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasOwner(signer.toSuiAddress());
+    transaction.setGasBudget(1_000n);
+    transaction.setGasPrice(1n);
+    if (funding !== "coin") {
+        transaction.setGasPayment([]);
+        transaction.setExpiration({
+            ValidDuring: {
+                minEpoch: "1",
+                maxEpoch: "2",
+                minTimestamp: null,
+                maxTimestamp: null,
+                chain: "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD",
+                nonce: 1,
+            },
+        });
+        if (funding === "addressBalance") {
+            const walType = `0x${"2".repeat(64)}::wal::WAL`;
+            const withdrawal = transaction.withdrawal({
+                amount: 1n,
+                type: walType,
+            });
+            const wal = transaction.moveCall({
+                target: "0x2::coin::redeem_funds",
+                typeArguments: [walType],
+                arguments: [withdrawal],
+            });
+            transaction.moveCall({
+                target: "0x2::coin::destroy_zero",
+                typeArguments: [walType],
+                arguments: [wal],
+            });
+        } else {
+            transaction.transferObjects(
+                [
+                    transaction.objectRef({
+                    objectId: `0x${"2".repeat(64)}`,
+                    version: "1",
+                    digest: "11111111111111111111111111111111",
+                    }),
+                ],
+                signer.toSuiAddress()
+            );
+        }
+    } else {
+        transaction.setGasPayment([
+            {
+            objectId: `0x${"1".repeat(64)}`,
+            version: "1",
+            digest: "11111111111111111111111111111111",
+            },
+        ]);
+    }
+    const bytes = await transaction.build();
+    const signed = await signer.signTransaction(bytes);
+    return {
+        signer,
+        prepared: {
+            transactionBytes: signed.bytes,
+            signature: signed.signature,
+            digest: TransactionDataBuilder.getDigestFromBytes(bytes),
+        },
+    };
+}
+
+test("durable submissions direct-sign only when sponsorship is unconfigured", () => {
+    assert.deepEqual(DURABLE_WALLET_FALLBACK_POLICY, {
+        directSignIfUnconfigured: true,
+        directSignAfterSponsorFailure: false,
+        gasMode: "addressBalance",
+    });
+});
+
+test("prepared registration rejects tampered digest, signature, and wallet", async () => {
+    const { signer, prepared } = await preparedRegisterFixture();
+    await assert.doesNotReject(validatePreparedRegisterTransaction(prepared, signer.toSuiAddress()));
+    await assert.rejects(
+        validatePreparedRegisterTransaction(
+            { ...prepared, digest: `x${prepared.digest.slice(1)}` },
+            signer.toSuiAddress()
+        ),
+        /digest mismatch/
+    );
+
+    const otherSigner = new Ed25519Keypair();
+    const bytes = new Uint8Array(Buffer.from(prepared.transactionBytes, "base64"));
+    const otherSignature = await otherSigner.signTransaction(bytes);
+    await assert.rejects(
+        validatePreparedRegisterTransaction(
+            { ...prepared, signature: otherSignature.signature },
+            signer.toSuiAddress()
+        ),
+        /provided address/
+    );
+    await assert.rejects(
+        validatePreparedRegisterTransaction(prepared, otherSigner.toSuiAddress()),
+        /sender does not match the journaled wallet/
+    );
+});
+
+test("new registrations require address balances while legacy signed journals remain replayable", async () => {
+    const { signer, prepared } = await preparedRegisterFixture("coin");
+    const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
+    assert.equal(validated.maxEpoch, undefined);
+    assert.throws(
+        () => assertAddressBalanceRegisterTransaction(TransactionDataBuilder.fromBytes(validated.bytes)),
+        /must pay gas from the address balance/
+    );
+
+    const mixed = await preparedRegisterFixture("mixedLegacy");
+    const validatedMixed = await validatePreparedRegisterTransaction(mixed.prepared, mixed.signer.toSuiAddress());
+    assert.equal(validatedMixed.maxEpoch, 2n);
+    assert.throws(
+        () => assertAddressBalanceRegisterTransaction(TransactionDataBuilder.fromBytes(validatedMixed.bytes)),
+        /resolved WAL from an owned coin/
+    );
+});
+
+test("the pinned Sui SDK resolves WAL payment and relay SUI tip from address balances", async () => {
+    const signer = new Ed25519Keypair();
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasOwner(signer.toSuiAddress());
+    transaction.setGasBudget(1_000n);
+    transaction.setGasPrice(1n);
+    transaction.setGasPayment([]);
+    transaction.setExpiration({
+        ValidDuring: {
+            minEpoch: "1",
+            maxEpoch: "2",
+            minTimestamp: null,
+            maxTimestamp: null,
+            chain: "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD",
+            nonce: 1,
+        },
+    });
+    const wal = transaction.coin({
+        type: walType,
+        balance: 1n,
+        useGasCoin: false,
+    });
+    const relayTip = transaction.coin({ type: SUI_TYPE, balance: 1n });
+    transaction.moveCall({
+        target: "0x2::coin::destroy_zero",
+        typeArguments: [walType],
+        arguments: [wal],
+    });
+    transaction.transferObjects([relayTip], signer.toSuiAddress());
+
+    const client = {
+        core: {
+            async getBalance({ coinType }: { coinType: string }) {
+                return {
+                    balance: {
+                        coinType,
+                        balance: "10",
+                        addressBalance: "10",
+                        coinBalance: "0",
+                    },
+                };
+            },
+            async listCoins() {
+                return { objects: [], cursor: null, hasNextPage: false };
+            },
+        },
+    };
+    await transaction.prepareForSerialization({ client: client as never });
+
+    const resolved = TransactionDataBuilder.restore(transaction.getData() as never);
+    assert.equal(assertAddressBalanceRegisterTransaction(resolved), 2n);
+    const withdrawals = resolved.inputs.filter((input) => input.$kind === "FundsWithdrawal");
+    assert.equal(withdrawals.length, 2, "WAL payment and relay SUI tip both use address balances");
+});
+
+test("migration source status trusts only verified nonexistent blobs", () => {
+    assert.equal(isVerifiedNonexistentSource({ type: "nonexistent" }), true);
+    assert.equal(isVerifiedNonexistentSource({ type: "invalid" }), false);
+    assert.equal(isVerifiedNonexistentSource({ type: "permanent" }), false);
+    assert.equal(isVerifiedNonexistentSource({ type: "deletable" }), false);
+    assert.equal(isVerifiedNonexistentSource({ type: "unknown" }), false);
+});
+
+test("prepared registration queries the digest before replaying the same signed bytes", async () => {
+    const { signer, prepared } = await preparedRegisterFixture();
+    const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
+    const finalized = {
+        $kind: "Transaction",
+        Transaction: { digest: prepared.digest },
+    };
+    let storedResult: unknown;
+    let executeCalls = 0;
+    const client = {
+        async getTransaction({ digest }: { digest: string }) {
+            assert.equal(digest, prepared.digest);
+            if (!storedResult) {
+                throw Object.assign(new Error("transaction not found"), {
+                    code: "NOT_FOUND",
+                });
+            }
+            return storedResult;
+        },
+        async executeTransaction({ transaction, signatures }: { transaction: Uint8Array; signatures: string[] }) {
+            executeCalls += 1;
+            assert.deepEqual(transaction, validated.bytes);
+            assert.deepEqual(signatures, [prepared.signature]);
+            storedResult = finalized;
+            return storedResult;
+        },
+    };
+
+    const submittedBefore = sidecarMetrics.walletSubmittedTotal;
+    const currentEpoch = async () => 1n;
+    assert.equal(await executePreparedRegisterTransaction(validated, client, () => {}, currentEpoch), finalized);
+    assert.equal(sidecarMetrics.walletSubmittedTotal, submittedBefore + 1);
+    assert.equal(await executePreparedRegisterTransaction(validated, client, () => {}, currentEpoch), finalized);
+    assert.equal(
+        sidecarMetrics.walletSubmittedTotal,
+        submittedBefore + 1,
+        "querying an already-finalized digest is not a new wallet submission"
+    );
+    assert.equal(executeCalls, 1);
+    storedResult = {
+        $kind: "Transaction",
+        Transaction: { digest: "wrong-digest" },
+    };
+    await assert.rejects(
+        executePreparedRegisterTransaction(validated, client, () => {}, currentEpoch),
+        /response digest mismatch/
+    );
+});
+
+test("an expired prepared registration absent from chain is safe to rebuild", async () => {
+    const { signer, prepared } = await preparedRegisterFixture();
+    const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
+    assert.ok(validated.maxEpoch !== undefined);
+    const expiredEpoch = validated.maxEpoch + 1n;
+    let executeCalls = 0;
+    const client = {
+        async getTransaction() {
+            throw Object.assign(new Error("transaction not found"), {
+                code: "NOT_FOUND",
+            });
+        },
+        async executeTransaction() {
+            executeCalls += 1;
+            throw new Error("must not execute an expired transaction");
+        },
+    };
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => expiredEpoch
+        ),
+        NoSideEffectError
+    );
+    const ambiguous = await executePreparedRegisterTransaction(
+        validated,
+        client,
+        () => {},
+        async () => expiredEpoch,
+        true
+    ).then(
+        () => null,
+        (error) => error
+    );
+    assert.match(ambiguous?.message, /expired .* but remains ambiguous/);
+    assert.deepEqual(classifyDurableSideEffectError(ambiguous, true, true), {
+        code: "SHARED_SERVICE_UNAVAILABLE",
+    });
+    assert.equal(executeCalls, 0);
+});
+
+test("a newly created Blob missing from an RPC replica remains replayable", async () => {
+    const objectId = `0x${"2".repeat(64)}`;
+    await assert.rejects(
+        readBlobObject(
+            objectId,
+            { json: true },
+            {
+            async getObject() {
+                throw new Error(`Object ${objectId} not found`);
+            },
+            }
+        ),
+        (error: unknown) => {
+            assert.deepEqual(classifyDurableSideEffectError(error, true, true), {
+                code: "SHARED_SERVICE_UNAVAILABLE",
+            });
+            return true;
+        }
+    );
+
+    await assert.rejects(
+        readBlobObject(
+            objectId,
+            { json: true },
+            {
+            async getObject() {
+                throw new Error(`Object 0x${"3".repeat(64)} not found`);
+            },
+            }
+        ),
+        (error: unknown) => {
+            assert.deepEqual(classifyDurableSideEffectError(error, true, true), {
+                code: "DURABLE_SIDE_EFFECT_VERIFY_FAILED",
+            });
+            return true;
+        }
+    );
+});
+
+test("upload journal retries a newly created Blob on a stale RPC replica", async () => {
+    const objectId = `0x${"2".repeat(64)}`;
+    const expected = { object: { objectId } };
+    let calls = 0;
+
+    const result = await readUploadBlobObject(
+        objectId,
+        { json: true },
+        {
+        async getObject() {
+            calls += 1;
+            if (calls === 1) throw new Error(`Object ${objectId} not found`);
+            return expected as never;
+        },
+        }
+    );
+
+    assert.equal(calls, 2);
+    assert.equal(result, expected);
+});
+
+test("metadata ownership is adopted only during reconciliation", () => {
+    const owner = `0x${"1".repeat(64)}`;
+    const currentOwner = { AddressOwner: owner };
+    assert.equal(metadataReceiptAlreadyApplied(true, currentOwner, owner), true);
+    assert.equal(metadataReceiptAlreadyApplied(false, currentOwner, owner), false);
+});
 
 test("blobIdFromRaw converts on-chain U256 decimal to little-endian base64url", () => {
     // 1 → 32-byte LE array [1, 0, ..., 0] → "AQAA...". Walrus blob IDs are
@@ -22,6 +396,45 @@ test("blobIdFromRaw passes through already-encoded ids and rejects empties", () 
     assert.equal(blobIdFromRaw(""), null);
 });
 
+test("chainBlobIdFromRaw converts every decimal U256 representation", () => {
+    const oneLe = Buffer.from(new Uint8Array([1, ...new Array(31).fill(0)]));
+    assert.equal(chainBlobIdFromRaw("1"), oneLe.toString("base64url"));
+    assert.equal(chainBlobIdFromRaw("already-encoded"), "already-encoded");
+});
+
+test("source lease epochs accept only u32 numbers", () => {
+    assert.equal(strictWalrusEpoch(0, "epoch"), 0);
+    assert.equal(strictWalrusEpoch(0xffff_ffff, "epoch"), 0xffff_ffff);
+    for (const invalid of [-1, 1.5, 0x1_0000_0000, "460", null, undefined]) {
+        assert.throws(() => strictWalrusEpoch(invalid, "epoch"), /epoch must be a u32/);
+    }
+});
+
+test("registration reconciliation requires matching size and deletability", () => {
+    assert.equal(blobObjectMatchesRegistration({ rawSize: "42", deletable: true }, 42), true);
+    assert.equal(blobObjectMatchesRegistration({ rawSize: 41, deletable: true }, 42), false);
+    assert.equal(blobObjectMatchesRegistration({ rawSize: 42, deletable: false }, 42), false);
+});
+
+test("durable upload epochs require 15 on mainnet and allow 1 through 15 elsewhere", () => {
+    assert.equal(parseDurableWalrusEpochs(1, "testnet"), 1);
+    assert.equal(parseDurableWalrusEpochs(14, "testnet"), 14);
+    assert.equal(parseDurableWalrusEpochs(15, "mainnet"), 15);
+    assert.equal(parseDurableWalrusEpochs(1, "mainnet"), null);
+    assert.equal(parseDurableWalrusEpochs(14, "mainnet"), null);
+    for (const invalid of [0, 16, -1, 1.5, "3", null, undefined, Number.NaN]) {
+        assert.equal(parseDurableWalrusEpochs(invalid, "testnet"), null);
+    }
+});
+
+test("blobIdMatchesRequested filters migration IDs before metadata lookup", () => {
+    const requested = new Set(["wanted", "also-wanted"]);
+    assert.equal(blobIdMatchesRequested("wanted", requested), true);
+    assert.equal(blobIdMatchesRequested("other", requested), false);
+    assert.equal(blobIdMatchesRequested(null, requested), false);
+    assert.equal(blobIdMatchesRequested("anything", undefined), true);
+});
+
 test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient("0xa", "0xa"), true);
     assert.equal(ownerMatchesRecipient({ AddressOwner: "0xa" }, "0xa"), true);
@@ -29,6 +442,25 @@ test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient({ AddressOwner: "0xb" }, "0xa"), false);
     assert.equal(ownerMatchesRecipient(null, "0xa"), false);
     assert.equal(ownerMatchesRecipient(42, "0xa"), false);
+});
+
+test("ownerMatchesRecipient compares canonicalized addresses, not exact strings", () => {
+    const lower = `0x${"ab".repeat(32)}`;
+    const upper = `0x${"AB".repeat(32)}`;
+    // gRPC returns lowercase; a mixed-case journaled owner must still match.
+    assert.equal(ownerMatchesRecipient(lower, upper), true);
+    assert.equal(ownerMatchesRecipient({ AddressOwner: lower }, upper), true);
+    assert.equal(ownerMatchesRecipient({ ObjectOwner: upper }, lower), true);
+    // Zero-padding differences are canonicalized too.
+    assert.equal(ownerMatchesRecipient("0x00a", "0xA"), true);
+    // Distinct addresses still never match.
+    assert.equal(ownerMatchesRecipient(lower, `0x${"cd".repeat(32)}`), false);
+});
+
+test("metadata reconciliation adopts a lowercase chain owner for a mixed-case journal", () => {
+    const lower = `0x${"ab".repeat(32)}`;
+    const upper = `0x${"AB".repeat(32)}`;
+    assert.equal(metadataReceiptAlreadyApplied(true, { AddressOwner: lower }, upper), true);
 });
 
 test("isWalrusBlobObjectType normalizes 0x-padded package addresses", () => {
@@ -39,4 +471,107 @@ test("isWalrusBlobObjectType normalizes 0x-padded package addresses", () => {
     assert.equal(isWalrusBlobObjectType("0xother::blob::Blob", blobType), false);
     assert.equal(isWalrusBlobObjectType("0xfdc88f7d::storage::Blob", blobType), false);
     assert.equal(isWalrusBlobObjectType(undefined, blobType), false);
+});
+
+test("completion requires the current destination Blob object and an unexpired lease", () => {
+    const blobId = chainBlobIdFromRaw("7")!;
+    const objectId = `0x${"1".repeat(64)}`;
+    const owner = `0x${"2".repeat(64)}`;
+    const object = {
+        objectType: `${WALRUS_PACKAGE_ID}::blob::Blob`,
+        owner: { AddressOwner: owner },
+        json: {
+            blob_id: "7",
+            size: 42,
+            deletable: true,
+            certified_epoch: 1,
+            storage: { end_epoch: 10 },
+        },
+    };
+    const expected = { objectId, owner, size: 42, blobId };
+
+    assert.equal(assertCompletionBlobObject(object, expected, 9), 10);
+    assert.equal(assertCompletionBlobResponse({ object }, expected, 9), 10);
+    assert.throws(() => assertCompletionBlobResponse(object, expected, 9), /missing from the gRPC response/);
+    assert.throws(
+        () => assertCompletionBlobObject(object, { ...expected, blobId: chainBlobIdFromRaw("8")! }, 9),
+        /does not contain/
+    );
+    assert.throws(() => assertCompletionBlobObject(object, expected, 10), /expired/);
+});
+
+test("extractBlobObjectId prefers the SDK certified-step field", () => {
+    assert.equal(extractBlobObjectId({ blobObjectId: "0xtop" }), "0xtop");
+    assert.equal(extractBlobObjectId({ blobObject: { id: "0xnested" } }), "0xnested");
+    assert.equal(extractBlobObjectId({}), null);
+});
+
+test("metadata transfer accepts only a successful Sui transaction", () => {
+    assert.doesNotThrow(() =>
+        assertSuccessfulMetadataTransfer(
+            {
+        $kind: "Transaction",
+        Transaction: { status: { success: true, error: null } },
+            },
+            "success-digest"
+        )
+    );
+    assert.throws(
+        () =>
+            assertSuccessfulMetadataTransfer(
+                {
+            $kind: "FailedTransaction",
+                    FailedTransaction: {
+                        status: { success: false, error: {} },
+                    },
+                },
+                "failed-digest"
+            ),
+        /failed-digest was not successful/
+    );
+});
+
+test("journaled upload resumes the registered deletable object", async () => {
+    let options: unknown;
+    const flow = {
+        upload: async (value: unknown) => {
+            options = value;
+            return { step: "uploaded" };
+        },
+    };
+    await uploadWalrusBlobWithEffectsRetry(
+        flow,
+        "register-digest",
+        { traceId: "trace", jobId: "job", keyIndex: 0 },
+        true
+    );
+    assert.deepEqual(options, { digest: "register-digest", deletable: true });
+});
+
+test("normal registration checkpoints the exact Blob from transaction effects", () => {
+    assert.equal(
+        createdBlobObjectIdFromTransaction({
+        $kind: "Transaction",
+        Transaction: {
+            status: { success: true, error: null },
+            objectTypes: {
+                "0xblob": `${WALRUS_PACKAGE_ID}::blob::Blob`,
+                "0xmetadata": "0x2::dynamic_field::Field",
+            },
+            effects: {
+                changedObjects: [
+                    { objectId: "0xblob", idOperation: "Created" },
+                    { objectId: "0xmetadata", idOperation: "Created" },
+                ],
+            },
+        },
+        }),
+        "0xblob"
+    );
+    assert.throws(() =>
+        createdBlobObjectIdFromTransaction({
+        $kind: "FailedTransaction",
+        FailedTransaction: { status: { success: false, error: {} } },
+        })
+    );
 });

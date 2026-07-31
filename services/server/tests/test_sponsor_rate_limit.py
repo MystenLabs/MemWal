@@ -53,8 +53,12 @@ def unique_ip() -> str:
 
 
 def valid_sponsor_body() -> dict:
-    """Minimal valid /sponsor body."""
-    tx_bytes = base64.b64encode(b"\x00" * 12).decode()
+    """Structurally valid, allowlisted /sponsor body without wallet auth."""
+    # BCS TransactionKind for one 0xaaaa...::account::create_account call.
+    tx_bytes = (
+        "AAABAKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqB2FjY291bnQO"
+        "Y3JlYXRlX2FjY291bnQAAA=="
+    )
     return {
         "sender": "0x" + "a" * 64,
         "transactionBlockKindBytes": tx_bytes,
@@ -62,10 +66,11 @@ def valid_sponsor_body() -> dict:
 
 
 def valid_execute_body() -> dict:
-    """Minimal valid /sponsor/execute body."""
+    """Structurally valid /sponsor/execute body without a pending binding."""
     sig = base64.b64encode(b"\x00" * 65).decode()  # 65-byte signature
     return {
         "digest": "1" * 43,  # valid base58, 43 chars
+        "sender": "0x" + "a" * 64,
         "signature": sig,
     }
 
@@ -246,29 +251,26 @@ def test_execute_body_too_large_returns_413():
     print(f"{PASS} /sponsor/execute body > 4 KB → 413")
 
 
-def test_valid_sponsor_body_passes_all_guards():
+def test_valid_sponsor_body_requires_wallet_auth():
     """
-    POST /sponsor with a fully valid body must pass every guard layer:
-    rate limit middleware → body limit → validation → reaches upstream.
-    Upstream may be down (502) but the request must not be blocked by our guards (400/413/429).
+    An allowlisted transaction without wallet authorization must fail closed
+    before the request reaches the sponsorship sidecar.
     """
     body = valid_sponsor_body()
     code, _ = http("POST", "/sponsor", body=body, headers={"X-Forwarded-For": unique_ip()})
-    assert code not in (400, 413, 429), \
-        f"valid body blocked by a guard layer (got {code}), should reach upstream"
-    print(f"{PASS} valid /sponsor body passes all guards → upstream returned {code}")
+    assert code == 401, f"unsigned sponsor request must return 401, got {code}"
+    print(f"{PASS} allowlisted /sponsor request without wallet auth → 401")
 
 
-def test_valid_execute_body_passes_all_guards():
+def test_valid_execute_body_requires_pending_binding():
     """
-    POST /sponsor/execute with a fully valid body must pass every guard layer.
-    Upstream may be down (502) but must not be blocked by our guards.
+    A structurally valid execute request without the one-time sender/digest
+    binding created by /sponsor must fail closed.
     """
     body = valid_execute_body()
     code, _ = http("POST", "/sponsor/execute", body=body, headers={"X-Forwarded-For": unique_ip()})
-    assert code not in (400, 413, 429), \
-        f"valid body blocked by a guard layer (got {code}), should reach upstream"
-    print(f"{PASS} valid /sponsor/execute body passes all guards → upstream returned {code}")
+    assert code == 401, f"unbound sponsor execute request must return 401, got {code}"
+    print(f"{PASS} /sponsor/execute without pending sender binding → 401")
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +324,8 @@ def test_rate_limit_window_resets_via_redis():
 
 def test_rate_limit_valid_body_counts_against_limit():
     """
-    A request with a *valid* body also counts against the rate limit.
+    A request with a structurally valid but unsigned body also counts against
+    the rate limit.
     Previously only invalid bodies were used in rate limit tests — this confirms
     the counter increments regardless of whether the handler succeeds or fails.
 
@@ -334,10 +337,10 @@ def test_rate_limit_valid_body_counts_against_limit():
     headers = {"X-Forwarded-For": ip}
     # Use a unique sender so this test's per-sender bucket is isolated
     unique_sender = "0x" + uuid.uuid4().hex * 2  # 64 hex chars
-    tx_bytes = base64.b64encode(b"\x00" * 12).decode()
+    tx_bytes = valid_sponsor_body()["transactionBlockKindBytes"]
     body = {"sender": unique_sender, "transactionBlockKindBytes": tx_bytes}
 
-    # Send 10 valid requests (each reaches upstream, may return 502)
+    # Send 10 structurally valid requests (each fails auth with 401).
     for i in range(10):
         code, _ = http("POST", "/sponsor", body=body, headers=headers)
         assert code != 429, f"should not hit rate limit before the 11th request (hit at {i+1})"
@@ -580,8 +583,8 @@ def run_all():
         ("execute digest wrong length → 400",       test_execute_digest_wrong_length_returns_400),
         ("execute signature wrong length → 400",    test_execute_signature_wrong_length_returns_400),
         ("/sponsor/execute body > 4 KB → 413",      test_execute_body_too_large_returns_413),
-        ("valid /sponsor body passes all guards",    test_valid_sponsor_body_passes_all_guards),
-        ("valid /execute body passes all guards",   test_valid_execute_body_passes_all_guards),
+        ("unsigned /sponsor request → 401",          test_valid_sponsor_body_requires_wallet_auth),
+        ("unbound /execute request → 401",           test_valid_execute_body_requires_pending_binding),
 
         # Phase 01 — Rate limiting (rejection)
         ("10th request still allowed (boundary)",   test_rate_limit_10th_request_still_allowed),

@@ -3,6 +3,7 @@ import { tool } from "ai";
 import { desc, eq, gt, sql, and, count } from "drizzle-orm";
 import { source, sourceChunk } from "@/lib/db/schema";
 import { db } from "@/lib/db/drizzle";
+import { UNTRUSTED_TOOL_DATA_NOTICE } from "./security";
 
 export function listSourcesTool({ userId }: { userId: string }) {
   return tool({
@@ -40,10 +41,17 @@ export function listSourcesTool({ userId }: { userId: string }) {
       console.log(`[tool:listSources] Found ${sources.length} sources for user`);
 
       if (sources.length === 0) {
-        return { sources: [] as typeof sources, message: "No sources processed yet." };
+        return {
+          sources: [] as typeof sources,
+          message: "No sources processed yet.",
+        };
       }
 
-      return { sources, total: sources.length };
+      return {
+        securityNotice: UNTRUSTED_TOOL_DATA_NOTICE,
+        sources,
+        total: sources.length,
+      };
     },
   });
 }

@@ -204,7 +204,8 @@ pub async fn recall(
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
     // download -> batched SEAL decrypt -> UTF-8, with reactive cleanup on
-    // Walrus 404 / permanent decrypt failure. The engine owns the
+    // Walrus 404 (decrypt failures are dropped, never deleted). The
+    // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
@@ -212,8 +213,10 @@ pub async fn recall(
         .iter()
         .map(|h| (h.blob_id.clone(), h.distance))
         .collect();
-    let (mut hydrated, dropped_count, timings) =
-        state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
+    let (mut hydrated, dropped_count, timings) = state
+        .engine
+        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
     // Zip `created_at` (recency signal) + `importance` from the

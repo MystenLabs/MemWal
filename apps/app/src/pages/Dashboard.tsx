@@ -11,7 +11,7 @@ import {
 } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey } from '@mysten-incubation/memwal/account'
+import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
 import { TriangleAlert, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
@@ -486,16 +486,20 @@ export default function Dashboard({
             // Generate keypair via SDK
             const delegate = await generateDelegateKey()
 
-            // Register on-chain via SDK
-            await addDelegateKey({
-                packageId: config.memwalPackageId,
-                accountId: effectiveAccountObjectId!,
-                publicKey: delegate.publicKey,
-                label: trimmedLabel,
-                walletSigner,
-                suiClient,
-                suiNetwork: config.suiNetwork,
+            // Register on-chain (v1_new ABI: address derived on-chain, not passed)
+            const tx = new Transaction()
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::add_delegate_key`,
+                arguments: [
+                    tx.object(effectiveAccountObjectId!),
+                    tx.object(config.memwalRegistryId),
+                    tx.pure('vector<u8>', Array.from(delegate.publicKey)),
+                    tx.pure('string', trimmedLabel),
+                    tx.object('0x6'),
+                ],
             })
+            const result = await signAndExecuteTx({ transaction: tx })
+            await suiClient.waitForTransaction({ digest: result.digest })
 
             const delegatePublicKeyHex = bytesToHex(delegate.publicKey)
             setNewPrivateKey(delegate.privateKey)
@@ -515,6 +519,7 @@ export default function Dashboard({
         }
     }, [
         walletSigner,
+        signAndExecuteTx,
         hasMaxDelegateKeys,
         effectiveAccountObjectId,
         newKeyLabel,
@@ -537,6 +542,7 @@ export default function Dashboard({
                 target: `${config.memwalPackageId}::account::remove_delegate_key`,
                 arguments: [
                     tx.object(effectiveAccountObjectId),
+                    tx.object(config.memwalRegistryId),
                     tx.pure('vector<u8>', hexToByteArray(publicKeyHex)),
                 ],
             })
@@ -665,8 +671,8 @@ export default function Dashboard({
         ? 'Remove delegate key?'
         : `Remove ${removeConfirmCount} delegate keys?`
     const removeConfirmDescription = removeConfirmCount === 1
-        ? 'This key will be removed from your Walrus Memory account. This cannot be undone.'
-        : `${removeConfirmCount} selected keys will be removed from your Walrus Memory account. This cannot be undone.`
+        ? 'This key will be removed from your Walrus Memory account. It can no longer read new memories, but anything already saved stays readable by it until re-encrypted. This cannot be undone.'
+        : `${removeConfirmCount} selected keys will be removed from your Walrus Memory account. They can no longer read new memories, but anything already saved stays readable by them until re-encrypted. This cannot be undone.`
 
     // ============================================================
     // SDK code snippets
@@ -780,10 +786,14 @@ const result = await generateText({
                 <div className="dash-alert" style={{ marginBottom: 24 }}>
                     <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                     <p>
-                        New uploads to Walrus Memory are paused while we conduct a security upgrade.
-                        The upgrade addresses a bug that makes it possible to bypass the encryption of
-                        stored memories. We recommend users review any sensitive data they may have
-                        stored on Walrus Memory. A guide to removing data is available{' '}
+                        Uploads to Walrus Memory have been resumed, following completion of a security
+                        upgrade on {config.migrationCompletedDate}. This upgrade patched a bug that made
+                        it possible to bypass the encryption of stored memories. All existing memories
+                        have been migrated onto a new, secure contract. A copy of memories written
+                        before the migration remains in the previous contract, where they are exposed
+                        to the original bug. We recommend removing all pre-migration data on the
+                        previous contract, and reviewing any sensitive data you may have stored. A
+                        guide to removing pre-migration data is available{' '}
                         <a href={config.securityGuideUrl} target="_blank" rel="noopener noreferrer">here</a>.
                     </p>
                 </div>

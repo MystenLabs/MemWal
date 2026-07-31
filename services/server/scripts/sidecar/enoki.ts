@@ -7,6 +7,7 @@
  */
 
 import { Buffer } from "buffer";
+import { setTimeout as sleepWithSignal } from "node:timers/promises";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import type { Transaction } from "@mysten/sui/transactions";
 import { getEnokiRetryDelayMs, isSponsoredTransactionInvalidatedMessage } from "../enoki-retry.js";
@@ -20,18 +21,29 @@ import {
     ENOKI_TRANSIENT_MAX_DELAY_MS,
 } from "./config.js";
 import { suiClient } from "./clients.js";
-import { errorMessage, sleep, truncateForLog } from "./util.js";
+import { errorMessage, truncateForLog } from "./util.js";
 
 type EnokiDataWrapper<T> = { data: T };
 export type EnokiSponsorResponse = { bytes: string; digest: string };
 export type EnokiExecuteResponse = { digest: string };
+export type EnokiFallbackPolicy = {
+    directSignIfUnconfigured: boolean;
+    directSignAfterSponsorFailure: boolean;
+    gasMode?: "auto" | "addressBalance";
+};
 
-// SuiJsonRpcClient.signAndExecuteTransaction resolves to a flat
-// SuiTransactionBlockResponse (`.digest`). SuiGrpcClient's core API resolves to
-// the discriminated union `{Transaction: {digest}} | {FailedTransaction: {digest}}`
-// instead — no top-level `.digest`. Direct-sign fallback reads this result on
-// both clients, so it must handle both shapes or `.digest` is silently
-// `undefined` once SUI_GRPC_URL is set.
+const DEFAULT_FALLBACK_POLICY: EnokiFallbackPolicy = {
+    directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+};
+
+// The migrator's controller lease reserves 60s for one Enoki call plus 10s
+// margin. Keep retries and backoff inside that same deadline.
+const ENOKI_REQUEST_TIMEOUT_MS = 60_000;
+
+// SuiGrpcClient resolves to the discriminated union
+// `{Transaction: {digest}} | {FailedTransaction: {digest}}`. Keep the flat
+// digest case for SDK-version compatibility.
 function extractTransactionDigest(result: any): string {
     if (typeof result?.digest === "string") return result.digest;
     const digest = result?.Transaction?.digest ?? result?.FailedTransaction?.digest;
@@ -87,6 +99,7 @@ export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
         throw new Error("ENOKI_API_KEY is not configured");
     }
 
+    const signal = AbortSignal.timeout(ENOKI_REQUEST_TIMEOUT_MS);
     for (let attempt = 1; ; attempt += 1) {
         let resp: globalThis.Response;
         try {
@@ -97,8 +110,10 @@ export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
                     Authorization: `Bearer ${ENOKI_API_KEY}`,
                 },
                 body: JSON.stringify(payload),
+                signal,
             });
         } catch (err) {
+            if (signal.aborted) throw signal.reason;
             const retryDelayMs = getEnokiRetryDelayMs({
                 attempt,
                 maxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
@@ -115,7 +130,7 @@ export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
                 retryDelayMs,
                 error: errorMessage(err),
             })}`);
-            await sleep(retryDelayMs);
+            await sleepWithSignal(retryDelayMs, undefined, { signal });
             continue;
         }
 
@@ -140,10 +155,14 @@ export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {
                 ...summarizeEnokiError(text),
             })}`);
             if (retryDelayMs !== null) {
-                await sleep(retryDelayMs);
+                await sleepWithSignal(retryDelayMs, undefined, { signal });
                 continue;
             }
-            throw new Error(`Enoki API error (${resp.status}): ${text}`);
+            // Structured status keeps the strict durable-path classifier
+            // treating Enoki outages as shared-infra (budget-free).
+            const error = new Error(`Enoki API error (${resp.status}): ${text}`);
+            (error as Error & { status?: number }).status = resp.status;
+            throw error;
         }
 
         const parsed = JSON.parse(text) as EnokiDataWrapper<T>;
@@ -155,6 +174,7 @@ async function executeSponsoredTransactionOnce(
     tx: Transaction,
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
+    onSubmissionStarted: () => void = () => {},
 ): Promise<string> {
     // Resolve owned-object inputs against the correct sender. The gRPC client
     // validates object ownership against the tx sender during build/resolution;
@@ -162,7 +182,7 @@ async function executeSponsoredTransactionOnce(
     // own, certify does not — so gRPC rejects it ("Transaction was not signed by
     // the correct sender ... given owner/signer 0x0"). Enoki still sponsors with
     // its own sender and `onlyTransactionKind` excludes the sender from the
-    // bytes, so this only fixes resolution (no-op on the JSON-RPC path).
+    // bytes, so this only fixes resolution.
     tx.setSenderIfNotSet(signer.toSuiAddress());
     const txKindBytes = await tx.build({
         client: suiClient as any,
@@ -182,6 +202,7 @@ async function executeSponsoredTransactionOnce(
 
     // Defense-in-depth — encode digest before path interpolation.
     const encodedSponsoredDigest = encodeURIComponent(sponsored.digest);
+    onSubmissionStarted();
     const executed = await callEnoki<EnokiExecuteResponse>(
         `/transaction-blocks/sponsor/${encodedSponsoredDigest}`,
         {
@@ -193,32 +214,61 @@ async function executeSponsoredTransactionOnce(
     return executed.digest;
 }
 
+export async function executeDirectSignedTransaction(
+    tx: Transaction,
+    signer: Ed25519Keypair,
+    onSubmissionStarted: () => void = () => {},
+    client = suiClient,
+): Promise<string> {
+    tx.setSenderIfNotSet(signer.toSuiAddress());
+    const transaction = await tx.build({ client });
+    const { signature } = await signer.signTransaction(transaction);
+    onSubmissionStarted();
+    const result = await client.executeTransaction({
+        transaction,
+        signatures: [signature],
+    });
+    return extractTransactionDigest(result);
+}
+
 export async function executeWithEnokiSponsor(
     tx: Transaction,
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
+    fallbackPolicy: EnokiFallbackPolicy = DEFAULT_FALLBACK_POLICY,
+    onSubmissionStarted: () => void = () => {},
 ): Promise<string> {
+    if (fallbackPolicy.gasMode === "addressBalance") {
+        tx.setGasPayment([]);
+    }
+
     if (!ENOKI_API_KEY) {
-        if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
-            throw new Error("ENOKI_API_KEY is not configured and ENOKI_FALLBACK_TO_DIRECT_SIGN=false");
+        if (!fallbackPolicy.directSignIfUnconfigured) {
+            throw new Error("ENOKI_API_KEY is not configured and direct signing is disabled");
         }
 
         console.warn("[enoki-sponsor] ENOKI_API_KEY not configured, falling back to direct signing");
-        const direct = await suiClient.signAndExecuteTransaction({
-            signer,
-            transaction: tx,
-        });
-        return extractTransactionDigest(direct);
+        return executeDirectSignedTransaction(tx, signer, onSubmissionStarted);
     }
 
     let sponsorError: unknown;
     try {
-        return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
+        return await executeSponsoredTransactionOnce(
+            tx,
+            signer,
+            allowedAddresses,
+            onSubmissionStarted,
+        );
     } catch (err: any) {
         if (isSponsoredTransactionInvalidatedMessage(errorMessage(err))) {
             console.warn(`[enoki-sponsor] sponsored tx invalidated; retrying sponsor/execute once: ${err?.message || err}`);
             try {
-                return await executeSponsoredTransactionOnce(tx, signer, allowedAddresses);
+                return await executeSponsoredTransactionOnce(
+                    tx,
+                    signer,
+                    allowedAddresses,
+                    onSubmissionStarted,
+                );
             } catch (retryErr: any) {
                 sponsorError = retryErr;
             }
@@ -230,16 +280,12 @@ export async function executeWithEnokiSponsor(
     {
         const err = sponsorError;
         const errMsg = errorMessage(err);
-        if (!ENOKI_FALLBACK_TO_DIRECT_SIGN) {
+        if (!fallbackPolicy.directSignAfterSponsorFailure) {
             console.error(`[enoki-sponsor] sponsor failed and fallback disabled: ${errMsg}`);
             throw err;
         }
 
         console.warn(`[enoki-sponsor] sponsor failed, falling back to direct signing: ${errMsg}`);
-        const direct = await suiClient.signAndExecuteTransaction({
-            signer,
-            transaction: tx,
-        });
-        return extractTransactionDigest(direct);
+        return executeDirectSignedTransaction(tx, signer, onSubmissionStarted);
     }
 }

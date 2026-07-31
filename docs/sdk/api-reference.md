@@ -243,6 +243,8 @@ import {
 | `addDelegateKey(opts)` | Add a delegate key to an account (owner only) |
 | `removeDelegateKey(opts)` | Remove a delegate key from an account (owner only) |
 
+`addDelegateKey` and `removeDelegateKey` require the shared `registryId` alongside the package and account IDs.
+
 ## Utility Functions
 
 ```ts

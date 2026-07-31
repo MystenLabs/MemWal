@@ -45,6 +45,7 @@ Store both as server-side environment variables:
 ```bash .env.local
 MEMWAL_PRIVATE_KEY=<delegate-private-key-hex>
 MEMWAL_ACCOUNT_ID=0x<memwal-account-object-id>
+MEMWAL_REGISTRY_ID=0x<account-registry-object-id>
 ```
 
 ### Revoke flow
@@ -56,6 +57,7 @@ import { removeDelegateKey } from "@mysten-incubation/memwal/account";
 
 await removeDelegateKey({
   packageId: "0x<contract-package-id>",
+  registryId: process.env.MEMWAL_REGISTRY_ID!,
   accountId: process.env.MEMWAL_ACCOUNT_ID!,
   publicKey: "<delegate-public-key-hex>", // the leaked key's public key
   suiPrivateKey: "suiprivkey1...",        // owner key: kept offline, NOT on the server

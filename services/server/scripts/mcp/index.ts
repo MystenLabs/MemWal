@@ -216,7 +216,11 @@ async function handleSse(
     await server.connect(transport);
 }
 
-async function handlePostMessage(req: Request, res: Response): Promise<void> {
+async function handlePostMessage(
+    req: Request,
+    res: Response,
+    relayerUrl: string
+): Promise<void> {
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
     if (!sessionId) {
         return rpcError(res, 400, "Missing sessionId query parameter");
@@ -225,6 +229,37 @@ async function handlePostMessage(req: Request, res: Response): Promise<void> {
     if (!conn) {
         return rpcError(res, 404, `Unknown sessionId ${sessionId}`);
     }
+
+    let auth: AuthResolution;
+    try {
+        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
+    } catch (err) {
+        if (err instanceof McpAuthError) {
+            res.setHeader(
+                "www-authenticate",
+                'Bearer realm="memwal", error="invalid_token"'
+            );
+            return rpcError(res, err.status, err.message);
+        }
+        return rpcError(
+            res,
+            500,
+            err instanceof Error ? err.message : String(err)
+        );
+    }
+
+    if (conn.sessionKey !== auth.sessionKey) {
+        log.warn("session.auth_mismatch", {
+            transport: "sse",
+            transportId: sessionId,
+        });
+        return rpcError(
+            res,
+            403,
+            "sessionId does not match authenticated caller"
+        );
+    }
+
     // SSEServerTransport.handlePostMessage expects the raw IncomingMessage.
     // Express `req` is an IncomingMessage subtype; passing it through works.
     await conn.transport.handlePostMessage(req, res);
@@ -399,8 +434,8 @@ export interface MountMcpOptions {
  * `/api/mcp/*` traffic to these internal `/mcp/*` routes.
  *
  *   GET  /mcp/sse              open SSE stream (auth required)
- *   POST /mcp/messages         JSON-RPC messages (auth happens at SSE open,
- *                              this route trusts the sessionId)
+ *   POST /mcp/messages         JSON-RPC messages (auth is re-checked and
+ *                              bound to the session opener)
  */
 export function mountMcpRoutes(
     app: Express,
@@ -428,7 +463,7 @@ export function mountMcpRoutes(
         // transport's internal raw-body parser.
         async (req, res) => {
             try {
-                await handlePostMessage(req, res);
+                await handlePostMessage(req, res, relayerUrl);
             } catch (err) {
                 log.error("mcp.post.error", {
                     err: err instanceof Error ? err.message : String(err),
