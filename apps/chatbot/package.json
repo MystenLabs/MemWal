@@ -19,7 +19,8 @@
     "playwright:install": "playwright install --with-deps chromium",
     "test:e2e": "PLAYWRIGHT=True playwright test",
     "test:e2e:ui": "PLAYWRIGHT=True playwright test --ui",
-    "test": "pnpm test:e2e"
+    "test": "pnpm test:e2e",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.15",
@@ -125,7 +126,8 @@
     "tailwindcss": "^4.1.13",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
-    "ultracite": "^7.0.11"
+    "ultracite": "^7.0.11",
+    "vitest": "^4.1.10"
   },
   "packageManager": "pnpm@9.12.3"
 }

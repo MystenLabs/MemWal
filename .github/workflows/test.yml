@@ -310,6 +310,12 @@ jobs:
         continue-on-error: true
         run: pnpm --filter @memwal/chatbot lint
 
+      # Fast unit tests (vitest, no DB/browser). Includes the document-tool
+      # ownership regression test — hard-fails so a future revert of the
+      # ownership checks is caught here.
+      - name: Unit tests (vitest)
+        run: pnpm --filter @memwal/chatbot test:unit
+
       - name: Build (Next.js, type-check inclusive)
         working-directory: apps/chatbot
         # Bypass the package.json `build` script's `tsx lib/db/migrate` step —
