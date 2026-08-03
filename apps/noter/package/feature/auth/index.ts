@@ -22,8 +22,6 @@ export {
 
 // API Input Schemas (if needed by external features)
 export type {
-  InitiateLoginInput,
-  CompleteLoginInput,
   ValidateSessionInput,
   ConnectWalletInput,
 } from "./api/input";
@@ -36,14 +34,8 @@ export type {
   UserMenuProps,
   AuthGuardProps,
   SessionData,
-  ZkLoginSessionData,
   WalletSessionData,
-  EphemeralKeyPair,
-  JwtClaims,
 } from "./domain/type";
-
-// Domain utilities (client-safe)
-export { truncateSuiAddress } from "./domain/zklogin";
 
 // Hooks
 export { useAuth } from "./hook/use-auth";

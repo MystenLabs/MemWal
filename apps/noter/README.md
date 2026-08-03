@@ -58,12 +58,9 @@ DATABASE_URL=postgresql://...
 
 # OAuth (Google)
 GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
 
-# Sui zkLogin
+# Sui network
 NEXT_PUBLIC_SUI_NETWORK=testnet
-NEXT_PUBLIC_ZK_PROVER_URL=https://prover-dev.mystenlabs.com/v1
-SALT_SERVICE_URL=https://salt.api.mystenlabs.com/get_salt
 
 # AI
 OPENROUTER_API_KEY=...
