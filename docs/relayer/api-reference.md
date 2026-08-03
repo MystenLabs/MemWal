@@ -1,8 +1,37 @@
 ---
-title: "API Reference"
+title: API Reference
+description: >-
+  Complete HTTP API reference for the Walrus Memory relayer, including authentication headers, public routes, the protected endpoints for remember, recall, analyze, ask, restore, forget, and stats, and the MCP transport endpoints.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - API reference
+  - relayer API
+  - REST endpoints
+  - authentication
+goal:
+  description: Authenticate a request to the relayer using an Ed25519 delegate key, call each API endpoint with the correct parameters, and interpret the response or error codes.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What are the Walrus Memory relayer API endpoints?"
+  - "How do I authenticate requests to the MemWal relayer?"
+  - "What is the request and response format for the remember and recall APIs?"
+answer: >-
+  The Walrus Memory relayer exposes public routes (health, version, config, metrics, sponsor) and protected routes (remember, recall, analyze, ask, restore, forget, stats) that require Ed25519 signed headers, plus MCP transport endpoints that use bearer authentication. Signed authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
 ---
 
-The Rust relayer exposes these routes. Routes are defined in `services/server/src/main.rs`.
+The Rust relayer exposes these routes. The route table lives in `services/server/src/main.rs`.
 
 See also:
 
@@ -12,26 +41,26 @@ See also:
 
 ## Authentication
 
-All `/api/*` routes require signed headers. The SDK handles this automatically.
+All `/api/*` routes except the [MCP transports](#mcp-transports) require signed headers. The SDK handles this automatically.
 
-### Required Headers
+### Required headers
 
-| Header | Description |
+| **Header** | **Description** |
 |--------|-------------|
 | `x-public-key` | Hex-encoded Ed25519 public key (32 bytes) |
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) |
 | `x-timestamp` | Unix timestamp in seconds (5-minute validity window) |
 | `x-nonce` | UUID v4 nonce. The relayer records it in Redis for replay protection |
 
-### Optional Headers
+### Optional headers
 
-| Header | Description |
+| **Header** | **Description** |
 |--------|-------------|
 | `x-account-id` | MemWalAccount object ID hint. Official SDKs always send it and include it in the canonical signature |
-| `x-seal-session` | Base64 exported SEAL SessionKey for relayer-managed decrypt flows. Used by the TypeScript and Python SDKs |
+| `x-seal-session` | Base64 exported Seal SessionKey for relayer-managed decrypt flows. The TypeScript and Python SDKs use it |
 | `x-delegate-key` | Legacy delegate private key credential for relayer-managed decrypt flows. Deprecated; use `x-seal-session` where supported |
 
-### Signature Format
+### Signature format
 
 The signed message is:
 
@@ -43,11 +72,13 @@ For `GET` requests, `body_sha256` is the SHA-256 of an empty byte string. If a r
 
 The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
 
-## Public Routes
+## Public routes
+
+These routes require no authentication.
 
 ### `GET /health`
 
-Service health check. No authentication required.
+Service health check.
 
 **Response:**
 
@@ -79,27 +110,46 @@ Service health check. No authentication required.
 
 ### `GET /version`
 
-Stable relayer/API compatibility metadata. No authentication required.
+Stable relayer/API compatibility metadata.
 
 **Response:** the compatibility object documented in [Versioning and Compatibility](/relayer/versioning-and-compatibility#runtime-metadata).
 
+### `GET /config`
+
+Public deployment parameters that the SDK reads to build a Seal SessionKey client-side. Every field is non-secret.
+
+**Response:**
+
+```json
+{
+  "packageId": "0x...",
+  "network": "testnet",
+  "suiRpcUrl": "https://fullnode.testnet.sui.io",
+  "rateLimitDisabled": false
+}
+```
+
+`rateLimitDisabled` mirrors the server's benchmark-bypass setting so benchmark scripts can pre-flight the configuration.
+
+### `GET /metrics`
+
+Prometheus metrics for scraping. See [Observability](/relayer/observability) for the exported series and how to wire a scraper.
+
 ### `POST /sponsor`
 
-Proxy to the SEAL/Walrus sidecar's `/sponsor` endpoint. The request must include
-`authTimestamp`, a UUID-v4 `authNonce`, and `authSignature`: a Sui personal-message
-signature over the sender, transaction-kind hash, timestamp, and nonce. Only one
-allowlisted Walrus Memory `account` call may be sponsored.
+Proxy to the Seal/Walrus sidecar's `/sponsor` endpoint for sponsored transactions. The request must include `authTimestamp`, a UUID-v4 `authNonce`, and `authSignature`: a Sui personal-message signature over the sender, transaction-kind hash, timestamp, and nonce. Only one allowlisted Walrus Memory `account` call is eligible for sponsorship.
 
 ### `POST /sponsor/execute`
 
-Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the
-short-lived, one-time Redis binding created by the authenticated `/sponsor` call.
+Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the short-lived, one-time Redis binding that the authenticated `/sponsor` call creates.
 
-## Protected Routes
+## Protected routes
+
+Every route below requires the signed headers described in [Authentication](#authentication).
 
 ### `POST /api/remember`
 
-Submit text as an encrypted memory job. The relayer returns after creating a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
+Submit text as an encrypted memory job. The relayer returns after creating a background job; embedding, Seal encryption, Walrus upload, and vector indexing continue asynchronously.
 
 **Request:**
 
@@ -123,7 +173,7 @@ Submit text as an encrypted memory job. The relayer returns after creating a bac
 
 ### `GET /api/remember/:job_id`
 
-Poll a remember job.
+Poll a remember job. `status` is one of `pending`, `running`, `uploaded`, `done`, or `failed`. Failed jobs include an `error` message. Unknown job IDs and jobs that belong to another owner return `404`, so callers cannot enumerate job IDs.
 
 **Response:**
 
@@ -139,7 +189,7 @@ Poll a remember job.
 
 ### `POST /api/remember/bulk`
 
-Submit up to 20 memories in one request. `job_ids[i]` corresponds to `items[i]`.
+Submit up to 20 memories in one request. `job_ids[i]` corresponds to `items[i]`. This route accepts request bodies up to 2 MB.
 
 **Request:**
 
@@ -164,7 +214,7 @@ Submit up to 20 memories in one request. `job_ids[i]` corresponds to `items[i]`.
 
 ### `POST /api/remember/bulk/status`
 
-Poll a batch of remember jobs.
+Poll a batch of remember jobs. Unknown job IDs come back with status `not_found`, and failed items include an `error` message.
 
 **Request:**
 
@@ -195,11 +245,28 @@ Search for memories matching a natural language query. Returns decrypted plainte
 {
   "query": "What do we know about this user?",
   "limit": 10,
-  "namespace": "demo"
+  "namespace": "demo",
+  "scoring_weights": {
+    "semantic": 1.0,
+    "recency": 0.3,
+    "recency_half_life_days": 30,
+    "importance": 0.2
+  }
 }
 ```
 
-`limit` defaults to `10`. `namespace` defaults to `"default"`.
+`limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` is optional; omit it to keep the plain cosine-distance order.
+
+#### Scoring weights
+
+The optional `scoring_weights` object turns on composite ranking. The same object works on `/api/recall`, `/api/recall/manual`, and `/api/ask`.
+
+| **Field** | **Default** | **Description** |
+|--------|-------------|-------------|
+| `semantic` | `1.0` | Weight for cosine similarity between the query and each memory |
+| `recency` | `0` | Weight for how recently the relayer indexed each memory |
+| `recency_half_life_days` | `30` | Half-life in days for the recency decay |
+| `importance` | `0` | Weight for the per-fact importance score that the extractor assigns at save time |
 
 **Response:**
 
@@ -209,16 +276,20 @@ Search for memories matching a natural language query. Returns decrypted plainte
     {
       "blob_id": "walrus-blob-id",
       "text": "User prefers dark mode",
-      "distance": 0.15
+      "distance": 0.15,
+      "score": 0.91
     }
   ],
-  "total": 1
+  "total": 1,
+  "dropped_count": 0
 }
 ```
 
+`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
+
 ### `POST /api/remember/manual`
 
-Register a client-encrypted payload. The client sends SEAL-encrypted data (base64) and a precomputed embedding vector. The relayer uploads the encrypted bytes to Walrus and stores the vector mapping.
+Register a client-encrypted payload. The client sends Seal-encrypted data (base64) and a precomputed embedding vector. The relayer uploads the encrypted bytes to Walrus and stores the vector mapping.
 
 **Request:**
 
@@ -243,7 +314,7 @@ Register a client-encrypted payload. The client sends SEAL-encrypted data (base6
 
 ### `POST /api/recall/manual`
 
-Search with a precomputed query vector. Returns blob IDs and distances only — the client handles downloading and decrypting.
+Search with a precomputed query vector. Returns index hits only; the client handles downloading and decrypting. The request accepts the same optional `scoring_weights` object as [`POST /api/recall`](#scoring-weights), and the server applies the same `limit` cap of `100`.
 
 **Request:**
 
@@ -262,12 +333,16 @@ Search with a precomputed query vector. Returns blob IDs and distances only — 
   "results": [
     {
       "blob_id": "walrus-blob-id",
-      "distance": 0.15
+      "distance": 0.15,
+      "created_at": "2026-07-23T12:00:00Z",
+      "importance": 0.5
     }
   ],
   "total": 1
 }
 ```
+
+`created_at` is the time the relayer indexed the entry. `importance` carries the per-fact importance score that the extractor assigns at save time.
 
 ### `POST /api/analyze`
 
@@ -278,9 +353,12 @@ Extract facts from text using an LLM, then enqueue each fact as a separate memor
 ```json
 {
   "text": "I live in Hanoi and prefer dark mode.",
-  "namespace": "demo"
+  "namespace": "demo",
+  "occurred_at": "2026-07-01T00:00:00Z"
 }
 ```
+
+`occurred_at` is an optional RFC 3339 timestamp that anchors the extracted facts in time, for example when you import older conversations. The extractor writes the date into the fact text itself; the relayer stores no separate event-time metadata and cannot filter or rank by event time.
 
 **Response:** `202 Accepted`
 
@@ -311,7 +389,7 @@ Recall memories, inject them into an LLM prompt, and return an AI-generated answ
 }
 ```
 
-`limit` defaults to `5`. `namespace` defaults to `"default"`.
+`limit` defaults to `5` and caps at `100`. `namespace` defaults to `"default"`. The request accepts the same optional `scoring_weights` object as [`POST /api/recall`](#scoring-weights).
 
 **Response:**
 
@@ -331,7 +409,7 @@ Recall memories, inject them into an LLM prompt, and return an AI-generated answ
 
 ### `POST /api/restore`
 
-Rebuild missing vector entries for one namespace. Queries onchain blobs by owner and namespace, downloads from Walrus, decrypts, re-embeds, and re-indexes only the entries missing from the local database.
+Rebuild missing vector entries for one namespace. Queries onchain blobs by owner and namespace, downloads from Walrus, decrypts, re-embeds, and re-indexes only the entries missing from the index.
 
 **Request:**
 
@@ -342,7 +420,7 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
 }
 ```
 
-`limit` defaults to `10`.
+`limit` defaults to `10` and caps the onchain query itself, newest blobs first. Raise it to cover a larger namespace.
 
 **Response:**
 
@@ -355,3 +433,58 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
   "owner": "0x..."
 }
 ```
+
+### `POST /api/forget`
+
+Delete every vector index row for one namespace. The Walrus blobs persist, so a later `POST /api/restore` call can re-index them. The relayer resolves the owner from the signed headers and only deletes that owner's rows.
+
+**Request:**
+
+```json
+{
+  "namespace": "demo"
+}
+```
+
+`namespace` defaults to `"default"`.
+
+**Response:**
+
+```json
+{
+  "deleted": 12,
+  "namespace": "demo",
+  "owner": "0x..."
+}
+```
+
+`deleted` is the number of index rows the relayer removed.
+
+### `POST /api/stats`
+
+Return the memory count and stored byte total for one namespace, scoped to the authenticated owner.
+
+**Request:**
+
+```json
+{
+  "namespace": "demo"
+}
+```
+
+`namespace` defaults to `"default"`.
+
+**Response:**
+
+```json
+{
+  "memory_count": 42,
+  "storage_bytes": 1048576,
+  "namespace": "demo",
+  "owner": "0x..."
+}
+```
+
+## MCP transports
+
+The relayer also proxies Model Context Protocol traffic to its Node sidecar. `GET`, `POST`, `DELETE`, and `OPTIONS` on `/api/mcp` serve the Streamable HTTP transport, and `GET /api/mcp/sse` plus `POST /api/mcp/messages` serve the legacy SSE transport. These routes use bearer authentication instead of signed headers. See [Reference](/mcp/reference) for transport details and client configuration.
