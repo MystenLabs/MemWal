@@ -474,11 +474,6 @@ pub async fn prepare_deletion(
         // (abort code 1), so the chain's value wins and the configured id is only a
         // fallback for networks whose system object does not expose one.
         let walrus_package = walrus_package_id(&state.config.walrus_package_id, &system);
-        // Tell ops the upgrade happened. Spawned, never awaited: a slow Slack webhook must not
-        // eat PREPARE_RPC_BUDGET and fail the user's deletion. The alert manager dedups.
-        if walrus_package_changed(&state.config.walrus_package_id, walrus_package.as_str()) {
-            alert_walrus_package_upgrade(&state, walrus_package.as_str());
-        }
         let gas_price = match sui.reference_gas_price().await {
             Ok(price) => price,
             Err(error) => return Err(prepare_rpc_failure(pool, batch_id, error).await),
@@ -1199,55 +1194,6 @@ fn walrus_package_changed(configured: &str, on_chain: &str) -> bool {
         (Ok(configured), Ok(on_chain)) => configured != on_chain,
         _ => configured != on_chain,
     }
-}
-
-/// Notify ops that Walrus upgraded its package.
-///
-/// **No operator action is required, and `WALRUS_PACKAGE_ID` must NOT be repointed.** That
-/// value is the package the Walrus `Blob` TYPE originates from, and Move types are immutable
-/// across upgrades — it stays the ORIGINAL package forever. It is used only for the
-/// `{package}::blob::Blob` object-type filter in `list_owned_blobs`. Repointing it at the new
-/// package makes that filter match ZERO objects, and every tracked row is then terminalized
-/// `not_owner` — irreversibly, so the user's exposed blobs could never be deleted again.
-///
-/// The package to CALL is read from the System object at runtime (`walrus_package_id`), so
-/// deletion already follows the upgrade on its own. This alert is informational: in-flight
-/// batches prepared before the upgrade fail once (`EWrongVersion`) and recover on re-prepare.
-///
-/// Fire-and-forget: it must never sit on the prepare path, where a slow Slack webhook would
-/// consume `PREPARE_RPC_BUDGET` and fail the user's deletion.
-fn alert_walrus_package_upgrade(state: &Arc<AppState>, on_chain: &str) {
-    let state = Arc::clone(state);
-    let on_chain = on_chain.to_owned();
-    tokio::spawn(async move {
-        if let Err(error) = state
-            .alerts
-            .notify_walrus_package_upgrade_detected(
-                crate::alerts::WalrusPackageUpgradeDetectedAlert {
-                    remember_job_id: None,
-                    owner: None,
-                    namespace: None,
-                    sui_network: state.config.sui_network.clone(),
-                    sidecar_walrus_dep_version: "n/a (security-delete builds PTBs in-server)"
-                        .into(),
-                    on_chain_version_before: Some(state.config.walrus_package_id.clone()),
-                    on_chain_version_after: Some(on_chain),
-                    action_taken: "No action required. security-delete already calls the \
-                                   on-chain package. DO NOT repoint WALRUS_PACKAGE_ID: it is \
-                                   the Blob TYPE's origin package (immutable), and changing it \
-                                   makes the owned-object type filter match nothing, which \
-                                   terminalizes every tracked row as not_owner."
-                        .into(),
-                    error: "Walrus upgraded its package; in-flight batches fail once with \
-                            EWrongVersion and recover on re-prepare"
-                        .into(),
-                },
-            )
-            .await
-        {
-            tracing::warn!(?error, "failed to send Walrus package-upgrade alert");
-        }
-    });
 }
 
 fn rpc_error(error: SuiErr) -> SdError {
