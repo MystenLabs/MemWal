@@ -1,7 +1,7 @@
 import type { Session } from "next-auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Regression test for the document-tool IDOR (GH #516 / WALM-309): the
+// Regression test for the document-tool IDOR: the
 // updateDocument and requestSuggestions tools must not read or mutate a
 // document that belongs to another user. We mock the DB query layer so no real
 // Postgres connection is needed.
@@ -60,6 +60,14 @@ function sessionFor(userId: string): Session {
   return { user: { id: userId }, expires: "" } as unknown as Session;
 }
 
+// A session whose user has no usable id (guest / expired / malformed). The
+// tools must reject these at the entry guard, before any id ever reaches the
+// userId filter (a UUID column) — reverting the guard to `?? ""` would send an
+// empty string into that filter instead.
+function sessionWithNoUserId(): Session {
+  return { user: {}, expires: "" } as unknown as Session;
+}
+
 const noopDataStream = { write: vi.fn() } as any;
 
 async function runUpdate(callerId: string) {
@@ -98,7 +106,7 @@ beforeEach(() => {
   );
 });
 
-describe("updateDocument ownership (WALM-309)", () => {
+describe("updateDocument ownership", () => {
   it("DB-layer scoping: rejects a cross-owner document without writing", async () => {
     const result = await runUpdate(ATTACKER_ID);
     expect(result).toEqual({ error: "Document not found" });
@@ -120,9 +128,24 @@ describe("updateDocument ownership (WALM-309)", () => {
     expect(result).not.toHaveProperty("error");
     expect(onUpdateDocument).toHaveBeenCalledTimes(1);
   });
+
+  it("no-user-id session: rejects at the entry guard without querying", async () => {
+    const { updateDocument } = await import("./update-document");
+    const t = updateDocument({
+      session: sessionWithNoUserId(),
+      dataStream: noopDataStream,
+    });
+    // @ts-expect-error — tool().execute signature is loose at the test boundary
+    const result = await t.execute({ id: DOC_ID, description: "x" });
+    expect(result).toEqual({ error: "Document not found" });
+    // The guard must short-circuit before any lookup or write — proving no
+    // empty-string userId is ever passed into the (UUID) userId filter.
+    expect(getDocumentByIdForUser).not.toHaveBeenCalled();
+    expect(onUpdateDocument).not.toHaveBeenCalled();
+  });
 });
 
-describe("requestSuggestions ownership (WALM-309)", () => {
+describe("requestSuggestions ownership", () => {
   it("DB-layer scoping: rejects reading a cross-owner document", async () => {
     const result = await runSuggestions(ATTACKER_ID);
     expect(result).toEqual({ error: "Document not found" });
@@ -147,12 +170,27 @@ describe("requestSuggestions ownership (WALM-309)", () => {
     // The owner's own doc must pass the ownership + content gate. Downstream the
     // tool calls streamText() with the real artifact model, which isn't wired in
     // a unit test — so "passed the gate" is proven by the call reaching that LLM
-    // step (an AI-SDK model error) rather than short-circuiting with the
-    // ownership "Document not found" return.
-    await expect(runSuggestions(OWNER_ID)).rejects.toThrow(
-      /model version|Unsupported model/i
-    );
+    // step and throwing (any downstream error) rather than short-circuiting with
+    // the ownership "Document not found" return. We assert only that it throws,
+    // not on the specific AI-SDK message, so a dependency upgrade can't make this
+    // brittle while the ownership gate itself still works.
+    await expect(runSuggestions(OWNER_ID)).rejects.toThrow();
     // If the ownership check had wrongly rejected the owner, execute() would
     // have resolved to { error: "Document not found" } and never thrown here.
+  });
+
+  it("no-user-id session: rejects at the entry guard without querying", async () => {
+    const { requestSuggestions } = await import("./request-suggestions");
+    const t = requestSuggestions({
+      session: sessionWithNoUserId(),
+      dataStream: noopDataStream,
+    });
+    // @ts-expect-error — tool().execute signature is loose at the test boundary
+    const result = await t.execute({ documentId: DOC_ID });
+    expect(result).toEqual({ error: "Document not found" });
+    // The guard must short-circuit before any lookup or save — proving no
+    // empty-string userId is ever passed into the (UUID) userId filter.
+    expect(getDocumentByIdForUser).not.toHaveBeenCalled();
+    expect(saveSuggestions).not.toHaveBeenCalled();
   });
 });

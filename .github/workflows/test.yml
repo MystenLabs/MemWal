@@ -311,8 +311,9 @@ jobs:
         run: pnpm --filter @memwal/chatbot lint
 
       # Fast unit tests (vitest, no DB/browser). Includes the document-tool
-      # ownership regression test — hard-fails so a future revert of the
-      # ownership checks is caught here.
+      # ownership regression test. This step fails the job on a regression, so
+      # the signal surfaces on the PR; note it is not yet wired as a required
+      # status check in branch protection, so it does not by itself block merge.
       - name: Unit tests (vitest)
         run: pnpm --filter @memwal/chatbot test:unit
 
