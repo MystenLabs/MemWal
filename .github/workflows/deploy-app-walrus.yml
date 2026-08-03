@@ -106,7 +106,7 @@ jobs:
                 wallet_config:
                   active_env: mainnet
                 rpc_urls:
-                  - https://fullnode.mainnet.sui.io:443
+                  - https://rpc-mainnet.suiscan.xyz
             default_context: mainnet
           SITES_CONFIG: |
             contexts:
