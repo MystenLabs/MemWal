@@ -198,10 +198,10 @@ pnpm db:studio
 pnpm db:purge-legacy-sessions
 ```
 
-Run `pnpm db:purge-legacy-sessions` once when deploying the build that removes the
-legacy custom zkLogin login path. It deletes rows from `zklogin_sessions` (leaving
-`wallet_sessions` untouched) so any session created before the removal is revoked
-rather than left to expire. It is idempotent and safe to re-run.
+`pnpm db:purge-legacy-sessions` clears leftover rows from `zklogin_sessions`
+(leaving `wallet_sessions` untouched). The app no longer reads or trusts that
+table for authentication, so this is optional data hygiene rather than a required
+security step. It is idempotent and safe to re-run.
 
 ### Code Quality
 
