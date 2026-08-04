@@ -3,13 +3,13 @@
  * Static values for authentication.
  */
 
-// OAuth provider registry. Kept as the source of the OAuthProvider union used on
-// user/profile types; the Enoki flow surfaces the provider, so the values remain.
+// OAuth provider registry — the source of the OAuthProvider union used on
+// user/profile types. Enoki handles the actual OAuth client config
+// (NEXT_PUBLIC_GOOGLE_CLIENT_ID, see lib/enoki/config.ts); this only enumerates
+// the supported providers, so it carries no client id / auth URL of its own.
 export const OAUTH_PROVIDERS = {
   google: {
     name: "Google",
-    clientId: process.env.GOOGLE_CLIENT_ID!,
-    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   },
 } as const;
 

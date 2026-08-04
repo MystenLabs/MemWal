@@ -20,10 +20,15 @@ if (!url) {
 const sql = postgres(url);
 
 async function purge() {
-  console.log("Purging legacy zkLogin sessions (zklogin_sessions)...");
-  const deleted = await sql`DELETE FROM zklogin_sessions`;
-  console.log(`Removed ${deleted.count} legacy zkLogin session row(s).`);
-  await sql.end();
+  try {
+    console.log("Purging legacy zkLogin sessions (zklogin_sessions)...");
+    const deleted = await sql`DELETE FROM zklogin_sessions`;
+    console.log(`Removed ${deleted.count} legacy zkLogin session row(s).`);
+  } finally {
+    // Always close the connection, even if the DELETE throws, so the script
+    // never hangs with an open client.
+    await sql.end();
+  }
 }
 
 purge().catch((error) => {

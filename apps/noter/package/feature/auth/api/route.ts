@@ -20,10 +20,17 @@ import {
 } from "../lib/enoki-challenge";
 import { SharedRedisUnavailableError } from "@/shared/lib/shared-redis";
 
+// Canonical Sui address: 0x + 64 hex. Reject malformed input at the boundary so
+// it never reaches normalizeSuiAddress (which would silently left-pad garbage
+// into a valid-looking-but-wrong address) or a DB lookup.
+const suiAddressSchema = z
+  .string()
+  .regex(/^0x[0-9a-f]{64}$/i, "Invalid Sui address");
+
 export const authRouter = router({
   /**
-   * Get current session (for resuming auth state)
-   * Works for both zkLogin and wallet sessions
+   * Get current session (for resuming auth state).
+   * Resolves wallet / enoki sessions only; the legacy zkLogin table is not trusted.
    */
   getSession: procedure
     .input(validateSessionInput)
@@ -115,7 +122,7 @@ export const authRouter = router({
    * signature }` to connectEnoki / exportDelegateKey to prove address ownership.
    */
   issueEnokiChallenge: procedure
-    .input(z.object({ suiAddress: z.string().min(1) }))
+    .input(z.object({ suiAddress: suiAddressSchema }))
     .mutation(async ({ input }) => {
       try {
         const { challengeId, message } = await issueEnokiChallengeToken(
@@ -136,10 +143,14 @@ export const authRouter = router({
       }
     }),
 
-  /** Connect with Enoki zkLogin. Two-phase: suiAddress only = returning user check, full = register. */
+  /**
+   * Connect with Enoki zkLogin. Every call must prove address ownership with a
+   * signed challenge (challengeId + signature). Two-phase: without privateKey/
+   * accountId = returning-user check; with them = register.
+   */
   connectEnoki: procedure
     .input(z.object({
-      suiAddress: z.string().min(1),
+      suiAddress: suiAddressSchema,
       challengeId: z.string().min(1),
       signature: z.string().min(1),
       privateKey: z.string().optional(),
@@ -234,7 +245,7 @@ export const authRouter = router({
    */
   exportDelegateKey: procedure
     .input(z.object({
-      suiAddress: z.string().min(1),
+      suiAddress: suiAddressSchema,
       challengeId: z.string().min(1),
       signature: z.string().min(1),
     }))

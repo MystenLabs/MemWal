@@ -11,8 +11,9 @@ auth tRPC router (`package/feature/auth/api/route.ts`) and consumed by the `useA
 3. **Delegate key** (`connectDelegateKey`) — manual login with a delegate private key + account id.
 
 Sessions are stored in the `wallet_sessions` table (Enoki reuses it with `walletType = "enoki"`).
-Session lookup, logout, and the memory API routes also read the legacy `zklogin_sessions` table as a
-fallback for any pre-existing sessions.
+Authentication resolves sessions from `wallet_sessions` only; the legacy `zklogin_sessions` table is
+no longer trusted for session lookup (logout still deletes any leftover row, and a one-time cleanup
+script is provided). See the removal note below.
 
 > **Removed:** an earlier custom OAuth→JWT→prover→salt zkLogin flow (`initiateLogin` / `completeLogin`)
 > was never wired into the UI (no `/auth/callback` page, no callers) and has been removed. It did not
