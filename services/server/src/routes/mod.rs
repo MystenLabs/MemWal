@@ -8,7 +8,7 @@
 //! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
-//! - `accounts` — `/api/accounts/:owner/exists` (public MemWalAccount
+//! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
 //!   existence check)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,

@@ -1102,6 +1102,7 @@ mod tests {
             sidecar_secret: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
+            accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,

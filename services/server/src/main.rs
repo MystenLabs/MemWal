@@ -307,6 +307,13 @@ async fn main() {
         config.sponsor_rate_limit.global_per_minute,
         config.sponsor_rate_limit.global_per_hour,
     );
+    tracing::info!(
+        "  accounts rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
+        config.accounts_rate_limit.per_minute,
+        config.accounts_rate_limit.per_hour,
+        config.accounts_rate_limit.global_per_minute,
+        config.accounts_rate_limit.global_per_hour,
+    );
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
         // buckets. The warning is split across lines so each one is grep-able

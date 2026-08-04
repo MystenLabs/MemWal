@@ -962,18 +962,104 @@ pub async fn sponsor_rate_limit_middleware(
 }
 
 // ============================================================
+// Accounts — deployment-wide budget limit
+// ============================================================
+
+/// Check whether the deployment has exceeded its accounts-exists budget
+/// limits.
+///
+/// Uses a sliding-window counter in Redis just like
+/// `check_global_sponsor_rate_limit`, but keyed by fixed server-controlled
+/// identifiers so IP rotation cannot bypass an aggregate ceiling on this
+/// anonymous, enumeration-risk endpoint.
+///
+/// Returns `Err(())` on Redis failure so callers can fail closed. A
+/// per-process fallback would not enforce a deployment-wide cap across
+/// replicas.
+pub async fn check_global_accounts_rate_limit(
+    state: &crate::types::AppState,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = "rate:accounts:global:min";
+    let hr_key = "rate:accounts:global:hr";
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket ---
+    match check_and_record_window(
+        &mut redis,
+        min_key,
+        min_window_start,
+        now,
+        per_minute,
+        1, // weight = 1 per accounts-exists request
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket ---
+    match check_and_record_window(
+        &mut redis,
+        hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1, // weight = 1 per accounts-exists request
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_sustained");
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (hour): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+// ============================================================
 // Accounts Rate Limit Middleware (IP-based, unauthenticated)
 // ============================================================
 
 /// Pre-authentication rate limiting middleware for the public
-/// `GET /api/accounts/:owner/exists` route.
+/// `GET /api/accounts/{owner}/exists` route.
 ///
 /// This is the only route in `public_routes` that reaches the DB pool
 /// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
-/// are all static/no-DB. Enforces a per-IP sliding-window limit using the
-/// same Redis counters as the authenticated middleware, reusing the
-/// existing general request budget (`RateLimitConfig::max_requests_per_minute`
-/// / `max_requests_per_hour`) rather than adding a new config knob.
+/// are all static/no-DB. Modeled directly on `sponsor_rate_limit_middleware`:
+/// enforces a per-IP sliding-window limit via `AccountsRateLimitConfig`
+/// (a dedicated, stricter budget than the general authenticated
+/// `RateLimitConfig` this middleware used to reuse — see that config's doc
+/// comment for the reasoning behind its numbers), plus a deployment-wide
+/// global cap via `check_global_accounts_rate_limit` so IP rotation alone
+/// cannot exceed an aggregate ceiling.
 ///
 /// Redis errors return 503. A local fallback cannot provide consistent abuse
 /// protection across replicas, so — like `sponsor_rate_limit_middleware` —
@@ -1004,7 +1090,7 @@ pub async fn accounts_rate_limit_middleware(
         }
     };
 
-    let config = &state.config.rate_limit;
+    let config = &state.config.accounts_rate_limit;
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
@@ -1019,7 +1105,7 @@ pub async fn accounts_rate_limit_middleware(
         &min_key,
         min_window_start,
         now,
-        config.max_requests_per_minute,
+        config.per_minute,
         1,
         120,
     )
@@ -1029,14 +1115,9 @@ pub async fn accounts_rate_limit_middleware(
             tracing::warn!(
                 "accounts rate limit [IP/min]: ip={} denied (limit={})",
                 ip,
-                config.max_requests_per_minute
+                config.per_minute
             );
-            return rate_limit_response(
-                "accounts_ip_burst",
-                config.max_requests_per_minute,
-                "min",
-                60,
-            );
+            return rate_limit_response("accounts_ip_burst", config.per_minute, "min", 60);
         }
         Err(e) => {
             tracing::error!(
@@ -1054,7 +1135,7 @@ pub async fn accounts_rate_limit_middleware(
         &hr_key,
         hr_window_start,
         now + 0.1,
-        config.max_requests_per_hour,
+        config.per_hour,
         1,
         3700,
     )
@@ -1064,14 +1145,9 @@ pub async fn accounts_rate_limit_middleware(
             tracing::warn!(
                 "accounts rate limit [IP/hr]: ip={} denied (limit={})",
                 ip,
-                config.max_requests_per_hour
+                config.per_hour
             );
-            return rate_limit_response(
-                "accounts_ip_sustained",
-                config.max_requests_per_hour,
-                "hour",
-                300,
-            );
+            return rate_limit_response("accounts_ip_sustained", config.per_hour, "hour", 300);
         }
         Err(e) => {
             tracing::error!(
@@ -1081,6 +1157,29 @@ pub async fn accounts_rate_limit_middleware(
             return rate_limiter_unavailable_response();
         }
         Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_global_accounts_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_burst",
+                config.global_per_minute,
+                "min",
+                60,
+            );
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
     }
 
     next.run(request).await
