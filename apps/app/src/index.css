@@ -13,6 +13,7 @@
 }
 .dash-page .sd-warning { margin-bottom: 1rem; color: #7d5400; }
 .dash-page .sd-counts, .dash-page .sd-tabs, .dash-page .sd-actions { margin-bottom: 1rem; }
+.dash-page .sd-load-prompt { display: flex; justify-content: center; margin-top: 1.5rem; }
 .dash-page .sd-tabs .btn { border: 1px solid #faf8f5; background: #000000; color: #faf8f5; }
 .dash-page .sd-tabs .btn[aria-selected='true'] { border-color: #faf8f5; background: #faf8f5; color: #000000; }
 .dash-page .sd-table-wrap { overflow-x: auto; }
@@ -11343,6 +11344,27 @@ h1, h2, h3 {
   gap: 20px;
 }
 
+.dash-page .dashboard-cleanup-load {
+  min-height: 52px;
+  height: 52px;
+  padding: 10px 30px;
+  border: 1px solid #faf8f5;
+  border-radius: 26px;
+  background: transparent;
+  color: #faf8f5;
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.72px;
+}
+
+.dash-page .dashboard-cleanup-load:hover:not(:disabled) {
+  background: rgba(250, 248, 245, 0.16);
+  border-color: #faf8f5;
+  color: #faf8f5;
+}
+
 /* Old-memories banner — first thing in the shell: below the navbar,
    above the "Welcome" header (all other dash-shell orders start at 0). */
 .dash-page .dash-alert--cleanup {
@@ -11399,9 +11421,17 @@ h1, h2, h3 {
   line-height: 1.3;
 }
 
-/* The generic 860px rules shrink header pills to 44px but only match
-   .btn-secondary — keep the danger pill in step with Refresh. */
+/* Keep cleanup actions in step with the 44px mobile header pills. */
 @media (max-width: 860px) {
+  .dash-page .dashboard-cleanup-load {
+    min-height: 44px;
+    height: 44px;
+    padding: 0 16px;
+    border-radius: 22px;
+    font-size: 15px;
+    letter-spacing: 0.25px;
+  }
+
   .dash-page .dashboard-cleanup-delete {
     min-height: 44px;
     height: 44px;
