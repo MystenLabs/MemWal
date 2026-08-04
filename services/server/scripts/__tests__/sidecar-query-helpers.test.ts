@@ -275,6 +275,28 @@ test("address-balance uploads fail instead of falling back to owned coins", asyn
     );
 });
 
+test("address-balance enforcement preserves async object inputs across rebuilds", async () => {
+    const signer = new Ed25519Keypair();
+    const objectId = `0x${"3".repeat(64)}`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.add(async (tx) => {
+        await Promise.resolve();
+        tx.transferObjects(
+            [tx.objectRef({
+                objectId,
+                version: "1",
+                digest: "11111111111111111111111111111111",
+            })],
+            signer.toSuiAddress(),
+        );
+    });
+    enforceAddressBalanceCoinIntents(transaction);
+
+    await assert.doesNotReject(transaction.build({ onlyTransactionKind: true }));
+    await assert.doesNotReject(transaction.build({ onlyTransactionKind: true }));
+});
+
 test("migration source status trusts only verified nonexistent blobs", () => {
     assert.equal(isVerifiedNonexistentSource({ type: "nonexistent" }), true);
     assert.equal(isVerifiedNonexistentSource({ type: "invalid" }), false);

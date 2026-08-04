@@ -9,14 +9,15 @@ const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
  * when an address balance is insufficient.
  */
 export function enforceAddressBalanceCoinIntents(transaction: Transaction): void {
-    const initialOwnedObjectIds = new Set(
-        (transaction.getData() as any).inputs
-            .map((input: any) => (
-                input.Object?.ImmOrOwnedObject?.objectId ?? input.UnresolvedObject?.objectId
-            ))
-            .filter((objectId: unknown): objectId is string => typeof objectId === "string"),
-    );
+    let initialOwnedObjectIds: Set<string> | undefined;
     transaction.addSerializationPlugin(async (transactionData, options, next) => {
+        initialOwnedObjectIds ??= new Set(
+            transactionData.inputs
+                .map((input) => (
+                    input.Object?.ImmOrOwnedObject?.objectId ?? input.UnresolvedObject?.objectId
+                ))
+                .filter((objectId): objectId is string => typeof objectId === "string"),
+        );
         const requiredByType = new Map<string, bigint>();
         for (const command of transactionData.commands) {
             if (command.$kind !== "$Intent" || command.$Intent.name !== COIN_WITH_BALANCE_INTENT) {
