@@ -94,35 +94,11 @@ export async function upsertWalletUser(
 // ══════════════════════════════════════════════════════════════
 
 /**
- * Get active session by ID (supports both zkLogin and wallet sessions)
- * Returns null if session doesn't exist, is expired, or has no associated user
+ * Get active session by ID (wallet / enoki sessions only).
+ * Returns null if the session doesn't exist, is expired, or has no associated
+ * user. The legacy zklogin_sessions table is no longer trusted.
  */
 export async function getActiveSession(db: DbClient, sessionId: string) {
-  // Try zkLogin session first
-  const [zkSession] = await db
-    .select()
-    .from(zkLoginSessions)
-    .where(eq(zkLoginSessions.id, sessionId))
-    .limit(1);
-
-  if (zkSession?.userId && zkSession.expiresAt > new Date()) {
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, zkSession.userId))
-      .limit(1);
-
-    if (user) {
-      return {
-        user: toSafeUser(user),
-        sessionId: zkSession.id,
-        suiAddress: user.suiAddress,
-        expiresAt: zkSession.expiresAt,
-      };
-    }
-  }
-
-  // Try wallet session
   const [walletSession] = await db
     .select()
     .from(walletSessions)

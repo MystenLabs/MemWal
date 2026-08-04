@@ -6,7 +6,7 @@
 
 import { rememberText } from "@/feature/note/lib/pdw-client";
 import { db } from "@/shared/lib/db";
-import { zkLoginSessions, walletSessions, users } from "@/shared/db/schema";
+import { walletSessions, users } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 async function resolveUserKey(req: Request) {
@@ -19,20 +19,10 @@ async function resolveUserKey(req: Request) {
     .where(eq(walletSessions.id, sessionId))
     .limit(1);
 
+  // Only wallet/enoki sessions are trusted; the legacy zklogin_sessions table
+  // is no longer honored, so a missing/expired wallet session is unauthenticated.
   if (!session?.userId || session.expiresAt < new Date()) {
-    const [zkSession] = await db
-      .select()
-      .from(zkLoginSessions)
-      .where(eq(zkLoginSessions.id, sessionId))
-      .limit(1);
-    if (!zkSession?.userId || zkSession.expiresAt < new Date()) {
-      return { key: null, accountId: null };
-    }
-    const [user] = await db.select().from(users).where(eq(users.id, zkSession.userId)).limit(1);
-    return {
-      key: user?.delegatePrivateKey ?? null,
-      accountId: user?.delegateAccountId ?? null,
-    };
+    return { key: null, accountId: null };
   }
 
   const [user] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);

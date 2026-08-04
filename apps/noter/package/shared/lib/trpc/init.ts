@@ -2,7 +2,7 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
 import superjson from "superjson";
 import { db } from "@/shared/lib/db";
-import { zkLoginSessions, walletSessions, users } from "@/shared/db/schema";
+import { walletSessions, users } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 export type Context = {
@@ -41,19 +41,10 @@ export const createContext = async (
   const sessionId = getSessionIdFromRequest(opts.req);
   if (!sessionId) return noAuth;
 
-  // Try zkLogin session first
-  const [zkSession] = await db
-    .select()
-    .from(zkLoginSessions)
-    .where(eq(zkLoginSessions.id, sessionId))
-    .limit(1);
-
-  if (zkSession?.userId && zkSession.expiresAt > new Date()) {
-    const keys = await loadUserMemwalKey(zkSession.userId);
-    return { db, userId: zkSession.userId, ...keys };
-  }
-
-  // Try wallet/enoki session
+  // Sessions are resolved only from wallet/enoki sessions, which require proof
+  // of address ownership to create. The legacy zklogin_sessions table (written
+  // by the removed custom zkLogin flow) is deliberately no longer trusted here,
+  // so a leftover or re-introduced row can never authenticate a request.
   const [walletSession] = await db
     .select()
     .from(walletSessions)
