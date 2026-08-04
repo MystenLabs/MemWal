@@ -685,6 +685,12 @@ pub async fn restore(
             .get(blob_id)
             .cloned()
             .unwrap_or((None, String::new()));
+        // The sidecar sends "agentId" as a present-but-empty string when no
+        // delegate key was recorded (the common case) — #[serde(default)]
+        // only fires on a MISSING key, so an empty string deserializes to
+        // Some(""), not None. Normalize both provenance fields the same way
+        // so a blob with no known agent gets a real SQL NULL, not "".
+        let agent_id = agent_id.filter(|s| !s.is_empty());
         state
             .db
             .insert_vector(
