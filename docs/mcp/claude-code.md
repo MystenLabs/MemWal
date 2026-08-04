@@ -28,16 +28,18 @@ questions:
   - How do I add Walrus Memory to Claude Code?
   - How do I install the MemWal plugin on Claude Code?
   - What is the difference between the MemWal plugin and MCP-only on Claude Code?
+  - How do I fix the memwal MCP server when it shows as failed in Claude Code?
 answer: >-
-  To add Walrus Memory to Claude Code, install the MemWal plugin via the marketplace (/plugin marketplace add MystenLabs/MemWal, then /plugin install memwal@memwal-plugins), or add it as MCP-only with claude mcp add. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that reinforce automatic memory behavior and make the agent prefer Walrus Memory over Claude Code's built-in memory.
+  To add Walrus Memory to Claude Code, install the MemWal plugin through the marketplace (/plugin marketplace add MystenLabs/MemWal, then /plugin install memwal@memwal-plugins), or add it as MCP-only with claude mcp add. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that reinforce automatic memory behavior and make the agent prefer Walrus Memory over Claude Code's built-in memory.
 ---
 
 Add MemWal to Claude Code so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
 
 ## Prerequisites
 
-- Node.js 20+
-- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
+- Node.js 20+ with `npx` on your `PATH`. Check with `node --version`.
+- Claude Code recent enough to support plugins if you want the plugin install; the `/plugin` command confirms support. MCP-only works on any version with `claude mcp add`.
+- A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`); you can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). No keys go in config files: credentials land in `~/.memwal/credentials.json` after sign-in.
 
 ## Installation
 
@@ -74,7 +76,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 
 ## What the plugin includes
 
-| Component | Plugin | MCP-only |
+| **Component** | **Plugin** | **MCP-only** |
 |---|:-:|:-:|
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
@@ -83,7 +85,7 @@ MCP-only still saves and recalls on its own because the tools are proactive. The
 
 ## Available tools
 
-| Tool | Description |
+| **Tool** | **Description** |
 |------|-------------|
 | `memwal_remember` | Save a durable fact (preference, decision, constraint, identity). |
 | `memwal_remember_bulk` | Save several distinct facts in one call. |
@@ -97,7 +99,7 @@ See [Reference](/mcp/reference) for full parameters.
 
 ## Lifecycle hooks (plugin only)
 
-| Hook | Event | What it does |
+| **Hook** | **Event** | **What it does** |
 |------|-------|--------------|
 | Session start | `SessionStart` | Announces that memory is active and reminds the agent to use the `memwal_*` tools (preferring them over any built-in memory). |
 | User prompt | `UserPromptSubmit` | Detects when your message references past work or states a durable fact, and reminds the agent to recall or save. |
@@ -122,15 +124,34 @@ Agent: (calls memwal_recall, finds your preferences)
 
 ## Verify
 
-```
-/mcp          → "memwal" should be Connected
-```
+Work through these three checks in order; each one isolates a different layer.
 
-Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`. Then state a durable fact and check that the agent saves it with `memwal_remember`.
+1. **Server connected.** Run `/mcp` and confirm `memwal` shows as Connected. Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`.
+2. **Relayer reachable.** Ask the agent to run `memwal_health`. A healthy response returns within a few seconds; anything else points at network access to `relayer.memory.walrus.xyz`.
+3. **End to end.** State a durable fact, for example a package-manager preference, confirm the agent calls `memwal_remember`, then open a brand-new session and confirm `memwal_recall` surfaces it.
 
-## Troubleshooting
+## Troubleshooting FAQ
 
-- **Tools missing**: restart Claude Code (MCP servers load at startup).
-- **Not signed in**: ask the agent to run `memwal_login`, approve in the browser, then retry.
-- **Hooks not firing**: use the **Plugin** install, not MCP-only; the hooks ship only with the plugin.
-- **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.
+**`/mcp` shows memwal as failed or missing.**
+Restart Claude Code first; MCP servers load at startup. If it still fails, run `npx -y @mysten-incubation/memwal-mcp --help` in a plain terminal: that surfaces the real error, most often a Node version below 20 or `npx` missing from the `PATH` Claude Code inherits. For a full trace, add `MEMWAL_MCP_DEBUG=1` to the server's environment.
+
+**`/plugin` commands are not recognized.**
+Your Claude Code version predates plugin support. Update Claude Code, or use the MCP-only install; the memory tools behave the same, you only lose the automatic-memory hooks.
+
+**The browser sign-in cannot open (SSH, containers, headless machines).**
+`memwal_login` needs a browser. Sign in once on a desktop machine, then copy `~/.memwal/credentials.json` to the same path on the headless machine. For fully headless servers, the [headless setup guide](/sdk/headless-setup) covers credential-based configuration.
+
+**Signed in with the wrong account.**
+Ask the agent to run `memwal_logout`, which wipes `~/.memwal/credentials.json`, then run `memwal_login` again with the right wallet.
+
+**The agent saves but recall returns nothing.**
+Recall is scoped per account and namespace. If you set `MEMWAL_NAMESPACE` (or `--namespace`) after saving, earlier memories live in the previous namespace. If the namespace matches and results are still missing, run `memwal_restore <namespace>` to rebuild the search index from Walrus; the stored memories are the source of truth and the index is rebuildable.
+
+**Hooks are not firing.**
+The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin` and restart after installing.
+
+**Tool calls fail with an authentication error after working before.**
+The stored credential can lapse if the delegate key was revoked from the dashboard. Run `memwal_logout` then `memwal_login` to mint a fresh delegate key.
+
+**Corporate proxy or restricted network.**
+The server needs outbound HTTPS to `relayer.memory.walrus.xyz` (and the sign-in flow needs `memory.walrus.xyz`). If only the relayer is blocked, the HTTP transport option above fails identically; allowlist both hosts.

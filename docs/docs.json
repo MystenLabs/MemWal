@@ -170,6 +170,7 @@
             "group": "Model Context Protocol",
             "pages": [
               "mcp/overview",
+              "mcp/quickstart",
               "mcp/claude-code",
               "mcp/codex",
               "mcp/cursor",
