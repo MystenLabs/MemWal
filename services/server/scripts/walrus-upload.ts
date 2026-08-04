@@ -159,6 +159,7 @@ async function main() {
 
     // Step 4: Certify blob on Sui → returns a Transaction
     const certifyTx = flow.certify();
+    certifyTx.setSenderIfNotSet(signerAddress);
     enforceAddressBalanceCoinIntents(certifyTx);
     certifyTx.setGasPayment([]);
 
