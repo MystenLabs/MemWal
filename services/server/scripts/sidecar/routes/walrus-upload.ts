@@ -37,7 +37,12 @@ import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
 import { dedupeAddresses, errorMessage, parseWalrusKeySlot, shortAddress, sleep, truncateForLog } from "../util.js";
 import { isMoveAbortBalanceSplit, isMoveAbortWalDestroyZero } from "../enoki.js";
-import { patchGasCoinIntents, submitRebuildableWalletTransaction, submitWalletTransaction } from "../wallet.js";
+import {
+    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+    patchGasCoinIntents,
+    submitRebuildableWalletTransaction,
+    submitWalletTransaction,
+} from "../wallet.js";
 import {
     extractBlobObjectId,
     InvalidSealPersistenceFenceError,
@@ -255,7 +260,12 @@ export function registerWalrusUploadRoute(app: Express): void {
             );
             const registerDigest = await timedPhase(
                 "register_sponsor",
-                () => submitWalletTransaction(registerTx, signer, registerAllowedAddresses),
+                () => submitWalletTransaction(
+                    registerTx,
+                    signer,
+                    registerAllowedAddresses,
+                    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+                ),
                 (digest) => ({ digest })
             );
             await timedPhase(
@@ -283,11 +293,18 @@ export function registerWalrusUploadRoute(app: Express): void {
             const certifyDigest = await timedPhase(
                 "certify_sponsor",
                 () =>
-                    submitRebuildableWalletTransaction("certify_sponsor", () => flow.certify(), signer, undefined, {
-                        traceId,
-                        jobId: jobIdForLog,
-                        keyIndex: keySlot,
-                    }),
+                    submitRebuildableWalletTransaction(
+                        "certify_sponsor",
+                        () => flow.certify(),
+                        signer,
+                        undefined,
+                        {
+                            traceId,
+                            jobId: jobIdForLog,
+                            keyIndex: keySlot,
+                        },
+                        ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+                    ),
                 (digest) => ({ digest })
             );
             await timedPhase(
@@ -311,17 +328,18 @@ export function registerWalrusUploadRoute(app: Express): void {
                         "metadata_transfer",
                         () =>
                             setMetadataAndTransferBlobs(
-                            signer,
+                                signer,
                                 [{ blobObjectId, namespace, sealFence }],
-                            owner,
-                            packageId,
-                            agentId,
+                                owner,
+                                packageId,
+                                agentId,
                                 {
                                     traceId,
                                     jobId: jobIdForLog,
                                     keyIndex: keySlot,
-                                }
-                        ),
+                                },
+                                ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+                            ),
                         (digest) => ({ digest, blobObjectId })
                     );
                     console.log(

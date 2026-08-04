@@ -56,6 +56,7 @@ import {
     readBlobObject,
 } from "./walrus-query.js";
 import { uploadWalrusBlobWithEffectsRetry } from "./walrus-upload.js";
+import { enforceAddressBalanceCoinIntents } from "../address-balance.js";
 import {
     assertUploadExecutionIdentity,
     parseUploadExecutionIdentity,
@@ -550,6 +551,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 memwal_migration_job: jobId,
                             },
                         });
+                        enforceAddressBalanceCoinIntents(registerTx);
                         const registerTransaction = await prepareRegisterTransaction(
                             registerTx,
                             signer,

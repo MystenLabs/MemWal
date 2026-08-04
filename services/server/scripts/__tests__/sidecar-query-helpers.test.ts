@@ -16,7 +16,12 @@ import {
     strictWalrusEpoch,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
-import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
+import {
+    ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    parseDurableWalrusEpochs,
+    SUI_TYPE,
+    WALRUS_PACKAGE_ID,
+} from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
     createdBlobObjectIdFromTransaction,
@@ -29,7 +34,11 @@ import { classifyDurableSideEffectError, NoSideEffectError } from "../sidecar/re
 import { uploadWalrusBlobWithEffectsRetry } from "../sidecar/routes/walrus-upload.js";
 import { metadataReceiptAlreadyApplied } from "../sidecar/routes/walrus-metadata.js";
 import { sidecarMetrics } from "../sidecar/state.js";
-import { DURABLE_WALLET_FALLBACK_POLICY } from "../sidecar/wallet.js";
+import {
+    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+    DURABLE_WALLET_FALLBACK_POLICY,
+} from "../sidecar/wallet.js";
+import { enforceAddressBalanceCoinIntents } from "../sidecar/address-balance.js";
 
 async function preparedRegisterFixture(funding: "addressBalance" | "coin" | "mixedLegacy" = "addressBalance"): Promise<{
     signer: Ed25519Keypair;
@@ -106,6 +115,14 @@ test("durable submissions direct-sign only when sponsorship is unconfigured", ()
     assert.deepEqual(DURABLE_WALLET_FALLBACK_POLICY, {
         directSignIfUnconfigured: true,
         directSignAfterSponsorFailure: false,
+        gasMode: "addressBalance",
+    });
+});
+
+test("legacy uploads preserve fallback behavior while using address balances", () => {
+    assert.deepEqual(ADDRESS_BALANCE_WALLET_FALLBACK_POLICY, {
+        directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+        directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
         gasMode: "addressBalance",
     });
 });
@@ -210,6 +227,52 @@ test("the pinned Sui SDK resolves WAL payment and relay SUI tip from address bal
     assert.equal(assertAddressBalanceRegisterTransaction(resolved), 2n);
     const withdrawals = resolved.inputs.filter((input) => input.$kind === "FundsWithdrawal");
     assert.equal(withdrawals.length, 2, "WAL payment and relay SUI tip both use address balances");
+});
+
+test("address-balance uploads fail instead of falling back to owned coins", async () => {
+    const signer = new Ed25519Keypair();
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.coin({ type: walType, balance: 1n, useGasCoin: false });
+    enforceAddressBalanceCoinIntents(transaction);
+
+    let balanceCalls = 0;
+    const client = {
+        core: {
+            async getBalance() {
+                balanceCalls += 1;
+                return {
+                    balance: {
+                        balance: "1",
+                        addressBalance: balanceCalls === 1 ? "1" : "0",
+                        coinBalance: balanceCalls === 1 ? "0" : "1",
+                    },
+                };
+            },
+            async listCoins() {
+                return {
+                    objects: [{
+                        objectId: `0x${"1".repeat(64)}`,
+                        version: "1",
+                        digest: "11111111111111111111111111111111",
+                        balance: "1",
+                        coinType: walType,
+                    }],
+                    cursor: null,
+                    hasNextPage: false,
+                };
+            },
+        },
+    };
+    await assert.rejects(
+        transaction.prepareForSerialization({ client: client as never }),
+        /Address-balance upload resolved owned coin objects/,
+    );
+    await assert.rejects(
+        transaction.prepareForSerialization({ client: client as never }),
+        /Address-balance upload resolved owned coin objects/,
+    );
 });
 
 test("migration source status trusts only verified nonexistent blobs", () => {

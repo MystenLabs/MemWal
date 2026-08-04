@@ -21,6 +21,7 @@ import {
     ENOKI_TRANSIENT_MAX_DELAY_MS,
 } from "./config.js";
 import { suiClient } from "./clients.js";
+import { enforceAddressBalanceCoinIntents } from "./address-balance.js";
 import { errorMessage, truncateForLog } from "./util.js";
 
 type EnokiDataWrapper<T> = { data: T };
@@ -239,6 +240,7 @@ export async function executeWithEnokiSponsor(
     onSubmissionStarted: () => void = () => {},
 ): Promise<string> {
     if (fallbackPolicy.gasMode === "addressBalance") {
+        enforceAddressBalanceCoinIntents(tx);
         tx.setGasPayment([]);
     }
 
