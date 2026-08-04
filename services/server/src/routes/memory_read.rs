@@ -247,6 +247,50 @@ pub async fn list_owner_memories(
     Ok(Json(result))
 }
 
+#[derive(Debug, Serialize)]
+pub struct DelegateKeyResponse {
+    pub label: String,
+    pub sui_address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentsResponse {
+    pub agents: Vec<DelegateKeyResponse>,
+    pub snapshot_version: u32,
+}
+
+/// GET /v1/owners/{owner}/agents
+pub async fn list_owner_agents(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(path_owner): Path<String>,
+) -> Result<Json<AgentsResponse>, AppError> {
+    if auth.owner != path_owner {
+        return Err(AppError::Forbidden("owner mismatch".to_string()));
+    }
+    let keys = crate::storage::sui::list_delegate_keys_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        &auth.account_id,
+        &state.config.package_id,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to list delegate keys: {}", e)))?;
+
+    let agents = keys
+        .into_iter()
+        .map(|k| DelegateKeyResponse {
+            label: k.label,
+            sui_address: k.sui_address,
+        })
+        .collect();
+
+    Ok(Json(AgentsResponse {
+        agents,
+        snapshot_version: SNAPSHOT_VERSION,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

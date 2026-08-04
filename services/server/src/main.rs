@@ -1013,6 +1013,7 @@ async fn main() {
             "/v1/owners/{owner}/memories",
             get(routes::list_owner_memories),
         )
+        .route("/v1/owners/{owner}/agents", get(routes::list_owner_agents))
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))

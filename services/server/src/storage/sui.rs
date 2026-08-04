@@ -157,6 +157,111 @@ pub async fn verify_delegate_key_onchain(
     )))
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DelegateKeyInfo {
+    pub sui_address: String,
+    pub label: String,
+    pub created_at: u64,
+}
+
+/// Parse the `delegate_keys` array out of a MemWalAccount's `fields` map.
+/// Pure function — no I/O — so it's unit-testable without a live chain.
+pub fn parse_delegate_keys(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    let delegate_keys = fields
+        .get("delegate_keys")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    let mut out = Vec::with_capacity(delegate_keys.len());
+    for dk in delegate_keys {
+        let dk_fields = dk.get("fields").or(Some(dk));
+        let sui_address = dk_fields
+            .and_then(|f| f.get("sui_address"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| OnchainVerifyError::RpcError("delegate key missing sui_address".into()))?
+            .to_string();
+        let label = dk_fields
+            .and_then(|f| f.get("label"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = dk_fields
+            .and_then(|f| f.get("created_at"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| {
+                dk_fields
+                    .and_then(|f| f.get("created_at"))
+                    .and_then(|v| v.as_u64())
+            })
+            .unwrap_or(0);
+        out.push(DelegateKeyInfo {
+            sui_address,
+            label,
+            created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// List all delegate keys on a MemWalAccount object. JSON-RPC only (mirrors
+/// verify_delegate_key_onchain's non-gRPC path) — WALM-295 Phase 1 does not
+/// need the gRPC variant since this endpoint is not on the hot signature-
+/// verification path.
+pub async fn list_delegate_keys_onchain(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_getObject",
+        "params": [account_object_id, { "showContent": true }]
+    });
+
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    let response = request
+        .send()
+        .await
+        .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
+
+    let rpc_response: RpcResponse = parse_json_rpc_response(response, "sui_getObject").await?;
+    if let Some(error) = rpc_response.error {
+        return Err(OnchainVerifyError::RpcError(format!(
+            "RPC error {}: {}",
+            error.code, error.message
+        )));
+    }
+
+    let result = rpc_response
+        .result
+        .ok_or_else(|| OnchainVerifyError::RpcError("No result in RPC response".into()))?;
+    let content = result
+        .data
+        .and_then(|d| d.content)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no content".into()))?;
+
+    ensure_memwal_account_type(
+        content.object_type.as_deref(),
+        expected_type_origin_package_id,
+        account_object_id,
+    )?;
+
+    let fields = content
+        .fields
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
+
+    parse_delegate_keys(&fields)
+}
+
 // ── gRPC value helpers ──
 // google.protobuf.Value (via prost-types) is a dynamic JSON-like tree, not
 // serde_json::Value — these navigate it the same way `fields.get(...)` reads
@@ -1068,6 +1173,44 @@ mod tests {
         let wrong_key = serde_json::json!([10, 20, 31]);
         let wrong_arr = wrong_key.as_array().unwrap();
         assert_ne!(*wrong_arr, pk_as_numbers, "different key should NOT match");
+    }
+
+    // ── parse_delegate_keys (Task 7 — pure JSON parsing, no I/O) ────────
+
+    #[test]
+    fn parse_delegate_keys_extracts_all_fields() {
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "owner": "0xowner",
+            "active": true,
+            "delegate_keys": [
+                {
+                    "fields": {
+                        "public_key": [1, 2, 3],
+                        "sui_address": "0xdelegate1",
+                        "label": "cli",
+                        "created_at": "1700000000000"
+                    }
+                },
+                {
+                    "fields": {
+                        "public_key": [4, 5, 6],
+                        "sui_address": "0xdelegate2",
+                        "label": "mobile",
+                        "created_at": "1700000001000"
+                    }
+                }
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let parsed = parse_delegate_keys(&fields).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].label, "cli");
+        assert_eq!(parsed[0].sui_address, "0xdelegate1");
+        assert_eq!(parsed[0].created_at, 1700000000000);
+        assert_eq!(parsed[1].label, "mobile");
     }
 
     #[test]

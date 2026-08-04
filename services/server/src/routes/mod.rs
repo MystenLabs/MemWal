@@ -26,7 +26,7 @@ mod sponsor;
 // without having to know which submodule each handler lives in.
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
-pub use memory_read::{list_owner_memories, list_owner_namespaces};
+pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};
 pub use recall::{recall, recall_manual};
 pub use remember::{
     remember, remember_bulk, remember_bulk_status, remember_manual, remember_status,
