@@ -24,6 +24,25 @@ pub struct NamespacesResponse {
     pub snapshot_version: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MemoryItem {
+    pub memory_id: String,
+    pub namespace_id: String,
+    pub blob_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub size: i64,
+    pub agent_id: Option<String>,
+    pub package_id: Option<String>,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoriesResponse {
+    pub memories: Vec<MemoryItem>,
+    pub next_cursor: Option<String>,
+    pub snapshot_version: u32,
+}
+
 pub const SNAPSHOT_VERSION: u32 = 1;
 
 pub(crate) async fn query_owner_namespaces(
@@ -65,6 +84,141 @@ pub async fn list_owner_namespaces(
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
     let result = query_owner_namespaces(state.db.pool(), &auth.owner).await?;
+    Ok(Json(result))
+}
+
+use base64::Engine as _;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct MemoriesCursor {
+    updated_at: chrono::DateTime<chrono::Utc>,
+    id: String,
+}
+
+fn encode_cursor(updated_at: chrono::DateTime<chrono::Utc>, id: &str) -> String {
+    let json = serde_json::to_vec(&MemoriesCursor {
+        updated_at,
+        id: id.to_string(),
+    })
+    .expect("cursor serializes");
+    base64::engine::general_purpose::STANDARD.encode(json)
+}
+
+fn decode_cursor(raw: &str) -> Result<MemoriesCursor, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|_| AppError::BadRequest("invalid cursor".to_string()))?;
+    serde_json::from_slice(&bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
+}
+
+const DEFAULT_MEMORIES_LIMIT: i64 = 100;
+const MAX_MEMORIES_LIMIT: i64 = 500;
+
+pub(crate) async fn query_owner_memories(
+    pool: &PgPool,
+    owner: &str,
+    cursor: Option<String>,
+    limit: i64,
+) -> Result<MemoriesResponse, AppError> {
+    let limit = limit.clamp(1, MAX_MEMORIES_LIMIT);
+
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        i64,
+        Option<String>,
+        Option<String>,
+    )> = if let Some(raw_cursor) = cursor {
+        let c = decode_cursor(&raw_cursor)?;
+        sqlx::query_as(
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+             FROM vector_entries
+             WHERE owner = $1 AND (updated_at, id) > ($2, $3)
+             ORDER BY updated_at, id
+             LIMIT $4",
+        )
+        .bind(owner)
+        .bind(c.updated_at)
+        .bind(c.id)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as(
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+             FROM vector_entries
+             WHERE owner = $1
+             ORDER BY updated_at, id
+             LIMIT $2",
+        )
+        .bind(owner)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await
+    }
+    .map_err(|e| AppError::Internal(format!("Failed to query memories: {}", e)))?;
+
+    let has_more = rows.len() as i64 > limit;
+    let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
+
+    let next_cursor = if has_more {
+        page.last().map(|r| encode_cursor(r.4, &r.0))
+    } else {
+        None
+    };
+
+    let memories = page
+        .into_iter()
+        .map(
+            |(id, namespace, blob_id, created_at, _updated_at, size, agent_id, package_id)| {
+                MemoryItem {
+                    memory_id: id,
+                    namespace_id: namespace,
+                    blob_id,
+                    created_at,
+                    size,
+                    agent_id,
+                    package_id,
+                    // Always "active" until Plan B (WALM-296) adds expires_at
+                    // and derives this from it.
+                    status: "active",
+                }
+            },
+        )
+        .collect();
+
+    Ok(MemoriesResponse {
+        memories,
+        next_cursor,
+        snapshot_version: SNAPSHOT_VERSION,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct MemoriesQuery {
+    pub updated_after: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// GET /v1/owners/{owner}/memories?updated_after=<cursor>&limit=100
+pub async fn list_owner_memories(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+    Path(path_owner): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<MemoriesQuery>,
+) -> Result<Json<MemoriesResponse>, AppError> {
+    if auth.owner != path_owner {
+        return Err(AppError::Forbidden("owner mismatch".to_string()));
+    }
+    let limit = params.limit.unwrap_or(DEFAULT_MEMORIES_LIMIT);
+    if limit < 1 {
+        return Err(AppError::BadRequest("limit must be positive".to_string()));
+    }
+    let result = query_owner_memories(state.db.pool(), &auth.owner, params.updated_after, limit).await?;
     Ok(Json(result))
 }
 
@@ -150,5 +304,62 @@ mod tests {
             .await
             .unwrap();
         assert!(result.namespaces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_owner_memories_paginates_by_updated_at_and_id() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, agent_id, package_id)
+                 VALUES ($1, $2, 'default', $3, $4, $5, $6, $7)",
+            )
+            .bind(format!("{}-m{}", owner, i))
+            .bind(&owner)
+            .bind(format!("blob-{}", i))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .bind(format!("agent-{}", i))
+            .bind("0xpkg")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let page1 = query_owner_memories(&pool, &owner, None, 2).await.unwrap();
+        assert_eq!(page1.memories.len(), 2);
+        assert!(page1.next_cursor.is_some());
+
+        let page2 = query_owner_memories(&pool, &owner, page1.next_cursor.clone(), 2)
+            .await
+            .unwrap();
+        assert_eq!(page2.memories.len(), 2);
+
+        let page3 = query_owner_memories(&pool, &owner, page2.next_cursor.clone(), 2)
+            .await
+            .unwrap();
+        assert_eq!(page3.memories.len(), 1);
+        assert!(page3.next_cursor.is_none());
+
+        let mut all_ids: Vec<String> = page1
+            .memories
+            .iter()
+            .chain(page2.memories.iter())
+            .chain(page3.memories.iter())
+            .map(|m| m.memory_id.clone())
+            .collect();
+        all_ids.sort();
+        all_ids.dedup();
+        assert_eq!(all_ids.len(), 5, "pagination must not skip or duplicate rows");
+
+        assert_eq!(page1.memories[0].agent_id.as_deref(), Some("agent-0"));
+        assert_eq!(page1.memories[0].status, "active");
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
     }
 }
