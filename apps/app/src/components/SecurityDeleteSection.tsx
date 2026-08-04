@@ -51,6 +51,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     const pageCursors = useRef<(string | null)[]>([null])
     const pageRef = useRef(1)
     const [selected, setSelected] = useState<Set<string>>(new Set())
+    const [activated, setActivated] = useState(false)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
     const [confirm, setConfirm] = useState<'all' | 'selection' | null>(null)
@@ -132,15 +133,14 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         if (previousAddress.current && addressChanged) clearToken(previousAddress.current)
         previousAddress.current = address
         requestGeneration.current++
-        setItems([]); setSelected(new Set()); setConfirm(null); setPreview(null); setError('')
+        setActivated(false)
+        setItems([]); setSelected(new Set()); setConfirm(null); setPreview(null); setError(''); setLoading(false)
         pageCursors.current = [null]; pageRef.current = 1; setPage(1)
         clearSealSession()
-        // Address changes are loaded by the address/tab effect below. Account
-        // object changes still need an explicit reload because that dependency
-        // intentionally is not part of the list request.
-        if (address && !addressChanged) void load(1)
-    }, [address, accountObjectId, load])
-    useEffect(() => { void load(1) }, [address, tab]) // eslint-disable-line react-hooks/exhaustive-deps
+    }, [address, accountObjectId])
+    useEffect(() => {
+        if (activated) void load(1)
+    }, [activated, tab]) // eslint-disable-line react-hooks/exhaustive-deps
     const dismissToast = useCallback((id: number) => {
         setToasts(previous => previous.filter(toast => toast.id !== id))
     }, [])
@@ -218,14 +218,17 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
 
     if (!config.securityDeleteEnabled || !address) return null
     return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
-        <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
+        <button className="btn btn-secondary" disabled={loading || busy} onClick={activated ? refresh : () => setActivated(true)}>{activated && <RefreshCw size={16}/>} {activated ? 'Refresh' : 'Load my memories'}</button>
     }>
         <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
-        <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
-        <div className="sd-tabs" role="tablist">
-            <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} onClick={() => selectTab('risk')}>Stored</button>
-            <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Deleted</button>
-        </div>
+        {!activated && <p>Load your pre-migration memories to review them. Your wallet will ask you to sign a message to verify ownership.</p>}
+        {activated && <>
+            <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
+            <div className="sd-tabs" role="tablist">
+                <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} onClick={() => selectTab('risk')}>Stored</button>
+                <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Deleted</button>
+            </div>
+        </>}
         {error && <div className="dashboard-cleanup-error" role="alert">{error}</div>}
         {deletion.phase.kind === 'error' && <div className="dashboard-cleanup-error" role="alert">{deletion.phase.message} <code>{deletion.phase.code}</code></div>}
         {busy && <div className="dashboard-cleanup-status" aria-live="polite"><span>{deletion.phase.kind === 'signing' ? 'Check your wallet to sign this batch…' : `Deleting batch ${'batch' in deletion.phase ? deletion.phase.batch : ''}…`}</span>{deletion.phase.kind === 'signing' && <button type="button" className="btn btn-secondary" onClick={() => void deletion.cancelActive()}>Cancel batch</button>}</div>}
@@ -235,7 +238,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
                 <button type="button" className="sd-toast-dismiss" aria-label="Dismiss notification" onClick={() => dismissToast(toast.id)}>×</button>
             </div>)}
         </div>}
-        {tab === 'risk' && <div className="sd-actions">
+        {activated && tab === 'risk' && <div className="sd-actions">
             <button className="btn btn-secondary" disabled={!riskPageIds.length || busy} onClick={() => setSelected(previous => {
                 if (allPageSelected) return new Set([...previous].filter(id => !riskPageIds.includes(id)))
                 return new Set([...previous, ...riskPageIds])
@@ -243,8 +246,8 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
             <button className="btn btn-danger" disabled={!visibleSelected.size || busy} onClick={() => openConfirm('selection')}><Trash2 size={16}/> Delete selected ({visibleSelected.size})</button>
             <button className="btn btn-danger" disabled={!visibleCounts.deletable || busy} onClick={() => openConfirm('all')}><Trash2 size={16}/> Delete all ({visibleCounts.deletable})</button>
         </div>}
-        <div id="sd-tab-panel" role="tabpanel">{loading && visibleItems.length === 0 ? <p role="status">Loading affected memories…</p> : <SecurityDeleteTable items={visibleItems} selectable={tab === 'risk'} selected={visibleSelected} onToggle={toggle} onPreview={openPreview} previewEnabled={Boolean(accountObjectId)}/>}</div>
-        {totalPages > 1 && <nav className="sd-pager" aria-label="Memory pages">
+        {activated && <div id="sd-tab-panel" role="tabpanel">{loading && visibleItems.length === 0 ? <p role="status">Loading affected memories…</p> : <SecurityDeleteTable items={visibleItems} selectable={tab === 'risk'} selected={visibleSelected} onToggle={toggle} onPreview={openPreview} previewEnabled={Boolean(accountObjectId)}/>}</div>}
+        {activated && totalPages > 1 && <nav className="sd-pager" aria-label="Memory pages">
             <button className="btn btn-secondary" disabled={visiblePage <= 1 || loading} onClick={() => void load(visiblePage - 1)}>‹ Prev</button>
             {pageStrip(visiblePage, totalPages).map((entry, index) => entry === 'gap'
                 ? <span key={`gap-${index}`} className="sd-pager-gap" aria-hidden="true">…</span>

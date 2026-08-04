@@ -35,6 +35,8 @@ const risk = [
     { blobId: 'blob-two-long-identifier', objectId: null, createdAt: '2026-01-02T00:00:00Z', state: 'deletable' },
 ]
 
+const loadMemories = (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Load my memories' }))
+
 beforeEach(() => {
     vi.clearAllMocks()
     mocks.address = '0x1'
@@ -44,9 +46,13 @@ beforeEach(() => {
     mocks.fetchPreview.mockResolvedValue('owner secret')
 })
 
-it('renders affected rows and authoritative counts', async () => {
+it('waits for explicit user intent before loading affected rows', async () => {
+    const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
-    expect(await screen.findByText('Stored')).toBeInTheDocument()
+    expect(mocks.listBlobs).not.toHaveBeenCalled()
+    expect(screen.getByText(/wallet will ask you to sign/i)).toBeInTheDocument()
+    await loadMemories(user)
+    expect(await screen.findByRole('tab', { name: 'Stored' })).toBeInTheDocument()
     await waitFor(() => expect(mocks.listBlobs).toHaveBeenCalledWith('token', expect.objectContaining({ state: 'deletable' })))
     expect(screen.getByTitle('blob-one-long-identifier')).toBeInTheDocument()
     expect(screen.getByText('resolving…')).toBeInTheDocument()
@@ -55,6 +61,7 @@ it('renders affected rows and authoritative counts', async () => {
 it('loads the read-only progress state set after tab switch', async () => {
     const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await screen.findByTitle('blob-one-long-identifier')
     const storedTab = screen.getByRole('tab', { name: 'Stored' })
     const deletedTab = screen.getByRole('tab', { name: 'Deleted' })
@@ -69,6 +76,7 @@ it('loads the read-only progress state set after tab switch', async () => {
 it('passes the exact selected IDs after confirmation', async () => {
     const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await user.click(await screen.findByLabelText('Select blob-one-long-identifier'))
     await user.click(screen.getByRole('button', { name: /Delete selected/ }))
     await user.click(screen.getByRole('button', { name: 'Delete forever' }))
@@ -89,10 +97,15 @@ it('ignores an old owner response that resolves after address switch', async () 
         counts: { ...counts, total: 1, deletable: 1 }, limits: { deleteBatchMax: 900 }, nextCursor: null,
     }
     mocks.listBlobs.mockReset().mockReturnValueOnce(oldResponse).mockResolvedValue(nextResponse)
+    const user = userEvent.setup()
     const { rerender } = render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await waitFor(() => expect(mocks.listBlobs).toHaveBeenCalledTimes(1))
     mocks.address = '0x2'
     rerender(<SecurityDeleteSection accountObjectId="0x99" />)
+    expect(screen.getByRole('button', { name: 'Load my memories' })).toBeInTheDocument()
+    expect(mocks.listBlobs).toHaveBeenCalledTimes(1)
+    await loadMemories(user)
     expect(await screen.findByTitle('new-owner-blob')).toBeInTheDocument()
     releaseOld({ items: risk, counts, limits: { deleteBatchMax: 900 }, nextCursor: null })
     await Promise.resolve()
@@ -109,6 +122,7 @@ it('clears rows and ignores an old tab response during a tab switch', async () =
     mocks.listBlobs.mockReset().mockReturnValueOnce(oldRiskResponse).mockResolvedValue(progressResponse)
     const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await waitFor(() => expect(mocks.listBlobs).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('tab', { name: 'Deleted' }))
     expect(await screen.findByTitle('progress-blob')).toBeInTheDocument()
@@ -120,6 +134,7 @@ it('clears rows and ignores an old tab response during a tab switch', async () =
 it('removes owner-scoped plaintext immediately on an address switch', async () => {
     const user = userEvent.setup()
     const { rerender } = render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await user.click(await screen.findByRole('button', { name: 'Preview blob-one-long-identifier' }))
     expect(await screen.findByText('owner secret')).toBeInTheDocument()
     expect(mocks.fetchPreview).toHaveBeenCalledOnce()
@@ -151,6 +166,7 @@ it('shows a dismissible toast when a deletion operation completes', async () => 
 it('keeps the loaded rows when the active tab is clicked again', async () => {
     const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await screen.findByTitle('blob-one-long-identifier')
     await user.click(screen.getByRole('tab', { name: 'Stored' }))
     expect(screen.getByTitle('blob-one-long-identifier')).toBeInTheDocument()
@@ -167,6 +183,7 @@ it('jumps to an unvisited page by walking cursors and shows pager state', async 
         return { items: pageRows('p3'), counts: bigCounts, limits: { deleteBatchMax: 900 }, nextCursor: null }
     })
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await screen.findByTitle('p1-row')
     expect(screen.getByText('Page 1 of 3')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '‹ Prev' })).toBeDisabled()
@@ -191,6 +208,7 @@ it('steps back when the current page empties out after deletions', async () => {
         return { items: [{ blobId: 'p2-row', objectId: '0x2', createdAt: '2026-01-02T00:00:00Z', state: 'deletable' }], counts: liveCounts, limits: { deleteBatchMax: 900 }, nextCursor: null }
     })
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await screen.findByTitle('p1-row')
     await user.click(screen.getByRole('button', { name: 'Next ›' }))
     await screen.findByTitle('p2-row')
@@ -204,6 +222,7 @@ it('steps back when the current page empties out after deletions', async () => {
 it('select page toggles to unselect page and clears the page selection', async () => {
     const user = userEvent.setup()
     render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
     await screen.findByTitle('blob-one-long-identifier')
     await user.click(screen.getByRole('button', { name: 'Select page' }))
     expect(screen.getByLabelText('Select blob-one-long-identifier')).toBeChecked()

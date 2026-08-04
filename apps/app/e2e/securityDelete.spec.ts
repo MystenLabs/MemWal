@@ -114,8 +114,11 @@ test('security delete: connect, table, Seal preview, delete selected, progress, 
 	await page.getByRole('button', { name: 'MemWal E2E Dev Wallet' }).click()
 	await expect(page).toHaveURL(/\/dashboard/, { timeout: 20_000 })
 
-	// 2. "Stored" tab (default) lists all 3 seeded rows with blobId/objectId/createdAt.
+	// 2. Loading the list requires explicit user intent before the wallet auth
+	// challenge. The "Stored" tab then lists all 3 seeded rows.
 	await page.locator('#cleanup').scrollIntoViewIfNeeded()
+	await expect(await walletCalls(page)).toHaveLength(0)
+	await page.getByRole('button', { name: 'Load my memories' }).click()
 	const atRiskTab = page.getByRole('tab', { name: 'Stored' })
 	await expect(atRiskTab).toHaveAttribute('aria-selected', 'true')
 
@@ -193,8 +196,8 @@ test('security delete: connect, table, Seal preview, delete selected, progress, 
 		{ timeout: 30_000 },
 	)
 
-	// 6. Popup-count contract (spec §10): exactly 1 personal-message
-	// signature (security-delete auth challenge — the same cached token
+	// 6. Popup-count contract (spec §10): exactly 1 explicitly initiated
+	// personal-message signature (security-delete auth challenge — the same cached token
 	// covers list/prepare/submit) + 1 Seal-session personal-message
 	// signature (cached across preview clicks, only 1 preview click here) +
 	// 1 tx signature (both selected rows delete in a single batch, well
