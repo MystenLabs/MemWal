@@ -128,7 +128,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         const current = refreshContext.current
         // Deletion callbacks can outlive the wallet or tab that started them.
         // Never let a stale callback trigger auth or overwrite another view.
-        if (!current.activated || current.address !== address || current.tab !== tab) return
+        if (previousAddress.current !== address || !current.activated || current.address !== address || current.tab !== tab) return
         void load(pageRef.current)
     }, [address, load, tab])
     const deletion = useSecurityDeletion({ onStateChanged: refresh })
@@ -178,6 +178,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     // so rows, selections, dialogs, and plaintext never flash for the new owner.
     const identityMatches = previousAddress.current === address
     const previewIdentityMatches = identityMatches && previousAccountObjectId.current === accountObjectId
+    const visibleActivated = identityMatches && activated
     const visibleItems = identityMatches ? items : []
     const visibleCounts = identityMatches ? counts : EMPTY_COUNTS
     const visibleSelected = identityMatches ? selected : new Set<string>()
@@ -229,13 +230,13 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
 
     if (!config.securityDeleteEnabled || !address) return null
     return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
-        activated && <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
+        visibleActivated && <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
     }>
         <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
-        {!activated && <div className="sd-load-prompt">
+        {identityMatches && !activated && <div className="sd-load-prompt">
             <button className="btn dashboard-cleanup-load" disabled={loading || busy} onClick={() => setActivated(true)}>Load my memories</button>
         </div>}
-        {activated && <>
+        {visibleActivated && <>
             <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
             <div className="sd-tabs" role="tablist">
                 <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} disabled={busy} onClick={() => selectTab('risk')}>Stored</button>
@@ -251,7 +252,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
                 <button type="button" className="sd-toast-dismiss" aria-label="Dismiss notification" onClick={() => dismissToast(toast.id)}>×</button>
             </div>)}
         </div>}
-        {activated && tab === 'risk' && <div className="sd-actions">
+        {visibleActivated && tab === 'risk' && <div className="sd-actions">
             <button className="btn btn-secondary" disabled={!riskPageIds.length || busy} onClick={() => setSelected(previous => {
                 if (allPageSelected) return new Set([...previous].filter(id => !riskPageIds.includes(id)))
                 return new Set([...previous, ...riskPageIds])
@@ -259,8 +260,8 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
             <button className="btn btn-danger" disabled={!visibleSelected.size || busy} onClick={() => openConfirm('selection')}><Trash2 size={16}/> Delete selected ({visibleSelected.size})</button>
             <button className="btn btn-danger" disabled={!visibleCounts.deletable || busy} onClick={() => openConfirm('all')}><Trash2 size={16}/> Delete all ({visibleCounts.deletable})</button>
         </div>}
-        {activated && <div id="sd-tab-panel" role="tabpanel">{loading && visibleItems.length === 0 ? <p role="status">Loading affected memories…</p> : <SecurityDeleteTable items={visibleItems} selectable={tab === 'risk'} selected={visibleSelected} onToggle={toggle} onPreview={openPreview} previewEnabled={Boolean(accountObjectId)}/>}</div>}
-        {activated && totalPages > 1 && <nav className="sd-pager" aria-label="Memory pages">
+        {visibleActivated && <div id="sd-tab-panel" role="tabpanel">{loading && visibleItems.length === 0 ? <p role="status">Loading affected memories…</p> : <SecurityDeleteTable items={visibleItems} selectable={tab === 'risk'} selected={visibleSelected} onToggle={toggle} onPreview={openPreview} previewEnabled={Boolean(accountObjectId)}/>}</div>}
+        {visibleActivated && totalPages > 1 && <nav className="sd-pager" aria-label="Memory pages">
             <button className="btn btn-secondary" disabled={visiblePage <= 1 || loading} onClick={() => void load(visiblePage - 1)}>‹ Prev</button>
             {pageStrip(visiblePage, totalPages).map((entry, index) => entry === 'gap'
                 ? <span key={`gap-${index}`} className="sd-pager-gap" aria-hidden="true">…</span>
