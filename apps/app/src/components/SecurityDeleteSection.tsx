@@ -223,7 +223,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
         {!activated && <div className="sd-load-prompt">
             <p>Load your pre-migration memories to review them. Your wallet will ask you to sign a message to verify ownership.</p>
-            <button className="btn btn-secondary" disabled={loading || busy} onClick={() => setActivated(true)}>Load my memories</button>
+            <button className="btn dashboard-cleanup-load" disabled={loading || busy} onClick={() => setActivated(true)}>Load my memories</button>
         </div>}
         {activated && <>
             <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
