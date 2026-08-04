@@ -1242,6 +1242,16 @@ pub struct ForgetResponse {
     pub owner: String,
 }
 
+/// GET /api/accounts/:owner/exists — does `owner` have a registered
+/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// Intentionally minimal: no `account_id`, since Console doesn't need the
+/// internal identifier and returning it would needlessly widen the API's
+/// surface for future churn.
+#[derive(Debug, Serialize)]
+pub struct AccountExistsResponse {
+    pub exists: bool,
+}
+
 /// POST /api/stats — count + stored bytes for a namespace.
 /// Used by the benchmark harness for verification. Mode-blind.
 #[derive(Debug, Deserialize)]

@@ -962,6 +962,131 @@ pub async fn sponsor_rate_limit_middleware(
 }
 
 // ============================================================
+// Accounts Rate Limit Middleware (IP-based, unauthenticated)
+// ============================================================
+
+/// Pre-authentication rate limiting middleware for the public
+/// `GET /api/accounts/:owner/exists` route.
+///
+/// This is the only route in `public_routes` that reaches the DB pool
+/// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
+/// are all static/no-DB. Enforces a per-IP sliding-window limit using the
+/// same Redis counters as the authenticated middleware, reusing the
+/// existing general request budget (`RateLimitConfig::max_requests_per_minute`
+/// / `max_requests_per_hour`) rather than adding a new config knob.
+///
+/// Redis errors return 503. A local fallback cannot provide consistent abuse
+/// protection across replicas, so — like `sponsor_rate_limit_middleware` —
+/// this path intentionally fails closed.
+pub async fn accounts_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    // XFF is ignored by default. Only walk back through the explicitly
+    // configured number of trusted proxy hops, using the same resolver as
+    // the sponsor and MCP proxy paths.
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
+            tracing::warn!("accounts_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:accounts:ip:min:{}", ip);
+    let hr_key = format!("rate:accounts:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.max_requests_per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.max_requests_per_minute
+            );
+            return rate_limit_response(
+                "accounts_ip_burst",
+                config.max_requests_per_minute,
+                "min",
+                60,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.max_requests_per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.max_requests_per_hour
+            );
+            return rate_limit_response(
+                "accounts_ip_sustained",
+                config.max_requests_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
+// ============================================================
 // Unit Tests
 // ============================================================
 

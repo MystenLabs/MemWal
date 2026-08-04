@@ -1133,6 +1133,17 @@ async fn main() {
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
+            "/api/accounts/{owner}/exists",
+            get(routes::account_exists)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                // Only route in `public_routes` that hits the DB pool — see
+                // `rate_limit::accounts_rate_limit_middleware` doc comment.
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::accounts_rate_limit_middleware,
+                )),
+        )
+        .route(
             "/metrics",
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )

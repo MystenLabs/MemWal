@@ -118,6 +118,50 @@ mod tests {
             "the cleanup must not delete an identical blob_id in another namespace"
         );
     }
+
+    // ── find_account_by_owner (backs GET /api/accounts/:owner/exists) ──
+    //
+    // `accounts` is populated by the v2-indexer from onchain
+    // `AccountCreated` events, not by this server. This test simulates
+    // that indexer write directly (a raw INSERT) rather than driving it
+    // through any server code path, since the indexer itself is a
+    // separate service/binary outside this crate.
+
+    #[tokio::test]
+    async fn find_account_by_owner_reflects_indexed_accounts_table() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xaccount-exists-owner-{suffix}");
+        let account_id = format!("account-{suffix}");
+
+        // No indexed row yet — an address that has never created a
+        // MemWalAccount (or whose AccountCreated event hasn't been
+        // indexed yet) must resolve to `None`.
+        assert_eq!(db.find_account_by_owner(&owner).await.unwrap(), None);
+
+        // Simulate the v2-indexer inserting a row after observing
+        // `AccountCreated` onchain.
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.find_account_by_owner(&owner).await.unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -728,7 +772,6 @@ impl VectorDb {
 
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
-    #[allow(dead_code)]
     pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
         let result: Option<(String,)> =
             sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")
