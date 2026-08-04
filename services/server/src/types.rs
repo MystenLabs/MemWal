@@ -132,6 +132,12 @@ pub struct AppState {
     /// once at startup. This client is intentionally independent of security
     /// deletion's quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
+    /// Short-TTL (`storage::sui::DELEGATE_KEYS_CACHE_TTL`, mirrors
+    /// `sui/client.rs`'s `Timed<WalrusEpoch>` window) in-memory cache of
+    /// each account's on-chain delegate-key list, keyed by account object
+    /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
+    /// the TTL window don't re-hit the chain (WALM-295).
+    pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,

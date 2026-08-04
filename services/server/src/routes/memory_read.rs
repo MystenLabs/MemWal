@@ -4,6 +4,7 @@
 
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
+use base64::Engine as _;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub struct NamespaceSummary {
 #[derive(Debug, Serialize)]
 pub struct NamespacesResponse {
     pub namespaces: Vec<NamespaceSummary>,
+    pub next_cursor: Option<String>,
     pub snapshot_version: u32,
 }
 
@@ -45,20 +47,91 @@ pub struct MemoriesResponse {
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+const DEFAULT_NAMESPACES_LIMIT: i64 = 100;
+const MAX_NAMESPACES_LIMIT: i64 = 500;
+
+/// Namespaces' rollup is one row per namespace (`GROUP BY namespace`) with no
+/// natural `id` column to tie-break on the way `memories`' `(updated_at, id)`
+/// pair does — so the keyset cursor here is the namespace text value itself.
+/// (`memories`' `MemoriesCursor` type isn't reused because it carries an
+/// `updated_at` field that has no meaning for a rolled-up row spanning many
+/// `updated_at` values.)
+fn encode_namespace_cursor(namespace: &str) -> String {
+    // Same URL_SAFE_NO_PAD rationale as `encode_cursor` above — this value is
+    // echoed back verbatim as `next_cursor` and used in a URL query string.
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(namespace.as_bytes())
+}
+
+fn decode_namespace_cursor(raw: &str) -> Result<String, AppError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| AppError::BadRequest("invalid cursor".to_string()))?;
+    String::from_utf8(bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
+}
+
+/// `updated_after`/`cursor` here is a **pagination continuation token**
+/// (the opaque `next_cursor` a previous page returned), not a standalone
+/// "only namespaces touched since this timestamp" filter — mirroring exactly
+/// how `memories`' `updated_after` behaves (see that endpoint's doc note:
+/// "must be the opaque next_cursor value ... not a raw timestamp"). The
+/// design spec's SQL sketch used `updated_after` as a row-level `WHERE
+/// updated_at > $cursor` filter ahead of the `GROUP BY`, which does not
+/// compose with real keyset pagination on `namespace` (there is no stable
+/// cursor to hand back between pages under that scheme once multiple
+/// namespaces share update times). Correct keyset pagination was prioritized
+/// as the primary fix; a genuine independent recency filter is not
+/// implemented in this pass — see the fix report for the tradeoff.
 pub(crate) async fn query_owner_namespaces(
     pool: &PgPool,
     owner: &str,
+    cursor: Option<String>,
+    limit: i64,
 ) -> Result<NamespacesResponse, AppError> {
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used
-         FROM vector_entries WHERE owner = $1 GROUP BY namespace ORDER BY namespace",
-    )
-    .bind(owner)
-    .fetch_all(pool)
-    .await
+    let limit = limit.clamp(1, MAX_NAMESPACES_LIMIT);
+    let cursor_namespace = cursor.as_deref().map(decode_namespace_cursor).transpose()?;
+
+    let rows: Vec<(String, i64, i64)> = if let Some(ref after) = cursor_namespace {
+        sqlx::query_as(
+            "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used
+             FROM vector_entries
+             WHERE owner = $1
+             GROUP BY namespace
+             HAVING namespace > $2
+             ORDER BY namespace
+             LIMIT $3",
+        )
+        .bind(owner)
+        .bind(after)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as(
+            "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used
+             FROM vector_entries
+             WHERE owner = $1
+             GROUP BY namespace
+             ORDER BY namespace
+             LIMIT $2",
+        )
+        .bind(owner)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await
+    }
     .map_err(|e| AppError::Internal(format!("Failed to query namespaces: {}", e)))?;
 
-    let namespaces = rows
+    let has_more = rows.len() as i64 > limit;
+    let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
+
+    let next_cursor = if has_more {
+        page.last()
+            .map(|(name, _, _)| encode_namespace_cursor(name))
+    } else {
+        None
+    };
+
+    let namespaces = page
         .into_iter()
         .map(|(name, memory_count, storage_used)| NamespaceSummary {
             id: name.clone(),
@@ -70,24 +143,29 @@ pub(crate) async fn query_owner_namespaces(
 
     Ok(NamespacesResponse {
         namespaces,
+        next_cursor,
         snapshot_version: SNAPSHOT_VERSION,
     })
 }
 
-/// GET /v1/owners/{owner}/namespaces
+/// GET /v1/owners/{owner}/namespaces?updated_after=<cursor>&limit=100
 pub async fn list_owner_namespaces(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
     Path(path_owner): Path<String>,
+    params: MemoriesQuery,
 ) -> Result<Json<NamespacesResponse>, AppError> {
     if auth.owner != path_owner {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
-    let result = query_owner_namespaces(state.db.pool(), &auth.owner).await?;
+    let limit = params.limit.unwrap_or(DEFAULT_NAMESPACES_LIMIT);
+    if limit < 1 {
+        return Err(AppError::BadRequest("limit must be positive".to_string()));
+    }
+    let result =
+        query_owner_namespaces(state.db.pool(), &auth.owner, params.updated_after, limit).await?;
     Ok(Json(result))
 }
-
-use base64::Engine as _;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct MemoriesCursor {
@@ -101,11 +179,14 @@ fn encode_cursor(updated_at: chrono::DateTime<chrono::Utc>, id: &str) -> String 
         id: id.to_string(),
     })
     .expect("cursor serializes");
-    base64::engine::general_purpose::STANDARD.encode(json)
+    // URL_SAFE_NO_PAD (not STANDARD): next_cursor is used verbatim in a URL
+    // query string per the contract doc. STANDARD emits `+`, `/`, `=`, which
+    // corrupt or require percent-encoding most clients won't apply.
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
 }
 
 fn decode_cursor(raw: &str) -> Result<MemoriesCursor, AppError> {
-    let bytes = base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw)
         .map_err(|_| AppError::BadRequest("invalid cursor".to_string()))?;
     serde_json::from_slice(&bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
@@ -243,7 +324,8 @@ pub async fn list_owner_memories(
     if limit < 1 {
         return Err(AppError::BadRequest("limit must be positive".to_string()));
     }
-    let result = query_owner_memories(state.db.pool(), &auth.owner, params.updated_after, limit).await?;
+    let result =
+        query_owner_memories(state.db.pool(), &auth.owner, params.updated_after, limit).await?;
     Ok(Json(result))
 }
 
@@ -268,7 +350,12 @@ pub async fn list_owner_agents(
     if auth.owner != path_owner {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
-    let keys = crate::storage::sui::list_delegate_keys_onchain(
+    // Short-TTL cached read (WALM-295 design spec: "Cached with the same
+    // short TTL pattern as walrus_epoch() ... rather than left uncached") —
+    // repeated /agents calls for the same account within the TTL window
+    // don't re-hit the chain.
+    let keys = crate::storage::sui::list_delegate_keys_cached(
+        &state.delegate_keys_cache,
         &state.http_client,
         &state.config.sui_rpc_url,
         &auth.account_id,
@@ -323,6 +410,59 @@ mod tests {
         pool
     }
 
+    /// `next_cursor` is used verbatim in a URL query string per the contract
+    /// doc (`?updated_after=<cursor>`) — it must never contain `+`, `/`, or
+    /// `=`, which `base64::engine::general_purpose::STANDARD` emits and most
+    /// clients won't percent-encode automatically. Search over ids/timestamps
+    /// until we find a byte sequence that STANDARD would have encoded with at
+    /// least one of those characters, then assert our actual `encode_cursor`
+    /// (URL_SAFE_NO_PAD) output round-trips through `decode_cursor` and is
+    /// clean of all three.
+    #[test]
+    fn encode_cursor_is_url_safe_and_round_trips() {
+        use base64::Engine as _;
+
+        let mut found_standard_unsafe_case = false;
+        for i in 0..500 {
+            let id = format!("memory-id-{i}-{}", uuid::Uuid::new_v4());
+            let updated_at =
+                chrono::DateTime::from_timestamp(1_700_000_000 + i, (i as u32) * 137).unwrap();
+
+            // Sanity check: prove this fixture would have been unsafe under
+            // the old STANDARD engine, so the test is actually exercising the
+            // bug, not just trivially passing on inputs that never collide.
+            let json = serde_json::to_vec(&MemoriesCursor {
+                updated_at,
+                id: id.clone(),
+            })
+            .expect("cursor serializes");
+            let standard_encoded = base64::engine::general_purpose::STANDARD.encode(&json);
+            if standard_encoded.contains('+')
+                || standard_encoded.contains('/')
+                || standard_encoded.contains('=')
+            {
+                found_standard_unsafe_case = true;
+            }
+
+            let encoded = encode_cursor(updated_at, &id);
+            assert!(
+                !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
+                "encoded cursor must be URL-safe with no padding, got: {}",
+                encoded
+            );
+
+            let decoded = decode_cursor(&encoded).expect("round-trips");
+            assert_eq!(decoded.id, id);
+            assert_eq!(decoded.updated_at, updated_at);
+        }
+
+        assert!(
+            found_standard_unsafe_case,
+            "fixture sweep never produced a STANDARD-unsafe cursor — test would not \
+             have caught the regression this fix addresses"
+        );
+    }
+
     #[tokio::test]
     async fn query_owner_namespaces_rolls_up_counts_and_bytes() {
         let pool = test_pool().await;
@@ -348,7 +488,9 @@ mod tests {
             .unwrap();
         }
 
-        let result = query_owner_namespaces(&pool, &owner).await.unwrap();
+        let result = query_owner_namespaces(&pool, &owner, None, 100)
+            .await
+            .unwrap();
         let mut sorted = result.namespaces;
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -359,6 +501,10 @@ mod tests {
         assert_eq!(sorted[1].name, "work");
         assert_eq!(sorted[1].memory_count, 2);
         assert_eq!(sorted[1].storage_used, 300);
+        assert!(
+            result.next_cursor.is_none(),
+            "single page must not paginate"
+        );
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
             .bind(&owner)
@@ -369,10 +515,71 @@ mod tests {
     #[tokio::test]
     async fn query_owner_namespaces_empty_for_unknown_owner() {
         let pool = test_pool().await;
-        let result = query_owner_namespaces(&pool, "0xnobody-here")
+        let result = query_owner_namespaces(&pool, "0xnobody-here", None, 100)
             .await
             .unwrap();
         assert!(result.namespaces.is_empty());
+        assert!(result.next_cursor.is_none());
+    }
+
+    /// Mirrors `query_owner_memories_paginates_by_updated_at_and_id`'s style:
+    /// seed multiple namespaces for one owner, paginate with a small limit
+    /// using the namespace-text keyset cursor, and assert the union of all
+    /// pages equals the full set exactly once (no gaps, no duplicates).
+    #[tokio::test]
+    async fn query_owner_namespaces_paginates_by_namespace_cursor() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        // 5 distinct namespaces, alphabetically: alpha, bravo, charlie, delta, echo.
+        for ns in ["alpha", "bravo", "charlie", "delta", "echo"] {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(format!("{}-{}", owner, ns))
+            .bind(&owner)
+            .bind(ns)
+            .bind(format!("blob-{}", ns))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut all_names: Vec<String> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = query_owner_namespaces(&pool, &owner, cursor.clone(), 2)
+                .await
+                .unwrap();
+            assert!(page.namespaces.len() <= 2);
+            all_names.extend(page.namespaces.iter().map(|n| n.name.clone()));
+            cursor = page.next_cursor.clone();
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let mut sorted = all_names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted,
+            vec!["alpha", "bravo", "charlie", "delta", "echo"],
+            "pagination must not skip or duplicate namespaces, got {:?}",
+            all_names
+        );
+        // Also verify ordering was preserved across page boundaries (not
+        // just that the union matched — a shuffled union would still pass
+        // the assertion above).
+        assert_eq!(all_names, sorted);
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
     }
 
     #[tokio::test]
@@ -421,7 +628,11 @@ mod tests {
             .collect();
         all_ids.sort();
         all_ids.dedup();
-        assert_eq!(all_ids.len(), 5, "pagination must not skip or duplicate rows");
+        assert_eq!(
+            all_ids.len(),
+            5,
+            "pagination must not skip or duplicate rows"
+        );
 
         assert_eq!(page1.memories[0].agent_id.as_deref(), Some("agent-0"));
         assert_eq!(page1.memories[0].status, "active");

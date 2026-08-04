@@ -723,6 +723,7 @@ async fn main() {
         config: Arc::clone(&config),
         http_client,
         sui_grpc_client,
+        delegate_keys_cache: crate::storage::sui::new_delegate_keys_cache(),
         key_pool,
         alerts,
         engine,

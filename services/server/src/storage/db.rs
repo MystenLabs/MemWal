@@ -164,6 +164,81 @@ mod tests {
             .execute(db.pool())
             .await;
     }
+
+    /// Reproduces an Apalis retry re-entering `insert_vector` with the same
+    /// primary key (`jobs.rs` sets `vector_id = remember_job_id`): the second
+    /// call takes the `ON CONFLICT (id) DO UPDATE` branch. Console's
+    /// `updated_after` incremental sync depends on `updated_at` actually
+    /// advancing on that branch, not just the insert succeeding.
+    #[tokio::test]
+    async fn insert_vector_bumps_updated_at_on_conflict() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-conflict-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner-conflict",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let first_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        // Force a measurable time gap so a naive "insert succeeded" assertion
+        // couldn't accidentally pass — the row must actually move forward.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Simulate the Apalis retry: same id, same conflict branch.
+        db.insert_vector(
+            &id,
+            "0xtest-owner-conflict",
+            "test-ns",
+            "blob-1-retried",
+            &[0.2_f32; 1536],
+            43,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let second_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        assert!(
+            second_updated_at > first_updated_at,
+            "updated_at must advance on ON CONFLICT DO UPDATE (first={:?}, second={:?})",
+            first_updated_at,
+            second_updated_at
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -325,7 +400,8 @@ impl VectorDb {
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
                 importance = EXCLUDED.importance,
                 agent_id = EXCLUDED.agent_id,
-                package_id = EXCLUDED.package_id",
+                package_id = EXCLUDED.package_id,
+                updated_at = NOW()",
         )
         .bind(id)
         .bind(owner)
@@ -384,7 +460,8 @@ impl VectorDb {
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
                 plaintext = EXCLUDED.plaintext,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                updated_at = NOW()",
         )
         .bind(id)
         .bind(owner)

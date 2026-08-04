@@ -157,11 +157,84 @@ pub async fn verify_delegate_key_onchain(
     )))
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DelegateKeyInfo {
     pub sui_address: String,
     pub label: String,
     pub created_at: u64,
+}
+
+// ============================================================
+// Delegate keys — short-TTL in-memory cache (WALM-295 `/agents`)
+// ============================================================
+//
+// Mirrors `sui/client.rs`'s `Timed<WalrusEpoch>` pattern used by
+// `walrus_epoch()` — a value + fetch timestamp, refreshed once stale —
+// per the design spec: "Cached with the same short TTL pattern as
+// walrus_epoch() ... rather than left uncached". This is deliberately
+// NOT the DB-backed `delegate_key_cache` table (`storage/db.rs`): that
+// table caches a single verified public-key -> account mapping on the
+// hot per-request auth path; this caches the full delegate-key *list*
+// per account for a page-load-triggered read (`GET /v1/owners/{owner}/agents`),
+// which has no existing cache at all today.
+
+/// Same window `walrus_epoch()` uses (`sui/client.rs::walrus_epoch`, 30s).
+pub const DELEGATE_KEYS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone)]
+pub struct TimedDelegateKeys {
+    pub value: Vec<DelegateKeyInfo>,
+    pub fetched_at: std::time::Instant,
+}
+
+/// Keyed by `account_object_id` so different accounts' delegate lists don't
+/// collide. `AppState` owns one `Arc` of this (see `types.rs`), shared across
+/// all `/agents` requests the same way `SuiClient`'s `Timed` caches are
+/// shared via its own `Arc<RwLock<..>>` fields.
+pub type DelegateKeysCache =
+    std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, TimedDelegateKeys>>>;
+
+pub fn new_delegate_keys_cache() -> DelegateKeysCache {
+    std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Cached wrapper around `list_delegate_keys_onchain`: returns the cached
+/// list if it was fetched within `DELEGATE_KEYS_CACHE_TTL`, otherwise fetches
+/// live and refreshes the cache. Keeps repeated `/agents` calls for the same
+/// account within the TTL window from re-hitting the chain.
+pub async fn list_delegate_keys_cached(
+    cache: &DelegateKeysCache,
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    if let Some(cached) = cache
+        .read()
+        .await
+        .get(account_object_id)
+        .filter(|c| c.fetched_at.elapsed() < DELEGATE_KEYS_CACHE_TTL)
+    {
+        return Ok(cached.value.clone());
+    }
+
+    let keys = list_delegate_keys_onchain(
+        http_client,
+        rpc_url,
+        account_object_id,
+        expected_type_origin_package_id,
+    )
+    .await?;
+
+    cache.write().await.insert(
+        account_object_id.to_string(),
+        TimedDelegateKeys {
+            value: keys.clone(),
+            fetched_at: std::time::Instant::now(),
+        },
+    );
+
+    Ok(keys)
 }
 
 /// Parse the `delegate_keys` array out of a MemWalAccount's `fields` map.
@@ -228,10 +301,26 @@ pub async fn list_delegate_keys_onchain(
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .json(&body);
     let request = crate::observability::apply_request_id_header(request);
-    let response = request
-        .send()
-        .await
-        .map_err(|e| OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e)))?;
+    // Mirror verify_delegate_key_onchain's instrumentation exactly so this
+    // call is visible in the same `sui_rpc` external-call metrics (final
+    // review, WALM-295 Fix 4) instead of being an invisible RPC cost.
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+    })?;
+    let status_label = response.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject",
+        &status_label,
+        started.elapsed(),
+    );
 
     let rpc_response: RpcResponse = parse_json_rpc_response(response, "sui_getObject").await?;
     if let Some(error) = rpc_response.error {
@@ -1211,6 +1300,101 @@ mod tests {
         assert_eq!(parsed[0].sui_address, "0xdelegate1");
         assert_eq!(parsed[0].created_at, 1700000000000);
         assert_eq!(parsed[1].label, "mobile");
+    }
+
+    // ── list_delegate_keys_cached (WALM-295 Fix 4 — short-TTL cache) ────
+    //
+    // No mock-HTTP crate exists in this codebase's dependency tree, so these
+    // tests prove the cache-hit / TTL-expiry branches without a live chain
+    // call: they point at an unreachable RPC URL and rely on the fact that a
+    // cache HIT returns before ever attempting the HTTP request (so it
+    // succeeds despite the bad URL), while a cache MISS/expiry falls through
+    // to the real request path (so it fails against the bad URL). This
+    // exercises the exact branch the fix depends on.
+
+    fn unreachable_rpc_url() -> &'static str {
+        // Port 1 is a reserved/unassigned TCP port — connection is refused
+        // immediately rather than hanging, so the test stays fast.
+        "http://127.0.0.1:1/"
+    }
+
+    fn sample_delegate_keys() -> Vec<DelegateKeyInfo> {
+        vec![DelegateKeyInfo {
+            sui_address: "0xdelegate1".to_string(),
+            label: "cli".to_string(),
+            created_at: 1_700_000_000,
+        }]
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_returns_cached_value_within_ttl() {
+        let cache = new_delegate_keys_cache();
+        let account_id = "0xaccount-fresh";
+        cache.write().await.insert(
+            account_id.to_string(),
+            TimedDelegateKeys {
+                value: sample_delegate_keys(),
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+
+        let client = reqwest::Client::new();
+        let result =
+            list_delegate_keys_cached(&cache, &client, unreachable_rpc_url(), account_id, "0xpkg")
+                .await;
+
+        assert!(
+            result.is_ok(),
+            "a fresh cache entry must be served without attempting the RPC call, got {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), sample_delegate_keys());
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_refetches_after_ttl_expiry() {
+        let cache = new_delegate_keys_cache();
+        let account_id = "0xaccount-stale";
+        cache.write().await.insert(
+            account_id.to_string(),
+            TimedDelegateKeys {
+                value: sample_delegate_keys(),
+                fetched_at: std::time::Instant::now()
+                    - DELEGATE_KEYS_CACHE_TTL
+                    - std::time::Duration::from_secs(1),
+            },
+        );
+
+        let client = reqwest::Client::new();
+        let result =
+            list_delegate_keys_cached(&cache, &client, unreachable_rpc_url(), account_id, "0xpkg")
+                .await;
+
+        assert!(
+            result.is_err(),
+            "an expired cache entry must trigger a real re-fetch attempt, which should fail \
+             against the unreachable RPC URL used in this test — got Ok, meaning the stale \
+             entry was served instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_misses_for_unknown_account() {
+        let cache = new_delegate_keys_cache();
+        let client = reqwest::Client::new();
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            "0xnever-cached",
+            "0xpkg",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "no cache entry exists yet, so this must attempt (and fail) the real RPC call"
+        );
     }
 
     #[test]

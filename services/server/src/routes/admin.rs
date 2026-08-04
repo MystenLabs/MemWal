@@ -472,7 +472,12 @@ pub async fn restore(
     let blob_provenance: std::collections::HashMap<String, (Option<String>, String)> =
         on_chain_blobs
             .iter()
-            .map(|b| (b.blob_id.clone(), (b.agent_id.clone(), b.package_id.clone())))
+            .map(|b| {
+                (
+                    b.blob_id.clone(),
+                    (b.agent_id.clone(), b.package_id.clone()),
+                )
+            })
             .collect();
 
     if total == 0 {
