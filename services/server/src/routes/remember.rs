@@ -1129,6 +1129,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            restore_requests_per_owner_per_minute: 10,
         }
     }
 

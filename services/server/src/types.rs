@@ -342,6 +342,12 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299
+    /// bounded-processing fix). Dedicated on top of the generic weighted
+    /// account rate limiter — bounds how often an attacker can force a
+    /// fresh first-time-discovery cost by repeatedly transferring junk
+    /// blob_ids into a victim's wallet. `0` disables the guard.
+    pub restore_requests_per_owner_per_minute: u64,
 }
 
 impl Config {
@@ -474,6 +480,10 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            restore_requests_per_owner_per_minute: env_positive_u64(
+                "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
+                10,
+            ),
         }
     }
 }
@@ -1597,6 +1607,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            restore_requests_per_owner_per_minute: 10,
         }
     }
 

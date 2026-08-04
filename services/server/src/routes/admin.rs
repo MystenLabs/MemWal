@@ -430,7 +430,20 @@ pub async fn restore(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit;
+
+    // GH #501 / WALM-299: owner-scoped call-frequency guard, applied before
+    // any Walrus/SEAL work so a caller that's already hammering restore()
+    // fails cheaply. See `rate_limit::check_restore_call_rate_limit` for why
+    // this is on top of the generic account rate limiter.
+    crate::rate_limit::check_restore_call_rate_limit(&state, owner).await?;
+
+    // GH #501 / WALM-299: cap `limit` the same way `/api/ask` caps its
+    // `limit` (`body.limit.unwrap_or(5).min(100)`) — without this, a
+    // misbehaving or malicious caller could request an unbounded number of
+    // blobs to download + SEAL-decrypt in a single call. The sidecar's own
+    // gRPC discovery cap (~100 items) is an incidental backstop, not a
+    // deliberate one, so this clamp is the real ceiling.
+    let limit = body.limit.min(100);
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // Prefer the client-built SessionKey; fall back to legacy
@@ -476,25 +489,39 @@ pub async fn restore(
         }));
     }
 
-    // Step 2: Check which blobs already exist in local DB → only restore missing ones
+    // Step 2: Check which blobs already exist in local DB → only restore missing ones.
+    // Also exclude blob_ids that have permanently failed to restore before
+    // (GH #501 / WALM-299 negative cache — see `db.record_restore_failure`).
+    // A foreign/attacker blob that already failed SEAL decrypt or UTF-8
+    // validation for this owner+namespace is never re-downloaded and
+    // re-decrypt-attempted on a later call; it's already correctly reported
+    // as "skipped", same as any other missing-but-excluded blob.
     let existing_blob_ids = state.db.get_blobs_by_namespace(owner, namespace).await?;
-    let existing_set: std::collections::HashSet<&str> =
-        existing_blob_ids.iter().map(|s| s.as_str()).collect();
+    let failed_blob_ids = state.db.get_failed_blob_ids(owner, namespace).await?;
+    let existing_set: std::collections::HashSet<&str> = existing_blob_ids
+        .iter()
+        .map(|s| s.as_str())
+        .chain(failed_blob_ids.iter().map(|s| s.as_str()))
+        .collect();
     let all_missing: Vec<String> = all_blob_ids
         .iter()
         .filter(|id| !existing_set.contains(id.as_str()))
         .cloned()
         .collect();
-    // Apply limit — query-blobs returns newest-first for restore's recent
-    // transaction path, so keep the first N missing blobs. If fewer than N
+    // Apply limit — query-blobs' on-chain ordering is unspecified (the
+    // gRPC `listOwnedObjects` path replaced the old, genuinely newest-first
+    // `queryTransactionBlocks` scan; see walrus-query.ts's own doc-comment).
+    // This cap exists purely to bound how many blobs a single call can
+    // download + decrypt, not to prioritize recency. If fewer than N
     // candidates match after namespace/package filtering, restore returns a
     // partial result instead of scanning the whole wallet.
     let missing_blob_ids: Vec<String> = all_missing.into_iter().take(limit).collect();
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
-        "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",
+        "restore: total={} on-chain, existing={}, negative-cached={}, missing={} (limited to {}) for ns={}",
         total,
         existing_blob_ids.len(),
+        failed_blob_ids.len(),
         missing_blob_ids.len(),
         limit,
         namespace
@@ -597,6 +624,8 @@ pub async fn restore(
             let policy_package_id = state.config.seal_policy_package_id.clone();
             let registry_id = state.config.registry_id.clone();
             let account_id = auth.account_id.clone();
+            let owner = owner.clone();
+            let namespace = namespace.clone();
             async move {
                 match seal::seal_decrypt(
                     http_client,
@@ -615,11 +644,47 @@ pub async fn restore(
                         Ok(text) => Some((blob_id, text)),
                         Err(e) => {
                             tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
+                            // Decrypt already succeeded here, so invalid UTF-8
+                            // is inherently deterministic for this blob — always
+                            // safe to negative-cache (GH #501 / WALM-299).
+                            if let Err(db_err) = db
+                                .record_restore_failure(&owner, &namespace, &blob_id, "invalid_utf8")
+                                .await
+                            {
+                                tracing::warn!(
+                                    "restore: failed to record invalid-UTF-8 negative cache for {}: {}",
+                                    blob_id,
+                                    db_err
+                                );
+                            }
                             None
                         }
                     },
                     Err(e) => {
                         tracing::warn!("restore: decrypt failed for {}: {}", blob_id, e);
+                        // Only negative-cache *permanent* decrypt failures
+                        // (wrong key/policy — will never succeed for this
+                        // owner). Transient failures (SEAL timeout, 429/503,
+                        // rate limit) must keep being retried; caching those
+                        // could permanently and wrongly blacklist a
+                        // legitimate blob during an infra blip.
+                        if seal::DecryptOutcome::permanent_from_error(&e.to_string()) {
+                            if let Err(db_err) = db
+                                .record_restore_failure(
+                                    &owner,
+                                    &namespace,
+                                    &blob_id,
+                                    "decrypt_permanent",
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "restore: failed to record decrypt-permanent negative cache for {}: {}",
+                                    blob_id,
+                                    db_err
+                                );
+                            }
+                        }
                         None
                     }
                 }
@@ -764,6 +829,34 @@ mod tests {
             assert_eq!(
                 clamped, expected,
                 "ask limit clamp: input={:?} expected={} got={}",
+                input, expected, clamped
+            );
+        }
+    }
+
+    // ── /api/restore body.limit cap (GH #501 / WALM-299) ────────────────
+    //
+    // `RestoreRequest.limit` (plain `usize`, serde default 10 — unlike
+    // `/api/ask`'s `Option<usize>`) previously had no upper bound in
+    // `restore()`. Mirrors `ask_limit_caps_at_one_hundred` against the
+    // production expression `body.limit.min(100)`.
+
+    #[test]
+    fn restore_limit_caps_at_one_hundred() {
+        // Mirror the production expression: body.limit.min(100)
+        for (input, expected) in [
+            (10, 10),   // serde default, unclamped
+            (0, 0),     // pass-through (caller intent)
+            (50, 50),   // under cap
+            (100, 100), // at cap
+            (101, 100), // over cap → clamped
+            (10_000, 100),
+            (usize::MAX, 100),
+        ] {
+            let clamped = input.min(100);
+            assert_eq!(
+                clamped, expected,
+                "restore limit clamp: input={} expected={} got={}",
                 input, expected, clamped
             );
         }

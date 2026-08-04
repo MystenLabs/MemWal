@@ -303,7 +303,17 @@ pub enum DecryptOutcome {
 }
 
 impl DecryptOutcome {
-    fn permanent_from_error(err: &str) -> bool {
+    /// Classifies a SEAL decrypt error string as permanent (deterministic —
+    /// wrong key/policy, will never succeed for this owner) vs transient
+    /// (timeout/429/503/rate-limit — must be retried, never cached as bad).
+    ///
+    /// `pub(crate)` so `routes::admin::restore()` can reuse it to decide
+    /// whether a foreign/attacker blob's decrypt failure is safe to record
+    /// in the `restore_failed_blobs` negative cache (GH #501 / WALM-299) —
+    /// a permanent failure never gets discovered-and-decrypted again for
+    /// this owner, while a transient one must keep being retried so an
+    /// infra blip can never permanently blacklist a legitimate blob.
+    pub(crate) fn permanent_from_error(err: &str) -> bool {
         let lower = err.to_ascii_lowercase();
         if lower.contains("timeout")
             || lower.contains("fetch_keys failed")
