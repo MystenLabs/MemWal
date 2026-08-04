@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import nacl.signing
 import respx
 
+from memwal.client import MemWal
 from memwal.middleware import (
     _find_last_user_message,
     _format_memories,
@@ -586,6 +587,41 @@ class TestWithMemWalOpenAI:
 
         await asyncio.sleep(0.05)
         assert analyze_route.called
+
+    @respx.mock
+    async def test_memwal_flush_awaits_pending_autosave(self) -> None:
+        """memwal_flush() deterministically waits for the fire-and-forget
+        analyze() call, instead of the caller having to guess a sleep
+        duration and hope the background task finished in time."""
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+
+        respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+
+        gate = asyncio.Event()
+        completed = {"value": False}
+
+        async def gated_analyze(self, *args, **kwargs):
+            await gate.wait()
+            completed["value"] = True
+
+        with patch.object(MemWal, "analyze", gated_analyze):
+            smart = with_memwal_openai(
+                client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
+            )
+            await smart.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "remember this"}],
+            )
+
+            # Fire-and-forget: the response came back, but the gated
+            # analyze() call has not completed yet.
+            assert completed["value"] is False
+
+            gate.set()
+            await smart.memwal_flush()
+
+            assert completed["value"] is True
 
     @respx.mock
     async def test_min_relevance_filter(self) -> None:

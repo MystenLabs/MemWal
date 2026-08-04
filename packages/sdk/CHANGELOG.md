@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal
 
+## Unreleased
+
+### Fixed
+
+- `withMemWal`'s auto-save was fire-and-forget with no way to know when it finished — a short-lived process (CLI script, serverless handler) calling `process.exit()` could lose an in-flight save silently. The returned model now exposes `await model.flush()`, which waits for any outstanding auto-save writes before the caller exits. (GH #359, WALM-306)
+
 ## 0.1.0
 
 ### Added
