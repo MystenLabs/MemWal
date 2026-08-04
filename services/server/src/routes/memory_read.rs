@@ -204,12 +204,37 @@ pub struct MemoriesQuery {
     pub limit: Option<i64>,
 }
 
+// A plain `axum::extract::Query<MemoriesQuery>` param would reject an
+// unparseable `limit` (e.g. `limit=abc`) with Axum's own default
+// QueryRejection — a plain-text 400, not this API's `{"error": ...}`
+// JSON envelope, and invisible to `record_app_error` metrics. The
+// codebase already has a precedent for exactly this problem
+// (`SdQuery<T>` in `services/server/src/security_delete_error.rs`,
+// mapping `QueryRejection` to that module's own error type) — this
+// mirrors the same idea, mapped to `AppError` instead.
+impl<S> axum::extract::FromRequestParts<S> for MemoriesQuery
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        axum::extract::Query::<MemoriesQuery>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Query(q)| q)
+            .map_err(|_| AppError::BadRequest("invalid query parameters".to_string()))
+    }
+}
+
 /// GET /v1/owners/{owner}/memories?updated_after=<cursor>&limit=100
 pub async fn list_owner_memories(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,
     Path(path_owner): Path<String>,
-    axum::extract::Query(params): axum::extract::Query<MemoriesQuery>,
+    params: MemoriesQuery,
 ) -> Result<Json<MemoriesResponse>, AppError> {
     if auth.owner != path_owner {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
@@ -356,6 +381,67 @@ mod tests {
 
         assert_eq!(page1.memories[0].agent_id.as_deref(), Some("agent-0"));
         assert_eq!(page1.memories[0].status, "active");
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn query_owner_memories_handles_updated_at_tie_via_id_tiebreak() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, 'default', $3, $4, $5)",
+            )
+            .bind(format!("{}-t{}", owner, i))
+            .bind(&owner)
+            .bind(format!("blob-t{}", i))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Force all 3 rows to the exact same updated_at — a real tie,
+        // not just three inserts close in time.
+        let tied_at = chrono::Utc::now();
+        sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE owner = $2")
+            .bind(tied_at)
+            .bind(&owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        for _ in 0..5 {
+            let page = query_owner_memories(&pool, &owner, cursor.clone(), 1)
+                .await
+                .unwrap();
+            if page.memories.is_empty() {
+                break;
+            }
+            seen.push(page.memories[0].memory_id.clone());
+            cursor = page.next_cursor.clone();
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            3,
+            "all 3 tied rows must appear exactly once across pages, got {:?}",
+            seen
+        );
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
             .bind(&owner)
