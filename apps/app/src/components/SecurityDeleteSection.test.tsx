@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ address: '0x1', securityDeleteEnabled: true, phase: { kind: 'idle' } as { kind: string; batch?: number; totalBatches?: number | null }, listBlobs: vi.fn(), deleteSelection: vi.fn(), deleteAll: vi.fn(), cancelActive: vi.fn(), fetchPreview: vi.fn(), clearSealSession: vi.fn() }))
+const mocks = vi.hoisted(() => ({ address: '0x1', securityDeleteEnabled: true, phase: { kind: 'idle' } as { kind: string; batch?: number; totalBatches?: number | null }, onStateChanged: () => {}, listBlobs: vi.fn(), deleteSelection: vi.fn(), deleteAll: vi.fn(), cancelActive: vi.fn(), fetchPreview: vi.fn(), clearSealSession: vi.fn() }))
 vi.mock('../config', () => ({ config: {
     get securityDeleteEnabled() { return mocks.securityDeleteEnabled },
     memwalServerUrl: 'http://test',
@@ -15,9 +15,10 @@ vi.mock('@mysten/dapp-kit', () => ({
     useSuiClient: () => ({}),
     useSignPersonalMessage: () => ({ mutateAsync: vi.fn() }),
 }))
-vi.mock('../hooks/useSecurityDeletion', () => ({ useSecurityDeletion: () => ({
-    phase: mocks.phase, deleteSelection: mocks.deleteSelection, deleteAll: mocks.deleteAll, cancelActive: mocks.cancelActive,
-}) }))
+vi.mock('../hooks/useSecurityDeletion', () => ({ useSecurityDeletion: ({ onStateChanged }: { onStateChanged: () => void }) => {
+    mocks.onStateChanged = onStateChanged
+    return { phase: mocks.phase, deleteSelection: mocks.deleteSelection, deleteAll: mocks.deleteAll, cancelActive: mocks.cancelActive }
+} }))
 vi.mock('../utils/securityDeleteAuth', () => ({
     withAuth: (_address: string, _sign: unknown, call: (token: string) => unknown) => call('token'),
     clearToken: vi.fn(),
@@ -71,6 +72,61 @@ it('loads the read-only progress state set after tab switch', async () => {
     expect(storedTab).toHaveAttribute('aria-selected', 'false')
     expect(deletedTab).toHaveAttribute('aria-selected', 'true')
     await waitFor(() => expect(mocks.listBlobs).toHaveBeenLastCalledWith('token', expect.objectContaining({ state: 'deleting,deleted,deleted_external,not_owner,expired' })))
+})
+
+it('keeps the activated list when the account object resolves for the same owner', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<SecurityDeleteSection accountObjectId={null} />)
+    await loadMemories(user)
+    await screen.findByTitle('blob-one-long-identifier')
+
+    rerender(<SecurityDeleteSection accountObjectId="0x99" />)
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
+    expect(screen.getByTitle('blob-one-long-identifier')).toBeInTheDocument()
+    expect(mocks.listBlobs).toHaveBeenCalledOnce()
+})
+
+it('ignores a stale deletion refresh after the wallet changes', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
+    await screen.findByTitle('blob-one-long-identifier')
+    const staleRefresh = mocks.onStateChanged
+
+    mocks.address = '0x2'
+    rerender(<SecurityDeleteSection accountObjectId="0x99" />)
+    staleRefresh()
+
+    expect(screen.getByRole('button', { name: 'Load my memories' })).toBeInTheDocument()
+    expect(mocks.listBlobs).toHaveBeenCalledOnce()
+})
+
+it('ignores a stale deletion refresh after switching tabs', async () => {
+    const user = userEvent.setup()
+    render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
+    await screen.findByTitle('blob-one-long-identifier')
+    const staleRefresh = mocks.onStateChanged
+
+    await user.click(screen.getByRole('tab', { name: 'Deleted' }))
+    await waitFor(() => expect(mocks.listBlobs).toHaveBeenCalledTimes(2))
+    staleRefresh()
+
+    expect(mocks.listBlobs).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('tab', { name: 'Deleted' })).toHaveAttribute('aria-selected', 'true')
+})
+
+it('prevents tab changes while deletion is in progress', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<SecurityDeleteSection accountObjectId="0x99" />)
+    await loadMemories(user)
+    await screen.findByTitle('blob-one-long-identifier')
+
+    mocks.phase = { kind: 'executing', batch: 1 }
+    rerender(<SecurityDeleteSection accountObjectId="0x99" />)
+
+    expect(screen.getByRole('tab', { name: 'Stored' })).toBeDisabled()
+    expect(screen.getByRole('tab', { name: 'Deleted' })).toBeDisabled()
 })
 
 it('passes the exact selected IDs after confirmation', async () => {

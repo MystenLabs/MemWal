@@ -60,7 +60,9 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     const nextToastId = useRef(0)
     const requestGeneration = useRef(0)
     const previousAddress = useRef(address)
-    const previousIdentity = useRef(`${address}:${accountObjectId ?? ''}`)
+    const previousAccountObjectId = useRef(accountObjectId)
+    const refreshContext = useRef({ address, tab, activated })
+    refreshContext.current = { address, tab, activated }
     const previewTrigger = useRef<HTMLElement | null>(null)
     const confirmTrigger = useRef<HTMLElement | null>(null)
 
@@ -122,21 +124,29 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         }
     }, [address, signer, tab])
 
-    const refresh = useCallback(() => { void load(pageRef.current) }, [load])
+    const refresh = useCallback(() => {
+        const current = refreshContext.current
+        // Deletion callbacks can outlive the wallet or tab that started them.
+        // Never let a stale callback trigger auth or overwrite another view.
+        if (!current.activated || current.address !== address || current.tab !== tab) return
+        void load(pageRef.current)
+    }, [address, load, tab])
     const deletion = useSecurityDeletion({ onStateChanged: refresh })
 
     useEffect(() => {
-        const identity = `${address}:${accountObjectId ?? ''}`
-        if (previousIdentity.current === identity) return
         const addressChanged = previousAddress.current !== address
-        previousIdentity.current = identity
+        const accountObjectChanged = previousAccountObjectId.current !== accountObjectId
+        if (!addressChanged && !accountObjectChanged) return
         if (previousAddress.current && addressChanged) clearToken(previousAddress.current)
         previousAddress.current = address
+        previousAccountObjectId.current = accountObjectId
+        setPreview(null)
+        clearSealSession()
+        if (!addressChanged) return
         requestGeneration.current++
         setActivated(false)
-        setItems([]); setSelected(new Set()); setConfirm(null); setPreview(null); setError(''); setLoading(false)
+        setItems([]); setSelected(new Set()); setConfirm(null); setError(''); setLoading(false)
         pageCursors.current = [null]; pageRef.current = 1; setPage(1)
-        clearSealSession()
     }, [address, accountObjectId])
     useEffect(() => {
         if (activated) void load(1)
@@ -166,13 +176,14 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     // Effects clear owner-scoped state after a wallet/account transition, but
     // effects run after paint. Suppress it synchronously during that transition
     // so rows, selections, dialogs, and plaintext never flash for the new owner.
-    const identityMatches = previousIdentity.current === `${address}:${accountObjectId ?? ''}`
+    const identityMatches = previousAddress.current === address
+    const previewIdentityMatches = identityMatches && previousAccountObjectId.current === accountObjectId
     const visibleItems = identityMatches ? items : []
     const visibleCounts = identityMatches ? counts : EMPTY_COUNTS
     const visibleSelected = identityMatches ? selected : new Set<string>()
     const visiblePage = identityMatches ? page : 1
     const visibleConfirm = identityMatches ? confirm : null
-    const visiblePreview = identityMatches ? preview : null
+    const visiblePreview = previewIdentityMatches ? preview : null
     const riskPageIds = visibleItems.filter(item => item.state === 'deletable').map(item => item.blobId)
     const allPageSelected = riskPageIds.length > 0 && riskPageIds.every(id => visibleSelected.has(id))
     const busy = ['preparing', 'signing', 'executing'].includes(deletion.phase.kind)
@@ -227,8 +238,8 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
         {activated && <>
             <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
             <div className="sd-tabs" role="tablist">
-                <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} onClick={() => selectTab('risk')}>Stored</button>
-                <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} onClick={() => selectTab('progress')}>Deleted</button>
+                <button role="tab" aria-selected={tab === 'risk'} aria-controls="sd-tab-panel" className={`btn ${tab === 'risk' ? 'btn-secondary' : ''}`} disabled={busy} onClick={() => selectTab('risk')}>Stored</button>
+                <button role="tab" aria-selected={tab === 'progress'} aria-controls="sd-tab-panel" className={`btn ${tab === 'progress' ? 'btn-secondary' : ''}`} disabled={busy} onClick={() => selectTab('progress')}>Deleted</button>
             </div>
         </>}
         {error && <div className="dashboard-cleanup-error" role="alert">{error}</div>}
