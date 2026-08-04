@@ -29,6 +29,7 @@ export type {
 // Types
 export type {
   AuthState,
+  SafeUser,
   LoginResult,
   LoginButtonProps,
   UserMenuProps,

@@ -8,9 +8,11 @@ import {
   TooltipTrigger,
 } from "@/shared/components/ui/tooltip";
 import { cn } from "@/shared/lib/utils";
-import { Copy, LogOut, Minus, Check, Shield, KeyRound, Eye, EyeOff, ExternalLink } from "lucide-react";
+import { trpc } from "@/shared/lib/trpc/client";
+import { useSignPersonalMessage } from "@mysten/dapp-kit";
+import { Copy, LogOut, Minus, Check, Shield, KeyRound, Eye, EyeOff, ExternalLink, Loader2 } from "lucide-react";
 import Image from "next/image";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 interface UserFloatPanelProps {
   className: string;
@@ -46,12 +48,60 @@ function truncateAddress(addr: string): string {
 export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const { user, suiAddress, logout } = useAuth();
   const [showKey, setShowKey] = useState(false);
+  const [delegateKey, setDelegateKey] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState("");
+
+  const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
+  const { mutateAsync: issueChallenge } =
+    trpc.auth.issueEnokiChallenge.useMutation();
+  const exportKeyMutation = trpc.auth.exportDelegateKey.useMutation();
 
   const handleLogout = async () => {
     await logout();
     onClose();
     window.location.href = "/";
   };
+
+  /**
+   * Fetch the delegate private key on explicit user action. Requires a fresh
+   * ownership challenge signed for the user's own address; the key is never
+   * part of the session DTO and is only revealed through this guarded path.
+   */
+  const handleRevealKey = useCallback(async () => {
+    // Already fetched — just toggle visibility.
+    if (delegateKey) {
+      setShowKey((v) => !v);
+      return;
+    }
+    if (!suiAddress) return;
+
+    setKeyError("");
+    try {
+      const { challengeId, message } = await issueChallenge({
+        suiAddress,
+      });
+      const { signature } = await signPersonalMessage({
+        message: new TextEncoder().encode(message),
+      });
+      const result = await exportKeyMutation.mutateAsync({
+        suiAddress,
+        challengeId,
+        signature,
+      });
+      setDelegateKey(result.delegatePrivateKey);
+      setShowKey(true);
+    } catch (err) {
+      setKeyError(
+        err instanceof Error ? err.message : "Unable to reveal key.",
+      );
+    }
+  }, [
+    delegateKey,
+    suiAddress,
+    issueChallenge,
+    signPersonalMessage,
+    exportKeyMutation,
+  ]);
 
   const authMethod = user?.authMethod === "enoki" ? "Google" : user?.authMethod === "wallet" ? "Wallet" : "Key";
 
@@ -149,32 +199,39 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
               )}
             </div>
 
-            {/* Delegate Key Export */}
-            {user.delegatePrivateKey && (
+            {/* Delegate Key Export — fetched on demand via a guarded, ownership-verified path */}
+            {user.delegateAccountId && (
               <div className="space-y-1">
                 <div className="flex items-center gap-1 px-1 py-0.5">
                   <KeyRound className="size-3 text-muted-foreground" />
                   <span className="text-xs font-medium">Delegate Key</span>
                 </div>
 
-                {showKey && (
+                {showKey && delegateKey && (
                   <div className="bg-secondary p-2">
                     <code className="text-[10px] break-all leading-relaxed block font-mono">
-                      {user.delegatePrivateKey}
+                      {delegateKey}
                     </code>
                     <div className="flex justify-end mt-1">
-                      <CopyButton value={user.delegatePrivateKey} label="key" />
+                      <CopyButton value={delegateKey} label="key" />
                     </div>
                   </div>
+                )}
+
+                {keyError && (
+                  <p className="text-[10px] text-destructive px-1">{keyError}</p>
                 )}
 
                 <Button
                   variant="secondary"
                   size="sm"
                   className="w-full"
-                  onClick={() => setShowKey(!showKey)}
+                  disabled={exportKeyMutation.isPending}
+                  onClick={handleRevealKey}
                 >
-                  {showKey ? (
+                  {exportKeyMutation.isPending ? (
+                    <><Loader2 className="size-3 mr-1.5 animate-spin" /> Verifying...</>
+                  ) : showKey ? (
                     <><EyeOff className="size-3 mr-1.5" /> Hide Key</>
                   ) : (
                     <><Eye className="size-3 mr-1.5" /> Reveal Key</>

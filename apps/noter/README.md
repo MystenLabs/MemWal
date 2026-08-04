@@ -56,11 +56,18 @@ Create a `.env` file with:
 # Database
 DATABASE_URL=postgresql://...
 
-# OAuth (Google)
-GOOGLE_CLIENT_ID=...
+# Enoki zkLogin (client-side, NEXT_PUBLIC_*)
+NEXT_PUBLIC_ENOKI_API_KEY=...
+NEXT_PUBLIC_GOOGLE_CLIENT_ID=...
+NEXT_PUBLIC_MEMWAL_PACKAGE_ID=0x...
+NEXT_PUBLIC_MEMWAL_REGISTRY_ID=0x...
+NEXT_PUBLIC_MEMWAL_SERVER_URL=http://localhost:9000
 
 # Sui network
 NEXT_PUBLIC_SUI_NETWORK=testnet
+
+# Auth challenge store (server-side, required for Enoki sign-in)
+REDIS_URL=redis://localhost:6379
 
 # AI
 OPENROUTER_API_KEY=...
@@ -74,18 +81,22 @@ MEMWAL_ACCOUNT_ID=0x...
 MEMWAL_SERVER_URL=http://localhost:8000
 ```
 
+Enoki is the sign-in flow the app uses; `NEXT_PUBLIC_ENOKI_API_KEY` and
+`NEXT_PUBLIC_GOOGLE_CLIENT_ID` come from the Enoki portal / Google Cloud console,
+and the `MEMWAL_*` package/registry IDs identify the on-chain account contract.
+`REDIS_URL` backs the single-use ownership challenge issued during sign-in — sign-in
+fails closed if it is unset or unreachable.
+
 `MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
 must stay server-side. Run `pnpm verify:memwal` before starting the app to
 derive the public key locally and catch obvious credential mismatches.
 
-### Getting OAuth Credentials
+### Getting OAuth credentials
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a new project or select existing
-3. Enable "Google+ API"
-4. Go to Credentials → Create OAuth 2.0 Client ID
-5. Add authorized redirect URI: `http://localhost:3000/auth/callback`
-6. Copy Client ID and Client Secret to `.env`
+`NEXT_PUBLIC_GOOGLE_CLIENT_ID` is the Google OAuth client ID registered with your
+Enoki application; follow the Enoki portal's setup for the redirect/origin
+configuration. No custom `/auth/callback` route is used — the Enoki wallet handles
+the OAuth round-trip client-side.
 
 ## Project Structure
 
@@ -93,7 +104,6 @@ derive the public key locally and catch obvious credential mismatches.
 noter/
 ├── app/                    # Next.js app router
 │   ├── ai/                 # AI chat routes (protected)
-│   ├── auth/               # Auth callback handler
 │   ├── api/                # API routes (tRPC)
 │   └── page.tsx            # Home page
 ├── package/
@@ -114,18 +124,20 @@ noter/
 
 ## Key Features
 
-### zkLogin Authentication
+### Authentication
 
-Users authenticate using Google OAuth and receive a unique Sui blockchain address:
+Users sign in with Enoki zkLogin (Google), a Sui wallet, or a delegate key, and
+receive a Sui blockchain address. Sign-in proves control of the address by signing
+a server-issued single-use challenge:
 
 ```tsx
-import { useAuth, LoginButton } from "@/feature/auth";
+import { useAuth, AuthButtonGroup } from "@/feature/auth";
 
 function App() {
   const { isAuthenticated, user, logout } = useAuth();
 
   if (!isAuthenticated) {
-    return <LoginButton provider="google" />;
+    return <AuthButtonGroup />;
   }
 
   return (
@@ -181,7 +193,15 @@ pnpm db:migrate
 
 # Open Drizzle Studio
 pnpm db:studio
+
+# One-time deploy step: revoke any legacy custom-zkLogin sessions
+pnpm db:purge-legacy-sessions
 ```
+
+Run `pnpm db:purge-legacy-sessions` once when deploying the build that removes the
+legacy custom zkLogin login path. It deletes rows from `zklogin_sessions` (leaving
+`wallet_sessions` untouched) so any session created before the removal is revoked
+rather than left to expire. It is idempotent and safe to re-run.
 
 ### Code Quality
 

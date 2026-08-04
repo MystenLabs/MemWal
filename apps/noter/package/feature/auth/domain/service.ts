@@ -7,10 +7,41 @@
  */
 
 import type { db as dbClient } from "@/shared/lib/db";
+import type { User } from "@/shared/db/type";
 import { users, zkLoginSessions, walletSessions } from "@/shared/db/schema";
 import { eq, and } from "drizzle-orm";
 
 type DbClient = typeof dbClient;
+
+// ══════════════════════════════════════════════════════════════
+// SAFE USER DTO
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * The subset of a user row that is safe to hand back to the client.
+ * Deliberately omits secrets (delegatePrivateKey) and PII the client
+ * has no need for (email, providerSub).
+ */
+export type SafeUser = {
+  id: string;
+  suiAddress: string;
+  name: string | null;
+  avatar: string | null;
+  authMethod: string;
+  delegateAccountId: string | null;
+};
+
+/** Project a raw user row down to the client-safe DTO. */
+export function toSafeUser(user: User): SafeUser {
+  return {
+    id: user.id,
+    suiAddress: user.suiAddress,
+    name: user.name ?? null,
+    avatar: user.avatar ?? null,
+    authMethod: user.authMethod,
+    delegateAccountId: user.delegateAccountId ?? null,
+  };
+}
 
 // ══════════════════════════════════════════════════════════════
 // WALLET USER MANAGEMENT
@@ -83,7 +114,7 @@ export async function getActiveSession(db: DbClient, sessionId: string) {
 
     if (user) {
       return {
-        user,
+        user: toSafeUser(user),
         sessionId: zkSession.id,
         suiAddress: user.suiAddress,
         expiresAt: zkSession.expiresAt,
@@ -107,7 +138,7 @@ export async function getActiveSession(db: DbClient, sessionId: string) {
 
     if (user) {
       return {
-        user,
+        user: toSafeUser(user),
         sessionId: walletSession.id,
         suiAddress: user.suiAddress,
         expiresAt: walletSession.expiresAt,
@@ -121,6 +152,18 @@ export async function getActiveSession(db: DbClient, sessionId: string) {
 // ══════════════════════════════════════════════════════════════
 // ENOKI USER MANAGEMENT
 // ══════════════════════════════════════════════════════════════
+
+/**
+ * Thrown when a registration attempt would clobber delegate credentials that
+ * are already provisioned for a user under an incompatible auth method. The
+ * route layer maps this to a 409/CONFLICT-style response.
+ */
+export class DelegateCredentialConflictError extends Error {
+  constructor() {
+    super("Delegate credentials already provisioned for this address");
+    this.name = "DelegateCredentialConflictError";
+  }
+}
 
 /** Create or update user from Enoki zkLogin. Stores delegate key for returning-user fast path. */
 export async function upsertEnokiUser(
@@ -138,6 +181,20 @@ export async function upsertEnokiUser(
     .limit(1);
 
   if (existingUser) {
+    // Ownership guard: never let caller-supplied credentials silently clobber
+    // an already-provisioned row that belongs to a different auth scenario.
+    // Overwriting delegate creds is only allowed when either the row has no
+    // delegate key yet (first-time provisioning / partial setup), or the row is
+    // already an enoki/wallet row for this same address (re-provisioning /
+    // rotation of the owner's own key).
+    const hasDelegateKey = Boolean(existingUser.delegatePrivateKey);
+    const compatibleMethod =
+      existingUser.authMethod === "enoki" ||
+      existingUser.authMethod === "wallet";
+    if (hasDelegateKey && !compatibleMethod) {
+      throw new DelegateCredentialConflictError();
+    }
+
     const [user] = await db
       .update(users)
       .set({
@@ -177,6 +234,30 @@ export async function getEnokiUserBySuiAddress(db: DbClient, suiAddress: string)
 
   if (user?.delegatePrivateKey && user?.delegateAccountId) {
     return user;
+  }
+  return null;
+}
+
+/**
+ * Return the delegate key material for a verified owner, scoped strictly to the
+ * given suiAddress. This is the ONLY path that exposes the private key, and it
+ * must be gated by a proven ownership challenge at the route layer.
+ */
+export async function getDelegateKeyForOwner(
+  db: DbClient,
+  suiAddress: string
+): Promise<{ delegatePrivateKey: string; delegateAccountId: string } | null> {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.suiAddress, suiAddress))
+    .limit(1);
+
+  if (user?.delegatePrivateKey && user?.delegateAccountId) {
+    return {
+      delegatePrivateKey: user.delegatePrivateKey,
+      delegateAccountId: user.delegateAccountId,
+    };
   }
   return null;
 }

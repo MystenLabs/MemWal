@@ -7,11 +7,18 @@ import { router, procedure } from "@/shared/lib/trpc/init";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
+import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { uuidv7 } from "uuidv7";
 import { validateSessionInput, connectWalletInput } from "./input";
 import { AUTH_ERRORS } from "../constant";
 import { walletSessions } from "@/shared/db/schema";
 import * as authService from "../domain/service";
+import { toSafeUser, DelegateCredentialConflictError } from "../domain/service";
+import {
+  issueEnokiChallenge as issueEnokiChallengeToken,
+  verifyAndConsumeEnokiChallenge,
+} from "../lib/enoki-challenge";
+import { SharedRedisUnavailableError } from "@/shared/lib/shared-redis";
 
 export const authRouter = router({
   /**
@@ -78,9 +85,10 @@ export const authRouter = router({
           expiresAt,
         });
 
-        // Return wallet session data (no ephemeral keys for wallet auth)
+        // Return wallet session data (no ephemeral keys for wallet auth).
+        // Sanitized: never expose the delegate signing key or PII to the client.
         return {
-          user,
+          user: toSafeUser(user),
           sessionId,
           sessionData: {
             sessionId,
@@ -101,17 +109,74 @@ export const authRouter = router({
       }
     }),
 
+  /**
+   * Issue a single-use ownership challenge for the Enoki flow. The client signs
+   * the returned `message` with its zkLogin key and returns `{ challengeId,
+   * signature }` to connectEnoki / exportDelegateKey to prove address ownership.
+   */
+  issueEnokiChallenge: procedure
+    .input(z.object({ suiAddress: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      try {
+        const { challengeId, message } = await issueEnokiChallengeToken(
+          input.suiAddress
+        );
+        return { challengeId, message };
+      } catch (error) {
+        if (error instanceof SharedRedisUnavailableError) {
+          throw new TRPCError({
+            code: "SERVICE_UNAVAILABLE",
+            message: "Authentication service temporarily unavailable",
+          });
+        }
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
   /** Connect with Enoki zkLogin. Two-phase: suiAddress only = returning user check, full = register. */
   connectEnoki: procedure
     .input(z.object({
       suiAddress: z.string().min(1),
+      challengeId: z.string().min(1),
+      signature: z.string().min(1),
       privateKey: z.string().optional(),
       accountId: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const { suiAddress, privateKey, accountId } = input;
+      const { challengeId, signature, privateKey, accountId } = input;
+      // Normalize once so the challenge check and every DB op key on the same
+      // canonical address (a non-canonical variant would otherwise verify but
+      // miss the stored row).
+      const suiAddress = normalizeSuiAddress(input.suiAddress);
 
       try {
+        // Ownership gate — must pass BEFORE any DB lookup, for both phases.
+        let ownershipVerified: boolean;
+        try {
+          ownershipVerified = await verifyAndConsumeEnokiChallenge({
+            rawAddress: suiAddress,
+            challengeId,
+            signature,
+          });
+        } catch (error) {
+          if (error instanceof SharedRedisUnavailableError) {
+            throw new TRPCError({
+              code: "SERVICE_UNAVAILABLE",
+              message: "Authentication service temporarily unavailable",
+            });
+          }
+          throw error;
+        }
+        if (!ownershipVerified) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Wallet ownership verification failed",
+          });
+        }
+
         // Phase 1: returning user check
         if (!privateKey && !accountId) {
           const existing = await authService.getEnokiUserBySuiAddress(ctx.db, suiAddress);
@@ -122,7 +187,7 @@ export const authRouter = router({
             });
             return {
               needsSetup: false,
-              user: existing,
+              user: toSafeUser(existing),
               sessionId: session.sessionId,
               sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
             };
@@ -146,9 +211,71 @@ export const authRouter = router({
 
         return {
           needsSetup: false,
-          user,
+          user: toSafeUser(user),
           sessionId: session.sessionId,
           sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) throw error;
+        if (error instanceof DelegateCredentialConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+        });
+      }
+    }),
+
+  /**
+   * Export the delegate private key for a verified owner. Requires a fresh
+   * ownership challenge for the caller's own suiAddress. This is the ONLY path
+   * that returns the private key.
+   */
+  exportDelegateKey: procedure
+    .input(z.object({
+      suiAddress: z.string().min(1),
+      challengeId: z.string().min(1),
+      signature: z.string().min(1),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { challengeId, signature } = input;
+      const suiAddress = normalizeSuiAddress(input.suiAddress);
+
+      try {
+        let ownershipVerified: boolean;
+        try {
+          ownershipVerified = await verifyAndConsumeEnokiChallenge({
+            rawAddress: suiAddress,
+            challengeId,
+            signature,
+          });
+        } catch (error) {
+          if (error instanceof SharedRedisUnavailableError) {
+            throw new TRPCError({
+              code: "SERVICE_UNAVAILABLE",
+              message: "Authentication service temporarily unavailable",
+            });
+          }
+          throw error;
+        }
+        if (!ownershipVerified) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Wallet ownership verification failed",
+          });
+        }
+
+        const key = await authService.getDelegateKeyForOwner(ctx.db, suiAddress);
+        if (!key) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "No delegate key found for this address",
+          });
+        }
+        return {
+          delegatePrivateKey: key.delegatePrivateKey,
+          delegateAccountId: key.delegateAccountId,
         };
       } catch (error) {
         if (error instanceof TRPCError) throw error;
@@ -203,12 +330,15 @@ export const authRouter = router({
         });
 
         return {
-          user,
+          user: toSafeUser(user),
           sessionId: session.sessionId,
           sessionData: { sessionId: session.sessionId, expiresAt: session.expiresAt },
         };
       } catch (error) {
         if (error instanceof TRPCError) throw error;
+        if (error instanceof DelegateCredentialConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,

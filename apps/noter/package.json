@@ -12,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:reset": "tsx scripts/reset-db.ts && drizzle-kit push",
+    "db:purge-legacy-sessions": "tsx scripts/purge-legacy-zklogin-sessions.ts",
     "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
     "clean": "rm -rf .next out build"
   },
@@ -69,6 +70,7 @@
     "react-hook-form": "^7.71.2",
     "react-resizable-panels": "^4",
     "recharts": "2.15.4",
+    "redis": "^5.0.0",
     "sonner": "^2.0.7",
     "superjson": "^2.2.6",
     "tailwind-merge": "^3.5.0",
