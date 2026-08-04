@@ -315,7 +315,13 @@ impl DecryptOutcome {
     /// infra blip can never permanently blacklist a legitimate blob.
     pub(crate) fn permanent_from_error(err: &str) -> bool {
         let lower = err.to_ascii_lowercase();
-        if lower.contains("timeout")
+        // sendSealFailure (sidecar) echoes the configured request timeout as
+        // "(traceId=..., timeoutMs=...)" on every single error it composes,
+        // permanent or not — so a bare "timeout" substring match here would
+        // misclassify everything (including NoAccessError/InvalidCiphertext)
+        // as transient. Match the actual timeout signal instead.
+        if lower.contains("timeouterror")
+            || lower.contains("aborted due to timeout")
             || lower.contains("fetch_keys failed")
             || lower.contains("too many failed fetch")
             || lower.contains("internal server")
@@ -330,6 +336,15 @@ impl DecryptOutcome {
         err.contains("Not enough shares")
             || err.contains("InvalidCiphertext")
             || err.contains("InvalidPersonalMessageSignature")
+            // @mysten/seal's NoAccessError — key servers rejected the request
+            // because the caller doesn't hold access to the requested key(s).
+            // This is the exact failure produced by GH #501/WALM-299: a
+            // foreign blob transferred onto the victim's address that isn't
+            // encrypted to the victim. Deterministic for this (owner, blob),
+            // never resolves on retry, so it's safe (and required) to
+            // negative-cache — omitting it left restore()'s bounded-retry fix
+            // never actually firing for the reported attack.
+            || err.contains("NoAccessError")
     }
 }
 
@@ -562,5 +577,41 @@ mod tests {
                 msg
             );
         }
+    }
+
+    #[test]
+    fn classifies_no_access_error_as_permanent() {
+        // The exact wrapped error shape produced when restore() attempts to
+        // decrypt a foreign blob (GH #501/WALM-299): SEAL's key servers
+        // correctly reject a caller with no access, and the sidecar/Rust
+        // wrapping composes it into this message — including the
+        // "timeoutMs=" request-config echo that sendSealFailure adds to
+        // every error regardless of type. A naive "timeout" substring check
+        // would misclassify this as transient; this pins that it doesn't.
+        let msg = "seal decrypt failed: seal/decrypt failed during fetch_keys: \
+                    NoAccessError: user does not have access to one or more of \
+                    the requested keys (traceId=abc123, timeoutMs=10000)";
+        assert!(
+            DecryptOutcome::permanent_from_error(msg),
+            "expected permanent: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn classifies_real_wire_format_timeout_as_transient() {
+        // sendSealFailure's actual composed shape for a genuine timeout,
+        // including the same "(traceId=..., timeoutMs=...)" suffix as every
+        // other error — must still classify as transient despite that
+        // shared suffix, on the strength of "TimeoutError" / "aborted due to
+        // timeout" in the inner message, not the bare word "timeout".
+        let msg = "seal decrypt failed: seal/decrypt failed during fetch_keys: \
+                    TimeoutError: The operation was aborted due to timeout \
+                    (traceId=abc123, timeoutMs=10000)";
+        assert!(
+            !DecryptOutcome::permanent_from_error(msg),
+            "expected transient: {}",
+            msg
+        );
     }
 }
