@@ -218,10 +218,13 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
 
     if (!config.securityDeleteEnabled || !address) return null
     return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
-        <button className="btn btn-secondary" disabled={loading || busy} onClick={activated ? refresh : () => setActivated(true)}>{activated && <RefreshCw size={16}/>} {activated ? 'Refresh' : 'Load my memories'}</button>
+        activated && <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
     }>
         <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
-        {!activated && <p>Load your pre-migration memories to review them. Your wallet will ask you to sign a message to verify ownership.</p>}
+        {!activated && <div className="sd-load-prompt">
+            <p>Load your pre-migration memories to review them. Your wallet will ask you to sign a message to verify ownership.</p>
+            <button className="btn btn-secondary" disabled={loading || busy} onClick={() => setActivated(true)}>Load my memories</button>
+        </div>}
         {activated && <>
             <div className="sd-counts"><strong>{visibleCounts.deletable}</strong> Stored / <strong>{visibleCounts.deleting}</strong> in Progress / <strong>{visibleCounts.deleted + visibleCounts.deletedExternal}</strong> Deleted</div>
             <div className="sd-tabs" role="tablist">

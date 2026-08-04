@@ -51,6 +51,7 @@ it('waits for explicit user intent before loading affected rows', async () => {
     render(<SecurityDeleteSection accountObjectId="0x99" />)
     expect(mocks.listBlobs).not.toHaveBeenCalled()
     expect(screen.getByText(/wallet will ask you to sign/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Load my memories' }).closest('.card-header')).toBeNull()
     await loadMemories(user)
     expect(await screen.findByRole('tab', { name: 'Stored' })).toBeInTheDocument()
     await waitFor(() => expect(mocks.listBlobs).toHaveBeenCalledWith('token', expect.objectContaining({ state: 'deletable' })))
