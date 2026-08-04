@@ -913,9 +913,13 @@ pub async fn remember_manual(
             "encrypted_data cannot be empty".into(),
         ));
     }
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied embedding (width + finiteness) up front. The
+    // fact store's `embedding` column is a fixed-width pgvector that also refuses
+    // NaN/Inf, so a malformed vector can never be indexed — and store_blob pays
+    // for the (irreversible) Walrus upload before it reaches the insert. Rejecting
+    // here means a bad vector costs no gas and returns an actionable 400, instead
+    // of an opaque 500 after the paid upload.
+    validate_embedding_vector(&body.vector)?;
     validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;

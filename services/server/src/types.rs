@@ -864,6 +864,30 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate a client-supplied embedding vector against what the fact store can
+/// accept. Shared by the manual write and read paths, where the vector comes
+/// from the caller rather than the server-side embedder. Rejects, with an
+/// actionable `BadRequest` (and, on the write path, before any paid upload):
+///   - a width other than the fixed pgvector column (`EMBEDDING_DIMS`), and
+///   - any non-finite component (NaN / ±Inf), which pgvector refuses to index
+///     and which is meaningless for cosine similarity.
+/// Both would otherwise only fail deep in pgvector as an opaque 500.
+pub fn validate_embedding_vector(vector: &[f32]) -> Result<(), AppError> {
+    use crate::services::embedder::EMBEDDING_DIMS;
+    if vector.len() != EMBEDDING_DIMS {
+        return Err(AppError::BadRequest(format!(
+            "vector must have exactly {EMBEDDING_DIMS} dimensions, got {}",
+            vector.len()
+        )));
+    }
+    if let Some(index) = vector.iter().position(|component| !component.is_finite()) {
+        return Err(AppError::BadRequest(format!(
+            "vector must contain only finite values; component at index {index} is not finite"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecallRequest {
     pub query: String,
@@ -1543,6 +1567,64 @@ mod tests {
     use std::sync::Mutex;
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── Client-supplied embedding vector validation ──────────────
+
+    #[test]
+    fn embedding_of_correct_width_is_accepted() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        assert!(validate_embedding_vector(&vec![0.1_f32; EMBEDDING_DIMS]).is_ok());
+    }
+
+    #[test]
+    fn embedding_of_wrong_width_is_rejected_with_actionable_message() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // A width from a different embedding model; kept distinct from the
+        // expected width so a transposed format! (expected/actual swapped) still
+        // fails the exact-string assert below.
+        let wrong = EMBEDDING_DIMS / 2 + 1;
+        match validate_embedding_vector(&vec![0.1_f32; wrong]).unwrap_err() {
+            // BadRequest maps to HTTP 400, unlike the opaque 500 a downstream
+            // pgvector failure would produce (after a paid upload on the write path).
+            AppError::BadRequest(msg) => {
+                // Build the expected message from the constant (single source of
+                // truth — survives a dimension change) while still pinning the
+                // exact wording and the expected-then-actual order.
+                assert_eq!(
+                    msg,
+                    format!("vector must have exactly {EMBEDDING_DIMS} dimensions, got {wrong}")
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_empty_vector_is_rejected() {
+        // The width check subsumes a separate non-empty guard.
+        assert!(matches!(
+            validate_embedding_vector(&[]),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn embedding_with_non_finite_component_is_rejected() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // Correct width, but a NaN/Inf component pgvector would refuse to index —
+        // must be caught here, before any paid upload, not as an opaque 500.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut vector = vec![0.1_f32; EMBEDDING_DIMS];
+            vector[7] = bad;
+            match validate_embedding_vector(&vector).unwrap_err() {
+                AppError::BadRequest(msg) => {
+                    assert!(msg.contains("finite"), "message names the finiteness rule: {msg}");
+                    assert!(msg.contains("index 7"), "message names the offending index: {msg}");
+                }
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
 
     fn security_delete_test_config() -> Config {
         Config {
