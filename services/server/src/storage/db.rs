@@ -77,6 +77,8 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -88,6 +90,8 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -121,6 +125,44 @@ mod tests {
             vec![(other_namespace, blob_id)],
             "the cleanup must not delete an identical blob_id in another namespace"
         );
+    }
+
+    #[tokio::test]
+    async fn insert_vector_persists_agent_and_package_id() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT agent_id, package_id FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0.as_deref(), Some("agent-abc"));
+        assert_eq!(row.1.as_deref(), Some("0xpkg-123"));
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
     }
 }
 
@@ -266,20 +308,24 @@ impl VectorDb {
         vector: &[f32],
         blob_size_bytes: i64,
         importance: f32,
+        agent_id: Option<&str>,
+        package_id: Option<&str>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                agent_id = EXCLUDED.agent_id,
+                package_id = EXCLUDED.package_id",
         )
         .bind(id)
         .bind(owner)
@@ -288,6 +334,8 @@ impl VectorDb {
         .bind(embedding)
         .bind(blob_size_bytes)
         .bind(importance)
+        .bind(agent_id)
+        .bind(package_id)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));

@@ -66,6 +66,9 @@ pub struct OnChainBlob {
     /// Walrus Memory package ID from on-chain metadata
     #[serde(rename = "packageId", default)]
     pub package_id: String,
+    /// Delegate/agent public key from on-chain metadata (memwal_agent_id)
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
 }
 
 /// Response from sidecar query-blobs endpoint
