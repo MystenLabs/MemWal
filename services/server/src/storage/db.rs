@@ -45,6 +45,8 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_memory_read_api_columns.sql"),
+            include_str!("../../migrations/011_memory_read_api_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -201,6 +203,22 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
+
+        // owner-scoped read API: updated_at cursor column + agent_id/package_id
+        // (WALM-295).
+        let migration_010 = include_str!("../../migrations/010_memory_read_api_columns.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
+        // keyset-pagination index for the memories listing endpoint (WALM-295).
+        // Must stay in its own file/transaction — see 011's header comment.
+        let migration_011 = include_str!("../../migrations/011_memory_read_api_index.sql");
+        sqlx::raw_sql(migration_011)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
