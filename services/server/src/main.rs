@@ -1005,6 +1005,10 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        .route(
+            "/v1/owners/{owner}/namespaces",
+            get(routes::list_owner_namespaces),
+        )
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
