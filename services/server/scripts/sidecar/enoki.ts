@@ -30,12 +30,13 @@ export type EnokiExecuteResponse = { digest: string };
 export type EnokiFallbackPolicy = {
     directSignIfUnconfigured: boolean;
     directSignAfterSponsorFailure: boolean;
-    gasMode?: "auto" | "addressBalance";
+    gasMode: "auto" | "addressBalance";
 };
 
 const DEFAULT_FALLBACK_POLICY: EnokiFallbackPolicy = {
     directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
     directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    gasMode: "addressBalance",
 };
 
 // The migrator's controller lease reserves 60s for one Enoki call plus 10s

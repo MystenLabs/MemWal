@@ -1,8 +1,9 @@
 import type { Transaction } from "@mysten/sui/transactions";
-import { normalizeStructTag } from "@mysten/sui/utils";
+import { normalizeStructTag, normalizeSuiAddress, parseStructTag } from "@mysten/sui/utils";
 import { SUI_TYPE } from "./config.js";
 
 const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
+const SUI_FRAMEWORK_ADDRESS = normalizeSuiAddress("0x2");
 
 /**
  * Prevent the SDK's CoinWithBalance resolver from falling back to owned coins
@@ -10,6 +11,7 @@ const COIN_WITH_BALANCE_INTENT = "CoinWithBalance";
  */
 export function enforceAddressBalanceCoinIntents(transaction: Transaction): void {
     let initialOwnedObjectIds: Set<string> | undefined;
+    let hasCoinWithBalanceIntents = false;
     transaction.addSerializationPlugin(async (transactionData, options, next) => {
         initialOwnedObjectIds ??= new Set(
             transactionData.inputs
@@ -36,6 +38,7 @@ export function enforceAddressBalanceCoinIntents(transaction: Transaction): void
         }
 
         if (requiredByType.size > 0) {
+            hasCoinWithBalanceIntents = true;
             const client = options.client as any;
             if (!client?.core?.getBalance || !transactionData.sender) {
                 throw new Error("Address-balance upload requires a sender and Sui client");
@@ -61,11 +64,36 @@ export function enforceAddressBalanceCoinIntents(transaction: Transaction): void
             .filter((objectId): objectId is string => (
                 typeof objectId === "string" && !initialOwnedObjectIds.has(objectId)
             ));
-        if (newlyResolvedOwnedObjects.length > 0) {
+        if (hasCoinWithBalanceIntents && newlyResolvedOwnedObjects.length > 0) {
+            const client = options.client as any;
+            if (!client?.core?.getObjects) {
+                throw new Error("Address-balance upload could not verify newly resolved objects");
+            }
+            const response = await client.core.getObjects({ objectIds: newlyResolvedOwnedObjects });
+            const coinObjectIds = response.objects.map((object: any) => {
+                if (object instanceof Error) {
+                    throw new Error(`Address-balance upload could not verify resolved object: ${object.message}`);
+                }
+                if (typeof object?.type !== "string") {
+                    throw new Error(`Address-balance upload could not verify resolved object ${object?.objectId ?? ""}`);
+                }
+                const type = parseStructTag(object.type);
+                return type.address === SUI_FRAMEWORK_ADDRESS
+                    && type.module === "coin"
+                    && type.name === "Coin"
+                    ? object.objectId
+                    : null;
+            }).filter((objectId: unknown): objectId is string => typeof objectId === "string");
+
+            if (coinObjectIds.length === 0) return;
             throw new Error(
-                `Address-balance upload resolved owned coin objects: ${newlyResolvedOwnedObjects.join(", ")}`,
+                `Address-balance upload resolved owned coin objects: ${coinObjectIds.join(", ")}`,
             );
         }
+    });
+
+    transaction.addBuildPlugin(async (transactionData, _options, next) => {
+        await next();
         if (transactionData.gasData.payment && transactionData.gasData.payment.length > 0) {
             throw new Error("Address-balance upload resolved gas from an owned coin");
         }
