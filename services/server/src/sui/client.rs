@@ -228,6 +228,16 @@ struct Timed<T> {
 /// Gas price, keyed by the SUI epoch it was fetched in (gas price changes per Sui epoch).
 type EpochGasPrice = (SuiEpoch, u64);
 
+/// Walrus epoch schedule — the `epoch_duration_ms`/`first_epoch_start_ms` pair that lets a
+/// Walrus epoch (e.g. `Blob.storage.end_epoch`) be converted into a wall-clock timestamp via
+/// [`expires_at_from_epoch`]. Read from the Walrus staking pool's state object, which is a
+/// SEPARATE on-chain object from the system object `walrus_epoch()` reads.
+#[derive(Clone, Copy, Debug)]
+pub struct WalrusEpochSchedule {
+    pub epoch_duration_ms: u64,
+    pub first_epoch_start_ms: u64,
+}
+
 /// Production gRPC implementation. Cloning it is cheap: `sui_rpc::Client`
 /// clones the underlying channel and all caches/rate state are shared.
 #[derive(Clone)]
@@ -236,10 +246,12 @@ pub struct SuiClient {
     gate: RateGate,
     epoch: Arc<RwLock<Option<Timed<SuiEpoch>>>>,
     walrus_epoch: Arc<RwLock<Option<Timed<WalrusEpoch>>>>,
+    walrus_epoch_schedule: Arc<RwLock<Option<Timed<WalrusEpochSchedule>>>>,
     gas_price: Arc<RwLock<Option<Timed<EpochGasPrice>>>>,
     chain: Arc<RwLock<Option<[u8; 32]>>>,
     walrus_package: Option<String>,
     walrus_system: Option<String>,
+    walrus_staking_pool: Option<String>,
     priority: RequestPriority,
     attempt_timeout: Duration,
 }
@@ -253,10 +265,12 @@ impl SuiClient {
             gate: RateGate::new(requests_per_window, window)?,
             epoch: Arc::new(RwLock::new(None)),
             walrus_epoch: Arc::new(RwLock::new(None)),
+            walrus_epoch_schedule: Arc::new(RwLock::new(None)),
             gas_price: Arc::new(RwLock::new(None)),
             chain: Arc::new(RwLock::new(None)),
             walrus_package: None,
             walrus_system: None,
+            walrus_staking_pool: None,
             priority: RequestPriority::Interactive,
             attempt_timeout: DEFAULT_RPC_ATTEMPT_TIMEOUT,
         })
@@ -277,9 +291,15 @@ impl SuiClient {
         Ok(self)
     }
 
-    pub fn with_walrus_config(mut self, package_id: String, system_object_id: String) -> Self {
+    pub fn with_walrus_config(
+        mut self,
+        package_id: String,
+        system_object_id: String,
+        staking_pool_id: String,
+    ) -> Self {
         self.walrus_package = Some(package_id);
         self.walrus_system = Some(system_object_id);
+        self.walrus_staking_pool = Some(staking_pool_id);
         self
     }
 
@@ -691,6 +711,110 @@ impl SuiApi for SuiClient {
         Ok(epoch)
     }
 
+    /// Walrus epoch schedule — `epoch_duration_ms`/`first_epoch_start_ms`, used to convert a
+    /// Walrus epoch into a wall-clock timestamp via [`expires_at_from_epoch`].
+    ///
+    /// Mirrors `walrus_epoch()`'s structure exactly, but reads a DIFFERENT on-chain object:
+    /// the Walrus staking pool's own versioned state (hung off the staking pool object as a
+    /// dynamic field), not the system object. See `walrus_epoch()`'s doc comment for why the
+    /// state id must be resolved from chain (never pinned in config) and why the HIGHEST
+    /// dynamic-field version must be selected rather than trusting page order.
+    async fn walrus_epoch_schedule(&self) -> Result<WalrusEpochSchedule, SuiErr> {
+        if let Some(cached) = self
+            .walrus_epoch_schedule
+            .read()
+            .await
+            .as_ref()
+            .filter(|c| c.fetched_at.elapsed() < Duration::from_secs(30))
+        {
+            return Ok(cached.value);
+        }
+        let parent = self.walrus_staking_pool.clone().ok_or_else(|| {
+            SuiErr::Rejected("Walrus staking pool object ID is not configured".into())
+        })?;
+        let mut fields = Vec::new();
+        let mut page_token: Option<Vec<u8>> = None;
+        loop {
+            let parent = parent.clone();
+            let token = page_token.clone();
+            let response = self
+                .call(move |mut client| {
+                    let parent = parent.clone();
+                    let token = token.clone();
+                    async move {
+                        let mut request = ListDynamicFieldsRequest::default();
+                        request.parent = Some(parent);
+                        request.page_size = Some(50);
+                        request.page_token = token.map(Into::into);
+                        // `name` carries the BCS-encoded key — the staking pool version — and
+                        // is what makes the selection deterministic. Without it we would be
+                        // guessing.
+                        request.read_mask = Some(FieldMask::from_paths(["field_id", "name"]));
+                        client
+                            .state_client()
+                            .list_dynamic_fields(request)
+                            .await
+                            .map(|r| r.into_inner())
+                    }
+                })
+                .await?;
+            fields.extend(response.dynamic_fields);
+            match response.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token.to_vec()),
+                _ => break,
+            }
+        }
+        // Walrus keys the state field by the pool `version` (a Move u64), so select the
+        // HIGHEST version — the newest state — rather than trusting page order.
+        let state_id = fields
+            .iter()
+            .filter_map(|field| {
+                let id = field.field_id.clone()?;
+                let name = field.name.as_ref()?;
+                let version: u64 = bcs::from_bytes(name.value.as_ref()?).ok()?;
+                Some((version, id))
+            })
+            .max_by_key(|(version, _)| *version)
+            .map(|(_, id)| id)
+            .ok_or_else(|| {
+                SuiErr::Transport(
+                    "Walrus staking pool object exposes no versioned state dynamic field".into(),
+                )
+            })?;
+        let json = self
+            .call(|mut client| {
+                let id = state_id.clone();
+                async move {
+                    let mut request = GetObjectRequest::default();
+                    request.object_id = Some(id);
+                    request.read_mask = Some(FieldMask::from_paths(["json"]));
+                    client
+                        .ledger_client()
+                        .get_object(request)
+                        .await
+                        .map(|r| r.into_inner().object.and_then(|o| o.json))
+                }
+            })
+            .await?
+            .ok_or_else(|| SuiErr::Rejected("Walrus staking pool state object not found".into()))?;
+        let value = prost_json(&json);
+        let schedule = parse_epoch_schedule(&value).ok_or_else(|| {
+            tracing::warn!(
+                state_object = %state_id,
+                json = %serde_json::to_string(&value).unwrap_or_default().chars().take(400).collect::<String>(),
+                "walrus staking pool state: epoch_duration/first_epoch_start not found"
+            );
+            SuiErr::Transport(
+                "Walrus staking pool state JSON omitted epoch_duration/first_epoch_start".into(),
+            )
+        })?;
+        *self.walrus_epoch_schedule.write().await = Some(Timed {
+            value: schedule,
+            fetched_at: Instant::now(),
+        });
+        Ok(schedule)
+    }
+
     async fn reference_gas_price(&self) -> Result<u64, SuiErr> {
         let epoch = self.current_epoch().await?;
         if let Some(cached) = self
@@ -1026,6 +1150,35 @@ fn walrus_committee_epoch(value: &serde_json::Value) -> Option<u64> {
         serde_json::Value::String(text) => text.parse().ok(),
         _ => None,
     }
+}
+
+/// Parse epoch_duration/first_epoch_start from the Walrus staking pool's
+/// state object JSON. Mirrors walrus_committee_epoch()'s exact-path,
+/// unwrap-the-Field-wrapper approach — see that function's doc comment
+/// for why this must not be a recursive/fuzzy key search.
+fn parse_epoch_schedule(value: &serde_json::Value) -> Option<WalrusEpochSchedule> {
+    let root = value.get("value").unwrap_or(value);
+    let parse_u64_field = |key: &str| -> Option<u64> {
+        match root.get(key)? {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    };
+    Some(WalrusEpochSchedule {
+        epoch_duration_ms: parse_u64_field("epoch_duration")?,
+        first_epoch_start_ms: parse_u64_field("first_epoch_start")?,
+    })
+}
+
+/// Convert a Walrus epoch to its wall-clock expiry timestamp.
+pub fn expires_at_from_epoch(
+    end_epoch: WalrusEpoch,
+    schedule: &WalrusEpochSchedule,
+) -> chrono::DateTime<chrono::Utc> {
+    let expires_at_ms = schedule.first_epoch_start_ms as i64
+        + (end_epoch.0 as i64) * schedule.epoch_duration_ms as i64;
+    chrono::DateTime::from_timestamp_millis(expires_at_ms).unwrap_or_else(chrono::Utc::now)
 }
 
 #[cfg(test)]
@@ -1507,5 +1660,38 @@ mod tests {
         };
         let json = prost_json(&root);
         assert_eq!(find_json_u64(&json, "end_epoch"), None);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_computes_wall_clock_time() {
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let end_epoch = WalrusEpoch(10);
+        let expires_at = expires_at_from_epoch(end_epoch, &schedule);
+        let expected_ms = 1_700_000_000_000_i64 + 10 * 86_400_000_i64;
+        assert_eq!(expires_at.timestamp_millis(), expected_ms);
+    }
+
+    #[test]
+    fn parse_epoch_schedule_extracts_duration_and_start() {
+        // Shape per @mysten/walrus SDK's BCS-decoded StakingInnerV1 type
+        // (dist/client.d.mts): epoch_duration/first_epoch_start are
+        // top-level string (u64-as-string) fields, sibling to `epoch`.
+        // This exact raw-JSON shape (whether wrapped in a `value` field
+        // like the system-state object is) is NOT independently verified
+        // against a live fetch — if a real run shows a different shape,
+        // fix parse_epoch_schedule, not this test's expectation of what
+        // the fix should produce.
+        let raw = serde_json::json!({
+            "n_shards": 1000,
+            "epoch_duration": "86400000",
+            "first_epoch_start": "1700000000000",
+            "epoch": 457,
+        });
+        let schedule = parse_epoch_schedule(&raw).expect("fields present");
+        assert_eq!(schedule.epoch_duration_ms, 86_400_000);
+        assert_eq!(schedule.first_epoch_start_ms, 1_700_000_000_000);
     }
 }

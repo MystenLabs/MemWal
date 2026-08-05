@@ -30,11 +30,13 @@ async fn batch_get_objects_cap_probe() {
     let walrus_package = std::env::var("WALRUS_PACKAGE_ID").expect("WALRUS_PACKAGE_ID must be set");
     let walrus_system =
         std::env::var("WALRUS_SYSTEM_OBJECT_ID").expect("WALRUS_SYSTEM_OBJECT_ID must be set");
+    let walrus_staking_pool =
+        std::env::var("WALRUS_STAKING_POOL_ID").expect("WALRUS_STAKING_POOL_ID must be set");
     let owner = std::env::var("TEST_BLOB_OWNER")
         .expect("TEST_BLOB_OWNER must be set to an address owning ~1000 real Walrus Blob objects");
     let client = SuiClient::new(&url, 3_000, Duration::from_secs(10))
         .unwrap()
-        .with_walrus_config(walrus_package, walrus_system);
+        .with_walrus_config(walrus_package, walrus_system, walrus_staking_pool);
 
     // Collect the full owned set across pages, recording each page's size —
     // the observed page cap is itself a Task 6 measurement (spec §8 assumed

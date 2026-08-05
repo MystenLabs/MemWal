@@ -677,6 +677,7 @@ async fn main() {
         .with_walrus_config(
             config.walrus_package_id.clone(),
             config.walrus_system_object_id.clone(),
+            config.walrus_staking_pool_id.clone(),
         );
         (
             Some(Arc::new(client.clone())),
