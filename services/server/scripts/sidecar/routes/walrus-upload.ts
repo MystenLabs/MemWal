@@ -350,6 +350,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                         blobId: blob.blobId,
                         objectId: blobObjectId,
                         transferStatus: "failed",
+                        endEpoch: blob.blobObject.storage.end_epoch,
                     });
                 }
             }
@@ -369,6 +370,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                 blobId: blob.blobId,
                 objectId: blobObjectId,
                 transferStatus: deferTransfer ? "deferred" : "ok",
+                endEpoch: blob.blobObject.storage.end_epoch,
             });
         } catch (err: any) {
             const message = err?.message || String(err);
