@@ -382,6 +382,17 @@ pub async fn list_owner_agents(
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::OnceLock;
+
+    // Guards concurrent test threads in THIS module from racing on
+    // `CREATE EXTENSION IF NOT EXISTS vector` (001_init.sql) — Postgres
+    // does not make that statement safe under concurrent execution
+    // despite IF NOT EXISTS (two sessions can both pass the existence
+    // check before either commits, then collide on the unique index on
+    // pg_extension). Mirrors the same pattern already used in
+    // `services/server/src/jobs.rs` (`DB_SETUP_LOCK`) and
+    // `services/server/src/storage/db.rs` (`VECTOR_SCHEMA_SETUP_LOCK`).
+    static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL")
@@ -394,6 +405,10 @@ mod tests {
             .connect(&test_database_url())
             .await
             .unwrap();
+        let _guard = DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         for migration in [
             include_str!("../../migrations/001_init.sql"),
             include_str!("../../migrations/002_add_namespace.sql"),
