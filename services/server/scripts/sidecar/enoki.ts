@@ -9,7 +9,7 @@
 import { Buffer } from "buffer";
 import { setTimeout as sleepWithSignal } from "node:timers/promises";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import type { Transaction } from "@mysten/sui/transactions";
+import { TransactionDataBuilder, type Transaction } from "@mysten/sui/transactions";
 import { getEnokiRetryDelayMs, isSponsoredTransactionInvalidatedMessage } from "../enoki-retry.js";
 import {
     ENOKI_API_BASE_URL,
@@ -19,8 +19,12 @@ import {
     ENOKI_TRANSIENT_BASE_DELAY_MS,
     ENOKI_TRANSIENT_MAX_ATTEMPTS,
     ENOKI_TRANSIENT_MAX_DELAY_MS,
+    SUI_CHAIN_IDENTIFIER,
+    SUI_GRPC_URL,
+    SUI_NETWORK,
 } from "./config.js";
 import { suiClient } from "./clients.js";
+import { sidecarLog } from "./log.js";
 import { errorMessage, truncateForLog } from "./util.js";
 
 type EnokiDataWrapper<T> = { data: T };
@@ -40,6 +44,54 @@ const DEFAULT_FALLBACK_POLICY: EnokiFallbackPolicy = {
 // The migrator's controller lease reserves 60s for one Enoki call plus 10s
 // margin. Keep retries and backoff inside that same deadline.
 const ENOKI_REQUEST_TIMEOUT_MS = 60_000;
+
+function configuredSuiEndpoint(): string {
+    try {
+        const url = new URL(SUI_GRPC_URL);
+        return `${url.protocol}//${url.host}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch {
+        return "invalid";
+    }
+}
+
+export function transactionKindFingerprint(data: { inputs?: any[]; commands?: any[] }): {
+    movePackages: string[];
+    objectIds: string[];
+} {
+    const movePackages = new Set<string>();
+    const objectIds = new Set<string>();
+
+    for (const command of data.commands ?? []) {
+        const packageId = command?.MoveCall?.package;
+        if (typeof packageId === "string") movePackages.add(packageId);
+    }
+    for (const input of data.inputs ?? []) {
+        const object = input?.Object;
+        const objectId = object?.ImmOrOwnedObject?.objectId
+            ?? object?.SharedObject?.objectId
+            ?? object?.Receiving?.objectId
+            ?? input?.UnresolvedObject?.objectId;
+        if (typeof objectId === "string") objectIds.add(objectId);
+    }
+
+    return {
+        movePackages: [...movePackages],
+        objectIds: [...objectIds],
+    };
+}
+
+function transactionNetworkContext(diagnostics: Record<string, unknown>): Record<string, unknown> {
+    return {
+        ...diagnostics,
+        processId: process.pid,
+        deploymentId: process.env.RAILWAY_DEPLOYMENT_ID ?? null,
+        deploymentInstanceId: process.env.RAILWAY_DEPLOYMENT_INSTANCE_ID ?? null,
+        suiNetwork: SUI_NETWORK,
+        suiChainIdentifier: SUI_CHAIN_IDENTIFIER,
+        suiGrpcEndpoint: configuredSuiEndpoint(),
+        enokiNetwork: ENOKI_NETWORK,
+    };
+}
 
 // SuiGrpcClient resolves to the discriminated union
 // `{Transaction: {digest}} | {FailedTransaction: {digest}}`. Keep the flat
@@ -175,6 +227,7 @@ async function executeSponsoredTransactionOnce(
     signer: Ed25519Keypair,
     allowedAddresses?: string[],
     onSubmissionStarted: () => void = () => {},
+    diagnostics: Record<string, unknown> = {},
 ): Promise<string> {
     // Resolve owned-object inputs against the correct sender. The gRPC client
     // validates object ownership against the tx sender during build/resolution;
@@ -184,9 +237,27 @@ async function executeSponsoredTransactionOnce(
     // its own sender and `onlyTransactionKind` excludes the sender from the
     // bytes, so this only fixes resolution.
     tx.setSenderIfNotSet(signer.toSuiAddress());
-    const txKindBytes = await tx.build({
-        client: suiClient as any,
-        onlyTransactionKind: true,
+    const plannedFingerprint = transactionKindFingerprint(tx.getData() as { inputs?: any[]; commands?: any[] });
+    let txKindBytes: Uint8Array;
+    try {
+        txKindBytes = await tx.build({
+            client: suiClient as any,
+            onlyTransactionKind: true,
+        });
+    } catch (error: unknown) {
+        sidecarLog("error", "enoki_transaction_kind_build_failed", {
+            ...transactionNetworkContext(diagnostics),
+            signer: signer.toSuiAddress(),
+            ...plannedFingerprint,
+            error: errorMessage(error),
+        });
+        throw error;
+    }
+    const fingerprint = transactionKindFingerprint(TransactionDataBuilder.fromKindBytes(txKindBytes));
+    sidecarLog("info", "enoki_transaction_kind_built", {
+        ...transactionNetworkContext(diagnostics),
+        signer: signer.toSuiAddress(),
+        ...fingerprint,
     });
 
     const sponsored = await callEnoki<EnokiSponsorResponse>("/transaction-blocks/sponsor", {
@@ -194,6 +265,11 @@ async function executeSponsoredTransactionOnce(
         transactionBlockKindBytes: Buffer.from(txKindBytes).toString("base64"),
         sender: signer.toSuiAddress(),
         ...(allowedAddresses?.length ? { allowedAddresses } : {}),
+    });
+    sidecarLog("info", "enoki_sponsor_accepted", {
+        ...transactionNetworkContext(diagnostics),
+        sponsoredDigest: sponsored.digest,
+        ...fingerprint,
     });
 
     const signature = await signer.signTransaction(
@@ -210,6 +286,12 @@ async function executeSponsoredTransactionOnce(
             signature: signature.signature,
         }
     );
+    sidecarLog("info", "enoki_execute_accepted", {
+        ...transactionNetworkContext(diagnostics),
+        sponsoredDigest: sponsored.digest,
+        executedDigest: executed.digest,
+        ...fingerprint,
+    });
 
     return executed.digest;
 }
@@ -237,6 +319,7 @@ export async function executeWithEnokiSponsor(
     allowedAddresses?: string[],
     fallbackPolicy: EnokiFallbackPolicy = DEFAULT_FALLBACK_POLICY,
     onSubmissionStarted: () => void = () => {},
+    diagnostics: Record<string, unknown> = {},
 ): Promise<string> {
     if (fallbackPolicy.gasMode === "addressBalance") {
         tx.setGasPayment([]);
@@ -258,6 +341,7 @@ export async function executeWithEnokiSponsor(
             signer,
             allowedAddresses,
             onSubmissionStarted,
+            diagnostics,
         );
     } catch (err: any) {
         if (isSponsoredTransactionInvalidatedMessage(errorMessage(err))) {
@@ -268,6 +352,7 @@ export async function executeWithEnokiSponsor(
                     signer,
                     allowedAddresses,
                     onSubmissionStarted,
+                    diagnostics,
                 );
             } catch (retryErr: any) {
                 sponsorError = retryErr;

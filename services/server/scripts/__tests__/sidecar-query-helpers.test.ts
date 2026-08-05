@@ -35,6 +35,7 @@ import { uploadWalrusBlobWithEffectsRetry } from "../sidecar/routes/walrus-uploa
 import { metadataReceiptAlreadyApplied } from "../sidecar/routes/walrus-metadata.js";
 import { sidecarMetrics } from "../sidecar/state.js";
 import { DURABLE_WALLET_FALLBACK_POLICY } from "../sidecar/wallet.js";
+import { transactionKindFingerprint } from "../sidecar/enoki.js";
 
 const metadataTransferBlob = (blobObjectId: string): MetadataTransferBlob => ({
     blobObjectId,
@@ -50,6 +51,30 @@ test("metadata transfer recognizes visibility lag only for an input blob", () =>
     assert.equal(missingMetadataTransferBlobId(`Object ${blobObjectId} not found`, blobs), blobObjectId);
     assert.equal(missingMetadataTransferBlobId(`Object ${otherObjectId} not found`, blobs), null);
     assert.equal(missingMetadataTransferBlobId("request timed out", blobs), null);
+});
+
+test("sponsored transaction fingerprint captures packages and object inputs", () => {
+    const packageId = `0x${"1".repeat(64)}`;
+    const ownedObjectId = `0x${"2".repeat(64)}`;
+    const sharedObjectId = `0x${"3".repeat(64)}`;
+    const fingerprint = transactionKindFingerprint({
+        commands: [
+            { MoveCall: { package: packageId } },
+            { MoveCall: { package: packageId } },
+            { TransferObjects: {} },
+        ],
+        inputs: [
+            { Object: { ImmOrOwnedObject: { objectId: ownedObjectId } } },
+            { Object: { SharedObject: { objectId: sharedObjectId } } },
+            { UnresolvedObject: { objectId: ownedObjectId } },
+            { Pure: { bytes: "" } },
+        ],
+    });
+
+    assert.deepEqual(fingerprint, {
+        movePackages: [packageId],
+        objectIds: [ownedObjectId, sharedObjectId],
+    });
 });
 
 async function preparedRegisterFixture(funding: "addressBalance" | "coin" | "mixedLegacy" = "addressBalance"): Promise<{

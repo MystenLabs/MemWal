@@ -255,7 +255,19 @@ export function registerWalrusUploadRoute(app: Express): void {
             );
             const registerDigest = await timedPhase(
                 "register_sponsor",
-                () => submitWalletTransaction(registerTx, signer, registerAllowedAddresses),
+                () => submitWalletTransaction(
+                    registerTx,
+                    signer,
+                    registerAllowedAddresses,
+                    undefined,
+                    undefined,
+                    {
+                        phase: "register_sponsor",
+                        traceId,
+                        jobId: jobIdForLog,
+                        keyIndex: keySlot,
+                    }
+                ),
                 (digest) => ({ digest })
             );
             await timedPhase(

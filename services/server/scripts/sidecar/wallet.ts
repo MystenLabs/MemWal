@@ -127,6 +127,7 @@ export async function submitWalletTransaction(
     allowedAddresses?: string[],
     fallbackPolicy?: EnokiFallbackPolicy,
     onSubmissionStarted?: () => void,
+    diagnostics?: Record<string, unknown>,
 ): Promise<string> {
     return trackWalletSubmission(() =>
         executeWithEnokiSponsor(
@@ -135,6 +136,7 @@ export async function submitWalletTransaction(
             allowedAddresses,
             fallbackPolicy,
             onSubmissionStarted,
+            diagnostics,
         ),
     );
 }
@@ -171,6 +173,7 @@ export async function submitRebuildableWalletTransaction(
                 allowedAddresses,
                 fallbackPolicy,
                 onSubmissionStarted,
+                { phase: phaseName, ...logContext },
             );
         } catch (err: unknown) {
             const message = errorMessage(err);
