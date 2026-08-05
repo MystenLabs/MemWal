@@ -1172,12 +1172,23 @@ fn parse_epoch_schedule(value: &serde_json::Value) -> Option<WalrusEpochSchedule
 }
 
 /// Convert a Walrus epoch to its wall-clock expiry timestamp.
+///
+/// Per the Walrus Move contract's own field docs (vendored in
+/// @mysten/walrus's generated bindings): `epoch_duration` "does not affect
+/// the first (zero) epoch", and `first_epoch_start` is "used only for the
+/// first epoch" — i.e. epoch 1 begins exactly at first_epoch_start, and
+/// epoch_duration only applies from epoch 1 onward. So epoch E's start is
+/// first_epoch_start + (E - 1) * epoch_duration, not E * epoch_duration.
+/// This is a best-effort reading of that doc comment, not independently
+/// verified against a live epoch-change observation — see this plan's
+/// Self-Review Notes.
 pub fn expires_at_from_epoch(
     end_epoch: WalrusEpoch,
     schedule: &WalrusEpochSchedule,
 ) -> chrono::DateTime<chrono::Utc> {
+    let epochs_since_first = end_epoch.0.saturating_sub(1) as i64;
     let expires_at_ms = schedule.first_epoch_start_ms as i64
-        + (end_epoch.0 as i64) * schedule.epoch_duration_ms as i64;
+        + epochs_since_first * schedule.epoch_duration_ms as i64;
     chrono::DateTime::from_timestamp_millis(expires_at_ms).unwrap_or_else(chrono::Utc::now)
 }
 
@@ -1663,6 +1674,20 @@ mod tests {
     }
 
     #[test]
+    fn expires_at_from_epoch_epoch_one_starts_exactly_at_first_epoch_start() {
+        // Semantically anchored per the Walrus contract's own doc comment
+        // (epoch_duration "does not affect the first (zero) epoch";
+        // first_epoch_start is "used only for the first epoch") — epoch 1
+        // must begin exactly at first_epoch_start, not one duration later.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let expires_at = expires_at_from_epoch(WalrusEpoch(1), &schedule);
+        assert_eq!(expires_at.timestamp_millis(), 1_700_000_000_000_i64);
+    }
+
+    #[test]
     fn expires_at_from_epoch_computes_wall_clock_time() {
         let schedule = WalrusEpochSchedule {
             epoch_duration_ms: 86_400_000, // 1 day
@@ -1670,7 +1695,8 @@ mod tests {
         };
         let end_epoch = WalrusEpoch(10);
         let expires_at = expires_at_from_epoch(end_epoch, &schedule);
-        let expected_ms = 1_700_000_000_000_i64 + 10 * 86_400_000_i64;
+        // epoch 10 starts (10 - 1) = 9 durations after first_epoch_start.
+        let expected_ms = 1_700_000_000_000_i64 + 9 * 86_400_000_i64;
         assert_eq!(expires_at.timestamp_millis(), expected_ms);
     }
 
