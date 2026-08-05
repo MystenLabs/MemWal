@@ -13,6 +13,8 @@ pub struct UploadResult {
     /// Sui object ID of the Blob object (hex, e.g. "0x...")
     #[allow(dead_code)]
     pub object_id: Option<String>,
+    /// Walrus epoch at which the blob's storage expires
+    pub end_epoch: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -109,6 +111,8 @@ struct WalrusUploadResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    #[serde(default)]
+    end_epoch: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -358,6 +362,7 @@ async fn upload_blob_inner(
     Ok(UploadResult {
         blob_id: result.blob_id,
         object_id: result.object_id,
+        end_epoch: result.end_epoch,
     })
 }
 
@@ -858,5 +863,17 @@ mod tests {
             aggregate_download_errors("blob", &errors),
             AppError::Internal(_)
         ));
+    }
+
+    #[test]
+    fn walrus_upload_response_deserializes_end_epoch() {
+        let json = serde_json::json!({
+            "blobId": "abc123",
+            "objectId": "0xdead",
+            "transferStatus": "ok",
+            "endEpoch": 457,
+        });
+        let parsed: super::WalrusUploadResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.end_epoch, Some(457));
     }
 }
