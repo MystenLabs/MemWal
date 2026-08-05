@@ -232,7 +232,13 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
         visibleActivated && <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
     }>
-        <div className="sd-warning"><ShieldAlert size={18}/><span>Deletion is permanent. Preview anything you need before continuing.</span></div>
+        <div className="sd-warning">
+            <ShieldAlert size={18} aria-hidden="true" />
+            <span>
+                On {config.migrationCompletedDate} all existing memories were migrated onto a new contract as part of a security upgrade. We recommend removing all pre-migration data, and reviewing any sensitive data you may have stored. A guide is available{' '}
+                <a href={config.securityGuideUrl} target="_blank" rel="noopener noreferrer">here</a>.
+            </span>
+        </div>
         {identityMatches && !activated && <div className="sd-load-prompt">
             <button className="btn dashboard-cleanup-load" disabled={loading || busy} onClick={() => setActivated(true)}>Load my memories</button>
         </div>}
