@@ -162,25 +162,9 @@ class _PendingSaves:
     def flush_sync(self) -> None:
         """Join every pending thread. If async tasks are also pending
         (possible when a sync call site shares state with an async one),
-        run them to completion on a fresh loop first.
-
-        A pending Task belongs to the loop that created it (e.g. an earlier
-        `await llm.ainvoke(...)` call); gathering it under a *different*
-        loop here raises RuntimeError. That's a caller-error case (mixing
-        sync and async entry points on the same wrapped client) this
-        cleanup path can't recover from — log and continue draining
-        threads rather than raise out of what's usually shutdown code.
-        """
+        run them to completion on a fresh loop first."""
         if self._tasks:
-            try:
-                asyncio.run(asyncio.gather(*list(self._tasks), return_exceptions=True))
-            except RuntimeError:
-                logger.warning(
-                    "Walrus Memory flush_sync() could not await %d pending task(s) "
-                    "bound to a different event loop (mixing sync and async calls "
-                    "on the same wrapped client?) — those saves may be lost.",
-                    len(self._tasks),
-                )
+            asyncio.run(asyncio.gather(*list(self._tasks), return_exceptions=True))
         self._join_threads()
 
     def _join_threads(self) -> None:
