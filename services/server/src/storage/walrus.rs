@@ -14,7 +14,7 @@ pub struct UploadResult {
     #[allow(dead_code)]
     pub object_id: Option<String>,
     /// Walrus epoch at which the blob's storage expires
-    pub end_epoch: Option<i64>,
+    pub end_epoch: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -112,7 +112,7 @@ struct WalrusUploadResponse {
     #[serde(default)]
     transfer_status: Option<String>,
     #[serde(default)]
-    end_epoch: Option<i64>,
+    end_epoch: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]

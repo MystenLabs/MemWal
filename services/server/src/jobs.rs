@@ -776,7 +776,7 @@ async fn insert_vector_and_mark_remember_done(
     wallet_index: usize,
     agent_id: Option<&str>,
     package_id: Option<&str>,
-    end_epoch: Option<i64>,
+    end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
         .map(str::to_owned)

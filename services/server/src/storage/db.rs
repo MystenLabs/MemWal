@@ -192,11 +192,8 @@ mod tests {
         .await
         .unwrap();
 
-        // `end_epoch` is INTEGER (int4) on `vector_entries` (migration 014);
-        // cast to BIGINT so sqlx's runtime type check accepts decoding it as
-        // i64, matching `insert_vector`'s `Option<i64>` parameter type.
-        let row: (Option<i64>,) =
-            sqlx::query_as("SELECT end_epoch::BIGINT FROM vector_entries WHERE id = $1")
+        let row: (Option<i32>,) =
+            sqlx::query_as("SELECT end_epoch FROM vector_entries WHERE id = $1")
                 .bind(&id)
                 .fetch_one(db.pool())
                 .await
@@ -439,7 +436,7 @@ impl VectorDb {
         importance: f32,
         agent_id: Option<&str>,
         package_id: Option<&str>,
-        end_epoch: Option<i64>,
+        end_epoch: Option<i32>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
