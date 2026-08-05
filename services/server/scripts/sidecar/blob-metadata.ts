@@ -85,14 +85,7 @@ export function parseSealPersistenceFence(
     if (!SUI_ADDRESS.test(policy.policyPackageId)) {
         invalidFence("Sidecar SEAL policy package is not configured");
     }
-    const requestedPolicyPackageId = normalizeSuiAddress(input.policyPackageId);
     const configuredPolicyPackageId = normalizeSuiAddress(policy.policyPackageId);
-    if (requestedPolicyPackageId !== configuredPolicyPackageId) {
-        invalidFence("policyPackageId does not match the configured SEAL policy package", {
-            requestedPolicyPackageId,
-            configuredPolicyPackageId,
-        });
-    }
     if (typeof immutablePackageId !== "string" || !SUI_ADDRESS.test(immutablePackageId)) {
         invalidFence("Invalid or missing packageId for v1-new persistence fence");
     }
@@ -117,9 +110,9 @@ export function parseSealPersistenceFence(
         sealAbi: "v1-new",
         accountId: normalizeSuiAddress(input.accountId),
         registryId: normalizeSuiAddress(input.registryId),
-        // The executable target comes from deployment configuration. The
-        // request value is checked above only to catch stale/misrouted callers.
-        policyPackageId: normalizeSuiAddress(policy.policyPackageId),
+        // The executable target is operator-controlled. The request field is
+        // required for protocol completeness but cannot select Move code.
+        policyPackageId: configuredPolicyPackageId,
         idBytes: Array.from(Buffer.from(parsed.id, "hex")),
     };
 }
