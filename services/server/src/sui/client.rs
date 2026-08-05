@@ -1192,18 +1192,39 @@ fn parse_epoch_schedule(value: &serde_json::Value) -> Option<WalrusEpochSchedule
 /// `end_epoch - current_epoch` can legitimately be negative — an
 /// already-expired blob, where `end_epoch < current_epoch` — in which case
 /// `expires_at` correctly lands in the past. That is expected, not an
-/// error. Arithmetic is saturating: epoch counts/durations are always small
-/// in practice (Walrus epochs are weeks; counts stay in the thousands for
-/// centuries), but this must not panic the caller, which runs inside an
-/// unsupervised `tokio::spawn` background task with no restart wrapper.
+/// error. No step of this computation can panic: epoch counts/durations
+/// are always small in practice (Walrus epochs are weeks; counts stay in
+/// the thousands for centuries), but every step — including the initial
+/// `end_epoch - current_epoch` subtraction of two arbitrary `u64`s, which
+/// can itself overflow `i64` before any multiplication happens — is done
+/// in `i128` (wide enough for the full `u64` range on both sides) and only
+/// saturated back down to `i64` at the very end. This must not panic the
+/// caller, which runs inside an unsupervised `tokio::spawn` background
+/// task with no restart wrapper.
 pub fn expires_at_from_epoch(
     end_epoch: WalrusEpoch,
     current_epoch: WalrusEpoch,
     schedule: &WalrusEpochSchedule,
     now: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
-    let epoch_delta = end_epoch.0 as i64 - current_epoch.0 as i64;
-    let delta_ms = epoch_delta.saturating_mul(schedule.epoch_duration_ms as i64);
+    // Widen to i128 for the whole computation — end_epoch/current_epoch are
+    // arbitrary u64s (a malformed/adversarial on-chain response is not
+    // ruled out), so a plain `as i64 - as i64` subtraction can itself
+    // overflow i64 (e.g. end_epoch = i64::MAX as u64, current_epoch =
+    // i64::MIN as u64) before the multiplication even runs. i128 can hold
+    // the full u64 range on both sides of the subtraction and the
+    // subsequent multiplication by epoch_duration_ms without overflowing,
+    // so only the final narrowing back to i64 needs to saturate.
+    //
+    // The narrowing bound is `-i64::MAX..=i64::MAX`, NOT the full i64
+    // range: `chrono::Duration::milliseconds` itself panics on exactly
+    // `i64::MIN` (its `TimeDelta` range is asymmetric — `-i64::MAX` is its
+    // minimum representable value, not `i64::MIN` — see chrono's
+    // `time_delta.rs`), so clamping to `i64::MIN..=i64::MAX` would trade
+    // one panic for another at the most-negative boundary.
+    let epoch_delta: i128 = end_epoch.0 as i128 - current_epoch.0 as i128;
+    let delta_ms: i128 = epoch_delta.saturating_mul(schedule.epoch_duration_ms as i128);
+    let delta_ms: i64 = delta_ms.clamp(-(i64::MAX as i128), i64::MAX as i128) as i64;
     now.checked_add_signed(chrono::Duration::milliseconds(delta_ms))
         .unwrap_or(if delta_ms >= 0 {
             chrono::DateTime::<chrono::Utc>::MAX_UTC
@@ -1749,11 +1770,25 @@ mod tests {
         // Malformed/adversarial epoch values must saturate, not panic —
         // this runs inside an unsupervised tokio::spawn background task
         // with no restart wrapper.
+        //
+        // `WalrusEpoch(u64::MAX)`/`WalrusEpoch(0)` are NOT a real stress
+        // test of the `end_epoch.0 as i64 - current_epoch.0 as i64`
+        // subtraction: they bit-cast to `-1`/`0` as i64, nowhere near the
+        // i64 overflow boundary. `i64::MAX as u64` / `i64::MIN as u64` are
+        // both legitimate `u64` values (WalrusEpoch's inner type) that DO
+        // hit that boundary — `i64::MAX - i64::MIN` overflows i64 outright,
+        // which previously panicked under this crate's default
+        // overflow-checks-on debug/test profile even though the
+        // subsequent multiplication was already saturating.
         let schedule = WalrusEpochSchedule {
             epoch_duration_ms: u64::MAX,
             first_epoch_start_ms: 0,
         };
         let now = chrono::Utc::now();
+        let max_epoch = WalrusEpoch(i64::MAX as u64);
+        let min_epoch = WalrusEpoch(i64::MIN as u64);
+        let _ = expires_at_from_epoch(max_epoch, min_epoch, &schedule, now);
+        let _ = expires_at_from_epoch(min_epoch, max_epoch, &schedule, now);
         let _ = expires_at_from_epoch(WalrusEpoch(u64::MAX), WalrusEpoch(0), &schedule, now);
         let _ = expires_at_from_epoch(WalrusEpoch(0), WalrusEpoch(u64::MAX), &schedule, now);
     }
