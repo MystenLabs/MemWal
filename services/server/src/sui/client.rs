@@ -1173,23 +1173,43 @@ fn parse_epoch_schedule(value: &serde_json::Value) -> Option<WalrusEpochSchedule
 
 /// Convert a Walrus epoch to its wall-clock expiry timestamp.
 ///
-/// Per the Walrus Move contract's own field docs (vendored in
-/// @mysten/walrus's generated bindings): `epoch_duration` "does not affect
-/// the first (zero) epoch", and `first_epoch_start` is "used only for the
-/// first epoch" — i.e. epoch 1 begins exactly at first_epoch_start, and
-/// epoch_duration only applies from epoch 1 onward. So epoch E's start is
-/// first_epoch_start + (E - 1) * epoch_duration, not E * epoch_duration.
-/// This is a best-effort reading of that doc comment, not independently
-/// verified against a live epoch-change observation — see this plan's
-/// Self-Review Notes.
+/// Anchored on the CURRENT epoch, not Walrus's genesis:
+///
+/// ```text
+/// expires_at = now + (end_epoch - current_epoch) * epoch_duration
+/// ```
+///
+/// This self-corrects every sweep cycle (the caller re-fetches
+/// `current_epoch`/`now` on every 24h resync), so an `epoch_duration`
+/// change, or drift between actual epoch rollovers and the ideal schedule,
+/// can never silently extrapolate a wrong date over hundreds of epochs —
+/// the error is bounded to at most one epoch's worth of drift since the
+/// last resync. This deliberately does NOT use `schedule.first_epoch_start_ms`
+/// (kept on `WalrusEpochSchedule` only because `parse_epoch_schedule` still
+/// reads it off the same on-chain object; genesis-anchoring was the
+/// previous, riskier formula).
+///
+/// `end_epoch - current_epoch` can legitimately be negative — an
+/// already-expired blob, where `end_epoch < current_epoch` — in which case
+/// `expires_at` correctly lands in the past. That is expected, not an
+/// error. Arithmetic is saturating: epoch counts/durations are always small
+/// in practice (Walrus epochs are weeks; counts stay in the thousands for
+/// centuries), but this must not panic the caller, which runs inside an
+/// unsupervised `tokio::spawn` background task with no restart wrapper.
 pub fn expires_at_from_epoch(
     end_epoch: WalrusEpoch,
+    current_epoch: WalrusEpoch,
     schedule: &WalrusEpochSchedule,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
-    let epochs_since_first = end_epoch.0.saturating_sub(1) as i64;
-    let expires_at_ms = schedule.first_epoch_start_ms as i64
-        + epochs_since_first * schedule.epoch_duration_ms as i64;
-    chrono::DateTime::from_timestamp_millis(expires_at_ms).unwrap_or_else(chrono::Utc::now)
+    let epoch_delta = end_epoch.0 as i64 - current_epoch.0 as i64;
+    let delta_ms = epoch_delta.saturating_mul(schedule.epoch_duration_ms as i64);
+    now.checked_add_signed(chrono::Duration::milliseconds(delta_ms))
+        .unwrap_or(if delta_ms >= 0 {
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+        } else {
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+        })
 }
 
 #[cfg(test)]
@@ -1674,17 +1694,18 @@ mod tests {
     }
 
     #[test]
-    fn expires_at_from_epoch_epoch_one_starts_exactly_at_first_epoch_start() {
-        // Semantically anchored per the Walrus contract's own doc comment
-        // (epoch_duration "does not affect the first (zero) epoch";
-        // first_epoch_start is "used only for the first epoch") — epoch 1
-        // must begin exactly at first_epoch_start, not one duration later.
+    fn expires_at_from_epoch_same_epoch_boundary_equals_now() {
+        // Current-epoch-anchored: when end_epoch == current_epoch, the
+        // blob expires exactly "now" (zero epoch delta), regardless of
+        // schedule.first_epoch_start_ms — which this formula no longer
+        // reads at all.
         let schedule = WalrusEpochSchedule {
             epoch_duration_ms: 86_400_000, // 1 day
             first_epoch_start_ms: 1_700_000_000_000,
         };
-        let expires_at = expires_at_from_epoch(WalrusEpoch(1), &schedule);
-        assert_eq!(expires_at.timestamp_millis(), 1_700_000_000_000_i64);
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let expires_at = expires_at_from_epoch(WalrusEpoch(10), WalrusEpoch(10), &schedule, now);
+        assert_eq!(expires_at, now);
     }
 
     #[test]
@@ -1693,11 +1714,48 @@ mod tests {
             epoch_duration_ms: 86_400_000, // 1 day
             first_epoch_start_ms: 1_700_000_000_000,
         };
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
         let end_epoch = WalrusEpoch(10);
-        let expires_at = expires_at_from_epoch(end_epoch, &schedule);
-        // epoch 10 starts (10 - 1) = 9 durations after first_epoch_start.
-        let expected_ms = 1_700_000_000_000_i64 + 9 * 86_400_000_i64;
+        let current_epoch = WalrusEpoch(1);
+        let expires_at = expires_at_from_epoch(end_epoch, current_epoch, &schedule, now);
+        // end_epoch is 9 epochs ahead of current_epoch, so expiry is
+        // `now` plus 9 durations.
+        let expected_ms = 1_800_000_000_000_i64 + 9 * 86_400_000_i64;
         assert_eq!(expires_at.timestamp_millis(), expected_ms);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_negative_delta_lands_in_the_past() {
+        // end_epoch < current_epoch is a legitimate, expected case (an
+        // already-expired blob the sweep hasn't caught up to yet) — not an
+        // error. expires_at must correctly land before `now`.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let end_epoch = WalrusEpoch(1);
+        let current_epoch = WalrusEpoch(10);
+        let expires_at = expires_at_from_epoch(end_epoch, current_epoch, &schedule, now);
+        // current_epoch is 9 epochs ahead of end_epoch, so expiry is `now`
+        // minus 9 durations — squarely in the past.
+        let expected_ms = 1_800_000_000_000_i64 - 9 * 86_400_000_i64;
+        assert_eq!(expires_at.timestamp_millis(), expected_ms);
+        assert!(expires_at < now);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_does_not_panic_on_extreme_inputs() {
+        // Malformed/adversarial epoch values must saturate, not panic —
+        // this runs inside an unsupervised tokio::spawn background task
+        // with no restart wrapper.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: u64::MAX,
+            first_epoch_start_ms: 0,
+        };
+        let now = chrono::Utc::now();
+        let _ = expires_at_from_epoch(WalrusEpoch(u64::MAX), WalrusEpoch(0), &schedule, now);
+        let _ = expires_at_from_epoch(WalrusEpoch(0), WalrusEpoch(u64::MAX), &schedule, now);
     }
 
     #[test]

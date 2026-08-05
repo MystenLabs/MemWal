@@ -531,8 +531,7 @@ impl VectorDb {
         // index on expiry_synced_at so the periodic expiry refresh sweep
         // doesn't full-scan vector_entries every tick (WALM-296). Must stay
         // in its own file/transaction — see 015's header comment.
-        let migration_015 =
-            include_str!("../../migrations/015_memory_expiry_synced_at_index.sql");
+        let migration_015 = include_str!("../../migrations/015_memory_expiry_synced_at_index.sql");
         sqlx::raw_sql(migration_015)
             .execute(&pool)
             .await
@@ -1022,7 +1021,12 @@ impl VectorDb {
         .bind(limit)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to select rows needing expiry refresh: {}", e)))
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to select rows needing expiry refresh: {}",
+                e
+            ))
+        })
     }
 
     /// Stamp expiry_synced_at = NOW() at SCHEDULE time (not completion) so

@@ -107,12 +107,22 @@ struct QueryBlobStorageLeasesResponse {
     blobs: Vec<BlobStorageLease>,
     #[allow(dead_code)]
     total: usize,
-    #[allow(dead_code)]
     #[serde(rename = "currentEpoch")]
     current_epoch: i32,
     #[allow(dead_code)]
     #[serde(rename = "nonexistentBlobIds", default)]
     nonexistent_blob_ids: Vec<String>,
+}
+
+/// Result of a batch storage-lease lookup: each blob's on-chain storage
+/// lease, plus the Walrus epoch the sidecar observed while looking them up
+/// (`QueryBlobStorageLeasesResponse.current_epoch`). The expiry sweep
+/// (`main.rs`) needs both — `current_epoch` anchors its
+/// `expires_at_from_epoch` formula, scoped to the exact same lease-lookup
+/// response `storage_end_epoch` came from.
+pub struct BlobStorageLeases {
+    pub blobs: Vec<BlobStorageLease>,
+    pub current_epoch: i32,
 }
 
 /// Request/response types for sidecar HTTP API
@@ -571,7 +581,7 @@ pub async fn query_blob_storage_leases(
     sidecar_secret: Option<&str>,
     owner_address: &str,
     blob_ids: &[String],
-) -> Result<Vec<BlobStorageLease>, AppError> {
+) -> Result<BlobStorageLeases, AppError> {
     let url = format!("{}/walrus/query-blobs", sidecar_url);
 
     // NOTE: `limit` does NOT currently bound this call's cost. The
@@ -609,7 +619,10 @@ pub async fn query_blob_storage_leases(
             "walrus_query_blob_storage_leases",
             "transport_error",
         );
-        AppError::Internal(format!("Sidecar walrus/query-blobs (storage lease) failed: {}", e))
+        AppError::Internal(format!(
+            "Sidecar walrus/query-blobs (storage lease) failed: {}",
+            e
+        ))
     })?;
     let status_label = resp.status().as_u16().to_string();
     crate::observability::observe_external(
@@ -644,7 +657,10 @@ pub async fn query_blob_storage_leases(
         owner_address,
     );
 
-    Ok(result.blobs)
+    Ok(BlobStorageLeases {
+        blobs: result.blobs,
+        current_epoch: result.current_epoch,
+    })
 }
 
 /// Download a blob from one or more Walrus aggregators.

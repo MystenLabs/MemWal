@@ -781,8 +781,11 @@ mod tests {
         .unwrap();
 
         let result = query_owner_memories(&pool, &owner, None, 10).await.unwrap();
-        let by_blob: std::collections::HashMap<_, _> =
-            result.memories.iter().map(|m| (m.blob_id.clone(), m)).collect();
+        let by_blob: std::collections::HashMap<_, _> = result
+            .memories
+            .iter()
+            .map(|m| (m.blob_id.clone(), m))
+            .collect();
 
         assert_eq!(by_blob["blob-expired"].status, "expired");
         assert_eq!(by_blob["blob-active"].status, "active");

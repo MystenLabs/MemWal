@@ -378,14 +378,7 @@ impl Config {
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
         };
-        // Walrus staking pool shared object id, matching @mysten/walrus's
-        // constants.mjs per-network defaults (see also
-        // scripts/sidecar/config.ts's WALRUS_PACKAGE_ID handling, which
-        // follows the same pattern for the TS sidecar).
-        let default_walrus_staking_pool_id = match network.as_str() {
-            "testnet" => "0xbe46180321c30aab2f8b3501e24048377287fa708018a5b7c2792b35fe339ee3",
-            _ => "0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904",
-        };
+        let default_walrus_staking_pool_id = default_walrus_staking_pool_id(&network);
         let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
             .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
         let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
@@ -508,6 +501,22 @@ impl Config {
             walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
                 .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
         }
+    }
+}
+
+/// Per-network default for the Walrus staking pool shared object id (see
+/// `Config::walrus_staking_pool_id`'s doc comment). Matches @mysten/walrus's
+/// constants.mjs per-network defaults (see also scripts/sidecar/config.ts's
+/// WALRUS_PACKAGE_ID handling, which follows the same pattern for the TS
+/// sidecar). Only `testnet` has a distinct default — every other network
+/// value, including `devnet`/`localnet`, silently falls back to the
+/// MAINNET object id. Callers on a non-testnet, non-mainnet network should
+/// set `WALRUS_STAKING_POOL_ID` explicitly rather than relying on this.
+/// Expects `network` already trimmed/lowercased (see `Config::from_env`).
+pub fn default_walrus_staking_pool_id(network: &str) -> &'static str {
+    match network {
+        "testnet" => "0xbe46180321c30aab2f8b3501e24048377287fa708018a5b7c2792b35fe339ee3",
+        _ => "0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904",
     }
 }
 
