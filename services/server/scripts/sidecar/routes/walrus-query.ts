@@ -127,6 +127,17 @@ type RawBlobObj = {
 };
 
 /**
+ * True when `listBlobObjectsGrpc` returned exactly `cap` objects — i.e. its
+ * `while (out.length < cap)` loop stopped because of the cap, not because
+ * the owner ran out of Blob objects (WALM-319). Errs toward over-reporting:
+ * an owner who happens to own exactly `cap` blobs also reads as capped,
+ * since there's no cheap way to tell that apart from "there were more."
+ */
+export function isSourceCapped(fetchedCount: number, cap: number): boolean {
+    return fetchedCount >= cap;
+}
+
+/**
  * gRPC path for step 1: listOwnedObjects filters by object type server-side
  * and `include.json` returns the flattened Move fields (blob_id included), so
  * one paginated call replaces both the queryTransactionBlocks candidate scan
@@ -395,6 +406,13 @@ export function registerWalrusQueryRoute(app: Express): void {
             const cap =
                 useRecentTxPath && !requestedBlobIds ? Math.max(1, Math.min(desiredMatches * 5, 100)) : Infinity;
             const rawObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, cap, requestedBlobIds);
+            // WALM-319: the candidate fetch above is capped independent of
+            // `limit` once desiredMatches >= 20 (`cap` saturates at 100) and
+            // shared across all of the owner's namespaces — a caller (namely
+            // restore()) can't otherwise tell "found everything" apart from
+            // "stopped early because of the cap" once results are filtered
+            // down to one namespace.
+            const sourceCapped = isSourceCapped(rawObjs.length, cap);
             if (includeStorageLease === true) {
                 // Expiry is a terminal migration decision. Do not use the
                 // upload client's normal 30-minute metadata cache here.
@@ -525,7 +543,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                     rawObjs.length
                 }) for owner=${owner} ns=${namespace || "*"}`
             );
-            res.json({ blobs, total: blobs.length });
+            res.json({ blobs, total: blobs.length, sourceCapped });
         } catch (err: any) {
             const traceId = requestIdFor(req);
             const message = errorMessage(err);

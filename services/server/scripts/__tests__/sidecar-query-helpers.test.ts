@@ -9,6 +9,7 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    isSourceCapped,
     isWalrusBlobObjectType,
     isVerifiedNonexistentSource,
     ownerMatchesRecipient,
@@ -408,6 +409,19 @@ test("source lease epochs accept only u32 numbers", () => {
     for (const invalid of [-1, 1.5, 0x1_0000_0000, "460", null, undefined]) {
         assert.throws(() => strictWalrusEpoch(invalid, "epoch"), /epoch must be a u32/);
     }
+});
+
+test("isSourceCapped flags when the raw candidate fetch hit its cap (WALM-319)", () => {
+    // listBlobObjectsGrpc's own loop condition is `while (out.length < cap)`,
+    // so returning exactly `cap` objects means it stopped because of the
+    // cap, not because the owner ran out of blobs — that's the one case a
+    // caller can't tell apart from "the owner just happens to own exactly
+    // `cap` blobs" without this signal (and this errs toward over-warning
+    // in that boundary case, not under-warning).
+    assert.equal(isSourceCapped(3, 5), false, "fewer fetched than cap: not capped");
+    assert.equal(isSourceCapped(5, 5), true, "fetched exactly cap: capped");
+    assert.equal(isSourceCapped(0, 5), false, "nothing fetched: not capped");
+    assert.equal(isSourceCapped(5, Infinity), false, "unbounded cap can never be hit");
 });
 
 test("registration reconciliation requires matching size and deletability", () => {

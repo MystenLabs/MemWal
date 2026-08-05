@@ -1224,17 +1224,16 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
-    /// True when more on-chain blobs were missing locally than `limit`
-    /// allowed this call to restore.
-    ///
-    /// `false` is *not* a fully-recovered guarantee: the on-chain blob
-    /// discovery this is computed from (`query_blobs_by_owner` / the
-    /// sidecar's `query-blobs`) bounds how many raw candidates it fetches
-    /// per owner — shared across all of the owner's namespaces, and
-    /// hard-capped independent of `limit` — before this namespace's blobs
-    /// are even filtered out of that set. A namespace can still be
-    /// silently under-restored past that cap while `truncated` reads
-    /// `false`. Raising `limit` only helps up to that cap.
+    /// True when this restore is known-incomplete: either more on-chain
+    /// blobs were missing locally than `limit` allowed this call to
+    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
+    /// per owner, shared across all of the owner's namespaces, hard-capped
+    /// independent of `limit`) hit its own cap before this namespace's
+    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// case can be `true` even when `total == 0` for this namespace,
+    /// since a cap hit elsewhere can starve this namespace's fetch
+    /// entirely. Raising `limit` only helps with the first case; past the
+    /// sidecar's cap, only a cursor/pagination-based restore would.
     pub truncated: bool,
 }
 

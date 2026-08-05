@@ -471,7 +471,7 @@ pub async fn restore(
         owner,
         namespace
     );
-    let on_chain_blobs = walrus::query_blobs_by_owner(
+    let (on_chain_blobs, source_capped) = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -485,13 +485,17 @@ pub async fn restore(
     let total = all_blob_ids.len();
 
     if total == 0 {
+        // source_capped, not unconditionally false: the raw candidate fetch
+        // can hit its cap fulfilling OTHER namespaces before this one is
+        // even filtered out, so zero found here doesn't rule out more
+        // existing that were never fetched (WALM-319).
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
             total: 0,
             namespace: namespace.clone(),
             owner: owner.clone(),
-            truncated: false,
+            truncated: source_capped,
         }));
     }
 
@@ -509,15 +513,20 @@ pub async fn restore(
     // arbitrary N of the missing blobs, not the N most recent. If fewer
     // than N candidates match after namespace/package filtering, restore
     // returns a partial result instead of scanning the whole wallet.
-    let (missing_blob_ids, truncated) = paginate_missing_blobs(all_missing, limit);
+    let (missing_blob_ids, limit_truncated) = paginate_missing_blobs(all_missing, limit);
+    // OR in source_capped (WALM-319): the local limit-slice check alone
+    // can't see truncation that already happened one layer up, in the
+    // sidecar's raw candidate fetch.
+    let truncated = limit_truncated || source_capped;
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
-        "restore: total={} on-chain, existing={}, missing={} (limited to {}, truncated={}) for ns={}",
+        "restore: total={} on-chain, existing={}, missing={} (limited to {}, truncated={}, source_capped={}) for ns={}",
         total,
         existing_blob_ids.len(),
         missing_blob_ids.len(),
         limit,
         truncated,
+        source_capped,
         namespace
     );
 
