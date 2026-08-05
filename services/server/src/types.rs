@@ -123,6 +123,16 @@ pub struct AppState {
     /// background so resolver/reconciler traffic cannot consume reservations
     /// held for auth, prepare, and submit.
     pub security_delete_background_sui: Option<Arc<dyn crate::sui::SuiApi>>,
+    /// General-purpose Sui client for on-chain reads unrelated to security
+    /// deletion (currently: the per-memory expiry sweep's
+    /// `walrus_epoch_schedule()` lookup, WALM-296). Unlike
+    /// `security_delete_sui`, this is populated whenever `SUI_GRPC_URL` is
+    /// configured, regardless of whether the security-delete component is
+    /// enabled — the expiry sweep must work in deployments that don't run
+    /// security deletion at all. `None` only when `SUI_GRPC_URL` itself is
+    /// unset, in which case dependent background tasks log and skip rather
+    /// than panic.
+    pub walrus_sui_client: Option<Arc<dyn crate::sui::SuiApi>>,
     /// Shared only by security-delete API execution and reconciler replay.
     pub security_delete_execution_gate: Arc<SecurityDeleteExecutionGate>,
     /// `Arc` so the engine + handlers share one immutable config.

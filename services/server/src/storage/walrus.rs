@@ -80,6 +80,41 @@ struct QueryBlobsResponse {
     total: usize,
 }
 
+/// A blob's on-chain storage lease, as returned by the sidecar's
+/// `/walrus/query-blobs` endpoint when called with `includeStorageLease:
+/// true` (WALM-296's expiry sweep). This is a genuinely different response
+/// shape from `OnChainBlob`/`query_blobs_by_owner` — no `namespace`,
+/// `packageId`, or `agentId` — so it gets its own struct rather than
+/// extending `OnChainBlob`.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct BlobStorageLease {
+    /// Walrus blob ID
+    #[serde(rename = "blobId")]
+    pub blob_id: String,
+    /// Sui object ID of the Blob object
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    /// Walrus epoch at which this blob's storage lease ends
+    #[serde(rename = "storageEndEpoch")]
+    pub storage_end_epoch: i32,
+}
+
+/// Response from sidecar query-blobs endpoint when `includeStorageLease:
+/// true` is requested.
+#[derive(Debug, serde::Deserialize)]
+struct QueryBlobStorageLeasesResponse {
+    blobs: Vec<BlobStorageLease>,
+    #[allow(dead_code)]
+    total: usize,
+    #[allow(dead_code)]
+    #[serde(rename = "currentEpoch")]
+    current_epoch: i32,
+    #[allow(dead_code)]
+    #[serde(rename = "nonexistentBlobIds", default)]
+    nonexistent_blob_ids: Vec<String>,
+}
+
 /// Request/response types for sidecar HTTP API
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -519,6 +554,82 @@ pub async fn query_blobs_by_owner(
         result.total,
         owner_address,
         namespace
+    );
+
+    Ok(result.blobs)
+}
+
+/// Query on-chain storage-lease end epochs for a specific set of blob IDs
+/// owned by `owner_address`, via the sidecar's `/walrus/query-blobs`
+/// endpoint's `includeStorageLease: true` mode (WALM-296's periodic expiry
+/// sweep). Unlike `query_blobs_by_owner`, this is scoped to exactly the
+/// blob IDs passed in and returns each one's `storageEndEpoch` rather than
+/// namespace/package/agent metadata.
+pub async fn query_blob_storage_leases(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    owner_address: &str,
+    blob_ids: &[String],
+) -> Result<Vec<BlobStorageLease>, AppError> {
+    let url = format!("{}/walrus/query-blobs", sidecar_url);
+
+    let body = serde_json::json!({
+        "owner": owner_address,
+        "blobIds": blob_ids,
+        "includeStorageLease": true,
+    });
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "walrus_query_blob_storage_leases",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure(
+            "walrus_query_blob_storage_leases",
+            "transport_error",
+        );
+        AppError::Internal(format!("Sidecar walrus/query-blobs (storage lease) failed: {}", e))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_query_blob_storage_leases",
+        &status_label,
+        started.elapsed(),
+    );
+
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure(
+            "walrus_query_blob_storage_leases",
+            "http_error",
+        );
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "walrus query-blobs (storage lease) failed: {}",
+            body
+        )));
+    }
+
+    let result: QueryBlobStorageLeasesResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse query-blobs storage-lease response: {}",
+            e
+        ))
+    })?;
+
+    tracing::info!(
+        "walrus query-blobs (storage lease) ok: {} leases for owner={}",
+        result.blobs.len(),
+        owner_address,
     );
 
     Ok(result.blobs)
