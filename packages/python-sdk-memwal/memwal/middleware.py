@@ -174,6 +174,15 @@ class _PendingSaves:
             thread.join()
 
 
+def _expose_memwal_controls(obj: Any, memwal: MemWal, pending: _PendingSaves) -> None:
+    """Attach the underlying client and a way to drain pending auto-saves —
+    without this, a short-lived process has no way to avoid silently
+    losing writes still in flight when it exits."""
+    obj._memwal = memwal
+    obj.memwal_flush = pending.flush
+    obj.memwal_flush_sync = pending.flush_sync
+
+
 async def _warn_if_cancelled(coro: Any, label: str) -> None:
     try:
         await coro
@@ -383,12 +392,7 @@ def with_memwal_langchain(
     llm._agenerate = patched_agenerate  # type: ignore[assignment]
     llm._generate = patched_generate  # type: ignore[assignment]
 
-    # Expose the underlying client and a way to drain pending auto-saves —
-    # without this, a short-lived process has no way to avoid silently
-    # losing writes still in flight when it exits.
-    llm._memwal = memwal  # type: ignore[attr-defined]
-    llm.memwal_flush = pending.flush  # type: ignore[attr-defined]
-    llm.memwal_flush_sync = pending.flush_sync  # type: ignore[attr-defined]
+    _expose_memwal_controls(llm, memwal, pending)
 
     return llm
 
@@ -459,12 +463,7 @@ def with_memwal_openai(
             client, memwal, namespace, max_memories, auto_save, min_relevance, log, pending
         )
 
-    # Expose the underlying client and a way to drain pending auto-saves —
-    # without this, a short-lived process has no way to avoid silently
-    # losing writes still in flight when it exits.
-    client._memwal = memwal
-    client.memwal_flush = pending.flush
-    client.memwal_flush_sync = pending.flush_sync
+    _expose_memwal_controls(client, memwal, pending)
 
     return client
 
