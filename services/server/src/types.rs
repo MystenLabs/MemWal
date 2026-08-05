@@ -871,6 +871,7 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
 ///   - a width other than the fixed pgvector column (`EMBEDDING_DIMS`), and
 ///   - any non-finite component (NaN / ±Inf), which pgvector refuses to index
 ///     and which is meaningless for cosine similarity.
+///
 /// Both would otherwise only fail deep in pgvector as an opaque 500.
 pub fn validate_embedding_vector(vector: &[f32]) -> Result<(), AppError> {
     use crate::services::embedder::EMBEDDING_DIMS;
@@ -1618,8 +1619,14 @@ mod tests {
             vector[7] = bad;
             match validate_embedding_vector(&vector).unwrap_err() {
                 AppError::BadRequest(msg) => {
-                    assert!(msg.contains("finite"), "message names the finiteness rule: {msg}");
-                    assert!(msg.contains("index 7"), "message names the offending index: {msg}");
+                    assert!(
+                        msg.contains("finite"),
+                        "message names the finiteness rule: {msg}"
+                    );
+                    assert!(
+                        msg.contains("index 7"),
+                        "message names the offending index: {msg}"
+                    );
                 }
                 other => panic!("expected BadRequest, got {other:?}"),
             }
