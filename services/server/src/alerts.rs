@@ -303,6 +303,7 @@ pub struct WalrusUploadExhaustedAlert {
     pub wallet_index: usize,
     pub configured_wallets: usize,
     pub sui_network: String,
+    pub operation: String,
     pub error: String,
 }
 
@@ -496,10 +497,10 @@ impl SlackPayload {
 
     fn for_walrus_upload_exhausted(alert: &WalrusUploadExhaustedAlert) -> Self {
         let job = alert.remember_job_id.as_deref().unwrap_or("-");
-        let title = "MemWal Walrus upload exhausted retries".to_string();
+        let title = format!("MemWal Walrus {} exhausted retries", alert.operation);
         let summary = format!(
-            "Walrus upload failed after {}/{} wallet attempt(s) for job {}.",
-            alert.attempt, alert.max_attempts, job
+            "Walrus {} failed after {}/{} wallet attempt(s) for job {}.",
+            alert.operation, alert.attempt, alert.max_attempts, job
         );
         let details = format!(
             "*Job:* `{}`\n*Owner:* `{}`\n*Namespace:* `{}`\n*Network:* `{}`\n*Wallet index:* `{}`\n*Configured wallets:* `{}`\n*Error:* ```{}```",
@@ -810,6 +811,7 @@ mod tests {
             wallet_index: 4,
             configured_wallets: 5,
             sui_network: "mainnet".into(),
+            operation: "upload".into(),
             error: "walrus upload failed".into(),
         });
 
