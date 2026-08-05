@@ -419,6 +419,7 @@ mod tests {
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
+            include_str!("../../migrations/014_memory_expiry_columns.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }

@@ -49,6 +49,7 @@ mod tests {
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
+            include_str!("../../migrations/014_memory_expiry_columns.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -353,6 +354,13 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
+        // per-memory expiry columns (WALM-296).
+        let migration_014 = include_str!("../../migrations/014_memory_expiry_columns.sql");
+        sqlx::raw_sql(migration_014)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
