@@ -1212,9 +1212,11 @@ pub fn expires_at_from_epoch(
     // ruled out), so a plain `as i64 - as i64` subtraction can itself
     // overflow i64 (e.g. end_epoch = i64::MAX as u64, current_epoch =
     // i64::MIN as u64) before the multiplication even runs. i128 can hold
-    // the full u64 range on both sides of the subtraction and the
-    // subsequent multiplication by epoch_duration_ms without overflowing,
-    // so only the final narrowing back to i64 needs to saturate.
+    // the full u64 range on both sides of the subtraction without
+    // overflowing, but the subsequent multiplication by epoch_duration_ms
+    // can still exceed i128's range (u64::MAX * u64::MAX overflows i128 by
+    // roughly 2x) — that's why it's `saturating_mul`, not a plain `*`; only
+    // the final narrowing back to i64 needs an explicit saturating clamp.
     //
     // The narrowing bound is `-i64::MAX..=i64::MAX`, NOT the full i64
     // range: `chrono::Duration::milliseconds` itself panics on exactly
