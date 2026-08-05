@@ -320,9 +320,12 @@ pub async fn recall_manual(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RecallManualRequest>,
 ) -> Result<Json<RecallManualResponse>, AppError> {
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied query vector (width + finiteness) up front.
+    // The store's embedding column is fixed-width and refuses NaN/Inf, so a
+    // malformed query vector can only fail inside pgvector and surface as an
+    // opaque 500; reject it here with an actionable 400. (No upload/gas on this
+    // read path, unlike remember_manual — this is purely a clearer-error improvement.)
+    validate_embedding_vector(&body.vector)?;
 
     // Validate scoring_weights up front (NaN / out-of-range / sub-floor
     // half-life) before the vector search, mirroring `recall`. Previously

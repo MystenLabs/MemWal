@@ -9,6 +9,8 @@ vi.mock('../config', () => ({ config: {
     suiNetwork: 'testnet',
     memwalPackageId: '0x1',
     sealKeyServers: [],
+    migrationCompletedDate: 'July 30, 2026',
+    securityGuideUrl: 'https://docs.wal.app/walrus-memory/guides/delete-old-memories',
 } }))
 vi.mock('@mysten/dapp-kit', () => ({
     useCurrentAccount: () => ({ address: mocks.address }),
@@ -45,6 +47,17 @@ beforeEach(() => {
     mocks.phase = { kind: 'idle' }
     mocks.listBlobs.mockResolvedValue({ items: risk, counts, limits: { deleteBatchMax: 900 }, nextCursor: null })
     mocks.fetchPreview.mockResolvedValue('owner secret')
+})
+
+it('shows the migration notice and cleanup guide in the delete module', () => {
+    render(<SecurityDeleteSection accountObjectId="0x99" />)
+    expect(screen.getByText('Delete Pre-Migration Memories')).toBeInTheDocument()
+    expect(screen.getByText('Applies only to memories written before July 30, 2026')).toBeInTheDocument()
+    expect(screen.getByText(/On July 30, 2026 all existing memories were migrated/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'here' })).toHaveAttribute(
+        'href',
+        'https://docs.wal.app/walrus-memory/guides/delete-old-memories',
+    )
 })
 
 it('waits for explicit user intent before loading affected rows', async () => {
