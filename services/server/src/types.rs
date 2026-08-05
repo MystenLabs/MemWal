@@ -1224,6 +1224,11 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
+    /// True when more on-chain blobs were missing locally than `limit`
+    /// allowed this call to restore — the caller should raise `limit` or
+    /// call restore() again rather than assume the namespace is fully
+    /// recovered.
+    pub truncated: bool,
 }
 
 /// POST /api/forget — delete the vector index rows for a namespace

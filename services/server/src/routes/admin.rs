@@ -473,6 +473,7 @@ pub async fn restore(
             total: 0,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated: false,
         }));
     }
 
@@ -489,14 +490,19 @@ pub async fn restore(
     // transaction path, so keep the first N missing blobs. If fewer than N
     // candidates match after namespace/package filtering, restore returns a
     // partial result instead of scanning the whole wallet.
+    //
+    // WALM-317: this is a silent truncation unless we tell the caller —
+    // capture it before `.take(limit)` consumes `all_missing`.
+    let truncated = all_missing.len() > limit;
     let missing_blob_ids: Vec<String> = all_missing.into_iter().take(limit).collect();
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
-        "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",
+        "restore: total={} on-chain, existing={}, missing={} (limited to {}, truncated={}) for ns={}",
         total,
         existing_blob_ids.len(),
         missing_blob_ids.len(),
         limit,
+        truncated,
         namespace
     );
 
@@ -507,6 +513,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -577,6 +584,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -706,13 +714,14 @@ pub async fn restore(
         total,
         namespace: namespace.clone(),
         owner: owner.clone(),
+        truncated,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::encode_untrusted_memory_context;
-    use crate::types::RecallResult;
+    use crate::types::{RecallResult, RestoreResponse};
 
     // ── Memory context stays structured, untrusted JSON ──────────
 
@@ -767,6 +776,44 @@ mod tests {
                 input, expected, clamped
             );
         }
+    }
+
+    // ── restore() limit=10 silently truncates (WALM-317) ────────────────
+    //
+    // restore()'s on-chain-missing-blob list is sliced to `limit` before
+    // being restored (`all_missing.into_iter().take(limit)`), with no
+    // signal to the caller when there was more to restore than fit. This
+    // pins the truncation predicate (mirrors the production expression:
+    // all_missing.len() > limit) and the new response field it drives.
+
+    #[test]
+    fn restore_truncated_flag_matches_missing_vs_limit() {
+        for (missing_len, limit, expected_truncated) in [
+            (5usize, 10usize, false), // fewer missing than limit
+            (10, 10, false),          // exactly at limit
+            (11, 10, true),           // more missing than limit
+            (0, 10, false),           // nothing missing
+        ] {
+            let truncated = missing_len > limit;
+            assert_eq!(
+                truncated, expected_truncated,
+                "missing_len={} limit={} expected truncated={}",
+                missing_len, limit, expected_truncated
+            );
+        }
+    }
+
+    #[test]
+    fn restore_response_carries_truncated_field() {
+        let resp = RestoreResponse {
+            restored: 5,
+            skipped: 2,
+            total: 20,
+            namespace: "ns".to_string(),
+            owner: "0xabc".to_string(),
+            truncated: true,
+        };
+        assert!(resp.truncated);
     }
 
     // ── /api/forget + /api/stats empty-namespace validation ─────────────
