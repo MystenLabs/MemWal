@@ -12,7 +12,6 @@ keywords:
   - identity link
   - Enoki Connect
   - MemWalAccount
-  - WALM-298
 goal:
   description: Understand how a Console user's WM owner address gets verified and confirmed to exist, which side (Console vs WM) is responsible for each step, and what API contract WM exposes for this.
   requires:
@@ -46,7 +45,7 @@ answer: >-
 
 ## Overview
 
-Console (Walrus Console / "Harbor") and Walrus Memory (WM) are separate Enoki zkLogin applications. The same signed-in human has **two different Sui addresses** — `X` in Console, `Y` in WM — because zkLogin address derivation includes the OAuth client ID (`aud`) as a direct input (see the [Sui zkLogin address derivation spec](https://docs.sui.io/concepts/cryptography/zklogin) — different `aud` values deterministically produce different addresses, even for the identical `iss`/`sub`/salt). Console cannot compute `Y` from its own session; it has to obtain and verify it separately. This document describes that flow and the one API contract WM exposes as part of it.
+Console (Walrus Console) and Walrus Memory (WM) are separate Enoki zkLogin applications. The same signed-in human has **two different Sui addresses** — `X` in Console, `Y` in WM — because zkLogin address derivation includes the OAuth client ID (`aud`) as a direct input (see the [Sui zkLogin address derivation spec](https://docs.sui.io/concepts/cryptography/zklogin) — different `aud` values deterministically produce different addresses, even for the identical `iss`/`sub`/salt). Console cannot compute `Y` from its own session; it has to obtain and verify it separately. This document describes that flow and the one API contract WM exposes as part of it.
 
 ## Who does what
 
@@ -72,7 +71,7 @@ User                Console                          WM
  |                     |-- persist console_user <-> Y --|  (only if exists: true)
 ```
 
-This mirrors the identity-link step in the [Memory Indexing for Console PRD](https://app.notion.com/p/mystenlabs/PRD-Memory-Indexing-for-Console-Phase-1-3aa6d9dcb4e98022b0b5eb58a41e9163) §6.2, step 1 ("authenticate + prove control of owner Y (identity link)"), which precedes and is a prerequisite for the separate owner-scoped-token flow (WALM-297, not yet built) that Console uses for actually reading memory data.
+This identity-link step is a prerequisite for a separate, not-yet-built flow that issues Console an owner-scoped token for actually reading memory data. For the broader context this fits into, see the [Memory Indexing for Console PRD](https://app.notion.com/p/mystenlabs/PRD-Memory-Indexing-for-Console-Phase-1-3aa6d9dcb4e98022b0b5eb58a41e9163) (internal, requires Notion access). *Ticket references: this doc's endpoint is WALM-298; the follow-up token-issuance flow is WALM-297.*
 
 ## API contract: `GET /api/accounts/:owner/exists`
 
@@ -94,7 +93,7 @@ GET /api/accounts/{owner}/exists
 { "exists": true }
 ```
 
-`exists` is `true` if `owner` has ever created a `MemWalAccount` (i.e. it appears in WM's indexed `AccountRegistry` projection), `false` otherwise. This is **existence in the registry, not current activation status** — a deactivated/frozen `MemWalAccount` still resolves `exists: true`, by design (see `docs/architecture/permanent-registry-design.md`: the on-chain registry is permanent and append-only, and WM's indexer only processes `AccountCreated` events, so off-chain rows are never removed on deactivation either). If a caller needs to distinguish "never created" from "created but deactivated," this endpoint does not provide that — it answers only the existence question WALM-298 was scoped to answer.
+`exists` is `true` if `owner` has ever created a `MemWalAccount` (i.e. it appears in WM's indexed `AccountRegistry` projection), `false` otherwise. This is **existence in the registry, not current activation status** — a deactivated/frozen `MemWalAccount` still resolves `exists: true`, by design (see `docs/architecture/permanent-registry-design.md`: the on-chain registry is permanent and append-only, and WM's indexer only processes `AccountCreated` events, so off-chain rows are never removed on deactivation either). If a caller needs to distinguish "never created" from "created but deactivated," this endpoint does not provide that — it only answers whether an account was ever created.
 
 **Response — `400 Bad Request`**
 
@@ -110,6 +109,6 @@ Returned if `owner` is not a syntactically valid Sui address. Does not touch the
 
 ## What this flow deliberately does not do
 
-- **It does not mint any token or credential.** Owner-scoped token issuance for reading memory data is a separate, not-yet-built piece (WALM-297) that consumes the verified `Y` this flow produces — it is out of scope here.
+- **It does not mint any token or credential.** Owner-scoped token issuance for reading memory data is a separate, not-yet-built piece that consumes the verified `Y` this flow produces — it is out of scope here (see the ticket note under "Sequence" above).
 - **It does not let Console sign transactions as `Y`.** Neither Enoki Connect nor the wallet-signature fallback, as used here, grants Console any signing capability beyond the one-time link proof.
 - **It does not require WM to trust Console's proof.** WM's existence check is independent of however Console verified control of `Y` — WM simply confirms the address exists, regardless of which method Console used to arrive at it.
