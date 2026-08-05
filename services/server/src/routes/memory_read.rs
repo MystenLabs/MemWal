@@ -35,7 +35,9 @@ pub struct MemoryItem {
     pub size: i64,
     pub agent_id: Option<String>,
     pub package_id: Option<String>,
-    pub status: &'static str,
+    pub status: String,
+    pub end_epoch: Option<i32>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,10 +215,12 @@ pub(crate) async fn query_owner_memories(
         i64,
         Option<String>,
         Option<String>,
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
     )> = if let Some(raw_cursor) = cursor {
         let c = decode_cursor(&raw_cursor)?;
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
              FROM vector_entries
              WHERE owner = $1 AND (updated_at, id) > ($2, $3)
              ORDER BY updated_at, id
@@ -230,7 +234,7 @@ pub(crate) async fn query_owner_memories(
         .await
     } else {
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
              FROM vector_entries
              WHERE owner = $1
              ORDER BY updated_at, id
@@ -255,7 +259,18 @@ pub(crate) async fn query_owner_memories(
     let memories = page
         .into_iter()
         .map(
-            |(id, namespace, blob_id, created_at, _updated_at, size, agent_id, package_id)| {
+            |(
+                id,
+                namespace,
+                blob_id,
+                created_at,
+                _updated_at,
+                size,
+                agent_id,
+                package_id,
+                end_epoch,
+                expires_at,
+            )| {
                 MemoryItem {
                     memory_id: id,
                     namespace_id: namespace,
@@ -264,9 +279,12 @@ pub(crate) async fn query_owner_memories(
                     size,
                     agent_id,
                     package_id,
-                    // Always "active" until Plan B (WALM-296) adds expires_at
-                    // and derives this from it.
-                    status: "active",
+                    status: match expires_at {
+                        Some(exp) if exp < chrono::Utc::now() => "expired".to_string(),
+                        _ => "active".to_string(), // includes NULL (not yet synced) — optimistic default
+                    },
+                    end_epoch,
+                    expires_at,
                 }
             },
         )
@@ -713,6 +731,65 @@ mod tests {
             "all 3 tied rows must appear exactly once across pages, got {:?}",
             seen
         );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn query_owner_memories_derives_status_from_expires_at() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        // Row 1: expired (expires_at in the past)
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, end_epoch, expires_at)
+             VALUES ($1, $2, 'default', 'blob-expired', $3, 10, 100, NOW() - INTERVAL '1 day')",
+        )
+        .bind(format!("{}-expired", owner))
+        .bind(&owner)
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Row 2: active (expires_at in the future)
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, end_epoch, expires_at)
+             VALUES ($1, $2, 'default', 'blob-active', $3, 10, 900, NOW() + INTERVAL '30 days')",
+        )
+        .bind(format!("{}-active", owner))
+        .bind(&owner)
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Row 3: not yet synced (NULL expires_at)
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+             VALUES ($1, $2, 'default', 'blob-unsynced', $3, 10)",
+        )
+        .bind(format!("{}-unsynced", owner))
+        .bind(&owner)
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = query_owner_memories(&pool, &owner, None, 10).await.unwrap();
+        let by_blob: std::collections::HashMap<_, _> =
+            result.memories.iter().map(|m| (m.blob_id.clone(), m)).collect();
+
+        assert_eq!(by_blob["blob-expired"].status, "expired");
+        assert_eq!(by_blob["blob-active"].status, "active");
+        assert_eq!(by_blob["blob-unsynced"].status, "active"); // optimistic default pending sync
+        assert_eq!(by_blob["blob-active"].end_epoch, Some(900));
+        assert!(by_blob["blob-active"].expires_at.is_some());
+        assert_eq!(by_blob["blob-unsynced"].end_epoch, None);
+        assert_eq!(by_blob["blob-unsynced"].expires_at, None);
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
             .bind(&owner)
