@@ -114,6 +114,11 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
                 return res.status(503).json({ error: message, traceId });
             }
             if (err instanceof InvalidSealPersistenceFenceError) {
+                sidecarLog("error", "walrus_set_metadata_batch_invalid_seal_fence", {
+                    requestId: traceId,
+                    error: message,
+                    ...err.diagnostics,
+                });
                 return res.status(400).json({ error: message, traceId });
             }
             sidecarLog("error", "walrus_set_metadata_batch_failed", {

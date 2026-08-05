@@ -329,6 +329,13 @@ async fn main() {
         .args(["tsx", "sidecar-server.ts"])
         .current_dir(&scripts_dir)
         .env("MEMWAL_RELAYER_URL", mcp_relayer_url)
+        // Pin the child to the same validated deployment identity used by
+        // Rust instead of relying on ambient env inheritance.
+        .env("MEMWAL_PACKAGE_ID", &config.package_id)
+        .env(
+            "MEMWAL_SEAL_POLICY_PACKAGE_ID",
+            &config.seal_policy_package_id,
+        )
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()

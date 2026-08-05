@@ -5,7 +5,12 @@
 
 import { shutdownMcpSessions } from "../mcp/index.js";
 import { createSidecarApp } from "./app.js";
-import { SIDECAR_HOST, SIDECAR_PORT, SIDECAR_SHUTDOWN_TIMEOUT_MS } from "./config.js";
+import {
+    SEAL_POLICY_PACKAGE_ID,
+    SIDECAR_HOST,
+    SIDECAR_PORT,
+    SIDECAR_SHUTDOWN_TIMEOUT_MS,
+} from "./config.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "./state.js";
 import { truncateForLog } from "./util.js";
 
@@ -17,6 +22,7 @@ export function startSidecarServer(): void {
             host: SIDECAR_HOST,
             port: SIDECAR_PORT,
             pid: process.pid,
+            sealPolicyPackageId: SEAL_POLICY_PACKAGE_ID,
             state: sidecarStateSnapshot(),
         }));
     });

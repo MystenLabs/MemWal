@@ -170,21 +170,28 @@ test("persistence fence only permits the legacy ABI when the sidecar opts in", (
 });
 
 test("persistence fence rejects a request-controlled policy package", () => {
-    assert.throws(
-        () =>
-            parseSealPersistenceFence(
-                {
-                    sealAbi: "v1-new",
-                    accountId: ACC,
-                    registryId: REG,
-                    policyPackageId: OTHER_PKG,
-                    data: ciphertext(PKG),
-                },
-                PKG,
-                PERSISTENCE_POLICY
-            ),
-        /configured SEAL policy package/
-    );
+    let error: unknown;
+    try {
+        parseSealPersistenceFence(
+            {
+                sealAbi: "v1-new",
+                accountId: ACC,
+                registryId: REG,
+                policyPackageId: OTHER_PKG,
+                data: ciphertext(PKG),
+            },
+            PKG,
+            PERSISTENCE_POLICY
+        );
+    } catch (cause) {
+        error = cause;
+    }
+    assert(error instanceof InvalidSealPersistenceFenceError);
+    assert.match(error.message, /configured SEAL policy package/);
+    assert.deepEqual(error.diagnostics, {
+        requestedPolicyPackageId: OTHER_PKG,
+        configuredPolicyPackageId: POLICY_PKG,
+    });
 });
 
 async function withServer(fn: (baseUrl: string) => Promise<void>) {

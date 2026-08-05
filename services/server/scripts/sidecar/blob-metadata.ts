@@ -33,7 +33,10 @@ export type SealPersistenceFence =
       };
 
 export class InvalidSealPersistenceFenceError extends Error {
-    constructor(message: string) {
+    constructor(
+        message: string,
+        readonly diagnostics: Record<string, string> = {}
+    ) {
         super(message);
         this.name = "InvalidSealPersistenceFenceError";
     }
@@ -41,8 +44,8 @@ export class InvalidSealPersistenceFenceError extends Error {
 
 const SUI_ADDRESS = /^0x[0-9a-fA-F]{1,64}$/;
 
-function invalidFence(message: string): never {
-    throw new InvalidSealPersistenceFenceError(message);
+function invalidFence(message: string, diagnostics?: Record<string, string>): never {
+    throw new InvalidSealPersistenceFenceError(message, diagnostics);
 }
 
 /**
@@ -82,8 +85,13 @@ export function parseSealPersistenceFence(
     if (!SUI_ADDRESS.test(policy.policyPackageId)) {
         invalidFence("Sidecar SEAL policy package is not configured");
     }
-    if (normalizeSuiAddress(input.policyPackageId) !== normalizeSuiAddress(policy.policyPackageId)) {
-        invalidFence("policyPackageId does not match the configured SEAL policy package");
+    const requestedPolicyPackageId = normalizeSuiAddress(input.policyPackageId);
+    const configuredPolicyPackageId = normalizeSuiAddress(policy.policyPackageId);
+    if (requestedPolicyPackageId !== configuredPolicyPackageId) {
+        invalidFence("policyPackageId does not match the configured SEAL policy package", {
+            requestedPolicyPackageId,
+            configuredPolicyPackageId,
+        });
     }
     if (typeof immutablePackageId !== "string" || !SUI_ADDRESS.test(immutablePackageId)) {
         invalidFence("Invalid or missing packageId for v1-new persistence fence");
