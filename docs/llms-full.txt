@@ -4,7 +4,6 @@
 
 Important notes:
 
-- MemWal is generally available and actively evolving
 - The SDK talks to a relayer service that handles embedding, SEAL encryption, Walrus upload/download, and vector search
 - All content is end-to-end encrypted — only the owner and authorized delegates can decrypt
 - Delegate keys provide scoped access — agents can read/write memory without holding the owner's private key
