@@ -348,6 +348,13 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Walrus staking pool object id — a SEPARATE shared object from
+    /// walrus_system_object_id. The system state object (read by
+    /// sui::client::walrus_epoch()) carries committee.epoch; this object's
+    /// state carries epoch_duration/first_epoch_start, needed to convert a
+    /// Walrus epoch into a wall-clock timestamp (WALM-296). Do not
+    /// conflate the two ids.
+    pub walrus_staking_pool_id: String,
 }
 
 impl Config {
@@ -360,6 +367,14 @@ impl Config {
             "testnet" => "https://fullnode.testnet.sui.io:443",
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
+        };
+        // Walrus staking pool shared object id, matching @mysten/walrus's
+        // constants.mjs per-network defaults (see also
+        // scripts/sidecar/config.ts's WALRUS_PACKAGE_ID handling, which
+        // follows the same pattern for the TS sidecar).
+        let default_walrus_staking_pool_id = match network.as_str() {
+            "testnet" => "0xbe46180321c30aab2f8b3501e24048377287fa708018a5b7c2792b35fe339ee3",
+            _ => "0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904",
         };
         let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
             .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
@@ -480,6 +495,8 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
+                .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
         }
     }
 }
@@ -1609,6 +1626,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            walrus_staking_pool_id: "0x5".into(),
         }
     }
 
