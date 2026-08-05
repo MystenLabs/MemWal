@@ -411,15 +411,16 @@ test("source lease epochs accept only u32 numbers", () => {
     }
 });
 
-test("isSourceCapped flags when the raw candidate fetch hit its cap (WALM-319)", () => {
-    // listBlobObjectsGrpc's own loop condition is `while (out.length < cap)`,
-    // so returning exactly `cap` objects means it stopped because of the
-    // cap, not because the owner ran out of blobs — that's the one case a
-    // caller can't tell apart from "the owner just happens to own exactly
-    // `cap` blobs" without this signal (and this errs toward over-warning
-    // in that boundary case, not under-warning).
+test("isSourceCapped flags only when the raw candidate fetch proved more than cap exist (WALM-319)", () => {
+    // The call site now probes with `cap + 1` and slices back down to `cap`,
+    // so `fetchedCount` here is the probe fetch's raw count compared against
+    // the real (non-probe) cap. Exactly `cap` fetched means discovery
+    // completed within the cap — not capped. Only strictly more than `cap`
+    // proves the source had more candidates than the cap allowed (Henry's
+    // review on PR #538: exact-cap results must not read as truncated).
     assert.equal(isSourceCapped(3, 5), false, "fewer fetched than cap: not capped");
-    assert.equal(isSourceCapped(5, 5), true, "fetched exactly cap: capped");
+    assert.equal(isSourceCapped(5, 5), false, "fetched exactly cap: discovery completed, not capped");
+    assert.equal(isSourceCapped(6, 5), true, "fetched more than cap (probe proved more exist): capped");
     assert.equal(isSourceCapped(0, 5), false, "nothing fetched: not capped");
     assert.equal(isSourceCapped(5, Infinity), false, "unbounded cap can never be hit");
 });

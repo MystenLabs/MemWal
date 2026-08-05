@@ -784,6 +784,10 @@ class MemWal:
           do **not** count as either restored or skipped.
         * ``total`` — count of on-chain blobs the relayer saw for
           ``(owner, namespace)`` before the limit was applied.
+        * ``truncated`` — True when this restore is known-incomplete (limit
+          truncation or an upstream on-chain candidate-fetch cap; see
+          :class:`~memwal.types.RestoreResult`). Defaults to ``False`` when
+          talking to a relayer older than WALM-319 that omits the field.
 
         Args:
             namespace: Namespace to restore. Exact match — no prefix or
@@ -814,6 +818,10 @@ class MemWal:
             total=data["total"],
             namespace=data["namespace"],
             owner=data["owner"],
+            # Relayers older than WALM-319 omit `truncated` entirely --
+            # treat "not present" as "not known to be truncated" rather
+            # than require every relayer version to send it.
+            truncated=data.get("truncated", False),
         )
 
     async def health(self) -> HealthResult:
