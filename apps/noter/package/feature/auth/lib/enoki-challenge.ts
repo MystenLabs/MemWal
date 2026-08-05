@@ -25,6 +25,17 @@ const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_REDIS_PREFIX = "enoki-auth:challenge:";
 const MAX_SIGNATURE_LENGTH = 8192;
 
+// A challenge is scoped to the action it authorizes. The purpose is baked into
+// both the human-readable message the user signs AND the stored record, and
+// verification requires an exact match — so a signature obtained for sign-in can
+// never be replayed against the delegate-key export path, and vice versa.
+export type ChallengePurpose = "signin" | "export";
+
+const PURPOSE_PROMPT: Record<ChallengePurpose, string> = {
+  signin: "Sign in to Walrus Memory Noter",
+  export: "Export your Walrus Memory Noter delegate key",
+};
+
 type SuiNetwork = "mainnet" | "testnet";
 
 function getNetwork(): SuiNetwork {
@@ -48,18 +59,19 @@ export type EnokiChallenge = {
 };
 
 /**
- * Issue a single-use ownership challenge for `rawAddress`. Returns the message
- * to sign and an opaque challengeId. Throws SharedRedisUnavailableError if the
- * challenge store is unreachable (fail-closed).
+ * Issue a single-use ownership challenge for `rawAddress`, scoped to `purpose`.
+ * Returns the message to sign and an opaque challengeId. Throws
+ * SharedRedisUnavailableError if the challenge store is unreachable (fail-closed).
  */
 export async function issueEnokiChallenge(
-  rawAddress: string
+  rawAddress: string,
+  purpose: ChallengePurpose
 ): Promise<EnokiChallenge> {
   const address = normalizeSuiAddress(rawAddress);
   const nonce = crypto.randomUUID();
   const issuedAt = new Date().toISOString();
   const message = [
-    "Sign in to Walrus Memory Noter",
+    PURPOSE_PROMPT[purpose],
     `Address: ${address}`,
     `Nonce: ${nonce}`,
     `Issued at: ${issuedAt}`,
@@ -68,7 +80,7 @@ export async function issueEnokiChallenge(
   const redis = await requireSharedRedisClient();
   const result = await redis.set(
     `${CHALLENGE_REDIS_PREFIX}${nonce}`,
-    JSON.stringify({ address, message }),
+    JSON.stringify({ address, message, purpose }),
     { EX: CHALLENGE_TTL_SECONDS, NX: true }
   );
   if (result !== "OK") {
@@ -92,10 +104,12 @@ export async function verifyAndConsumeEnokiChallenge({
   rawAddress,
   challengeId,
   signature,
+  purpose,
 }: {
   rawAddress: string;
   challengeId: string;
   signature: string;
+  purpose: ChallengePurpose;
 }): Promise<boolean> {
   if (
     typeof challengeId !== "string" ||
@@ -127,7 +141,7 @@ export async function verifyAndConsumeEnokiChallenge({
     return false;
   }
 
-  let issued: { address?: unknown; message?: unknown };
+  let issued: { address?: unknown; message?: unknown; purpose?: unknown };
   try {
     issued = JSON.parse(stored);
   } catch {
@@ -135,8 +149,11 @@ export async function verifyAndConsumeEnokiChallenge({
   }
   if (
     typeof issued.message !== "string" ||
-    issued.address !== address
+    issued.address !== address ||
+    issued.purpose !== purpose
   ) {
+    // A challenge issued for a different action (e.g. sign-in) must not satisfy
+    // a verify for another action (e.g. export).
     return false;
   }
 

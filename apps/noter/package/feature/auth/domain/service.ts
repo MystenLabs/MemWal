@@ -157,17 +157,14 @@ export async function upsertEnokiUser(
     .limit(1);
 
   if (existingUser) {
-    // Ownership guard: never let caller-supplied credentials silently clobber
-    // an already-provisioned row that belongs to a different auth scenario.
-    // Overwriting delegate creds is only allowed when either the row has no
-    // delegate key yet (first-time provisioning / partial setup), or the row is
-    // already an enoki/wallet row for this same address (re-provisioning /
-    // rotation of the owner's own key).
-    const hasDelegateKey = Boolean(existingUser.delegatePrivateKey);
-    const compatibleMethod =
-      existingUser.authMethod === "enoki" ||
-      existingUser.authMethod === "wallet";
-    if (hasDelegateKey && !compatibleMethod) {
+    // Credential provisioning is insert-only: once a row has a delegate key, the
+    // connect/register path must never overwrite it with caller-supplied values
+    // (the server can't verify the delegate key/account binding here, so an
+    // overwrite would let a caller replace an existing owner's stored key).
+    // Rotation, if ever needed, must be a separate authenticated, on-chain-verified
+    // flow. Registering again for an already-provisioned address is a no-op that
+    // returns the existing row.
+    if (existingUser.delegatePrivateKey) {
       throw new DelegateCredentialConflictError();
     }
 
@@ -236,6 +233,19 @@ export async function getDelegateKeyForOwner(
     };
   }
   return null;
+}
+
+/** Look up a user's Sui address by id (used to bind an export to its session). */
+export async function getUserAddressById(
+  db: DbClient,
+  userId: string
+): Promise<string | null> {
+  const [user] = await db
+    .select({ suiAddress: users.suiAddress })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return user?.suiAddress ?? null;
 }
 
 /** Create an Enoki session. Reuses walletSessions table with walletType "enoki". */

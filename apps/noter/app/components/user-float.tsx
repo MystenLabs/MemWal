@@ -52,8 +52,8 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   const [keyError, setKeyError] = useState("");
 
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
-  const { mutateAsync: issueChallenge } =
-    trpc.auth.issueEnokiChallenge.useMutation();
+  const { mutateAsync: issueExportChallenge } =
+    trpc.auth.issueExportChallenge.useMutation();
   const exportKeyMutation = trpc.auth.exportDelegateKey.useMutation();
 
   const handleLogout = async () => {
@@ -77,9 +77,8 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
 
     setKeyError("");
     try {
-      const { challengeId, message } = await issueChallenge({
-        suiAddress,
-      });
+      // Export-scoped challenge (protected; issued for the session's own address).
+      const { challengeId, message } = await issueExportChallenge();
       const { signature } = await signPersonalMessage({
         message: new TextEncoder().encode(message),
       });
@@ -98,7 +97,7 @@ export function UserFloatPanel({ className, onClose }: UserFloatPanelProps) {
   }, [
     delegateKey,
     suiAddress,
-    issueChallenge,
+    issueExportChallenge,
     signPersonalMessage,
     exportKeyMutation,
   ]);

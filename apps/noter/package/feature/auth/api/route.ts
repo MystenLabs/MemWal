@@ -3,7 +3,7 @@
  * tRPC routes for Enoki zkLogin + wallet / delegate-key authentication.
  */
 
-import { router, procedure } from "@/shared/lib/trpc/init";
+import { router, procedure, protectedProcedure } from "@/shared/lib/trpc/init";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
@@ -117,16 +117,18 @@ export const authRouter = router({
     }),
 
   /**
-   * Issue a single-use ownership challenge for the Enoki flow. The client signs
-   * the returned `message` with its zkLogin key and returns `{ challengeId,
-   * signature }` to connectEnoki / exportDelegateKey to prove address ownership.
+   * Issue a single-use SIGN-IN challenge for the Enoki flow. The client signs the
+   * returned `message` with its zkLogin key and returns `{ challengeId, signature }`
+   * to connectEnoki. This challenge is scoped to sign-in only — it cannot be used
+   * to authorize a delegate-key export.
    */
   issueEnokiChallenge: procedure
     .input(z.object({ suiAddress: suiAddressSchema }))
     .mutation(async ({ input }) => {
       try {
         const { challengeId, message } = await issueEnokiChallengeToken(
-          input.suiAddress
+          input.suiAddress,
+          "signin"
         );
         return { challengeId, message };
       } catch (error) {
@@ -171,6 +173,7 @@ export const authRouter = router({
             rawAddress: suiAddress,
             challengeId,
             signature,
+            purpose: "signin",
           });
         } catch (error) {
           if (error instanceof SharedRedisUnavailableError) {
@@ -239,11 +242,46 @@ export const authRouter = router({
     }),
 
   /**
-   * Export the delegate private key for a verified owner. Requires a fresh
-   * ownership challenge for the caller's own suiAddress. This is the ONLY path
-   * that returns the private key.
+   * Issue a single-use EXPORT challenge, scoped to the delegate-key export action
+   * and to the caller's own session address. Protected: requires a valid session,
+   * and the challenge is issued only for that session's address — so a caller can
+   * never obtain an export challenge for someone else's address, and a sign-in
+   * signature can never satisfy it (different purpose).
    */
-  exportDelegateKey: procedure
+  issueExportChallenge: protectedProcedure.mutation(async ({ ctx }) => {
+    try {
+      const address = await authService.getUserAddressById(ctx.db, ctx.userId);
+      if (!address) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+      }
+      const { challengeId, message } = await issueEnokiChallengeToken(
+        address,
+        "export"
+      );
+      return { challengeId, message };
+    } catch (error) {
+      if (error instanceof TRPCError) throw error;
+      if (error instanceof SharedRedisUnavailableError) {
+        throw new TRPCError({
+          code: "SERVICE_UNAVAILABLE",
+          message: "Authentication service temporarily unavailable",
+        });
+      }
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: error instanceof Error ? error.message : AUTH_ERRORS.NETWORK_ERROR,
+      });
+    }
+  }),
+
+  /**
+   * Export the delegate private key for the authenticated caller. This is the
+   * ONLY path that returns the private key. It requires: a valid session
+   * (protectedProcedure); an EXPORT-purpose ownership challenge signature (a
+   * sign-in signature cannot be replayed here); and that the caller's session
+   * address matches the requested address (a caller can only export their own key).
+   */
+  exportDelegateKey: protectedProcedure
     .input(z.object({
       suiAddress: suiAddressSchema,
       challengeId: z.string().min(1),
@@ -254,12 +292,26 @@ export const authRouter = router({
       const suiAddress = normalizeSuiAddress(input.suiAddress);
 
       try {
+        // Bind the export to the session: the caller may only export the key for
+        // the address their own session authenticates as.
+        const sessionAddress = await authService.getUserAddressById(
+          ctx.db,
+          ctx.userId
+        );
+        if (!sessionAddress || normalizeSuiAddress(sessionAddress) !== suiAddress) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only export the key for your own session",
+          });
+        }
+
         let ownershipVerified: boolean;
         try {
           ownershipVerified = await verifyAndConsumeEnokiChallenge({
             rawAddress: suiAddress,
             challengeId,
             signature,
+            purpose: "export",
           });
         } catch (error) {
           if (error instanceof SharedRedisUnavailableError) {
