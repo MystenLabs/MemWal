@@ -61,6 +61,16 @@ The Public App Slug is **immutable once set** — the Enoki Portal does not offe
 
 **Recommendation for any future Enoki Connect app:** pick the Public App Slug deliberately, as if it were a permanent subdomain (because it is), not as a temporary placeholder.
 
+## Default Salt Confirmation
+
+WALM-298's acceptance criteria require confirming that WM and Console share the Enoki **default salt** — i.e. neither app supplies a custom salt to Enoki's zkLogin flow, since Enoki Connect does not support custom-salt (custom zkLogin) apps at all. This was verified by code inspection on both sides, not by an Enoki Portal setting (Enoki does not surface an explicit "using default salt: yes/no" indicator; absence of custom-salt code is the only observable signal):
+
+- **WM (`apps/app/src/App.tsx`):** `registerEnokiWallets({ apiKey, providers: { google: { clientId, redirectUrl } }, client, network })` — no `salt`/custom-salt parameter anywhere in the call, and a repo-wide search of `apps/app/src` for "salt" returns no custom salt service or override.
+- **Console (`api/src/infra/clients/enoki/enoki.client.ts`, `api/src/domain/auth/auth.service.ts`):** Console always obtains its salt *from* Enoki via `enokiClient.getZkLogin({ jwt })`, never supplies one — and `auth.service.ts` explicitly depends on this for a security check: *"The Enoki-managed salt makes local re-derivation the only proof that this token belongs to the caller"* (used to prevent id_token substitution attacks). Console's own security model would break under a custom salt, which is independent, corroborating evidence.
+- Enoki Connect itself would fail to register the wallet at all for a custom-salt app (per Enoki's own documentation), so the fact that WM's Enoki Connect setup above works at all is a third, functional confirmation.
+
+No custom salt exists on either side, by code inspection and by the functional precondition that Enoki Connect requires it. The one thing this doesn't cover: an explicit walkthrough of the Enoki Portal's own app configuration to positively confirm there's no server-side custom salt backend registered outside of what the client SDKs above would exercise — if a Portal-level indicator exists, checking it directly remains a stronger source of truth than the client-code inference above.
+
 ## Allowed Origins Requirement (the actual bug found)
 
 The Enoki Developer Portal's app-level **Settings** page has an **Allowed Origins** field. This lists the website origins permitted to access the Enoki app — and critically, it must include the origin of every **connecting app** that will initiate an Enoki Connect flow against WM's app, not just WM's own frontend origins.
