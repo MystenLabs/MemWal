@@ -80,6 +80,7 @@ mod tests {
             0.5,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -91,6 +92,7 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
             None,
             None,
         )
@@ -146,6 +148,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -159,6 +162,47 @@ mod tests {
 
         assert_eq!(row.0.as_deref(), Some("agent-abc"));
         assert_eq!(row.1.as_deref(), Some("0xpkg-123"));
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn insert_vector_persists_end_epoch() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            Some(457),
+        )
+        .await
+        .unwrap();
+
+        // `end_epoch` is INTEGER (int4) on `vector_entries` (migration 014);
+        // cast to BIGINT so sqlx's runtime type check accepts decoding it as
+        // i64, matching `insert_vector`'s `Option<i64>` parameter type.
+        let row: (Option<i64>,) =
+            sqlx::query_as("SELECT end_epoch::BIGINT FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, Some(457));
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
             .bind(&id)
@@ -189,6 +233,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -216,6 +261,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -393,13 +439,14 @@ impl VectorDb {
         importance: f32,
         agent_id: Option<&str>,
         package_id: Option<&str>,
+        end_epoch: Option<i64>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id, end_epoch)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
@@ -409,6 +456,7 @@ impl VectorDb {
                 importance = EXCLUDED.importance,
                 agent_id = EXCLUDED.agent_id,
                 package_id = EXCLUDED.package_id,
+                end_epoch = EXCLUDED.end_epoch,
                 updated_at = NOW()",
         )
         .bind(id)
@@ -420,6 +468,7 @@ impl VectorDb {
         .bind(importance)
         .bind(agent_id)
         .bind(package_id)
+        .bind(end_epoch)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));

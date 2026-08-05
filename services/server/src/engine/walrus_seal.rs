@@ -295,6 +295,7 @@ impl MemoryEngine for WalrusSealEngine {
                 importance,
                 agent_public_key,
                 Some(&self.config.package_id),
+                upload.end_epoch,
             )
             .await?;
 
