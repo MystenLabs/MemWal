@@ -1014,8 +1014,26 @@ async fn main() {
     let expiry_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        // Rate-limited external-RPC loop: if a tick overruns 300s, catch up
+        // by spacing subsequent ticks rather than firing several back-to-back
+        // (the default `Burst` behavior).
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
+
+            // SUI_GRPC_URL isn't configured in this deployment — a
+            // legitimate degraded-but-non-panicking state. Skip the whole
+            // sweep body (not just the on-chain call) so a client-less
+            // deployment doesn't still select + mark-scheduled rows for
+            // nothing every tick, churning expiry_synced_at across the
+            // table with no benefit.
+            let Some(sui_client) = expiry_state.walrus_sui_client.as_ref() else {
+                tracing::warn!(
+                    "Expiry refresh sweep: no Sui client configured (SUI_GRPC_URL unset), skipping sweep"
+                );
+                continue;
+            };
+
             let rows = match expiry_state.db.rows_needing_expiry_refresh(100).await {
                 Ok(rows) => rows,
                 Err(e) => {
@@ -1042,18 +1060,6 @@ async fn main() {
             }
 
             for (owner, id_blob_pairs) in by_owner {
-                let Some(sui_client) = expiry_state.walrus_sui_client.as_ref() else {
-                    // SUI_GRPC_URL isn't configured in this deployment — a
-                    // legitimate degraded-but-non-panicking state. These
-                    // rows stay marked as scheduled and get retried by the
-                    // next sweep after the 24h staleness window.
-                    tracing::warn!(
-                        owner = %owner,
-                        "Expiry refresh sweep: no Sui client configured (SUI_GRPC_URL unset), skipping batch"
-                    );
-                    continue;
-                };
-
                 let blob_ids: Vec<String> =
                     id_blob_pairs.iter().map(|(_, blob_id)| blob_id.clone()).collect();
                 let leases = match crate::storage::walrus::query_blob_storage_leases(

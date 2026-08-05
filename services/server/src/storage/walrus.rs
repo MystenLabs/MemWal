@@ -574,10 +574,22 @@ pub async fn query_blob_storage_leases(
 ) -> Result<Vec<BlobStorageLease>, AppError> {
     let url = format!("{}/walrus/query-blobs", sidecar_url);
 
+    // NOTE: `limit` does NOT currently bound this call's cost. The
+    // sidecar's `cap` formula (walrus-query.ts) is
+    // `useRecentTxPath && !requestedBlobIds ? ... : Infinity` — since this
+    // call always sends `blobIds`, `requestedBlobIds` is truthy, so `cap`
+    // is always `Infinity` regardless of `limit`, and the sidecar still
+    // paginates the owner's entire on-chain blob collection. `limit` is
+    // sent anyway (harmless, forward-compatible) in case the sidecar's cap
+    // logic is later changed to respect it for this call shape too. The
+    // real fix is sidecar-side (early-exit `listBlobObjectsGrpc` once all
+    // `requestedBlobIds` are found) and is tracked as a follow-up, not
+    // done here — see WALM-296's SDD ledger.
     let body = serde_json::json!({
         "owner": owner_address,
         "blobIds": blob_ids,
         "includeStorageLease": true,
+        "limit": blob_ids.len(),
     });
 
     let mut req = client.post(&url).json(&body);
@@ -986,5 +998,37 @@ mod tests {
         });
         let parsed: super::WalrusUploadResponse = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.end_epoch, Some(457));
+    }
+
+    /// Locks the exact JSON shape the sidecar's `/walrus/query-blobs`
+    /// (`includeStorageLease: true`) route returns — see
+    /// `res.json({ blobs, total, currentEpoch, nonexistentBlobIds })` in
+    /// `services/server/scripts/sidecar/routes/walrus-query.ts`, where each
+    /// `blobs[]` entry is `{ blobId, objectId, storageEndEpoch }`.
+    #[test]
+    fn query_blob_storage_leases_response_matches_sidecar_shape() {
+        let json = serde_json::json!({
+            "blobs": [
+                {
+                    "blobId": "M4hsZGQ1oCchKzYnnhDMV-ZKvhWsp2SS1G7xI6PzQxs",
+                    "objectId": "0xdead",
+                    "storageEndEpoch": 457,
+                }
+            ],
+            "total": 1,
+            "currentEpoch": 450,
+            "nonexistentBlobIds": []
+        });
+        let parsed: super::QueryBlobStorageLeasesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.total, 1);
+        assert_eq!(parsed.current_epoch, 450);
+        assert!(parsed.nonexistent_blob_ids.is_empty());
+        assert_eq!(parsed.blobs.len(), 1);
+        assert_eq!(
+            parsed.blobs[0].blob_id,
+            "M4hsZGQ1oCchKzYnnhDMV-ZKvhWsp2SS1G7xI6PzQxs"
+        );
+        assert_eq!(parsed.blobs[0].object_id, "0xdead");
+        assert_eq!(parsed.blobs[0].storage_end_epoch, 457);
     }
 }

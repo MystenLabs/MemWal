@@ -50,6 +50,7 @@ mod tests {
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
             include_str!("../../migrations/014_memory_expiry_columns.sql"),
+            include_str!("../../migrations/015_memory_expiry_synced_at_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -340,6 +341,71 @@ mod tests {
             .execute(db.pool())
             .await;
     }
+
+    /// "Never touch updated_at" is a load-bearing plan constraint for the
+    /// expiry sweep (Console's `updated_after` incremental sync depends on
+    /// it not moving for reasons unrelated to the row's own content — see
+    /// `insert_vector_bumps_updated_at_on_conflict` above for the positive
+    /// case). Regression-protects the negative case for both new
+    /// write-paths the sweep uses.
+    #[tokio::test]
+    async fn expiry_methods_never_touch_updated_at() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-expiry-updated-at-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner-expiry-updated-at",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let original_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        // Force a measurable time gap so a naive "call succeeded" assertion
+        // couldn't accidentally pass — updated_at must genuinely not move.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        db.mark_expiry_scheduled(&[id.clone()]).await.unwrap();
+        db.set_memory_expiry(&id, 457, chrono::Utc::now())
+            .await
+            .unwrap();
+
+        let after_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        assert_eq!(
+            original_updated_at, after_updated_at,
+            "mark_expiry_scheduled/set_memory_expiry must never touch updated_at"
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -461,6 +527,16 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
+
+        // index on expiry_synced_at so the periodic expiry refresh sweep
+        // doesn't full-scan vector_entries every tick (WALM-296). Must stay
+        // in its own file/transaction — see 015's header comment.
+        let migration_015 =
+            include_str!("../../migrations/015_memory_expiry_synced_at_index.sql");
+        sqlx::raw_sql(migration_015)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
