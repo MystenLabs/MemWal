@@ -783,21 +783,6 @@ const result = await generateText({
                     </div>
                 )}
 
-                <div className="dash-alert" style={{ marginBottom: 24 }}>
-                    <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                    <p>
-                        Uploads to Walrus Memory have been resumed, following completion of a security
-                        upgrade on {config.migrationCompletedDate}. This upgrade patched a bug that made
-                        it possible to bypass the encryption of stored memories. All existing memories
-                        have been migrated onto a new, secure contract. A copy of memories written
-                        before the migration remains in the previous contract, where they are exposed
-                        to the original bug. We recommend removing all pre-migration data on the
-                        previous contract, and reviewing any sensitive data you may have stored. A
-                        guide to removing pre-migration data is available{' '}
-                        <a href={config.securityGuideUrl} target="_blank" rel="noopener noreferrer">here</a>.
-                    </p>
-                </div>
-
                 {hasMaxDelegateKeys && (
                     <div className="dash-alert" style={{ marginBottom: 24 }}>
                         <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
