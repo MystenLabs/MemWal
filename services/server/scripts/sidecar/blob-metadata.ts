@@ -10,10 +10,10 @@ import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { EncryptedObject } from "@mysten/seal";
 import { Transaction } from "@mysten/sui/transactions";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
-import { WALRUS_PACKAGE_ID } from "./config.js";
+import { WALRUS_PACKAGE_ID, WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS } from "./config.js";
 import { suiClient } from "./clients.js";
 import type { EnokiFallbackPolicy } from "./enoki.js";
-import { dedupeAddresses, shortAddress } from "./util.js";
+import { dedupeAddresses, errorMessage, shortAddress, sleep } from "./util.js";
 import { assertFinalizedTransactionSuccess, submitRebuildableWalletTransaction } from "./wallet.js";
 
 export type MetadataTransferBlob = {
@@ -143,6 +143,14 @@ export function assertSuccessfulMetadataTransfer(result: any, digest: string): v
     assertFinalizedTransactionSuccess(result, `metadata transfer transaction ${digest}`);
 }
 
+export function missingMetadataTransferBlobId(message: string, blobs: MetadataTransferBlob[]): string | null {
+    const missingObject = message.match(/\bObject (0x[0-9a-f]{64}) not found\b/i)?.[1];
+    if (!missingObject) return null;
+
+    const normalizedMissingObject = normalizeSuiAddress(missingObject);
+    return blobs.find((blob) => normalizeSuiAddress(blob.blobObjectId) === normalizedMissingObject)?.blobObjectId ?? null;
+}
+
 export async function setMetadataAndTransferBlobs(
     signer: Ed25519Keypair,
     blobs: MetadataTransferBlob[],
@@ -204,19 +212,46 @@ export async function setMetadataAndTransferBlobs(
         return metaTx;
     };
 
-    const digest = await submitRebuildableWalletTransaction(
-        "metadata_transfer",
-        buildMetadataTransferTx,
-        signer,
-        dedupeAddresses([signerAddress, owner]),
-        {
-            ...retryLogContext,
-            blobCount: blobs.length,
-            owner: shortAddress(owner),
-        },
-        fallbackPolicy,
-        onSubmissionStarted
-    );
+    let submissionStarted = false;
+    let digest: string;
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            digest = await submitRebuildableWalletTransaction(
+                "metadata_transfer",
+                buildMetadataTransferTx,
+                signer,
+                dedupeAddresses([signerAddress, owner]),
+                {
+                    ...retryLogContext,
+                    blobCount: blobs.length,
+                    owner: shortAddress(owner),
+                },
+                fallbackPolicy,
+                () => {
+                    submissionStarted = true;
+                    onSubmissionStarted?.();
+                }
+            );
+            break;
+        } catch (error: unknown) {
+            const message = errorMessage(error);
+            const missingBlobObjectId = missingMetadataTransferBlobId(message, blobs);
+            const retryDelayMs = WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS[attempt];
+            if (submissionStarted || !missingBlobObjectId || retryDelayMs === undefined) {
+                throw error;
+            }
+
+            console.warn(`[metadata-transfer] object_visibility_retry ${JSON.stringify({
+                ...retryLogContext,
+                blobObjectId: missingBlobObjectId,
+                attempt: attempt + 1,
+                nextAttempt: attempt + 2,
+                maxAttempts: WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS.length + 1,
+                retryDelayMs,
+            })}`);
+            await sleep(retryDelayMs);
+        }
+    }
     const result = await suiClient.waitForTransaction({ digest });
     assertSuccessfulMetadataTransfer(result, digest);
     return digest;

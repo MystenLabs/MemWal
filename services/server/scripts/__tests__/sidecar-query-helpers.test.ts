@@ -15,7 +15,12 @@ import {
     readBlobObject,
     strictWalrusEpoch,
 } from "../sidecar/routes/walrus-query.js";
-import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
+import {
+    assertSuccessfulMetadataTransfer,
+    extractBlobObjectId,
+    missingMetadataTransferBlobId,
+    type MetadataTransferBlob,
+} from "../sidecar/blob-metadata.js";
 import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
@@ -30,6 +35,22 @@ import { uploadWalrusBlobWithEffectsRetry } from "../sidecar/routes/walrus-uploa
 import { metadataReceiptAlreadyApplied } from "../sidecar/routes/walrus-metadata.js";
 import { sidecarMetrics } from "../sidecar/state.js";
 import { DURABLE_WALLET_FALLBACK_POLICY } from "../sidecar/wallet.js";
+
+const metadataTransferBlob = (blobObjectId: string): MetadataTransferBlob => ({
+    blobObjectId,
+    namespace: "default",
+    sealFence: { sealAbi: "v1" },
+});
+
+test("metadata transfer recognizes visibility lag only for an input blob", () => {
+    const blobObjectId = `0x${"a".repeat(64)}`;
+    const otherObjectId = `0x${"b".repeat(64)}`;
+    const blobs = [metadataTransferBlob(blobObjectId)];
+
+    assert.equal(missingMetadataTransferBlobId(`Object ${blobObjectId} not found`, blobs), blobObjectId);
+    assert.equal(missingMetadataTransferBlobId(`Object ${otherObjectId} not found`, blobs), null);
+    assert.equal(missingMetadataTransferBlobId("request timed out", blobs), null);
+});
 
 async function preparedRegisterFixture(funding: "addressBalance" | "coin" | "mixedLegacy" = "addressBalance"): Promise<{
     signer: Ed25519Keypair;
