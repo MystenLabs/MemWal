@@ -547,6 +547,7 @@ pub(crate) async fn execute_wallet_job(
                             enqueued_wallet_index,
                             agent_id.as_deref(),
                             package_id.as_deref(),
+                            None,
                         )
                         .await
                         {
@@ -653,6 +654,7 @@ pub(crate) async fn execute_wallet_job(
                 enqueued_wallet_index,
                 agent_id.as_deref(),
                 package_id.as_deref(),
+                None,
             )
             .await
         }
@@ -774,6 +776,7 @@ async fn insert_vector_and_mark_remember_done(
     wallet_index: usize,
     agent_id: Option<&str>,
     package_id: Option<&str>,
+    end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
         .map(str::to_owned)
@@ -791,6 +794,7 @@ async fn insert_vector_and_mark_remember_done(
             importance,
             agent_id,
             package_id,
+            end_epoch,
         )
         .await
     {
@@ -1204,6 +1208,7 @@ async fn execute_upload_and_transfer(
         wallet_index,
         agent_public_key.as_deref(),
         Some(&package_id),
+        upload.end_epoch,
     )
     .await
 }

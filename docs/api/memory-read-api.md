@@ -152,7 +152,9 @@ Response:
       "size": 2048,
       "agent_id": "agent-abc",
       "package_id": "0xpkg",
-      "status": "active"
+      "status": "active",
+      "end_epoch": 900,
+      "expires_at": "2026-09-15T00:00:00Z"
     }
   ],
   "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi59",
@@ -160,8 +162,10 @@ Response:
 }
 ```
 
-`end_epoch`/`expires_at` fields are added by WALM-296 (see that plan) —
-not present yet in this Phase 1 response.
+`status` is `"expired"` if `expires_at` is in the past, `"active"`
+otherwise — including when `end_epoch`/`expires_at` are still `null` (not
+yet synced; a background sweep populates them within roughly 5 minutes of
+a memory being written, sooner for the primary upload path).
 
 ## GET /v1/owners/{owner}/agents
 

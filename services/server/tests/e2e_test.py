@@ -340,8 +340,8 @@ def test_remember_size_64kb_summarized(
     assert len(text) == 64 * 1024
     body = {"text": text, "namespace": "e2e-size-test"}
     result = make_signed_request("POST", "/api/remember", body, signing_key, account_id)
-    assert "id" in result, f"64 KiB remember failed: {result}"
-    print(f"[pass] POST /api/remember 64 KiB → id={result['id']} (summarize path)")
+    assert "job_id" in result, f"64 KiB remember failed: {result}"
+    print(f"[pass] POST /api/remember 64 KiB → job_id={result['job_id']} (summarize path)")
 
 
 def test_remember_size_large_accepted(
@@ -358,8 +358,8 @@ def test_remember_size_large_accepted(
     assert len(text) == LARGE_TEXT_BYTES
     body = {"text": text, "namespace": "e2e-size-test"}
     result = make_signed_request("POST", "/api/remember", body, signing_key, account_id)
-    assert "id" in result, f"large-size remember failed: {result}"
-    print(f"[pass] POST /api/remember {LARGE_TEXT_BYTES} bytes → id={result['id']}")
+    assert "job_id" in result, f"large-size remember failed: {result}"
+    print(f"[pass] POST /api/remember {LARGE_TEXT_BYTES} bytes → job_id={result['job_id']}")
 
 
 def test_remember_size_over_limit_rejected(

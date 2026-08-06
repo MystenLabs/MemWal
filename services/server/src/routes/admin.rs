@@ -717,6 +717,7 @@ pub async fn restore(
                 } else {
                     Some(package_id.as_str())
                 },
+                None,
             )
             .await?;
     }

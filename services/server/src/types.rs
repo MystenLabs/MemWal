@@ -123,6 +123,16 @@ pub struct AppState {
     /// background so resolver/reconciler traffic cannot consume reservations
     /// held for auth, prepare, and submit.
     pub security_delete_background_sui: Option<Arc<dyn crate::sui::SuiApi>>,
+    /// General-purpose Sui client for on-chain reads unrelated to security
+    /// deletion (currently: the per-memory expiry sweep's
+    /// `walrus_epoch_schedule()` lookup, WALM-296). Unlike
+    /// `security_delete_sui`, this is populated whenever `SUI_GRPC_URL` is
+    /// configured, regardless of whether the security-delete component is
+    /// enabled — the expiry sweep must work in deployments that don't run
+    /// security deletion at all. `None` only when `SUI_GRPC_URL` itself is
+    /// unset, in which case dependent background tasks log and skip rather
+    /// than panic.
+    pub walrus_sui_client: Option<Arc<dyn crate::sui::SuiApi>>,
     /// Shared only by security-delete API execution and reconciler replay.
     pub security_delete_execution_gate: Arc<SecurityDeleteExecutionGate>,
     /// `Arc` so the engine + handlers share one immutable config.
@@ -348,6 +358,13 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Walrus staking pool object id — a SEPARATE shared object from
+    /// walrus_system_object_id. The system state object (read by
+    /// sui::client::walrus_epoch()) carries committee.epoch; this object's
+    /// state carries epoch_duration/first_epoch_start, needed to convert a
+    /// Walrus epoch into a wall-clock timestamp (WALM-296). Do not
+    /// conflate the two ids.
+    pub walrus_staking_pool_id: String,
 }
 
 impl Config {
@@ -361,6 +378,7 @@ impl Config {
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
         };
+        let default_walrus_staking_pool_id = default_walrus_staking_pool_id(&network);
         let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
             .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
         let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
@@ -480,7 +498,25 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
+                .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
         }
+    }
+}
+
+/// Per-network default for the Walrus staking pool shared object id (see
+/// `Config::walrus_staking_pool_id`'s doc comment). Matches @mysten/walrus's
+/// constants.mjs per-network defaults (see also scripts/sidecar/config.ts's
+/// WALRUS_PACKAGE_ID handling, which follows the same pattern for the TS
+/// sidecar). Only `testnet` has a distinct default — every other network
+/// value, including `devnet`/`localnet`, silently falls back to the
+/// MAINNET object id. Callers on a non-testnet, non-mainnet network should
+/// set `WALRUS_STAKING_POOL_ID` explicitly rather than relying on this.
+/// Expects `network` already trimmed/lowercased (see `Config::from_env`).
+pub fn default_walrus_staking_pool_id(network: &str) -> &'static str {
+    match network {
+        "testnet" => "0xbe46180321c30aab2f8b3501e24048377287fa708018a5b7c2792b35fe339ee3",
+        _ => "0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904",
     }
 }
 
@@ -1609,6 +1645,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            walrus_staking_pool_id: "0x5".into(),
         }
     }
 

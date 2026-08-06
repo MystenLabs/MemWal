@@ -677,6 +677,7 @@ async fn main() {
         .with_walrus_config(
             config.walrus_package_id.clone(),
             config.walrus_system_object_id.clone(),
+            config.walrus_staking_pool_id.clone(),
         );
         (
             Some(Arc::new(client.clone())),
@@ -711,6 +712,32 @@ async fn main() {
         config.security_delete_execute_max_in_flight,
     ));
 
+    // General-purpose Sui client for the per-memory expiry sweep (WALM-296).
+    // Deliberately independent of `security_delete_component_enabled` —
+    // unlike `security_delete_sui` above, the expiry sweep must have a
+    // client whenever SUI_GRPC_URL is configured at all, so it works in
+    // deployments that never enable security deletion. This builds a
+    // separate SuiClient/gRPC client instance from `security_delete_sui`'s
+    // even when both end up `Some`; that duplication is intentional, not a
+    // bug — unifying them is out of scope for this change.
+    let walrus_sui_client: Option<Arc<dyn sui::SuiApi>> =
+        config.sui_grpc_url.as_deref().map(|url| {
+            let client = sui::SuiClient::new(
+                url,
+                config.sui_rpc_requests_per_window,
+                config.sui_rpc_window,
+            )
+            .expect("failed to initialize Walrus Sui client")
+            .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+            .expect("invalid Walrus Sui RPC controls")
+            .with_walrus_config(
+                config.walrus_package_id.clone(),
+                config.walrus_system_object_id.clone(),
+                config.walrus_staking_pool_id.clone(),
+            );
+            Arc::new(client) as Arc<dyn sui::SuiApi>
+        });
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
@@ -719,6 +746,7 @@ async fn main() {
         security_delete_wallet_verifier,
         security_delete_sui,
         security_delete_background_sui,
+        walrus_sui_client,
         security_delete_execution_gate,
         config: Arc::clone(&config),
         http_client,
@@ -973,6 +1001,153 @@ async fn main() {
                 .await
             {
                 tracing::error!("Stale remember job sweep failed: {}", e);
+            }
+        }
+    });
+
+    // A blob's storage_end_epoch and the current_epoch its lease lookup
+    // was observed at — both scoped to the same sidecar response, both
+    // needed by the current-epoch-anchored `expires_at_from_epoch` formula
+    // (WALM-296's expiry sweep, below).
+    struct LeaseEpochs {
+        storage_end_epoch: i32,
+        current_epoch: i32,
+    }
+
+    // Spawn background task for per-memory expiry refresh (WALM-296).
+    //
+    // Populates `end_epoch`/`expires_at` on `vector_entries` rows so the
+    // owner-scoped memory listing API never needs a live chain read.
+    // Batches by owner so each owner needs one sidecar query-blobs call
+    // (with `includeStorageLease: true`) rather than one per row. The
+    // epoch schedule (`epoch_duration_ms`) is fetched ONCE per tick,
+    // shared across every owner in that tick's batch.
+    let expiry_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        // Rate-limited external-RPC loop: if a tick overruns 300s, catch up
+        // by spacing subsequent ticks rather than firing several back-to-back
+        // (the default `Burst` behavior).
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+
+            // SUI_GRPC_URL isn't configured in this deployment — a
+            // legitimate degraded-but-non-panicking state. Skip the whole
+            // sweep body (not just the on-chain call) so a client-less
+            // deployment doesn't still select + mark-scheduled rows for
+            // nothing every tick, churning expiry_synced_at across the
+            // table with no benefit.
+            let Some(sui_client) = expiry_state.walrus_sui_client.as_ref() else {
+                tracing::warn!(
+                    "Expiry refresh sweep: no Sui client configured (SUI_GRPC_URL unset), skipping sweep"
+                );
+                continue;
+            };
+
+            // Fetch the epoch schedule ONCE per tick, BEFORE selecting or
+            // marking any row as scheduled. walrus_epoch_schedule() is a
+            // process-global (not owner-specific) on-chain fetch — if it
+            // fails here, nothing has been selected or marked yet, so the
+            // tick naturally retries in 300s. Previously this was fetched
+            // per-owner AFTER rows were already marked scheduled, so a
+            // failure left affected rows with NULL end_epoch/expires_at but
+            // stamped expiry_synced_at, invisible to the sweep for 24h.
+            let schedule = match sui_client.walrus_epoch_schedule().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Expiry refresh sweep: epoch schedule lookup failed: {}", e);
+                    continue;
+                }
+            };
+
+            let rows = match expiry_state.db.rows_needing_expiry_refresh(100).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!("Expiry refresh sweep: failed to select rows: {}", e);
+                    continue;
+                }
+            };
+            if rows.is_empty() {
+                continue;
+            }
+
+            let ids: Vec<String> = rows.iter().map(|(_, id, _)| id.clone()).collect();
+            if let Err(e) = expiry_state.db.mark_expiry_scheduled(&ids).await {
+                tracing::error!("Expiry refresh sweep: failed to mark scheduled: {}", e);
+                continue;
+            }
+
+            // Group by owner so each owner needs only one on-chain query
+            // rather than one RPC per row.
+            let mut by_owner: std::collections::HashMap<String, Vec<(String, String)>> =
+                std::collections::HashMap::new();
+            for (owner, id, blob_id) in rows {
+                by_owner.entry(owner).or_default().push((id, blob_id));
+            }
+
+            for (owner, id_blob_pairs) in by_owner {
+                let blob_ids: Vec<String> = id_blob_pairs
+                    .iter()
+                    .map(|(_, blob_id)| blob_id.clone())
+                    .collect();
+                let leases = match crate::storage::walrus::query_blob_storage_leases(
+                    &expiry_state.http_client,
+                    &expiry_state.config.sidecar_url,
+                    expiry_state.config.sidecar_secret.as_deref(),
+                    &owner,
+                    &blob_ids,
+                )
+                .await
+                {
+                    Ok(leases) => leases,
+                    Err(e) => {
+                        tracing::warn!(owner = %owner, "Expiry refresh sweep: on-chain lease lookup failed: {}", e);
+                        continue;
+                    }
+                };
+
+                // Widen the per-blob-id map to carry each blob's
+                // storage_end_epoch AND the current_epoch this owner's
+                // lease lookup observed — the current-epoch-anchored
+                // expires_at_from_epoch formula needs both, and
+                // current_epoch is scoped to this exact lease response
+                // (not the once-per-tick schedule, which only carries
+                // epoch_duration_ms).
+                let current_epoch = leases.current_epoch;
+                let by_blob_id: std::collections::HashMap<String, LeaseEpochs> = leases
+                    .blobs
+                    .into_iter()
+                    .map(|lease| {
+                        (
+                            lease.blob_id,
+                            LeaseEpochs {
+                                storage_end_epoch: lease.storage_end_epoch,
+                                current_epoch,
+                            },
+                        )
+                    })
+                    .collect();
+
+                let now = chrono::Utc::now();
+                for (id, blob_id) in id_blob_pairs {
+                    let Some(lease) = by_blob_id.get(&blob_id) else {
+                        continue;
+                    };
+                    let expires_at = crate::sui::expires_at_from_epoch(
+                        crate::sui::WalrusEpoch(lease.storage_end_epoch as u64),
+                        crate::sui::WalrusEpoch(lease.current_epoch as u64),
+                        &schedule,
+                        now,
+                    );
+                    if let Err(e) = expiry_state
+                        .db
+                        .set_memory_expiry(&id, lease.storage_end_epoch, expires_at)
+                        .await
+                    {
+                        tracing::error!(id = %id, "Expiry refresh sweep: failed to write back: {}", e);
+                    }
+                }
             }
         }
     });

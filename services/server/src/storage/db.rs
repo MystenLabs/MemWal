@@ -49,6 +49,8 @@ mod tests {
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
+            include_str!("../../migrations/014_memory_expiry_columns.sql"),
+            include_str!("../../migrations/015_memory_expiry_synced_at_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -79,6 +81,7 @@ mod tests {
             0.5,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -90,6 +93,7 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
             None,
             None,
         )
@@ -145,6 +149,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -158,6 +163,44 @@ mod tests {
 
         assert_eq!(row.0.as_deref(), Some("agent-abc"));
         assert_eq!(row.1.as_deref(), Some("0xpkg-123"));
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn insert_vector_persists_end_epoch() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            Some(457),
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<i32>,) =
+            sqlx::query_as("SELECT end_epoch FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, Some(457));
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
             .bind(&id)
@@ -188,6 +231,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -215,6 +259,7 @@ mod tests {
             0.5,
             Some("agent-abc"),
             Some("0xpkg-123"),
+            None,
         )
         .await
         .unwrap();
@@ -232,6 +277,128 @@ mod tests {
             "updated_at must advance on ON CONFLICT DO UPDATE (first={:?}, second={:?})",
             first_updated_at,
             second_updated_at
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rows_needing_expiry_refresh_returns_null_and_stale_rows_only() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        // never synced (NULL expiry_synced_at) — should be selected
+        db.insert_vector(
+            &format!("{}-a", owner),
+            &owner,
+            "ns",
+            "blob-a",
+            &[0.0_f32; 1536],
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // synced recently — should NOT be selected
+        sqlx::query("INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, expiry_synced_at) VALUES ($1, $2, 'ns', 'blob-b', $3, 1, NOW())")
+            .bind(format!("{}-b", owner)).bind(&owner).bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .execute(db.pool()).await.unwrap();
+
+        // synced 25 hours ago (stale, past a 24h threshold) — should be selected
+        sqlx::query("INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, expiry_synced_at) VALUES ($1, $2, 'ns', 'blob-c', $3, 1, NOW() - INTERVAL '25 hours')")
+            .bind(format!("{}-c", owner)).bind(&owner).bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .execute(db.pool()).await.unwrap();
+
+        // This shared local test database accumulates NULL/stale
+        // expiry_synced_at rows across many prior test runs (thousands, in
+        // practice), and ties among NULL values are unordered in Postgres.
+        // A small limit (e.g. 10, as in the original design sketch) would
+        // make this test flaky/order-dependent against that cruft — request
+        // a limit generous enough to comfortably outrun it instead.
+        let rows = db.rows_needing_expiry_refresh(50_000).await.unwrap();
+        let blob_ids: std::collections::HashSet<_> = rows
+            .iter()
+            .filter(|r| r.0 == owner)
+            .map(|r| r.2.clone())
+            .collect();
+
+        assert!(blob_ids.contains("blob-a"));
+        assert!(blob_ids.contains("blob-c"));
+        assert!(!blob_ids.contains("blob-b"));
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// "Never touch updated_at" is a load-bearing plan constraint for the
+    /// expiry sweep (Console's `updated_after` incremental sync depends on
+    /// it not moving for reasons unrelated to the row's own content — see
+    /// `insert_vector_bumps_updated_at_on_conflict` above for the positive
+    /// case). Regression-protects the negative case for both new
+    /// write-paths the sweep uses.
+    #[tokio::test]
+    async fn expiry_methods_never_touch_updated_at() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-expiry-updated-at-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner-expiry-updated-at",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let original_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        // Force a measurable time gap so a naive "call succeeded" assertion
+        // couldn't accidentally pass — updated_at must genuinely not move.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        db.mark_expiry_scheduled(&[id.clone()]).await.unwrap();
+        db.set_memory_expiry(&id, 457, chrono::Utc::now())
+            .await
+            .unwrap();
+
+        let after_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        assert_eq!(
+            original_updated_at, after_updated_at,
+            "mark_expiry_scheduled/set_memory_expiry must never touch updated_at"
         );
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
@@ -354,6 +521,22 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
 
+        // per-memory expiry columns (WALM-296).
+        let migration_014 = include_str!("../../migrations/014_memory_expiry_columns.sql");
+        sqlx::raw_sql(migration_014)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
+
+        // index on expiry_synced_at so the periodic expiry refresh sweep
+        // doesn't full-scan vector_entries every tick (WALM-296). Must stay
+        // in its own file/transaction — see 015's header comment.
+        let migration_015 = include_str!("../../migrations/015_memory_expiry_synced_at_index.sql");
+        sqlx::raw_sql(migration_015)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -385,13 +568,14 @@ impl VectorDb {
         importance: f32,
         agent_id: Option<&str>,
         package_id: Option<&str>,
+        end_epoch: Option<i32>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id, end_epoch)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
@@ -401,6 +585,7 @@ impl VectorDb {
                 importance = EXCLUDED.importance,
                 agent_id = EXCLUDED.agent_id,
                 package_id = EXCLUDED.package_id,
+                end_epoch = EXCLUDED.end_epoch,
                 updated_at = NOW()",
         )
         .bind(id)
@@ -412,6 +597,7 @@ impl VectorDb {
         .bind(importance)
         .bind(agent_id)
         .bind(package_id)
+        .bind(end_epoch)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
@@ -814,6 +1000,66 @@ impl VectorDb {
             tracing::warn!("Marked {} stale remember jobs as failed", rows);
         }
         Ok(rows)
+    }
+
+    /// Rows whose expiry data has never been synced, or was synced more
+    /// than 24h ago. Returns (owner, id, blob_id) tuples — the minimum a
+    /// caller needs to look up on-chain data and write it back. Stamps
+    /// nothing itself; the caller must call `mark_expiry_scheduled` before
+    /// doing the (potentially slow) on-chain lookup, so a second sweep
+    /// tick doesn't re-select the same rows while the first is in flight.
+    pub async fn rows_needing_expiry_refresh(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, String)>, AppError> {
+        sqlx::query_as(
+            "SELECT owner, id, blob_id FROM vector_entries
+             WHERE expiry_synced_at IS NULL OR expiry_synced_at < NOW() - INTERVAL '24 hours'
+             ORDER BY expiry_synced_at ASC NULLS FIRST
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to select rows needing expiry refresh: {}",
+                e
+            ))
+        })
+    }
+
+    /// Stamp expiry_synced_at = NOW() at SCHEDULE time (not completion) so
+    /// a row already picked up by the current sweep tick isn't re-selected
+    /// by the next tick while its on-chain lookup is still in flight. A
+    /// failed lookup is retried on the next sweep after the 24h window —
+    /// acceptable degradation, avoids duplicate-enqueue storms. Never
+    /// touches updated_at.
+    pub async fn mark_expiry_scheduled(&self, ids: &[String]) -> Result<(), AppError> {
+        sqlx::query("UPDATE vector_entries SET expiry_synced_at = NOW() WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to mark expiry scheduled: {}", e)))?;
+        Ok(())
+    }
+
+    /// Write back a resolved end_epoch/expires_at for one row. Never
+    /// touches updated_at — see this plan's Global Constraints.
+    pub async fn set_memory_expiry(
+        &self,
+        id: &str,
+        end_epoch: i32,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AppError> {
+        sqlx::query("UPDATE vector_entries SET end_epoch = $1, expires_at = $2 WHERE id = $3")
+            .bind(end_epoch)
+            .bind(expires_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set memory expiry: {}", e)))?;
+        Ok(())
     }
 
     /// Immediately remove a single stale/revoked delegate key from the cache.

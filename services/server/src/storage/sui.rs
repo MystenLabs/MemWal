@@ -206,6 +206,7 @@ pub async fn list_delegate_keys_cached(
     cache: &DelegateKeysCache,
     http_client: &reqwest::Client,
     rpc_url: &str,
+    grpc_client: Option<&sui_rpc::Client>,
     account_object_id: &str,
     expected_type_origin_package_id: &str,
 ) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
@@ -221,6 +222,7 @@ pub async fn list_delegate_keys_cached(
     let keys = list_delegate_keys_onchain(
         http_client,
         rpc_url,
+        grpc_client,
         account_object_id,
         expected_type_origin_package_id,
     )
@@ -283,12 +285,26 @@ pub fn parse_delegate_keys(
 /// verify_delegate_key_onchain's non-gRPC path) — WALM-295 Phase 1 does not
 /// need the gRPC variant since this endpoint is not on the hot signature-
 /// verification path.
+/// Routes through gRPC when `grpc_client` is provided, mirroring
+/// `verify_delegate_key_onchain`'s same JSON-RPC-sunset rationale — this
+/// was the one remaining `/agents`-only call site still hardcoded to
+/// JSON-RPC after that migration.
 pub async fn list_delegate_keys_onchain(
     http_client: &reqwest::Client,
     rpc_url: &str,
+    grpc_client: Option<&sui_rpc::Client>,
     account_object_id: &str,
     expected_type_origin_package_id: &str,
 ) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    if let Some(grpc_client) = grpc_client {
+        return list_delegate_keys_onchain_grpc(
+            grpc_client.clone(),
+            account_object_id,
+            expected_type_origin_package_id,
+        )
+        .await;
+    }
+
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -401,6 +417,18 @@ fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
     }
 }
 
+/// `created_at` (a Move `u64`) round-trips through gRPC's JSON-like
+/// `google.protobuf.Value` the same way it does through JSON-RPC — usually
+/// as a string (to avoid f64 precision loss), occasionally as a number —
+/// so try both, mirroring `parse_delegate_keys`'s JSON-RPC dual-path.
+fn grpc_value_as_u64(v: &prost_types::Value) -> Option<u64> {
+    match &v.kind {
+        Some(prost_types::value::Kind::StringValue(s)) => s.parse::<u64>().ok(),
+        Some(prost_types::value::Kind::NumberValue(n)) => Some(*n as u64),
+        _ => None,
+    }
+}
+
 /// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
 /// (owner, active, delegate_keys membership), fetched via
 /// LedgerService.GetObject instead of JSON-RPC's `sui_getObject`.
@@ -505,6 +533,94 @@ async fn verify_delegate_key_onchain_grpc(
         delegate_keys.len(),
         account_object_id
     )))
+}
+
+/// gRPC counterpart of `list_delegate_keys_onchain`'s JSON-RPC body — same
+/// shape as `verify_delegate_key_onchain_grpc` above (GetObject, type check,
+/// struct navigation), but returns every delegate key rather than searching
+/// for one match. Public key bytes are base64-encoded in the gRPC json
+/// representation (unlike JSON-RPC's array-of-numbers), but `/agents`
+/// doesn't need the key bytes at all — only `sui_address`/`label`/`created_at`.
+async fn list_delegate_keys_onchain_grpc(
+    mut client: sui_rpc::Client,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    let address: sui_sdk_types::Address = account_object_id
+        .parse()
+        .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
+    let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
+    request.read_mask = Some(prost_types::FieldMask {
+        paths: vec!["json".to_string(), "object_type".to_string()],
+    });
+
+    let started = std::time::Instant::now();
+    let response = client.ledger_client().get_object(request).await;
+    let status_label = match &response {
+        Ok(_) => "200".to_string(),
+        Err(status) => status.code().to_string(),
+    };
+    crate::observability::observe_external(
+        "sui_grpc",
+        "GetObject",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let object = response
+        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {}", e)))?
+        .into_inner()
+        .object
+        .ok_or_else(|| OnchainVerifyError::RpcError("gRPC response missing object".into()))?;
+
+    ensure_memwal_account_type(
+        object.object_type.as_deref(),
+        expected_type_origin_package_id,
+        account_object_id,
+    )?;
+
+    let json = object
+        .json
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
+    let fields = grpc_value_as_struct(&json)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
+
+    let delegate_keys = fields
+        .fields
+        .get("delegate_keys")
+        .and_then(grpc_value_as_list)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    let mut out = Vec::with_capacity(delegate_keys.len());
+    for dk in delegate_keys {
+        let Some(dk_fields) = grpc_value_as_struct(dk) else {
+            continue;
+        };
+        let sui_address = dk_fields
+            .fields
+            .get("sui_address")
+            .and_then(grpc_value_as_str)
+            .ok_or_else(|| OnchainVerifyError::RpcError("delegate key missing sui_address".into()))?
+            .to_string();
+        let label = dk_fields
+            .fields
+            .get("label")
+            .and_then(grpc_value_as_str)
+            .unwrap_or("")
+            .to_string();
+        let created_at = dk_fields
+            .fields
+            .get("created_at")
+            .and_then(grpc_value_as_u64)
+            .unwrap_or(0);
+        out.push(DelegateKeyInfo {
+            sui_address,
+            label,
+            created_at,
+        });
+    }
+
+    Ok(out)
 }
 
 /// Scan the AccountRegistry to find which account holds a given delegate key.
@@ -1339,9 +1455,15 @@ mod tests {
         );
 
         let client = reqwest::Client::new();
-        let result =
-            list_delegate_keys_cached(&cache, &client, unreachable_rpc_url(), account_id, "0xpkg")
-                .await;
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            None,
+            account_id,
+            "0xpkg",
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -1366,9 +1488,15 @@ mod tests {
         );
 
         let client = reqwest::Client::new();
-        let result =
-            list_delegate_keys_cached(&cache, &client, unreachable_rpc_url(), account_id, "0xpkg")
-                .await;
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            None,
+            account_id,
+            "0xpkg",
+        )
+        .await;
 
         assert!(
             result.is_err(),
@@ -1386,6 +1514,7 @@ mod tests {
             &cache,
             &client,
             unreachable_rpc_url(),
+            None,
             "0xnever-cached",
             "0xpkg",
         )
