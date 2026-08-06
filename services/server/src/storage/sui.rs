@@ -181,6 +181,18 @@ pub struct DelegateKeyInfo {
 /// Same window `walrus_epoch()` uses (`sui/client.rs::walrus_epoch`, 30s).
 pub const DELEGATE_KEYS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Staleness threshold for the periodic `DelegateKeysCache` sweep run from
+/// `main.rs`. `DELEGATE_KEYS_CACHE_TTL` above only gates whether a hit is
+/// *trusted* on read — nothing ever removed the map slot itself, so every
+/// `account_object_id` ever looked up via `list_delegate_keys_cached` stayed
+/// resident in memory for the life of the process (unbounded growth).
+///
+/// 10 minutes = 20x the 30s trust TTL: generous headroom so a sweep never
+/// evicts an entry that's still realistically in use, while still bounding
+/// the map to "accounts read from in the last 10 minutes" instead of
+/// "every account ever queried since boot".
+pub const DELEGATE_KEYS_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
 #[derive(Clone)]
 pub struct TimedDelegateKeys {
     pub value: Vec<DelegateKeyInfo>,
@@ -1394,6 +1406,52 @@ mod tests {
         assert!(
             result.is_err(),
             "no cache entry exists yet, so this must attempt (and fail) the real RPC call"
+        );
+    }
+
+    // ── DelegateKeysCache periodic sweep (WALM-295 finding: nothing ever
+    //    removed a map slot — only the TTL above gated trust-on-hit) ──────
+    //
+    // The sweep itself is a `tokio::spawn` + `interval` loop in `main.rs`
+    // (not unit-testable in isolation without booting the binary), but its
+    // core logic is exactly this `retain` predicate. This test locks that
+    // predicate down against the two failure modes that would silently
+    // reintroduce the leak: evicting entries that are still within
+    // `DELEGATE_KEYS_CACHE_MAX_AGE`, or failing to evict ones that aren't.
+    #[tokio::test]
+    async fn delegate_keys_cache_sweep_predicate_evicts_only_stale_entries() {
+        let cache = new_delegate_keys_cache();
+        cache.write().await.insert(
+            "0xstale".to_string(),
+            TimedDelegateKeys {
+                value: vec![],
+                fetched_at: std::time::Instant::now()
+                    - DELEGATE_KEYS_CACHE_MAX_AGE
+                    - std::time::Duration::from_secs(1),
+            },
+        );
+        cache.write().await.insert(
+            "0xfresh".to_string(),
+            TimedDelegateKeys {
+                value: vec![],
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+
+        // Mirrors main.rs's `delegate_cache_sweep` task body verbatim.
+        cache
+            .write()
+            .await
+            .retain(|_, v| v.fetched_at.elapsed() < DELEGATE_KEYS_CACHE_MAX_AGE);
+
+        let remaining = cache.read().await;
+        assert!(
+            !remaining.contains_key("0xstale"),
+            "entry older than DELEGATE_KEYS_CACHE_MAX_AGE must be evicted"
+        );
+        assert!(
+            remaining.contains_key("0xfresh"),
+            "entry younger than DELEGATE_KEYS_CACHE_MAX_AGE must survive the sweep"
         );
     }
 

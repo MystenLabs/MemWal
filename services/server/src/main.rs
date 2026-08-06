@@ -961,6 +961,35 @@ async fn main() {
         }
     });
 
+    // Spawn background task to bound the in-memory `DelegateKeysCache`
+    // (WALM-295 `/agents` cache — see `storage/sui.rs`). Unlike the
+    // Postgres-backed eviction above, nothing else ever removes entries from
+    // this HashMap: the 30s TTL only gates whether a hit is trusted, so
+    // without this sweep it grows for the lifetime of the process, one
+    // entry per distinct account_object_id ever looked up. Sweeping is a
+    // cheap in-memory `retain` (no I/O), so a 5-minute cadence against the
+    // 10-minute `DELEGATE_KEYS_CACHE_MAX_AGE` keeps the map bounded to
+    // recently-active accounts with headroom to spare.
+    let delegate_cache_sweep_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let mut cache = delegate_cache_sweep_state.delegate_keys_cache.write().await;
+            let before = cache.len();
+            cache.retain(|_, v| v.fetched_at.elapsed() < storage::sui::DELEGATE_KEYS_CACHE_MAX_AGE);
+            let evicted = before - cache.len();
+            drop(cache);
+            if evicted > 0 {
+                tracing::debug!(
+                    "delegate_keys_cache sweep: evicted {} stale entries ({} remaining)",
+                    evicted,
+                    before - evicted
+                );
+            }
+        }
+    });
+
     // Spawn background task for orphaned async remember jobs
     let stale_job_state = state.clone();
     tokio::spawn(async move {
@@ -1006,15 +1035,6 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
-        .route(
-            "/v1/owners/{owner}/namespaces",
-            get(routes::list_owner_namespaces),
-        )
-        .route(
-            "/v1/owners/{owner}/memories",
-            get(routes::list_owner_memories),
-        )
-        .route("/v1/owners/{owner}/agents", get(routes::list_owner_agents))
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
@@ -1024,6 +1044,34 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::verify_signature,
+        ))
+        .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
+
+    // WALM-295: owner-scoped read API — split out of `protected_routes` so
+    // these 3 GET endpoints stop spending the write path's 30/min
+    // per-delegate-key budget (that budget exists to bound Walrus
+    // upload/LLM/gas spend-risk; plain reads carry none of that risk and a
+    // routine pagination loop could trip it under completely normal use).
+    // Same auth layer as `protected_routes` (`auth::verify_signature`), but
+    // `read_api_rate_limit_middleware` instead of the shared
+    // `rate_limit_middleware`, so this budget can never contend with writes.
+    let read_api_routes = Router::new()
+        .route(
+            "/v1/owners/{owner}/namespaces",
+            get(routes::list_owner_namespaces),
+        )
+        .route(
+            "/v1/owners/{owner}/memories",
+            get(routes::list_owner_memories),
+        )
+        .route("/v1/owners/{owner}/agents", get(routes::list_owner_agents))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::read_api_rate_limit_middleware,
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1197,6 +1245,7 @@ async fn main() {
 
     let app = Router::new()
         .merge(protected_routes)
+        .merge(read_api_routes)
         .merge(public_routes)
         .layer(cors)
         // Merge after applying the deployment-wide CORS layer so its

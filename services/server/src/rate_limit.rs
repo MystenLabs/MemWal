@@ -385,7 +385,14 @@ fn rate_limiter_unavailable_response() -> Response {
 // Rate Limit Middleware
 // ============================================================
 
-/// Multi-layer rate limiting middleware for authenticated routes.
+/// Multi-layer rate limiting middleware for the write-path authenticated
+/// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
+///
+/// The owner-scoped read API (`/v1/owners/{owner}/{namespaces,memories,agents}`)
+/// does NOT run through this middleware — as of WALM-295 it has its own
+/// dedicated single-layer budget (`read_api_rate_limit_middleware`, below)
+/// so routine read pagination can never spend the write path's budget or
+/// vice versa.
 ///
 /// Checks 3 layers (all must pass):
 /// 1. Per-delegate-key: 30 weighted-req/min (prevents compromised key abuse)
@@ -393,9 +400,7 @@ fn rate_limiter_unavailable_response() -> Response {
 /// 3. Per-account sustained: 500 weighted-req/hour (prevents slow-burn)
 ///
 /// Endpoints are cost-weighted:
-///   analyze=10, remember=5, remember/manual=3, restore=3, ask=2, recall=1,
-///   owners/{owner}/agents=2 (live on-chain RPC read), owners/{owner}/memories=1,
-///   owners/{owner}/namespaces=1 (both DB-only reads)
+///   analyze=10, remember=5, remember/manual=3, restore=3, ask=2, recall=1
 ///
 /// Returns 429 Too Many Requests with JSON body if any layer exceeds its limit.
 ///
@@ -615,6 +620,95 @@ pub async fn rate_limit_middleware(
     }
 
     next.run(request).await
+}
+
+// ============================================================
+// Read API Rate Limit Middleware
+// ============================================================
+
+/// Rate limiting middleware for the owner-scoped read API
+/// (`GET /v1/owners/{owner}/{namespaces,memories,agents}`).
+///
+/// WALM-295 finding: these routes used to sit in the same `protected_routes`
+/// router as every write endpoint, behind `rate_limit_middleware`, so they
+/// spent the same 30/min per-delegate-key budget that exists to bound the
+/// write path's spend-risk (Walrus upload, LLM calls, gas). A single
+/// dedicated budget is enough here — reads don't carry that risk, so there's
+/// no need for the write path's extra account-level burst/sustained layers.
+///
+/// Checks ONE dedicated sliding-window layer, keyed by delegate key under
+/// its own Redis prefix (`rate:read:dk:{public_key}`) so it cannot share or
+/// contend with the write path's `rate:dk:{public_key}` bucket. Endpoint
+/// weight is looked up via the same `endpoint_weight()` table the write path
+/// uses (namespaces=1, memories=1, agents=2).
+///
+/// Returns 429 with the same JSON shape as `rate_limit_middleware`
+/// (`layer: "read_delegate_key"`) on exceed, and fails closed to 503 if
+/// Redis is unreachable — no in-memory fallback, matching every other
+/// rate limiter in this file except the deliberately-fallback-enabled
+/// authenticated write path.
+pub async fn read_api_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let auth_info = request
+        .extensions()
+        .get::<crate::types::AuthInfo>()
+        .cloned();
+
+    let auth = match auth_info {
+        Some(a) => a,
+        None => {
+            // No auth info = auth middleware didn't run ahead of this one;
+            // nothing to key the bucket on, so skip rather than 500.
+            return next.run(request).await;
+        }
+    };
+
+    let config = &state.config.read_api_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let weight = endpoint_weight(request.uri().path());
+    let dk_key = format!("rate:read:dk:{}", auth.public_key);
+    let window_start = now - 60_000.0; // 1-min window (ms)
+
+    match check_and_record_window(
+        &mut redis,
+        &dk_key,
+        window_start,
+        now,
+        config.per_delegate_key_per_minute,
+        weight,
+        120, // TTL 2 min
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "rate limit [read-delegate-key]: key={}... denied (limit={})",
+                &auth.public_key[..16.min(auth.public_key.len())],
+                config.per_delegate_key_per_minute
+            );
+            rate_limit_response(
+                "read_delegate_key",
+                config.per_delegate_key_per_minute,
+                "min",
+                60,
+            )
+        }
+        Err(e) => {
+            tracing::warn!("rate limit [read-delegate-key] Redis error: {}", e);
+            rate_limiter_unavailable_response()
+        }
+        Ok(WindowCheckResult::Allowed) => next.run(request).await,
+    }
 }
 
 // ============================================================
@@ -1061,6 +1155,29 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         // Verify Retry-After header is present
         assert!(resp.headers().contains_key("retry-after"));
+    }
+
+    // ---- Read API rate limit config + response shape (WALM-295) ----
+
+    #[test]
+    fn test_read_api_rate_limit_config_defaults() {
+        let config = crate::types::ReadApiRateLimitConfig::default();
+        assert_eq!(config.per_delegate_key_per_minute, 200);
+    }
+
+    #[test]
+    fn test_read_api_rate_limit_response_uses_dedicated_layer_name() {
+        // Guards against re-drifting into the shared "delegate_key" /
+        // "account_burst" layer names the write path uses — the whole point
+        // of this budget is that it is a *separate* bucket clients (and
+        // dashboards keying off `layer`) can distinguish from write-path 429s.
+        let resp = rate_limit_response("read_delegate_key", 200, "min", 60);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers().get("retry-after").unwrap(),
+            "60",
+            "Retry-After header must be present with the same value as retry_after_seconds"
+        );
     }
 
     #[test]
