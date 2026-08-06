@@ -4,11 +4,13 @@
 -- Deliberately its own migration file/transaction (not bundled with 011)
 -- so the ACCESS EXCLUSIVE this ALTER briefly takes to validate NOT NULL
 -- is a short constraint-check scan, not held open across the (larger)
--- backfill UPDATE. SET DEFAULT is metadata-only and safe to bundle here.
+-- backfill UPDATE.
 --
--- Idempotent: SET NOT NULL / SET DEFAULT on a column that already has
--- them is a no-op, matching every other migration's re-run-on-boot
--- expectation.
+-- The default itself is set by 010, not here — see 010's header comment
+-- for why it must run before 011's backfill, not alongside this NOT NULL
+-- enforcement.
+--
+-- Idempotent: SET NOT NULL on a column that already has it is a no-op,
+-- matching every other migration's re-run-on-boot expectation.
 
 ALTER TABLE vector_entries ALTER COLUMN updated_at SET NOT NULL;
-ALTER TABLE vector_entries ALTER COLUMN updated_at SET DEFAULT NOW();
