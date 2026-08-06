@@ -345,6 +345,35 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// WALM-297 — HMAC signing secret for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_SECRET`). Typed `String` rather than `Option<String>`
+    /// (unlike `deletion_token_secret`, whose env-loading idiom this
+    /// otherwise mirrors — `nonempty_env`, trimmed): owner-token issuance
+    /// isn't behind a separate feature flag the way security-delete is, so
+    /// there's no natural "component disabled" state to model with `None`.
+    /// An empty string means "not configured" — both `POST
+    /// /v1/owner-tokens` and the `OwnerToken` extractor treat that as an
+    /// unconditional rejection rather than letting an empty HMAC key
+    /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
+    pub owner_token_secret: String,
+    /// WALM-297 — the team-decided **service credential**: one static
+    /// shared secret WM generates and hands to Console, which Console
+    /// includes on every `POST /v1/owner-tokens` call
+    /// (`OWNER_TOKEN_SERVICE_CREDENTIAL`, header
+    /// `routes::owner_token::SERVICE_CREDENTIAL_HEADER`). Not one of the
+    /// two fields the WALM-297 spec named explicitly for this struct
+    /// (`owner_token_secret` / `owner_token_ttl_secs`) — added because the
+    /// client-authentication requirement in the same ticket has nothing
+    /// else to compare against otherwise. Same empty-string-means-
+    /// unconfigured contract as `owner_token_secret` above.
+    pub owner_token_service_credential: String,
+    /// WALM-297 — TTL for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_TTL_SECS`). Default 900s (15 min): short-lived per the
+    /// ticket, long enough that Console doesn't need to re-mint on every
+    /// single read during one user session.
+    pub owner_token_ttl_secs: u64,
+    /// WALM-297 — rate limiting for `POST /v1/owner-tokens`.
+    pub owner_token_rate_limit: OwnerTokenRateLimitConfig,
 }
 
 impl Config {
@@ -478,6 +507,11 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
+                .unwrap_or_default(),
+            owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900),
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::from_env(),
         }
     }
 }
@@ -808,6 +842,76 @@ impl AccountsRateLimitConfig {
         if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Owner Token Rate Limit Config (WALM-297)
+// ============================================================
+
+/// Rate limits for `POST /v1/owner-tokens`.
+///
+/// Two independent layers, both enforced (see
+/// `rate_limit::owner_token_credential_rate_limit_middleware` and
+/// `rate_limit::check_owner_token_owner_rate_limit`):
+///
+/// - `per_minute` / `per_hour` — keyed by the caller's service credential.
+///   Phase 1 has exactly one shared credential (Console's), so in practice
+///   this is one deployment-wide budget, same idea as
+///   `SponsorRateLimitConfig::global_per_minute`. Defaults (120/min,
+///   3000/hr) are generous relative to a 15-minute token TTL — Console
+///   minting a token per active user session, even across many concurrent
+///   sessions, stays well under this.
+/// - `owner_per_minute` / `owner_per_hour` — keyed by the (canonical)
+///   owner address, independent of which credential presented it. A
+///   compromised or buggy Console instance that still holds a valid
+///   service credential must not be able to mint unbounded tokens for one
+///   owner. Defaults (5/min, 30/hr) are tight: with a 900s default TTL, a
+///   legitimate caller has no reason to re-mint for the same owner more
+///   than a handful of times per minute.
+#[derive(Debug, Clone)]
+pub struct OwnerTokenRateLimitConfig {
+    pub per_minute: i64,
+    pub per_hour: i64,
+    pub owner_per_minute: i64,
+    pub owner_per_hour: i64,
+}
+
+impl Default for OwnerTokenRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 120,
+            per_hour: 3000,
+            owner_per_minute: 5,
+            owner_per_hour: 30,
+        }
+    }
+}
+
+impl OwnerTokenRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_hour = n;
             }
         }
         c
@@ -1770,6 +1874,10 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            owner_token_secret: "owner-token-test-secret".into(),
+            owner_token_service_credential: "owner-token-test-credential".into(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::default(),
         }
     }
 

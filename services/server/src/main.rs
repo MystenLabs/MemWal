@@ -7,6 +7,7 @@ mod jobs;
 mod jobs_security_delete;
 mod mcp_proxy;
 mod observability;
+mod owner_token_auth;
 mod rate_limit;
 mod routes;
 mod security_delete_auth;
@@ -314,6 +315,29 @@ async fn main() {
         config.accounts_rate_limit.global_per_minute,
         config.accounts_rate_limit.global_per_hour,
     );
+    tracing::info!(
+        "  owner-token issuance: {} (ttl={}s); rate limit {}/min, {}/hr per credential; {}/min, {}/hr per owner",
+        if config.owner_token_secret.is_empty() {
+            "DISABLED (OWNER_TOKEN_SECRET unset)"
+        } else {
+            "enabled"
+        },
+        config.owner_token_ttl_secs,
+        config.owner_token_rate_limit.per_minute,
+        config.owner_token_rate_limit.per_hour,
+        config.owner_token_rate_limit.owner_per_minute,
+        config.owner_token_rate_limit.owner_per_hour,
+    );
+    if config.owner_token_secret.is_empty() {
+        tracing::warn!(
+            "  owner-token: OWNER_TOKEN_SECRET is unset — POST /v1/owner-tokens will 503 and the OwnerToken extractor will reject every bearer token until it's set."
+        );
+    }
+    if config.owner_token_service_credential.is_empty() {
+        tracing::warn!(
+            "  owner-token: OWNER_TOKEN_SERVICE_CREDENTIAL is unset — POST /v1/owner-tokens will 401 every caller until it's set."
+        );
+    }
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
         // buckets. The warning is split across lines so each one is grep-able
@@ -1095,6 +1119,36 @@ async fn main() {
         .merge(security_delete_bearer_routes)
         .layer(security_delete_cors());
 
+    // WALM-297 — owner-scoped bearer token issuance. Its own dedicated
+    // router group (mirrors `security_delete_auth_routes`): it belongs in
+    // neither `protected_routes` (which requires an Ed25519 signed
+    // request — Console structurally can never produce one, since it
+    // never holds a delegate key) nor `public_routes` (this is the
+    // opposite of public — it demands the service credential). Router::layer
+    // runs bottom-to-top, so the credential gate (outermost / added last)
+    // rejects an uncredentialed caller before the rate limiter underneath
+    // it spends any Redis budget on the request.
+    let owner_token_routes = Router::new()
+        .route(
+            "/v1/owner-tokens",
+            post(routes::issue_token).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::owner_token_credential_rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::owner_token::service_credential_gate,
+        ));
+
+    // `GET /v1/owners/{owner}/_token_probe` — no router-level middleware
+    // needed: `OwnerToken` is a pure `FromRequestParts` extractor, so axum
+    // resolves (and rejects) it per-handler before the body ever runs.
+    // See `routes::owner_token` module doc for why this route exists.
+    let owner_token_probe_routes =
+        Router::new().route("/v1/owners/{owner}/_token_probe", get(routes::token_probe));
+
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
     // open and the sidecar parses it as the Ed25519 delegate key. Body limit
@@ -1206,6 +1260,15 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
+        // Owner-token routes use the same deployment-wide ALLOWED_ORIGINS
+        // CORS policy as protected/public routes (deny-all by default),
+        // NOT the security-delete API's blanket allow-any: the service
+        // credential must never reach browser JS (the mint call is
+        // server-to-server, Console backend → WM), and the probe / future
+        // WALM-295 read routes are only meant to be reachable from origins
+        // this deployment explicitly trusts.
+        .merge(owner_token_routes)
+        .merge(owner_token_probe_routes)
         .layer(cors)
         // Merge after applying the deployment-wide CORS layer so its
         // preflight handler cannot shadow the deletion API's public policy.

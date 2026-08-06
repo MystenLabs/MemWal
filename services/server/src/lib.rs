@@ -16,6 +16,7 @@ mod compatibility;
 mod engine;
 mod jobs;
 mod observability;
+mod owner_token_auth;
 mod rate_limit;
 mod security_delete_auth;
 mod security_delete_error;
