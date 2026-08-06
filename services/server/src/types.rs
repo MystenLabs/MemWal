@@ -34,6 +34,14 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
+/// Hard ceiling for `OWNER_TOKEN_TTL_SECS` (WALM-297) — 24 hours. Without a
+/// bound, `env_positive_u64` accepts any positive u64, and a very large TTL
+/// both defeats the "short-lived" security property the token scheme's
+/// whole threat model rests on (see docs/api/owner-token-auth.md's
+/// trust-boundary note) and can push `now + ttl` outside chrono's
+/// representable range in `routes::owner_token::issue_token`'s `expires_at`
+/// computation.
+pub const MAX_OWNER_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
@@ -319,6 +327,9 @@ pub struct Config {
     /// (`/v1/owners/{owner}/{namespaces,memories,agents}`), separate from
     /// the write path's `rate_limit` budget (WALM-295).
     pub read_api_rate_limit: ReadApiRateLimitConfig,
+    /// Rate limiting for the public, unauthenticated `GET
+    /// /api/accounts/{owner}/exists` endpoint
+    pub accounts_rate_limit: AccountsRateLimitConfig,
     /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
     /// ignores caller-supplied XFF and uses the direct peer address.
     pub trusted_proxy_hops: usize,
@@ -369,6 +380,35 @@ pub struct Config {
     /// Walrus epoch into a wall-clock timestamp (WALM-296). Do not
     /// conflate the two ids.
     pub walrus_staking_pool_id: String,
+    /// WALM-297 — HMAC signing secret for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_SECRET`). Typed `String` rather than `Option<String>`
+    /// (unlike `deletion_token_secret`, whose env-loading idiom this
+    /// otherwise mirrors — `nonempty_env`, trimmed): owner-token issuance
+    /// isn't behind a separate feature flag the way security-delete is, so
+    /// there's no natural "component disabled" state to model with `None`.
+    /// An empty string means "not configured" — both `POST
+    /// /v1/owner-tokens` and the `OwnerToken` extractor treat that as an
+    /// unconditional rejection rather than letting an empty HMAC key
+    /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
+    pub owner_token_secret: String,
+    /// WALM-297 — the team-decided **service credential**: one static
+    /// shared secret WM generates and hands to Console, which Console
+    /// includes on every `POST /v1/owner-tokens` call
+    /// (`OWNER_TOKEN_SERVICE_CREDENTIAL`, header
+    /// `routes::owner_token::SERVICE_CREDENTIAL_HEADER`). Not one of the
+    /// two fields the WALM-297 spec named explicitly for this struct
+    /// (`owner_token_secret` / `owner_token_ttl_secs`) — added because the
+    /// client-authentication requirement in the same ticket has nothing
+    /// else to compare against otherwise. Same empty-string-means-
+    /// unconfigured contract as `owner_token_secret` above.
+    pub owner_token_service_credential: String,
+    /// WALM-297 — TTL for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_TTL_SECS`). Default 900s (15 min): short-lived per the
+    /// ticket, long enough that Console doesn't need to re-mint on every
+    /// single read during one user session.
+    pub owner_token_ttl_secs: u64,
+    /// WALM-297 — rate limiting for `POST /v1/owner-tokens`.
+    pub owner_token_rate_limit: OwnerTokenRateLimitConfig,
 }
 
 impl Config {
@@ -454,6 +494,7 @@ impl Config {
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             read_api_rate_limit: ReadApiRateLimitConfig::from_env(),
+            accounts_rate_limit: AccountsRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -505,6 +546,12 @@ impl Config {
                 .unwrap_or_default(),
             walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
                 .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
+            owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
+                .unwrap_or_default(),
+            owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
+                .min(MAX_OWNER_TOKEN_TTL_SECS),
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::from_env(),
         }
     }
 }
@@ -819,12 +866,170 @@ impl Default for ReadApiRateLimitConfig {
     }
 }
 
+// ============================================================
+// Accounts Rate Limit Config
+// ============================================================
+
+/// Per-IP rate limits for the public, unauthenticated `GET
+/// /api/accounts/{owner}/exists` endpoint.
+///
+/// This is a cheap read (one indexed Postgres lookup) rather than a
+/// state-changing, cost-incurring operation like `/sponsor`, so its per-IP
+/// limits are set a bit more generously than `SponsorRateLimitConfig`'s
+/// 10/min · 30/hour. But the endpoint is still an anonymous
+/// address-existence oracle, so it must stay well below the general
+/// authenticated per-account budget (`RateLimitConfig`'s 60/min · 500/hour)
+/// — reusing that budget as a per-IP limit (the bug this config replaces)
+/// left effectively no defense against enumeration. 20/min and 120/hour
+/// per IP is the same order of magnitude as sponsor's proportions while
+/// staying generous enough not to bother a legitimate integrator retrying
+/// a handful of lookups.
+#[derive(Debug, Clone)]
+pub struct AccountsRateLimitConfig {
+    /// Max accounts-exists requests per minute per IP (default: 20)
+    pub per_minute: i64,
+    /// Max accounts-exists requests per hour per IP (default: 120)
+    pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by IP rotation.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the DB pool this
+    /// endpoint shares with every other public route.
+    pub global_per_hour: i64,
+}
+
+impl Default for AccountsRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 20,
+            per_hour: 120,
+            global_per_minute: 200,
+            global_per_hour: 1500,
+        }
+    }
+}
+
 impl ReadApiRateLimitConfig {
     pub fn from_env() -> Self {
         let mut c = Self::default();
         if let Ok(v) = std::env::var("READ_API_RATE_LIMIT_PER_MINUTE") {
             if let Ok(n) = v.parse() {
                 c.per_delegate_key_per_minute = n;
+            }
+        }
+        c
+    }
+}
+
+impl AccountsRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Owner Token Rate Limit Config (WALM-297)
+// ============================================================
+
+/// Rate limits for `POST /v1/owner-tokens`.
+///
+/// Two independent layers, both enforced (see
+/// `rate_limit::owner_token_credential_rate_limit_middleware` and
+/// `rate_limit::check_owner_token_owner_rate_limit`):
+///
+/// - `per_minute` / `per_hour` — keyed by the caller's service credential.
+///   Phase 1 has exactly one shared credential (Console's), so in practice
+///   this is one deployment-wide budget, same idea as
+///   `SponsorRateLimitConfig::global_per_minute`. Defaults (120/min,
+///   3000/hr) are generous relative to a 15-minute token TTL — Console
+///   minting a token per active user session, even across many concurrent
+///   sessions, stays well under this.
+/// - `owner_per_minute` / `owner_per_hour` — keyed by the (canonical)
+///   owner address, independent of which credential presented it. A
+///   compromised or buggy Console instance that still holds a valid
+///   service credential must not be able to mint unbounded tokens for one
+///   owner. Defaults (5/min, 30/hr) are tight: with a 900s default TTL, a
+///   legitimate caller has no reason to re-mint for the same owner more
+///   than a handful of times per minute.
+#[derive(Debug, Clone)]
+pub struct OwnerTokenRateLimitConfig {
+    pub per_minute: i64,
+    pub per_hour: i64,
+    pub owner_per_minute: i64,
+    pub owner_per_hour: i64,
+    /// Per-source-IP budget, independent of `x-service-credential` validity
+    /// (see `rate_limit::owner_token_ip_rate_limit_middleware`'s doc
+    /// comment — this is what actually throttles someone guessing the
+    /// shared credential, since the per-credential budget below is keyed
+    /// by the guessed value itself and never sees repeated failed guesses).
+    pub ip_per_minute: i64,
+    pub ip_per_hour: i64,
+}
+
+impl Default for OwnerTokenRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 120,
+            per_hour: 3000,
+            owner_per_minute: 5,
+            owner_per_hour: 30,
+            ip_per_minute: 30,
+            ip_per_hour: 300,
+        }
+    }
+}
+
+impl OwnerTokenRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_hour = n;
             }
         }
         c
@@ -949,6 +1154,31 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest(format!(
             "namespace exceeds maximum length of {} bytes",
             MAX_NAMESPACE_BYTES
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a client-supplied embedding vector against what the fact store can
+/// accept. Shared by the manual write and read paths, where the vector comes
+/// from the caller rather than the server-side embedder. Rejects, with an
+/// actionable `BadRequest` (and, on the write path, before any paid upload):
+///   - a width other than the fixed pgvector column (`EMBEDDING_DIMS`), and
+///   - any non-finite component (NaN / ±Inf), which pgvector refuses to index
+///     and which is meaningless for cosine similarity.
+///
+/// Both would otherwise only fail deep in pgvector as an opaque 500.
+pub fn validate_embedding_vector(vector: &[f32]) -> Result<(), AppError> {
+    use crate::services::embedder::EMBEDDING_DIMS;
+    if vector.len() != EMBEDDING_DIMS {
+        return Err(AppError::BadRequest(format!(
+            "vector must have exactly {EMBEDDING_DIMS} dimensions, got {}",
+            vector.len()
+        )));
+    }
+    if let Some(index) = vector.iter().position(|component| !component.is_finite()) {
+        return Err(AppError::BadRequest(format!(
+            "vector must contain only finite values; component at index {index} is not finite"
         )));
     }
     Ok(())
@@ -1332,6 +1562,16 @@ pub struct ForgetResponse {
     pub owner: String,
 }
 
+/// GET /api/accounts/:owner/exists — does `owner` have a registered
+/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// Intentionally minimal: no `account_id`, since Console doesn't need the
+/// internal identifier and returning it would needlessly widen the API's
+/// surface for future churn.
+#[derive(Debug, Serialize)]
+pub struct AccountExistsResponse {
+    pub exists: bool,
+}
+
 /// POST /api/stats — count + stored bytes for a namespace.
 /// Used by the benchmark harness for verification. Mode-blind.
 #[derive(Debug, Deserialize)]
@@ -1640,6 +1880,70 @@ mod tests {
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    // ── Client-supplied embedding vector validation ──────────────
+
+    #[test]
+    fn embedding_of_correct_width_is_accepted() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        assert!(validate_embedding_vector(&vec![0.1_f32; EMBEDDING_DIMS]).is_ok());
+    }
+
+    #[test]
+    fn embedding_of_wrong_width_is_rejected_with_actionable_message() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // A width from a different embedding model; kept distinct from the
+        // expected width so a transposed format! (expected/actual swapped) still
+        // fails the exact-string assert below.
+        let wrong = EMBEDDING_DIMS / 2 + 1;
+        match validate_embedding_vector(&vec![0.1_f32; wrong]).unwrap_err() {
+            // BadRequest maps to HTTP 400, unlike the opaque 500 a downstream
+            // pgvector failure would produce (after a paid upload on the write path).
+            AppError::BadRequest(msg) => {
+                // Build the expected message from the constant (single source of
+                // truth — survives a dimension change) while still pinning the
+                // exact wording and the expected-then-actual order.
+                assert_eq!(
+                    msg,
+                    format!("vector must have exactly {EMBEDDING_DIMS} dimensions, got {wrong}")
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_empty_vector_is_rejected() {
+        // The width check subsumes a separate non-empty guard.
+        assert!(matches!(
+            validate_embedding_vector(&[]),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn embedding_with_non_finite_component_is_rejected() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // Correct width, but a NaN/Inf component pgvector would refuse to index —
+        // must be caught here, before any paid upload, not as an opaque 500.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut vector = vec![0.1_f32; EMBEDDING_DIMS];
+            vector[7] = bad;
+            match validate_embedding_vector(&vector).unwrap_err() {
+                AppError::BadRequest(msg) => {
+                    assert!(
+                        msg.contains("finite"),
+                        "message names the finiteness rule: {msg}"
+                    );
+                    assert!(
+                        msg.contains("index 7"),
+                        "message names the offending index: {msg}"
+                    );
+                }
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
     fn security_delete_test_config() -> Config {
         Config {
             port: 8000,
@@ -1667,6 +1971,7 @@ mod tests {
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
             read_api_rate_limit: ReadApiRateLimitConfig::default(),
+            accounts_rate_limit: AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -1695,6 +2000,10 @@ mod tests {
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
             walrus_staking_pool_id: "0x5".into(),
+            owner_token_secret: "owner-token-test-secret".into(),
+            owner_token_service_credential: "owner-token-test-credential".into(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::default(),
         }
     }
 
@@ -2201,6 +2510,21 @@ mod tests {
         let config = ReadApiRateLimitConfig::from_env();
         std::env::remove_var("READ_API_RATE_LIMIT_PER_MINUTE");
         assert_eq!(config.per_delegate_key_per_minute, 500);
+    }
+
+    // ── AccountsRateLimitConfig defaults ────────────────────────────────
+
+    #[test]
+    fn accounts_rate_limit_default_values() {
+        let config = AccountsRateLimitConfig::default();
+        assert_eq!(config.per_minute, 20);
+        assert_eq!(config.per_hour, 120);
+        assert_eq!(config.global_per_minute, 200);
+        assert_eq!(config.global_per_hour, 1500);
+        // Must stay well below the general authenticated per-account budget
+        // this middleware used to (bug-)reuse, or the fix regresses.
+        assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
+        assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
     }
 
     #[test]

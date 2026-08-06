@@ -21,8 +21,10 @@ use crate::types::{AppError, Config};
 pub const EMBEDDING_MODEL: &str = "openai/text-embedding-3-small";
 
 /// Embedding vector dimensionality (text-embedding-3-small). Also the
-/// width of the deterministic mock vector.
-const EMBEDDING_DIMS: usize = 1536;
+/// width of the deterministic mock vector, and the fixed width of the
+/// `vector_entries.embedding` pgvector column — client-supplied vectors
+/// on the manual write path are validated against it.
+pub const EMBEDDING_DIMS: usize = 1536;
 
 #[async_trait]
 pub trait Embedder: Send + Sync {

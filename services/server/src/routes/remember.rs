@@ -913,9 +913,13 @@ pub async fn remember_manual(
             "encrypted_data cannot be empty".into(),
         ));
     }
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied embedding (width + finiteness) up front. The
+    // fact store's `embedding` column is a fixed-width pgvector that also refuses
+    // NaN/Inf, so a malformed vector can never be indexed — and store_blob pays
+    // for the (irreversible) Walrus upload before it reaches the insert. Rejecting
+    // here means a bad vector costs no gas and returns an actionable 400, instead
+    // of an opaque 500 after the paid upload.
+    validate_embedding_vector(&body.vector)?;
     validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
@@ -1103,6 +1107,7 @@ mod tests {
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             read_api_rate_limit: crate::types::ReadApiRateLimitConfig::default(),
+            accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -1131,6 +1136,10 @@ mod tests {
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
             walrus_staking_pool_id: String::new(),
+            owner_token_secret: "owner-token-test-secret".to_string(),
+            owner_token_service_credential: "owner-token-test-credential".to_string(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: crate::types::OwnerTokenRateLimitConfig::default(),
         }
     }
 
