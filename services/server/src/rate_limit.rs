@@ -1213,7 +1213,113 @@ pub async fn accounts_rate_limit_middleware(
 /// unauthenticated or malformed-body request is rejected by the
 /// credential gate or the handler's own `Json` extractor either way.
 ///
+/// Per-IP budget on `POST /v1/owner-tokens`, independent of whether the
+/// supplied `x-service-credential` is valid. Wired as the TRUE outermost
+/// layer on this route (outside `service_credential_gate` itself) — see
+/// `main.rs`'s `owner_token_routes` wiring for why this is load-bearing:
+/// `service_credential_gate` rejects a bad credential in-process with no
+/// I/O, so `owner_token_credential_rate_limit_middleware` below (keyed by
+/// the *value* of the supplied credential, hashed) is structurally never
+/// reached by a failing-credential request, and an attacker who varies
+/// their guess every request gets a fresh Redis bucket key each time and
+/// is never throttled by it either. Without a limiter keyed by something
+/// an attacker can't freely vary (their source IP), guessing the single
+/// shared service credential has no throttling at all — this closes that
+/// gap the same way `accounts_rate_limit_middleware`/
+/// `sponsor_rate_limit_middleware` already do for their own routes (IP
+/// budget applied unconditionally, before any auth/validity check).
 /// Fails closed to 503 on Redis error, matching every other limiter here.
+pub async fn owner_token_ip_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            tracing::warn!("owner_token_ip_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.owner_token_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:ownertoken:ip:min:{}", ip);
+    let hr_key = format!("rate:ownertoken:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.ip_per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_minute
+            );
+            return rate_limit_response("owner_token_ip_burst", config.ip_per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.ip_per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_hour
+            );
+            return rate_limit_response("owner_token_ip_sustained", config.ip_per_hour, "hour", 300);
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
 pub async fn owner_token_credential_rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,

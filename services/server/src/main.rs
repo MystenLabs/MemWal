@@ -1125,9 +1125,20 @@ async fn main() {
     // request — Console structurally can never produce one, since it
     // never holds a delegate key) nor `public_routes` (this is the
     // opposite of public — it demands the service credential). Router::layer
-    // runs bottom-to-top, so the credential gate (outermost / added last)
-    // rejects an uncredentialed caller before the rate limiter underneath
-    // it spends any Redis budget on the request.
+    // runs bottom-to-top (last-added = outermost = runs first), so:
+    //   1. owner_token_ip_rate_limit_middleware (outermost) — throttles by
+    //      source IP regardless of credential validity. This is the layer
+    //      that actually bounds credential-guessing: the credential gate
+    //      rejects a bad guess in-process with no I/O, so the per-credential
+    //      limiter below it is structurally unreachable for a failing guess
+    //      (and even if reached, is keyed by the guessed value itself, so a
+    //      varying guess gets a fresh bucket every time). Without this IP
+    //      layer, guessing the one shared service credential had no
+    //      throttling anywhere (found in adversarial review, fixed here).
+    //   2. service_credential_gate — rejects an uncredentialed caller before
+    //      the per-credential rate limiter spends any Redis budget on it.
+    //   3. owner_token_credential_rate_limit_middleware (innermost) — the
+    //      legitimate-traffic budget for an authenticated Console instance.
     let owner_token_routes = Router::new()
         .route(
             "/v1/owner-tokens",
@@ -1140,6 +1151,10 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::owner_token::service_credential_gate,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::owner_token_ip_rate_limit_middleware,
         ));
 
     // `GET /v1/owners/{owner}/_token_probe` — no router-level middleware

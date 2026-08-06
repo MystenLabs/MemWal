@@ -191,10 +191,24 @@ pub async fn issue_token(
     let ttl = state.config.owner_token_ttl_secs;
     let token =
         owner_token_auth::mint_token(state.config.owner_token_secret.as_bytes(), &owner, ttl, now);
-    let expires_at =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(now.saturating_add(ttl as i64), 0)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    // `to_rfc3339_opts(_, use_z=true)`, not the plain `to_rfc3339()` used
+    // previously: chrono's `to_rfc3339()` always renders the UTC offset as
+    // `+00:00`, never as the `Z` this response's own doc comment and
+    // docs/api/owner-token-auth.md's example both promise.
+    //
+    // `OWNER_TOKEN_TTL_SECS` is clamped to `MAX_OWNER_TOKEN_TTL_SECS` at
+    // config-load time (types.rs), so `now + ttl` cannot exceed chrono's
+    // representable range in practice — but this still fails loudly with a
+    // real error rather than silently substituting "now" (which would have
+    // told the caller their brand-new token was already expired) if that
+    // invariant is ever violated.
+    let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now.saturating_add(ttl as i64), 0)
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "owner-token expiry timestamp out of range (now={now}, ttl={ttl})"
+            ))
+        })?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     Ok(Json(IssueOwnerTokenResponse {
         token,
@@ -285,5 +299,92 @@ mod tests {
             SERVICE_CREDENTIAL_HEADER,
             SERVICE_CREDENTIAL_HEADER.to_ascii_lowercase()
         );
+    }
+
+    // `token_probe`'s two checks (owner-match, permission-scope) are the
+    // actual authorization decision this whole feature exists to make, and
+    // are explicitly documented as the copy-paste template WALM-295's real
+    // read handlers will use — so they're tested directly here even though
+    // `token_probe` is itself a dev-only stand-in route. `OwnerToken` and
+    // `Path` are both directly constructible (no AppState/DB/Redis needed),
+    // matching how `routes::accounts` unit-tests its pure logic.
+    fn claims_for(owner: &str, permissions: &[&str]) -> owner_token_auth::OwnerTokenClaims {
+        owner_token_auth::OwnerTokenClaims {
+            subject: "console".to_string(),
+            owner_address: owner.to_string(),
+            audience: owner_token_auth::OWNER_TOKEN_AUDIENCE.to_string(),
+            issued_at: 0,
+            expires_at: i64::MAX,
+            nonce: uuid::Uuid::new_v4().to_string(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    // Realistic 66-char Sui addresses — `same_owner`/`canonical_sui_address`
+    // reject anything shorter, so a placeholder like "0xabc" fails for the
+    // wrong reason (invalid address) rather than exercising the actual
+    // owner-comparison logic these tests target.
+    const TEST_OWNER: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000abc";
+    const OTHER_OWNER: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000def";
+
+    #[tokio::test]
+    async fn token_probe_allows_matching_owner_with_memories_read() {
+        let result = token_probe(
+            OwnerToken(claims_for(TEST_OWNER, &[PERMISSION_MEMORIES_READ])),
+            Path(TEST_OWNER.to_string()),
+        )
+        .await;
+        let Json(body) = result.expect("matching owner + correct scope must succeed");
+        assert!(body.ok);
+        assert_eq!(body.owner, TEST_OWNER);
+        assert_eq!(body.permissions, vec![PERMISSION_MEMORIES_READ.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn token_probe_rejects_owner_mismatch() {
+        let result = token_probe(
+            OwnerToken(claims_for(TEST_OWNER, &[PERMISSION_MEMORIES_READ])),
+            Path(OTHER_OWNER.to_string()),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn token_probe_matches_owner_case_insensitively_via_same_owner() {
+        // `same_owner` canonicalizes the *path* side before comparing, so
+        // this must still succeed even though the path segment's case
+        // differs from the (already-canonical) claim — pins that
+        // token_probe reuses the real canonical comparison rather than a
+        // raw string `==`.
+        let upper_path = TEST_OWNER.to_ascii_uppercase().replacen("0X", "0x", 1);
+        let result = token_probe(
+            OwnerToken(claims_for(TEST_OWNER, &[PERMISSION_MEMORIES_READ])),
+            Path(upper_path),
+        )
+        .await;
+        assert!(result.is_ok(), "canonical-equal owners must match");
+    }
+
+    #[tokio::test]
+    async fn token_probe_rejects_missing_required_permission() {
+        let result = token_probe(
+            OwnerToken(claims_for(TEST_OWNER, &["some.other.scope"])),
+            Path(TEST_OWNER.to_string()),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn token_probe_rejects_empty_permissions() {
+        let result = token_probe(
+            OwnerToken(claims_for(TEST_OWNER, &[])),
+            Path(TEST_OWNER.to_string()),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
     }
 }

@@ -57,10 +57,12 @@ Content-Type: application/json
 {"owner": "0xffebf969cf2f9ec94089be20387633b3ffaf8a3c8e6caade6c47e8814852c4e7"}
 ```
 
-Validation order (cheapest first): Sui address format → service credential →
-per-owner rate limit → `MemWalAccount` existence → mint. `owner` is
-canonicalized to lowercase before every downstream check and before it's
-embedded in the token's claims.
+Validation order: per-IP rate limit (outer middleware, throttles credential
+guessing regardless of validity) → service credential (middleware) →
+per-credential rate limit (middleware) → Sui address format (handler,
+cheapest handler-level check) → per-owner rate limit → `MemWalAccount`
+existence → mint. `owner` is canonicalized to lowercase before every
+downstream check and before it's embedded in the token's claims.
 
 Response — `200 OK`:
 
@@ -118,8 +120,19 @@ is rejected `401`, with no distinction in the response between those causes.
 
 ## Rate limiting
 
-Two **independent** budgets apply to `POST /v1/owner-tokens`, enforced by two
-different code paths that do **not** share a response shape:
+Three **independent** budgets apply to `POST /v1/owner-tokens`, enforced by
+three different code paths that do **not** all share a response shape:
+
+**0. Per-IP** (outermost middleware — runs *before* the service-credential
+check, regardless of whether the credential is valid): default 30/min,
+300/hour per source IP (`OWNER_TOKEN_RATE_LIMIT_IP_PER_MINUTE`/`_PER_HOUR`).
+This is the layer that actually bounds someone guessing the shared service
+credential — the per-credential budget below is keyed by the *value* of the
+supplied credential, so a wrong guess never accumulates against it, and a
+varying guess gets a fresh bucket every time; without a per-IP layer,
+credential-guessing had no throttling anywhere. Uses the same response shape
+as the per-credential budget below (`layer: "owner_token_ip_burst"` /
+`"owner_token_ip_sustained"`).
 
 **1. Per-owner** (checked inside the handler, after the service-credential
 gate): default 5/min, 30/hour per canonical owner address
@@ -209,6 +222,8 @@ other.
 | `OWNER_TOKEN_RATE_LIMIT_PER_HOUR` | `3000` | Per-credential issuance budget |
 | `OWNER_TOKEN_RATE_LIMIT_OWNER_PER_MINUTE` | `5` | Per-owner issuance budget |
 | `OWNER_TOKEN_RATE_LIMIT_OWNER_PER_HOUR` | `30` | Per-owner issuance budget |
+| `OWNER_TOKEN_RATE_LIMIT_IP_PER_MINUTE` | `30` | Per-source-IP issuance budget (throttles credential guessing) |
+| `OWNER_TOKEN_RATE_LIMIT_IP_PER_HOUR` | `300` | Per-source-IP issuance budget (throttles credential guessing) |
 
 ## Replay and revocation
 

@@ -34,6 +34,14 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
+/// Hard ceiling for `OWNER_TOKEN_TTL_SECS` (WALM-297) — 24 hours. Without a
+/// bound, `env_positive_u64` accepts any positive u64, and a very large TTL
+/// both defeats the "short-lived" security property the token scheme's
+/// whole threat model rests on (see docs/api/owner-token-auth.md's
+/// trust-boundary note) and can push `now + ttl` outside chrono's
+/// representable range in `routes::owner_token::issue_token`'s `expires_at`
+/// computation.
+pub const MAX_OWNER_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
@@ -510,7 +518,8 @@ impl Config {
             owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
             owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
                 .unwrap_or_default(),
-            owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900),
+            owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
+                .min(MAX_OWNER_TOKEN_TTL_SECS),
             owner_token_rate_limit: OwnerTokenRateLimitConfig::from_env(),
         }
     }
@@ -878,6 +887,13 @@ pub struct OwnerTokenRateLimitConfig {
     pub per_hour: i64,
     pub owner_per_minute: i64,
     pub owner_per_hour: i64,
+    /// Per-source-IP budget, independent of `x-service-credential` validity
+    /// (see `rate_limit::owner_token_ip_rate_limit_middleware`'s doc
+    /// comment — this is what actually throttles someone guessing the
+    /// shared credential, since the per-credential budget below is keyed
+    /// by the guessed value itself and never sees repeated failed guesses).
+    pub ip_per_minute: i64,
+    pub ip_per_hour: i64,
 }
 
 impl Default for OwnerTokenRateLimitConfig {
@@ -887,6 +903,8 @@ impl Default for OwnerTokenRateLimitConfig {
             per_hour: 3000,
             owner_per_minute: 5,
             owner_per_hour: 30,
+            ip_per_minute: 30,
+            ip_per_hour: 300,
         }
     }
 }
@@ -912,6 +930,16 @@ impl OwnerTokenRateLimitConfig {
         if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.owner_per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_hour = n;
             }
         }
         c
