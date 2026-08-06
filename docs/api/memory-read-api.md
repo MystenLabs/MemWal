@@ -112,28 +112,51 @@ through unmetered.
 `updated_after` — like `memories`' below — must be the opaque `next_cursor`
 value returned by a previous call, not a raw timestamp or namespace name;
 omit it for the first page. It base64 (URL-safe, unpadded) encodes the
-last-seen namespace name, used as a keyset pagination cursor (`namespace`
-has no separate id column to tie-break on the way `memories` uses
-`(updated_at, id)`). `limit` defaults to 100, max 500, `400` for
-non-positive/non-integer values — same convention as `memories`.
+JSON watermark `{"updated_at": ..., "namespace": ...}`: rows are ordered
+and filtered by the rollup's `(MAX(updated_at), namespace)`, mirroring
+`memories`' `(updated_at, id)` keyset. `limit` defaults to 100, max 500,
+`400` for non-positive/non-integer values — same convention as `memories`.
 
-Note: `updated_after` in this endpoint is a pure pagination continuation
-token, not an independent "namespaces touched since this timestamp" filter
-— it does not narrow results to recently-changed namespaces the way the
-name might suggest. See the design spec for the open gap this simplifies.
+**Breaking change from an earlier version of this endpoint:** namespaces
+are now returned ordered by recency (`(MAX(updated_at), namespace)`), not
+alphabetically by name. A client that wants an alphabetical list needs to
+buffer and sort every page itself rather than relying on response order.
+
+Because the cursor is a recency watermark rather than a name, it is a real
+incremental-sync token: a namespace you already synced comes back on the
+next poll if any of its memories were **created or updated** after that
+watermark, however early its name sorts. Namespaces untouched since the
+watermark are not re-sent.
+
+**Deletions are not currently reflected.** Forgetting a memory (or its
+Walrus blob expiring/being cleaned up) removes its row outright — the
+namespace's rollup shrinks, but that shrink does not advance the
+namespace's `updated_at` watermark the way a create/update does, so a
+namespace whose only change since your last sync was a deletion will not
+be resurfaced. Until this is addressed, clients that need to detect
+deletions should periodically do a full (cursor-less) resync rather than
+relying on `updated_after` alone.
 
 Response:
 ```json
 {
   "namespaces": [
-    { "id": "work", "name": "work", "memory_count": 12, "storage_used": 48213 }
+    {
+      "id": "work",
+      "name": "work",
+      "memory_count": 12,
+      "storage_used": 48213,
+      "updated_at": "2026-08-04T10:00:00Z"
+    }
   ],
-  "next_cursor": "d29yaw",
-  "snapshot_version": 1
+  "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi4sIm5hbWVzcGFjZSI6IndvcmsifQ",
+  "has_more": false,
+  "snapshot_version": 2
 }
 ```
 
-`next_cursor` is `null` once the last page has been returned.
+`updated_at` is `MAX(updated_at)` across the namespace's memories — the same
+value the cursor is built from.
 
 ## GET /v1/owners/{owner}/memories?updated_after=<cursor>&limit=100
 
@@ -149,6 +172,7 @@ Response:
       "namespace_id": "work",
       "blob_id": "blob-xyz",
       "created_at": "2026-08-04T10:00:00Z",
+      "updated_at": "2026-08-04T11:30:00Z",
       "size": 2048,
       "agent_id": "agent-abc",
       "package_id": "0xpkg",
@@ -156,12 +180,37 @@ Response:
     }
   ],
   "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi59",
-  "snapshot_version": 1
+  "has_more": false,
+  "snapshot_version": 2
 }
 ```
 
+`updated_at` is the row's own last-modified time — the same value this
+page's cursor is built from.
+
 `end_epoch`/`expires_at` fields are added by WALM-296 (see that plan) —
 not present yet in this Phase 1 response.
+
+### Cursor semantics (both paginated endpoints)
+
+`next_cursor` is **always** returned for a non-empty page — including the
+final page of a traversal and a result that fits entirely in one page. It
+is the watermark of the last row in that page, and it is what you pass as
+`updated_after` on your next poll. It is `null` only for an empty page,
+which has no row to take a watermark from; in that case keep the cursor you
+already had.
+
+So `next_cursor: null` does **not** mean "end of data" — use the separate
+`has_more` boolean for that instead. Keep paginating (pass back the latest
+`next_cursor`) while `has_more` is `true`; stop once you see `has_more:
+false`.
+
+**Do not infer end-of-data from page length.** `limit` is silently clamped
+to each endpoint's max (500) — a request for `limit=1000` that happens to
+match exactly 500 real rows returns a page exactly as long as the (clamped)
+`limit`, and a request for more than the actual remaining data returns a
+page shorter than `limit` while more data still exists elsewhere for that
+owner. `has_more` is correct in both cases; page-length heuristics are not.
 
 ## GET /v1/owners/{owner}/agents
 
@@ -175,7 +224,7 @@ Response:
   "agents": [
     { "label": "cli", "sui_address": "0xdelegate1" }
   ],
-  "snapshot_version": 1
+  "snapshot_version": 2
 }
 ```
 
