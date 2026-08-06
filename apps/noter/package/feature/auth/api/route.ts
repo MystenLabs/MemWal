@@ -7,6 +7,7 @@ import { router, procedure } from "@/shared/lib/trpc/init";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
+import { randomBytes } from "crypto";
 import { uuidv7 } from "uuidv7";
 import {
   initiateLoginInput,
@@ -33,8 +34,8 @@ import {
 } from "../lib/zklogin-client";
 import { OAUTH_PROVIDERS, OAUTH_SCOPES, AUTH_ERRORS } from "../constant";
 import { buildOAuthUrl } from "../domain/zklogin";
-import { zkLoginSessions, walletSessions } from "@/shared/db/schema";
-import { eq } from "drizzle-orm";
+import { zkLoginSessions, walletSessions, walletChallenges } from "@/shared/db/schema";
+import { eq, lt } from "drizzle-orm";
 import * as authService from "../domain/service";
 
 export const authRouter = router({
@@ -240,34 +241,81 @@ export const authRouter = router({
     }),
 
   /**
+   * Get a one-time challenge nonce for wallet authentication
+   * The nonce must be signed by the wallet and returned via connectWallet
+   */
+  getChallenge: procedure
+    .mutation(async ({ ctx }) => {
+      // Clean up expired challenges to prevent table bloat
+      await ctx.db
+        .delete(walletChallenges)
+        .where(lt(walletChallenges.expiresAt, new Date()));
+
+      const challengeId = uuidv7();
+      const nonce = randomBytes(32).toString("hex");
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+      await ctx.db.insert(walletChallenges).values({
+        id: challengeId,
+        nonce,
+        expiresAt,
+      });
+
+      return { challengeId, nonce, expiresAt };
+    }),
+
+  /**
    * Connect wallet - authenticate with Sui wallet (Slush, Sui Wallet)
-   * Verifies signature and creates session
+   * Verifies signature against a server-issued challenge nonce
    */
   connectWallet: procedure
     .input(connectWalletInput)
     .mutation(async ({ ctx, input }) => {
-      const { walletType, address, signature, message } = input;
+      const { challengeId, walletType, address, signature } = input;
 
       try {
-        // Verify the wallet signature before creating a session
+        // 1. Atomically consume challenge
+        const [challenge] = await ctx.db
+          .delete(walletChallenges)
+          .where(eq(walletChallenges.id, challengeId))
+          .returning();
+
+        if (!challenge) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Challenge not found or already used",
+          });
+        }
+
+        if (challenge.expiresAt < new Date()) {
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Challenge expired",
+          });
+        }
+
+        // 2. Verify signature against server-issued nonce
         const signerAddress = await verifyPersonalMessageSignature(
-          new TextEncoder().encode(message),
+          new TextEncoder().encode(challenge.nonce),
           signature,
         ).catch(() => {
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid signature" });
         });
 
         if (signerAddress.toSuiAddress() !== address) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "Signature does not match address" });
+          throw new TRPCError({
+            code: "UNAUTHORIZED",
+            message: "Signature does not match address",
+          });
         }
 
-        // Create or update user via service
+        // 4. Create or update user
         const user = await authService.upsertWalletUser(ctx.db, {
           address,
           walletType,
         });
 
-        // Create wallet session
+        // 5. Create wallet session
         const sessionId = uuidv7();
         const expiresAt = new Date();
         expiresAt.setHours(expiresAt.getHours() + 24); // 24 hour session
@@ -277,13 +325,12 @@ export const authRouter = router({
           userId: user.id,
           walletAddress: address,
           walletType,
-          signedMessage: message,
+          signedMessage: challenge.nonce,
           signature,
           signedAt: new Date(),
           expiresAt,
         });
 
-        // Return wallet session data (no ephemeral keys for wallet auth)
         return {
           user,
           sessionId,
