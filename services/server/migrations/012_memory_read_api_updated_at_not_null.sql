@@ -24,6 +24,12 @@
 -- otherwise be re-paid, and the plain ADD CONSTRAINT (no
 -- "IF NOT EXISTS" variant exists in Postgres) would error, on every
 -- restart forever.
+--
+-- The column's DEFAULT is set by migration 010, not here -- see 010's
+-- header for why it has to run before 011's backfill (closes a
+-- rolling-deploy race: an old-code replica inserting between 011's
+-- backfill and this migration's VALIDATE would otherwise crash-loop
+-- every replica still applying migrations).
 
 DO $$
 BEGIN
@@ -46,5 +52,3 @@ BEGIN
             VALIDATE CONSTRAINT vector_entries_updated_at_not_null;
     END IF;
 END $$;
-
-ALTER TABLE vector_entries ALTER COLUMN updated_at SET DEFAULT NOW();

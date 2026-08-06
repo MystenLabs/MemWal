@@ -18,12 +18,24 @@ pub struct NamespaceSummary {
     pub name: String,
     pub memory_count: i64,
     pub storage_used: i64,
+    /// `MAX(updated_at)` across the namespace's rows — the same value the
+    /// keyset cursor is built from. Exposed (not just baked into the opaque
+    /// cursor) so Console can tell *what* changed, not merely that its
+    /// watermark moved.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct NamespacesResponse {
     pub namespaces: Vec<NamespaceSummary>,
     pub next_cursor: Option<String>,
+    /// Explicit end-of-data signal. A page shorter than the requested
+    /// `limit` does NOT reliably mean "no more data" — the server silently
+    /// clamps `limit` to `MAX_NAMESPACES_LIMIT`, so a caller that asked for
+    /// more than the cap and got exactly the cap back would wrongly
+    /// conclude it was done. Use this field, not page length, to decide
+    /// whether to keep paginating.
+    pub has_more: bool,
     pub snapshot_version: u32,
 }
 
@@ -33,6 +45,11 @@ pub struct MemoryItem {
     pub namespace_id: String,
     pub blob_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The row's `updated_at` — the same value this page's keyset cursor is
+    /// built from. It was already being fetched purely to encode the cursor;
+    /// surfacing it lets Console diff by row instead of trusting an opaque
+    /// token.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
     pub size: i64,
     pub agent_id: Option<String>,
     pub package_id: Option<String>,
@@ -45,43 +62,49 @@ pub struct MemoryItem {
 pub struct MemoriesResponse {
     pub memories: Vec<MemoryItem>,
     pub next_cursor: Option<String>,
+    /// Explicit end-of-data signal — see `NamespacesResponse::has_more`'s
+    /// doc comment; same reasoning applies (`limit` is silently clamped to
+    /// `MAX_MEMORIES_LIMIT`).
+    pub has_more: bool,
     pub snapshot_version: u32,
 }
 
-pub const SNAPSHOT_VERSION: u32 = 1;
+/// Bumped 1 -> 2: the `/namespaces` cursor changed wire format (bare
+/// namespace name -> `(updated_at, namespace)` watermark, so a v1 cursor is
+/// not decodable as a v2 one) and both `/namespaces` and `/memories` rows
+/// gained an `updated_at` field.
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 const DEFAULT_NAMESPACES_LIMIT: i64 = 100;
 const MAX_NAMESPACES_LIMIT: i64 = 500;
 
-/// Namespaces' rollup is one row per namespace (`GROUP BY namespace`) with no
-/// natural `id` column to tie-break on. An earlier version of this cursor
-/// keyed purely on the namespace TEXT value (`HAVING namespace > $cursor`),
-/// which is unsafe: a namespace's name has no relationship to when it was
-/// created, so a namespace inserted concurrently while a client is mid-walk
-/// can sort lexicographically *before* the client's current cursor position
-/// and be silently, permanently skipped for that walk with no way to detect
-/// it.
+/// Keyset watermark over the namespace rollup, mirroring `MemoriesCursor`'s
+/// `(updated_at, id)` shape with the rollup's `(MAX(updated_at), namespace)`.
 ///
-/// Instead this mirrors how `memories`' `(updated_at, id)` cursor is already
-/// drop-safe in this same file: key on `(MAX(updated_at), namespace)` so the
-/// cursor is monotonic in time (a namespace can only move *forward* in the
-/// walk order as its rows are touched, never appear behind an
-/// already-consumed cursor position). `namespace` remains the tie-breaker
-/// for rollups that land on the exact same `MAX(updated_at)`, the same role
-/// `id` plays for `memories`.
+/// An earlier cursor was the bare namespace name, ordered by `namespace`
+/// alone. That is unsafe two ways: (1) as a *traversal* cursor, a namespace
+/// inserted concurrently while a client is mid-walk can sort lexicographically
+/// *before* the cursor and be silently, permanently skipped for that walk;
+/// (2) as a *sync* cursor, a namespace that sorts before the cursor can never
+/// reappear, so a later write that changes its `memory_count`/`storage_used`
+/// stays invisible to a polling client forever. Ordering by the rollup's own
+/// recency instead means a namespace can only move *forward* in walk order as
+/// its rows are touched — never behind an already-consumed cursor position —
+/// and any namespace touched after the client's watermark sorts after it and
+/// is returned on the next poll, however early its name sorts. `namespace`
+/// remains the tie-break (unique per `GROUP BY` row) so equal
+/// `MAX(updated_at)` values still paginate without gaps or repeats.
 ///
-/// That fix alone reintroduces the opposite failure in the other direction:
-/// `MAX(updated_at)` for a namespace can *increase* after that namespace has
-/// already been delivered to the client (any new/updated row belonging to it
-/// advances the aggregate), which lets it jump back in front of the client's
-/// cursor position and be delivered a second time later in the same walk —
-/// with different data. This is the exact same failure mode `memories`
-/// already solved with `MemoriesCursor::snapshot_at` (see that doc comment
-/// below), so `snapshot_at` is mirrored here with the same shape/encoding:
-/// captured once on the first page and threaded forward unchanged, it binds
-/// the whole walk to one point in time so a namespace mutated mid-walk is
-/// excluded (via `HAVING MAX(updated_at) <= $snapshot_at`) until a fresh
-/// walk starts.
+/// That fix alone reintroduces the opposite failure: `MAX(updated_at)` for a
+/// namespace can *increase* after it's already been delivered to the client
+/// (any new/updated row belonging to it advances the aggregate), letting it
+/// jump back in front of the cursor and be delivered a second time later in
+/// the same walk — with different data. This is the exact failure mode
+/// `memories` already solved with `MemoriesCursor::snapshot_at` (see that doc
+/// comment below), mirrored here with the same shape/encoding: captured once
+/// on the first page and threaded forward unchanged, it binds the whole walk
+/// to one point in time so a namespace mutated mid-walk is excluded (via
+/// `HAVING MAX(updated_at) <= $snapshot_at`) until a fresh walk starts.
 ///
 /// Combining both fixes has one honest, inherent trade-off, identical to
 /// `memories`': a namespace **created** after the walk's `snapshot_at` was
@@ -90,26 +113,24 @@ const MAX_NAMESPACES_LIMIT: i64 = 500;
 /// row" and "immediate same-walk visibility of a row created after the walk
 /// began" from one time-based watermark. Such a namespace simply was not
 /// part of the snapshot; it surfaces on the client's next fresh walk
-/// (`cursor = None`), not the current one. This is not a regression of the
-/// drop bug this cursor was built to fix — a namespace is never *permanently*
-/// lost the way the old lexicographic cursor could lose one — but it does
-/// mean "created mid-walk" and "mutated mid-walk" resolve the same way:
-/// visible next walk, not this one.
+/// (`cursor = None`), not the current one — not a regression of the
+/// permanent-loss bug this cursor exists to fix, just a "next walk, not this
+/// one" deferral.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct NamespaceCursor {
-    last_updated: chrono::DateTime<chrono::Utc>,
+struct NamespacesCursor {
+    updated_at: chrono::DateTime<chrono::Utc>,
     namespace: String,
     #[serde(default)]
     snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn encode_namespace_cursor(
-    last_updated: chrono::DateTime<chrono::Utc>,
+fn encode_namespaces_cursor(
+    updated_at: chrono::DateTime<chrono::Utc>,
     namespace: &str,
     snapshot_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let json = serde_json::to_vec(&NamespaceCursor {
-        last_updated,
+    let json = serde_json::to_vec(&NamespacesCursor {
+        updated_at,
         namespace: namespace.to_string(),
         snapshot_at: Some(snapshot_at),
     })
@@ -119,25 +140,31 @@ fn encode_namespace_cursor(
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
 }
 
-fn decode_namespace_cursor(raw: &str) -> Result<NamespaceCursor, AppError> {
+fn decode_namespaces_cursor(raw: &str) -> Result<NamespacesCursor, AppError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw)
         .map_err(|_| AppError::BadRequest("invalid cursor".to_string()))?;
     serde_json::from_slice(&bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
 }
 
-/// `updated_after`/`cursor` here is a **pagination continuation token**
-/// (the opaque `next_cursor` a previous page returned), not a standalone
-/// "only namespaces touched since this timestamp" filter — mirroring exactly
-/// how `memories`' `updated_after` behaves (see that endpoint's doc note:
-/// "must be the opaque next_cursor value ... not a raw timestamp"). The
-/// design spec's SQL sketch used `updated_after` as a row-level `WHERE
-/// updated_at > $cursor` filter ahead of the `GROUP BY`, which does not
-/// compose with real keyset pagination on `namespace` (there is no stable
-/// cursor to hand back between pages under that scheme once multiple
-/// namespaces share update times). Correct keyset pagination was prioritized
-/// as the primary fix; a genuine independent recency filter is not
-/// implemented in this pass — see the fix report for the tradeoff.
+/// `updated_after`/`cursor` here is the opaque `next_cursor` a previous call
+/// returned (never a raw timestamp or namespace name), mirroring how
+/// `memories`' `updated_after` behaves. It is a genuine incremental-sync
+/// watermark: rows are ordered and filtered by the rollup's
+/// `(MAX(updated_at), namespace)`, so a namespace whose contents changed
+/// after the client's last poll comes back even though it was already
+/// synced once — see `NamespacesCursor`.
+///
+/// The recency half of the keyset predicate has to stay in `HAVING`: it
+/// filters on `MAX(updated_at)`, an aggregate, which by definition cannot be
+/// evaluated before the `GROUP BY`. Note this is the opposite of the usual
+/// advice to push a `HAVING` predicate down into `WHERE` (which the previous
+/// `HAVING namespace > $2` should have followed, since `namespace` is a
+/// grouping key and needs no aggregation): rewriting *this* one as
+/// `WHERE updated_at > $cursor` would drop individual *rows* before
+/// aggregation, so `memory_count`/`storage_used` would then cover only each
+/// namespace's recently-touched subset — wrong totals, not merely a
+/// different plan.
 pub(crate) async fn query_owner_namespaces(
     pool: &PgPool,
     owner: &str,
@@ -145,30 +172,35 @@ pub(crate) async fn query_owner_namespaces(
     limit: i64,
 ) -> Result<NamespacesResponse, AppError> {
     let limit = limit.clamp(1, MAX_NAMESPACES_LIMIT);
-    let cursor_after = cursor.as_deref().map(decode_namespace_cursor).transpose()?;
+    let cursor_after = cursor.as_deref().map(decode_namespaces_cursor).transpose()?;
 
-    // See the doc comment on `NamespaceCursor::snapshot_at` (mirroring
+    // See the doc comment on `NamespacesCursor::snapshot_at` (mirroring
     // `MemoriesCursor::snapshot_at` below): bind this whole walk to one
     // boundary, captured now on the first page and threaded forward
     // unchanged from the incoming cursor on every later page.
     let (after, snapshot_at) = match cursor_after {
         Some(c) => {
             let snapshot_at = c.snapshot_at.unwrap_or_else(chrono::Utc::now);
-            (Some((c.last_updated, c.namespace)), snapshot_at)
+            (Some((c.updated_at, c.namespace)), snapshot_at)
         }
         None => (None, chrono::Utc::now()),
     };
 
-    let rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
+    // Peek one row past `limit` to get an explicit has_more signal — a page
+    // shorter than `limit` is NOT a reliable "no more data" signal on its
+    // own, because `limit` is silently clamped to MAX_NAMESPACES_LIMIT: a
+    // caller that asked for more than the cap and got exactly the cap back
+    // would otherwise wrongly conclude it was done.
+    let mut rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
         if let Some((cursor_updated_at, cursor_namespace)) = after {
             sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated
-             FROM vector_entries
-             WHERE owner = $1
-             GROUP BY namespace
-             HAVING (MAX(updated_at), namespace) > ($2, $3) AND MAX(updated_at) <= $4
-             ORDER BY MAX(updated_at), namespace
-             LIMIT $5",
+                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
+                 FROM vector_entries
+                 WHERE owner = $1
+                 GROUP BY namespace
+                 HAVING (MAX(updated_at), namespace) > ($2, $3) AND MAX(updated_at) <= $4
+                 ORDER BY MAX(updated_at), namespace
+                 LIMIT $5",
             )
             .bind(owner)
             .bind(cursor_updated_at)
@@ -179,13 +211,13 @@ pub(crate) async fn query_owner_namespaces(
             .await
         } else {
             sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated
-             FROM vector_entries
-             WHERE owner = $1
-             GROUP BY namespace
-             HAVING MAX(updated_at) <= $2
-             ORDER BY MAX(updated_at), namespace
-             LIMIT $3",
+                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
+                 FROM vector_entries
+                 WHERE owner = $1
+                 GROUP BY namespace
+                 HAVING MAX(updated_at) <= $2
+                 ORDER BY MAX(updated_at), namespace
+                 LIMIT $3",
             )
             .bind(owner)
             .bind(snapshot_at)
@@ -196,23 +228,28 @@ pub(crate) async fn query_owner_namespaces(
         .map_err(|e| AppError::Internal(format!("Failed to query namespaces: {}", e)))?;
 
     let has_more = rows.len() as i64 > limit;
-    let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
+    rows.truncate(limit as usize);
 
-    let next_cursor = if has_more {
-        page.last()
-            .map(|(name, _, _, last_updated)| encode_namespace_cursor(*last_updated, name, snapshot_at))
-    } else {
-        None
-    };
+    // Always hand back a watermark built from the LAST ROW EMITTED (never
+    // the peeked extra row above), whether or not more pages follow.
+    // Returning `None` on the final page left a client that had just
+    // finished syncing with no checkpoint to poll from next time — which is
+    // the entire point of the cursor. The only cursor-less case is an empty
+    // page: there is no row to take a watermark from, so the client keeps
+    // the one it already has.
+    let next_cursor = rows
+        .last()
+        .map(|(name, _, _, last_updated_at)| encode_namespaces_cursor(*last_updated_at, name, snapshot_at));
 
-    let namespaces = page
+    let namespaces = rows
         .into_iter()
         .map(
-            |(name, memory_count, storage_used, _last_updated)| NamespaceSummary {
+            |(name, memory_count, storage_used, updated_at)| NamespaceSummary {
                 id: name.clone(),
                 name,
                 memory_count,
                 storage_used,
+                updated_at,
             },
         )
         .collect();
@@ -220,6 +257,7 @@ pub(crate) async fn query_owner_namespaces(
     Ok(NamespacesResponse {
         namespaces,
         next_cursor,
+        has_more,
         snapshot_version: SNAPSHOT_VERSION,
     })
 }
@@ -316,8 +354,11 @@ pub(crate) async fn query_owner_memories(
         None => (None, chrono::Utc::now()),
     };
 
+    // Peek one row past `limit` for an explicit has_more signal — see
+    // query_owner_namespaces's identical comment on why page-length alone
+    // (vs. the clamped limit) isn't a reliable end-of-data signal.
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(
+    let mut rows: Vec<(
         String,
         String,
         String,
@@ -360,15 +401,16 @@ pub(crate) async fn query_owner_memories(
     .map_err(|e| AppError::Internal(format!("Failed to query memories: {}", e)))?;
 
     let has_more = rows.len() as i64 > limit;
-    let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
+    rows.truncate(limit as usize);
 
-    let next_cursor = if has_more {
-        page.last().map(|r| encode_cursor(r.4, &r.0, snapshot_at))
-    } else {
-        None
-    };
+    // Same watermark rule as `query_owner_namespaces`: the cursor always
+    // comes from the last row emitted (never the peeked extra row above), so
+    // the final (or only) page still checkpoints the client for its next
+    // incremental poll. Only an empty page has no cursor, because it has no
+    // row to build one from.
+    let next_cursor = rows.last().map(|r| encode_cursor(r.4, &r.0, snapshot_at));
 
-    let memories = page
+    let memories = rows
         .into_iter()
         .map(
             |(
@@ -376,7 +418,7 @@ pub(crate) async fn query_owner_memories(
                 namespace,
                 blob_id,
                 created_at,
-                _updated_at,
+                updated_at,
                 size,
                 agent_id,
                 package_id,
@@ -388,6 +430,7 @@ pub(crate) async fn query_owner_memories(
                     namespace_id: namespace,
                     blob_id,
                     created_at,
+                    updated_at,
                     size,
                     agent_id,
                     package_id,
@@ -405,6 +448,7 @@ pub(crate) async fn query_owner_memories(
     Ok(MemoriesResponse {
         memories,
         next_cursor,
+        has_more,
         snapshot_version: SNAPSHOT_VERSION,
     })
 }
@@ -615,34 +659,72 @@ mod tests {
         );
     }
 
+    fn ts(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
+        // Whole seconds only: Postgres `timestamptz` keeps microseconds, so a
+        // sub-microsecond chrono value would not survive the round trip and
+        // exact-equality assertions below would be flaky.
+        chrono::DateTime::from_timestamp(1_700_000_000 + offset_secs, 0).unwrap()
+    }
+
+    async fn seed_entry(
+        pool: &PgPool,
+        owner: &str,
+        id: &str,
+        namespace: &str,
+        size: i64,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(format!("{}-{}", owner, id))
+        .bind(owner)
+        .bind(namespace)
+        .bind(format!("blob-{}", id))
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .bind(size)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn cleanup(pool: &PgPool, owner: &str) {
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(pool)
+            .await;
+    }
+
     #[tokio::test]
-    async fn query_owner_namespaces_rolls_up_counts_and_bytes() {
+    async fn query_owner_namespaces_rolls_up_counts_bytes_and_max_updated_at() {
         let pool = test_pool().await;
         let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
 
-        for (id, ns, size) in [
-            ("m1", "work", 100i64),
-            ("m2", "work", 200i64),
-            ("m3", "personal", 50i64),
-        ] {
-            sqlx::query(
-                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(format!("{}-{}", owner, id))
-            .bind(&owner)
-            .bind(ns)
-            .bind(format!("blob-{}", id))
-            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
-            .bind(size)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        // `work`'s two rows deliberately straddle `personal`'s single row in
+        // time, so `updated_at` on the summary can only be right if it is the
+        // group's MAX (not its first, last-inserted, or min row).
+        seed_entry(&pool, &owner, "m1", "work", 100, ts(0)).await;
+        seed_entry(&pool, &owner, "m3", "personal", 50, ts(60)).await;
+        seed_entry(&pool, &owner, "m2", "work", 200, ts(120)).await;
 
         let result = query_owner_namespaces(&pool, &owner, None, 100)
             .await
             .unwrap();
+
+        // Emission order is the keyset order — (MAX(updated_at), namespace) —
+        // so `personal` (t+60) precedes `work` (t+120) despite sorting after
+        // it alphabetically.
+        assert_eq!(
+            result
+                .namespaces
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["personal", "work"],
+        );
+
         let mut sorted = result.namespaces;
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -650,18 +732,130 @@ mod tests {
         assert_eq!(sorted[0].name, "personal");
         assert_eq!(sorted[0].memory_count, 1);
         assert_eq!(sorted[0].storage_used, 50);
+        assert_eq!(sorted[0].updated_at, ts(60));
         assert_eq!(sorted[1].name, "work");
         assert_eq!(sorted[1].memory_count, 2);
         assert_eq!(sorted[1].storage_used, 300);
-        assert!(
-            result.next_cursor.is_none(),
-            "single page must not paginate"
+        assert_eq!(
+            sorted[1].updated_at,
+            ts(120),
+            "namespace updated_at must be MAX(updated_at) over the group"
         );
 
-        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
-            .bind(&owner)
-            .execute(&pool)
-            .await;
+        // A result that fits in one page is exactly the case that most needs a
+        // checkpoint: the client is caught up and its next poll has nothing
+        // else to anchor on.
+        let cursor = result
+            .next_cursor
+            .expect("a non-empty page must always hand back a watermark");
+        let decoded = decode_namespaces_cursor(&cursor).unwrap();
+        assert_eq!(decoded.namespace, "work");
+        assert_eq!(decoded.updated_at, ts(120));
+
+        cleanup(&pool, &owner).await;
+    }
+
+    /// The bug this whole cursor redesign exists for: under the old
+    /// namespace-name cursor (`ORDER BY namespace` / `HAVING namespace >
+    /// $cursor`), a namespace that sorts *before* the cursor could never be
+    /// returned again — so a later write that changed its rollup was
+    /// invisible to a polling client forever. Here `alpha` sorts before the
+    /// cursor's `zulu` but is updated after the cursor's watermark, and must
+    /// come back. A regression test that only checked ordering/no-duplicates
+    /// would pass against the old buggy code.
+    #[tokio::test]
+    async fn query_owner_namespaces_cursor_resurfaces_earlier_name_updated_after_watermark() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "a1", "alpha", 10, ts(0)).await;
+        seed_entry(&pool, &owner, "z1", "zulu", 20, ts(60)).await;
+
+        // First sync: client sees both, checkpoints at (t+60, "zulu").
+        let first = query_owner_namespaces(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .namespaces
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zulu"],
+        );
+        let watermark = first.next_cursor.expect("first page must checkpoint");
+        assert_eq!(decode_namespaces_cursor(&watermark).unwrap().namespace, "zulu");
+
+        // Now `alpha` — already synced, and alphabetically *before* the
+        // cursor's namespace — grows a second memory after that checkpoint.
+        seed_entry(&pool, &owner, "a2", "alpha", 90, ts(120)).await;
+
+        let second = query_owner_namespaces(&pool, &owner, Some(watermark), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second
+                .namespaces
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "a namespace changed after the watermark must reappear even though \
+             its name sorts before the cursor's; unchanged namespaces must not"
+        );
+        assert_eq!(second.namespaces[0].memory_count, 2);
+        assert_eq!(second.namespaces[0].storage_used, 100);
+        assert_eq!(second.namespaces[0].updated_at, ts(120));
+
+        let next = second
+            .next_cursor
+            .expect("the follow-up page must checkpoint too");
+        let decoded = decode_namespaces_cursor(&next).unwrap();
+        assert_eq!(decoded.namespace, "alpha");
+        assert_eq!(decoded.updated_at, ts(120));
+
+        // And polling from that fresh watermark with nothing else changed
+        // yields an empty page — the one and only cursor-less case.
+        let third = query_owner_namespaces(&pool, &owner, Some(next), 100)
+            .await
+            .unwrap();
+        assert!(third.namespaces.is_empty());
+        assert!(third.next_cursor.is_none());
+
+        cleanup(&pool, &owner).await;
+    }
+
+    #[test]
+    fn encode_namespaces_cursor_is_url_safe_and_round_trips() {
+        for i in 0..200 {
+            let namespace = format!("ns/{i}+{}", uuid::Uuid::new_v4());
+            let updated_at =
+                chrono::DateTime::from_timestamp(1_700_000_000 + i, (i as u32) * 137).unwrap();
+            let snapshot_at =
+                chrono::DateTime::from_timestamp(1_700_000_100 + i, 0).unwrap();
+
+            let encoded = encode_namespaces_cursor(updated_at, &namespace, snapshot_at);
+            assert!(
+                !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
+                "encoded cursor must be URL-safe with no padding, got: {}",
+                encoded
+            );
+
+            let decoded = decode_namespaces_cursor(&encoded).expect("round-trips");
+            assert_eq!(decoded.namespace, namespace);
+            assert_eq!(decoded.snapshot_at, Some(snapshot_at));
+            assert_eq!(decoded.updated_at, updated_at);
+        }
+
+        // A v1 cursor (bare base64 of the namespace name) is not a v2 cursor —
+        // hence the SNAPSHOT_VERSION bump. It must be rejected as a 400, never
+        // silently mis-decoded.
+        let v1_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"work");
+        assert!(matches!(
+            decode_namespaces_cursor(&v1_cursor),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[tokio::test]
@@ -675,64 +869,126 @@ mod tests {
     }
 
     /// Mirrors `query_owner_memories_paginates_by_updated_at_and_id`'s style:
-    /// seed multiple namespaces for one owner, paginate with a small limit
+    /// seed multiple namespaces for one owner, walk them with a small limit
     /// using the `(MAX(updated_at), namespace)` keyset cursor, and assert
     /// the union of all pages equals the full set exactly once (no gaps, no
-    /// duplicates).
+    /// duplicates). Update times are deliberately scrambled relative to name
+    /// order so the expected sequence is the recency order, not the
+    /// alphabetical one.
     #[tokio::test]
-    async fn query_owner_namespaces_paginates_by_namespace_cursor() {
+    async fn query_owner_namespaces_paginates_by_updated_at_and_namespace_cursor() {
         let pool = test_pool().await;
         let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
 
-        // 5 distinct namespaces, alphabetically: alpha, bravo, charlie, delta, echo.
-        for ns in ["alpha", "bravo", "charlie", "delta", "echo"] {
-            sqlx::query(
-                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(format!("{}-{}", owner, ns))
-            .bind(&owner)
-            .bind(ns)
-            .bind(format!("blob-{}", ns))
-            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
-            .bind(10_i64)
-            .execute(&pool)
-            .await
-            .unwrap();
+        for (ns, offset) in [
+            ("alpha", 40),
+            ("bravo", 10),
+            ("charlie", 50),
+            ("delta", 20),
+            ("echo", 30),
+        ] {
+            seed_entry(&pool, &owner, ns, ns, 10, ts(offset)).await;
         }
 
         let mut all_names: Vec<String> = Vec::new();
         let mut cursor = None;
-        loop {
+        // Bounded: with an always-present watermark the traversal now ends on
+        // an empty page, so an unbounded `while cursor.is_some()` would spin
+        // forever if the keyset predicate ever stopped advancing.
+        for _ in 0..10 {
             let page = query_owner_namespaces(&pool, &owner, cursor.clone(), 2)
                 .await
                 .unwrap();
             assert!(page.namespaces.len() <= 2);
-            all_names.extend(page.namespaces.iter().map(|n| n.name.clone()));
-            cursor = page.next_cursor.clone();
-            if cursor.is_none() {
+            if page.namespaces.is_empty() {
+                assert!(
+                    page.next_cursor.is_none(),
+                    "an empty page is the only case with no watermark"
+                );
                 break;
             }
+            all_names.extend(page.namespaces.iter().map(|n| n.name.clone()));
+            cursor = Some(
+                page.next_cursor
+                    .expect("every non-empty page must hand back a watermark"),
+            );
         }
 
-        let mut sorted = all_names.clone();
-        sorted.sort();
-        sorted.dedup();
         assert_eq!(
-            sorted,
-            vec!["alpha", "bravo", "charlie", "delta", "echo"],
-            "pagination must not skip or duplicate namespaces, got {:?}",
-            all_names
+            all_names,
+            vec!["bravo", "delta", "echo", "alpha", "charlie"],
+            "pages must follow (MAX(updated_at), namespace) order with no gaps \
+             or duplicates"
         );
-        // Also verify ordering was preserved across page boundaries (not
-        // just that the union matched — a shuffled union would still pass
-        // the assertion above).
-        assert_eq!(all_names, sorted);
 
-        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
-            .bind(&owner)
-            .execute(&pool)
+        cleanup(&pool, &owner).await;
+    }
+
+    /// Bug 2 for `/namespaces`, isolated: a page that exactly fills `limit`
+    /// (so the old `has_more` peek would have said "no more") still has to
+    /// return the watermark, and re-polling from it yields the empty page.
+    #[tokio::test]
+    async fn query_owner_namespaces_exactly_fitting_page_still_returns_watermark() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "n1", "one", 10, ts(0)).await;
+        seed_entry(&pool, &owner, "n2", "two", 10, ts(60)).await;
+
+        let page = query_owner_namespaces(&pool, &owner, None, 2).await.unwrap();
+        assert_eq!(page.namespaces.len(), 2);
+        let cursor = page
+            .next_cursor
+            .expect("an exactly-full final page must still checkpoint the client");
+        assert_eq!(decode_namespaces_cursor(&cursor).unwrap().namespace, "two");
+
+        let empty = query_owner_namespaces(&pool, &owner, Some(cursor), 2)
+            .await
+            .unwrap();
+        assert!(empty.namespaces.is_empty());
+        assert!(empty.next_cursor.is_none());
+
+        cleanup(&pool, &owner).await;
+    }
+
+    /// Reproduces a real bug found in review: `limit` is silently clamped
+    /// to `MAX_NAMESPACES_LIMIT` (500), so a caller asking for more than
+    /// that gets exactly 500 rows back — a page SHORTER than the `limit`
+    /// it requested, which a client using "short page = done" as its only
+    /// signal would wrongly treat as end-of-data even though a 501st
+    /// namespace exists. `has_more` must say `true` here.
+    #[tokio::test]
+    async fn query_owner_namespaces_has_more_true_when_limit_is_clamped() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        for i in 0..(MAX_NAMESPACES_LIMIT + 1) {
+            seed_entry(
+                &pool,
+                &owner,
+                &format!("n{i}"),
+                &format!("ns-{i:04}"),
+                10,
+                ts(i),
+            )
             .await;
+        }
+
+        let page = query_owner_namespaces(&pool, &owner, None, 10_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.namespaces.len(),
+            MAX_NAMESPACES_LIMIT as usize,
+            "limit=10000 must be clamped to MAX_NAMESPACES_LIMIT"
+        );
+        assert!(
+            page.has_more,
+            "a clamped-short page must still report has_more=true — page length alone is not a reliable end-of-data signal"
+        );
+        assert!(page.next_cursor.is_some());
+
+        cleanup(&pool, &owner).await;
     }
 
     /// Regression test for the namespace-keyset drop bug, and for the
@@ -823,7 +1079,12 @@ mod tests {
              (same trade-off memories already documents), got {:?}",
             page2_names
         );
-        assert!(page2.next_cursor.is_none(), "walk must terminate");
+        // `has_more` (not `next_cursor`'s nullity) is the authoritative
+        // end-of-data signal: `next_cursor` is always populated for a
+        // non-empty page, including the last one, so callers have a
+        // checkpoint to resume from — see `query_owner_namespaces`'s cursor
+        // doc comment.
+        assert!(!page2.has_more, "walk must terminate");
 
         // A fresh walk (cursor = None) is a new snapshot and must pick up
         // "alpha" — this is what actually rules out the old permanent-drop
@@ -898,7 +1159,7 @@ mod tests {
         assert_eq!(page1.namespaces[0].name, "bravo");
         assert_eq!(page1.namespaces[0].memory_count, 1);
         let cursor1 = page1.next_cursor.clone().expect("more pages remain");
-        let snapshot_at = decode_namespace_cursor(&cursor1)
+        let snapshot_at = decode_namespaces_cursor(&cursor1)
             .unwrap()
             .snapshot_at
             .unwrap();
@@ -943,7 +1204,7 @@ mod tests {
             "namespace mutated mid-walk after already being delivered must not reappear, got {:?}",
             page2_names
         );
-        assert!(page2.next_cursor.is_none(), "walk must terminate");
+        assert!(!page2.has_more, "walk must terminate");
 
         // A fresh walk (cursor = None) captures a new, later snapshot
         // boundary and picks up "bravo"'s mutated state (memory_count now
@@ -999,7 +1260,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page3.memories.len(), 1);
-        assert!(page3.next_cursor.is_none());
+        // Short final page: still a checkpoint, not `None` — that is the
+        // client's anchor for its next incremental poll.
+        let terminal = page3
+            .next_cursor
+            .clone()
+            .expect("the last page of a traversal must still hand back a watermark");
+        let decoded = decode_cursor(&terminal).unwrap();
+        assert_eq!(decoded.id, page3.memories[0].memory_id);
+        assert_eq!(decoded.updated_at, page3.memories[0].updated_at);
+
+        // Polling again from that watermark with nothing new written is the
+        // only case that legitimately has no cursor.
+        let page4 = query_owner_memories(&pool, &owner, Some(terminal), 2)
+            .await
+            .unwrap();
+        assert!(page4.memories.is_empty());
+        assert!(page4.next_cursor.is_none());
 
         let mut all_ids: Vec<String> = page1
             .memories
@@ -1019,10 +1296,44 @@ mod tests {
         assert_eq!(page1.memories[0].agent_id.as_deref(), Some("agent-0"));
         assert_eq!(page1.memories[0].status, "active");
 
-        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
-            .bind(&owner)
-            .execute(&pool)
-            .await;
+        cleanup(&pool, &owner).await;
+    }
+
+    /// Bug 2 for `/memories`, isolated: an exactly-`limit`-sized result set
+    /// (the old peek-based `has_more` would have reported "no more") still
+    /// returns a watermark, and that watermark is built from the last EMITTED
+    /// row. Also pins the newly exposed `updated_at` field to the row's real
+    /// value.
+    #[tokio::test]
+    async fn query_owner_memories_exactly_fitting_page_still_returns_watermark() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "e1", "default", 10, ts(0)).await;
+        seed_entry(&pool, &owner, "e2", "default", 10, ts(60)).await;
+
+        let page = query_owner_memories(&pool, &owner, None, 2).await.unwrap();
+        assert_eq!(page.memories.len(), 2);
+        assert_eq!(page.memories[0].updated_at, ts(0));
+        assert_eq!(page.memories[1].updated_at, ts(60));
+
+        let cursor = page
+            .next_cursor
+            .expect("an exactly-full final page must still checkpoint the client");
+        let decoded = decode_cursor(&cursor).unwrap();
+        assert_eq!(
+            decoded.id, page.memories[1].memory_id,
+            "watermark must come from the last emitted row"
+        );
+        assert_eq!(decoded.updated_at, ts(60));
+
+        let empty = query_owner_memories(&pool, &owner, Some(cursor), 2)
+            .await
+            .unwrap();
+        assert!(empty.memories.is_empty());
+        assert!(empty.next_cursor.is_none());
+
+        cleanup(&pool, &owner).await;
     }
 
     #[tokio::test]
@@ -1213,7 +1524,7 @@ mod tests {
             page2_ids
         );
         assert!(
-            page2.next_cursor.is_none(),
+            !page2.has_more,
             "walk must terminate even though `s1` was excluded"
         );
 
