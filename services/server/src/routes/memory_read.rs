@@ -358,6 +358,7 @@ pub async fn list_owner_agents(
         &state.delegate_keys_cache,
         &state.http_client,
         &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
         &auth.account_id,
         &state.config.package_id,
     )
