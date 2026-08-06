@@ -47,15 +47,101 @@ mod tests {
             include_str!("../../migrations/009_importance_signal.sql"),
             include_str!("../../migrations/010_memory_read_api_columns.sql"),
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
-            include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+
+        // Mirrors the ordering in VectorDb::new(): batched Rust backfill
+        // must complete before 012 validates NOT NULL, and the invalid-
+        // index recovery check must run before 013's CREATE INDEX
+        // CONCURRENTLY IF NOT EXISTS.
+        super::backfill_updated_at(&pool).await.unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/012_memory_read_api_updated_at_not_null.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::recover_invalid_pagination_index(&pool)
+            .await
+            .unwrap();
+
+        for migration in [
             include_str!("../../migrations/013_memory_read_api_index.sql"),
             include_str!("../../migrations/014_memory_expiry_columns.sql"),
             include_str!("../../migrations/015_memory_expiry_synced_at_index.sql"),
+            // Renamed from 014 to 016 during the WALM-295/296/297
+            // integration merge: WALM-296's expiry work independently
+            // claimed 014/015 on its own branch. Content unchanged.
+            include_str!("../../migrations/016_memory_read_api_updated_at_set_not_null.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
 
         Some(VectorDb { pool })
+    }
+
+    /// Regression test for the WALM-295 migration-order fixes: batched
+    /// Rust backfill (finding 1), the CHECK/VALIDATE NOT NULL fast path
+    /// split across migrations 012/014 (finding 2), and invalid-index
+    /// recovery ahead of migration 013 (finding 3).
+    ///
+    /// Gated on a dedicated env var (rather than `DATABASE_URL`, which
+    /// `test_db()` above already uses for the lighter-weight vector-only
+    /// schema) so it never runs as part of the normal suite by accident —
+    /// it exercises the FULL `VectorDb::new()` migration pipeline
+    /// (001-014) end to end, which is disruptive to run against a
+    /// database other tests share concurrently. Point
+    /// `MIGRATION_PIPELINE_TEST_DATABASE_URL` at a throwaway local
+    /// database to run it, e.g.:
+    /// `createdb -h localhost -U memwal memwal_migration_test`.
+    #[tokio::test]
+    async fn full_migration_pipeline_runs_end_to_end() {
+        let Ok(database_url) = std::env::var("MIGRATION_PIPELINE_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping: MIGRATION_PIPELINE_TEST_DATABASE_URL is not configured"
+            );
+            return;
+        };
+
+        let db = VectorDb::new(&database_url)
+            .await
+            .expect("full migration pipeline should complete cleanly");
+
+        let remaining_nulls: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM vector_entries WHERE updated_at IS NULL")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_nulls, 0, "backfill should have cleared every NULL updated_at row");
+
+        let index_valid: Option<bool> = sqlx::query_scalar(
+            "SELECT indisvalid FROM pg_index JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
+             WHERE relname = 'idx_vector_entries_owner_updated_id'",
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(index_valid, Some(true), "pagination index should exist and be valid");
+
+        let constraint_dropped: Option<String> = sqlx::query_scalar(
+            "SELECT conname FROM pg_constraint WHERE conname = 'vector_entries_updated_at_not_null'",
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            constraint_dropped, None,
+            "the temporary CHECK constraint should have been dropped by migration 014"
+        );
+
+        // Running the whole pipeline a second time (simulating a restart)
+        // must still be clean and idempotent.
+        VectorDb::new(&database_url)
+            .await
+            .expect("second run of the full migration pipeline should also complete cleanly");
     }
 
     #[tokio::test]
@@ -416,6 +502,134 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     }
 }
 
+/// Name of the keyset-pagination index migration 013 builds. Shared
+/// between the invalid-index recovery check and (in spirit) migration
+/// 013's own `CREATE INDEX CONCURRENTLY IF NOT EXISTS` -- kept as a
+/// constant here so the two names can't drift apart.
+const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
+
+/// Backfill `vector_entries.updated_at` from `created_at` in bounded
+/// batches (WALM-295).
+///
+/// This cannot be a plain migration file's `UPDATE ... WHERE
+/// updated_at IS NULL` (as migration 011 originally was) on a
+/// real-sized table: a single unbatched full-table UPDATE can run long
+/// enough to hit a statement/idle timeout. Postgres rolls back the
+/// ENTIRE update atomically on timeout -- there is no partial-UPDATE
+/// commit -- which propagates as an error/panic out of
+/// `VectorDb::new()`. Under Railway's restart policy that becomes a
+/// crash-loop with zero net progress between attempts: restart ->
+/// reconnect -> same unbatched UPDATE -> same timeout, forever.
+/// LIVE-CONFIRMED against the dev DB (113k rows): the single-statement
+/// version could not complete under a short timeout, while this batched
+/// version (5000 rows/iteration) completed in ~281s.
+///
+/// It also cannot be pushed into a `DO $$ ... $$` block inside a
+/// migration file: Postgres does not allow `COMMIT` inside a
+/// procedural block executed as a single statement, which is exactly
+/// what batching needs (each batch must commit on its own so a crash
+/// or restart mid-backfill doesn't lose progress already made). So the
+/// loop has to live in application code, where each iteration below is
+/// its own bare statement against the pool -- not wrapped in an
+/// explicit transaction -- and therefore commits independently. A
+/// later restart resumes near where the last successful batch left
+/// off, because already-backfilled rows no longer match `WHERE
+/// updated_at IS NULL`.
+///
+/// Called from `VectorDb::new()` after migration 010 (which adds the
+/// nullable `updated_at` column) and before migration 012 (which
+/// requires no NULL rows remain before it can validate its NOT NULL
+/// constraint).
+async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
+    const BATCH_SIZE: i64 = 5000;
+    let mut total_rows: u64 = 0;
+
+    loop {
+        let result = sqlx::query(
+            "UPDATE vector_entries SET updated_at = created_at \
+             WHERE id IN (SELECT id FROM vector_entries WHERE updated_at IS NULL LIMIT $1)",
+        )
+        .bind(BATCH_SIZE)
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to backfill updated_at: {}", e)))?;
+
+        let rows_affected = result.rows_affected();
+        total_rows += rows_affected;
+        if rows_affected == 0 {
+            break;
+        }
+    }
+
+    if total_rows > 0 {
+        tracing::info!(
+            rows = total_rows,
+            "backfilled vector_entries.updated_at from created_at"
+        );
+    }
+
+    Ok(())
+}
+
+/// Detect and recover from an INVALID `idx_vector_entries_owner_updated_id`
+/// left behind by an interrupted `CREATE INDEX CONCURRENTLY` build
+/// (WALM-295).
+///
+/// Migration 013 runs `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and
+/// `IF NOT EXISTS` matches by index NAME only -- it has no idea whether
+/// an existing index with that name is actually usable. A
+/// `CONCURRENTLY` build that gets interrupted (process crash,
+/// statement timeout, deploy killing the connection mid-build) leaves
+/// behind a permanently INVALID index under the target name. From that
+/// point on, every future `VectorDb::new()` sees the name already
+/// exists, silently no-ops migration 013 forever, and every
+/// memories-listing query keyset-paginating on `(owner, updated_at,
+/// id)` silently degrades to a sequential scan -- with no error ever
+/// surfaced.
+///
+/// Called immediately before migration 013 runs. If an INVALID index is
+/// found, it is dropped (via `DROP INDEX CONCURRENTLY`, which -- like
+/// `CREATE INDEX CONCURRENTLY` -- cannot run inside a transaction
+/// block, hence the bare `sqlx::query(..).execute(pool)` with no
+/// explicit transaction wrapper) so migration 013's own `CREATE INDEX
+/// CONCURRENTLY IF NOT EXISTS` can actually rebuild it. The recovery is
+/// logged at `warn` level so it is visible in observability rather than
+/// silently happening on every boot.
+async fn recover_invalid_pagination_index(pool: &PgPool) -> Result<(), AppError> {
+    let index_is_invalid: Option<bool> = sqlx::query_scalar(
+        "SELECT pg_index.indisvalid FROM pg_index \
+         JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
+         WHERE pg_class.relname = $1",
+    )
+    .bind(PAGINATION_INDEX_NAME)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to check validity of {}: {}",
+            PAGINATION_INDEX_NAME, e
+        ))
+    })?;
+
+    if index_is_invalid == Some(false) {
+        tracing::warn!(
+            index = PAGINATION_INDEX_NAME,
+            "found INVALID pagination index, likely left behind by an interrupted \
+             CREATE INDEX CONCURRENTLY build -- dropping it so migration 013 can rebuild it"
+        );
+
+        let drop_stmt = format!("DROP INDEX CONCURRENTLY {}", PAGINATION_INDEX_NAME);
+        sqlx::query(&drop_stmt).execute(pool).await.map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to drop invalid index {}: {}",
+                PAGINATION_INDEX_NAME, e
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 impl VectorDb {
     /// Initialize database connection pool and run migrations
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
@@ -491,14 +705,20 @@ impl VectorDb {
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
         // owner-scoped read API: updated_at cursor column + agent_id/package_id
-        // (WALM-295). Split across 010-012 (see each file's header) to avoid
-        // holding ACCESS EXCLUSIVE across the full-table backfill.
+        // (WALM-295). Split across 010-014 (see each file's header, and
+        // backfill_updated_at's / recover_invalid_pagination_index's doc
+        // comments above) to avoid holding ACCESS EXCLUSIVE across the
+        // full-table backfill or index build.
         let migration_010 = include_str!("../../migrations/010_memory_read_api_columns.sql");
         sqlx::raw_sql(migration_010)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
+        // 011 is now a no-op file (kept for migration numbering/history —
+        // see its header). The actual backfill runs as batched Rust code
+        // right after it, since Postgres can't COMMIT mid-loop inside a
+        // plain migration statement.
         let migration_011 =
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql");
         sqlx::raw_sql(migration_011)
@@ -506,12 +726,22 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
 
+        backfill_updated_at(&pool).await?;
+
+        // Requires the backfill above to have already completed — this
+        // validates NOT NULL and will error if any updated_at row is
+        // still NULL.
         let migration_012 =
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql");
         sqlx::raw_sql(migration_012)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 012: {}", e)))?;
+
+        // Must run before migration 013's CREATE INDEX CONCURRENTLY IF NOT
+        // EXISTS, which would otherwise silently no-op forever against a
+        // permanently INVALID index from an interrupted build.
+        recover_invalid_pagination_index(&pool).await?;
 
         // keyset-pagination index for the memories listing endpoint (WALM-295).
         // Must stay in its own file/transaction — see 013's header comment.
@@ -536,6 +766,17 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
+
+        // Finalizes updated_at NOT NULL cheaply using the validated CHECK
+        // constraint 012 set up — see 016's header. Renamed from 014 to 016
+        // during the WALM-295/296/297 integration merge: WALM-296's expiry
+        // work independently claimed 014/015 on its own branch.
+        let migration_016 =
+            include_str!("../../migrations/016_memory_read_api_updated_at_set_not_null.sql");
+        sqlx::raw_sql(migration_016)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 016: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 

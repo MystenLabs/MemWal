@@ -1,16 +1,28 @@
 -- services/server/migrations/011_memory_read_api_backfill_updated_at.sql
 --
--- WALM-295: backfill updated_at from created_at (not NOW()) so existing
--- rows keep their natural chronological order instead of clustering at
--- one deploy-time value, which would otherwise look like a
--- false-positive "everything changed" reset to Console's incremental
--- sync.
+-- WALM-295: this file USED to be a single unbatched
+-- `UPDATE vector_entries SET updated_at = created_at WHERE updated_at
+-- IS NULL;`. On a real-sized table that single statement can run long
+-- enough to hit a statement/idle timeout; Postgres rolls back the
+-- ENTIRE UPDATE atomically on timeout (there is no partial-UPDATE
+-- commit), which panics `VectorDb::new()` on the way out. Under
+-- Railway's restart policy that becomes a crash-loop with zero net
+-- progress: restart -> reconnect -> same unbatched UPDATE -> same
+-- timeout, forever. LIVE-CONFIRMED against the dev DB (113k rows).
 --
--- Deliberately its OWN migration file/transaction, separate from 010's
--- ADD COLUMN. Once 010 has committed, this UPDATE only needs a
--- ROW EXCLUSIVE lock on the rows it touches — it does not block SELECTs
--- on vector_entries the way holding 010's ACCESS EXCLUSIVE open across a
--- full-table UPDATE would. On every run after the first, this is a
--- fast no-op scan (WHERE updated_at IS NULL matches nothing).
+-- The fix has to be batched with each batch committing independently,
+-- which means it cannot be a plain migration file: Postgres does not
+-- allow COMMIT inside a `DO $$ ... $$` block (or any single statement)
+-- run via `raw_sql`, so there is no way to express "loop, commit,
+-- repeat" as SQL text alone. The backfill now lives in Rust as
+-- `backfill_updated_at()` in `db.rs`, invoked from `VectorDb::new()`
+-- after migration 010 and before migration 012 (which requires no NULL
+-- rows remain). See that function's doc comment for the full
+-- explanation.
+--
+-- This file is kept (rather than deleted) purely so migration numbering
+-- and history stay intact -- every other migration file is referenced
+-- by number in comments elsewhere (e.g. 010's header). Its body is now
+-- a no-op.
 
-UPDATE vector_entries SET updated_at = created_at WHERE updated_at IS NULL;
+SELECT 1;

@@ -79,10 +79,21 @@ if the `{owner}` path segment does not equal the resolved `auth.owner`.
 
 ## Rate limiting
 
-Requests are weighted and checked against three sliding-window layers
-(`services/server/src/rate_limit.rs`): per-delegate-key (30 weighted-req/min),
-per-account burst (60 weighted-req/min), per-account sustained
-(500 weighted-req/hour). Weights for this API:
+These three endpoints run on their own router (`read_api_routes` in
+`main.rs`), separate from the write path's `protected_routes`, behind
+`read_api_rate_limit_middleware` (`services/server/src/rate_limit.rs`)
+instead of the write path's `rate_limit_middleware`. They do **not** share
+the write path's budget — a routine pagination loop over this API can no
+longer trip, or contend with, the 30/min per-delegate-key budget that
+exists to bound the write path's spend-risk (Walrus upload, LLM calls,
+gas).
+
+There is a single sliding-window layer, keyed by delegate key under its
+own Redis prefix (`rate:read:dk:{public_key}`, distinct from the write
+path's `rate:dk:{public_key}`) — no separate per-account burst/sustained
+tiers on top. Default limit is **200 weighted-requests/min per delegate
+key** (`ReadApiRateLimitConfig::per_delegate_key_per_minute`), overridable
+via the `READ_API_RATE_LIMIT_PER_MINUTE` env var. Weights for this API:
 
 | Endpoint | Weight | Why |
 |---|---|---|
@@ -90,22 +101,22 @@ per-account burst (60 weighted-req/min), per-account sustained
 | `GET /v1/owners/{owner}/memories` | 1 | DB read only |
 | `GET /v1/owners/{owner}/agents` | 2 | Makes a live on-chain `sui_getObject` RPC call (short-TTL cached, but uncached on a cold/expired cache entry) |
 
-Exceeding any layer returns `429 Too Many Requests`:
+Exceeding the limit returns `429 Too Many Requests`:
 
 ```json
 {
   "error": "Rate limit exceeded",
-  "layer": "per-account-burst",
-  "limit": "60 weighted-requests/min",
-  "retry_after_seconds": 12
+  "layer": "read_delegate_key",
+  "limit": "200 weighted-requests/min",
+  "retry_after_seconds": 60
 }
 ```
 
-with a `Retry-After` header (seconds) set to match `retry_after_seconds`.
-If the rate limiter itself is unavailable (Redis unreachable and the
-in-memory fallback can't be used), requests fail closed with `503 Service
+with a `Retry-After: 60` header. If the rate limiter itself is
+unavailable (Redis unreachable), requests fail closed with `503 Service
 Unavailable` and a `Retry-After: 30` header rather than being allowed
-through unmetered.
+through unmetered — there is no in-memory fallback for this middleware,
+unlike the write path's deliberately-fallback-enabled limiter.
 
 ## GET /v1/owners/{owner}/namespaces?updated_after=<cursor>&limit=100
 

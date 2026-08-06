@@ -315,6 +315,10 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Dedicated rate-limit budget for the owner-scoped read API
+    /// (`/v1/owners/{owner}/{namespaces,memories,agents}`), separate from
+    /// the write path's `rate_limit` budget (WALM-295).
+    pub read_api_rate_limit: ReadApiRateLimitConfig,
     /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
     /// ignores caller-supplied XFF and uses the direct peer address.
     pub trusted_proxy_hops: usize,
@@ -449,6 +453,7 @@ impl Config {
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            read_api_rate_limit: ReadApiRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -777,6 +782,49 @@ impl SponsorRateLimitConfig {
         if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Read API Rate Limit Config
+// ============================================================
+//
+// WALM-295 finding: the 3 owner-scoped read endpoints (`namespaces`,
+// `memories`, `agents`) originally shared the write path's 30/min
+// per-delegate-key budget (`RateLimitConfig::max_requests_per_delegate_key`).
+// That budget exists to bound spend-risk on endpoints that write, upload to
+// Walrus, or call an LLM; a 31-request pagination loop over
+// `GET /v1/owners/{owner}/memories` — completely ordinary client behavior —
+// could trip it. Reads carry no equivalent spend risk, so they get their own,
+// more generous, single-layer budget instead of being folded into the
+// account-level burst/sustained layers that exist specifically to protect
+// the write path's spend surface.
+#[derive(Debug, Clone)]
+pub struct ReadApiRateLimitConfig {
+    /// Max weighted read-API requests per minute per delegate key.
+    /// Default 200: headroom for paginating a ~10k-memory account at
+    /// `limit=100` (100+ requests per full sync) plus margin for retries
+    /// and concurrent `namespaces`/`agents` calls in the same window.
+    pub per_delegate_key_per_minute: i64,
+}
+
+impl Default for ReadApiRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_delegate_key_per_minute: 200,
+        }
+    }
+}
+
+impl ReadApiRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("READ_API_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_delegate_key_per_minute = n;
             }
         }
         c
@@ -1618,6 +1666,7 @@ mod tests {
             sidecar_secret: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            read_api_rate_limit: ReadApiRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -2133,6 +2182,25 @@ mod tests {
         assert_eq!(config.per_hour, 30);
         assert_eq!(config.global_per_minute, 100);
         assert_eq!(config.global_per_hour, 1000);
+    }
+
+    // ── ReadApiRateLimitConfig defaults ─────────────────────────────────
+
+    #[test]
+    fn read_api_rate_limit_default_values() {
+        let config = ReadApiRateLimitConfig::default();
+        assert_eq!(config.per_delegate_key_per_minute, 200);
+    }
+
+    #[test]
+    fn read_api_rate_limit_from_env_override() {
+        // No other test touches READ_API_RATE_LIMIT_PER_MINUTE, so unlike
+        // WALRUS_STORAGE_EPOCHS above this doesn't need a shared lock to be
+        // race-free under `cargo test`'s parallel test threads.
+        std::env::set_var("READ_API_RATE_LIMIT_PER_MINUTE", "500");
+        let config = ReadApiRateLimitConfig::from_env();
+        std::env::remove_var("READ_API_RATE_LIMIT_PER_MINUTE");
+        assert_eq!(config.per_delegate_key_per_minute, 500);
     }
 
     #[test]

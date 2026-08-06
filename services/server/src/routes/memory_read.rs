@@ -9,6 +9,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::security_delete_auth::same_owner;
 use crate::types::*;
 
 #[derive(Debug, Serialize)]
@@ -53,22 +54,76 @@ const DEFAULT_NAMESPACES_LIMIT: i64 = 100;
 const MAX_NAMESPACES_LIMIT: i64 = 500;
 
 /// Namespaces' rollup is one row per namespace (`GROUP BY namespace`) with no
-/// natural `id` column to tie-break on the way `memories`' `(updated_at, id)`
-/// pair does — so the keyset cursor here is the namespace text value itself.
-/// (`memories`' `MemoriesCursor` type isn't reused because it carries an
-/// `updated_at` field that has no meaning for a rolled-up row spanning many
-/// `updated_at` values.)
-fn encode_namespace_cursor(namespace: &str) -> String {
-    // Same URL_SAFE_NO_PAD rationale as `encode_cursor` above — this value is
-    // echoed back verbatim as `next_cursor` and used in a URL query string.
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(namespace.as_bytes())
+/// natural `id` column to tie-break on. An earlier version of this cursor
+/// keyed purely on the namespace TEXT value (`HAVING namespace > $cursor`),
+/// which is unsafe: a namespace's name has no relationship to when it was
+/// created, so a namespace inserted concurrently while a client is mid-walk
+/// can sort lexicographically *before* the client's current cursor position
+/// and be silently, permanently skipped for that walk with no way to detect
+/// it.
+///
+/// Instead this mirrors how `memories`' `(updated_at, id)` cursor is already
+/// drop-safe in this same file: key on `(MAX(updated_at), namespace)` so the
+/// cursor is monotonic in time (a namespace can only move *forward* in the
+/// walk order as its rows are touched, never appear behind an
+/// already-consumed cursor position). `namespace` remains the tie-breaker
+/// for rollups that land on the exact same `MAX(updated_at)`, the same role
+/// `id` plays for `memories`.
+///
+/// That fix alone reintroduces the opposite failure in the other direction:
+/// `MAX(updated_at)` for a namespace can *increase* after that namespace has
+/// already been delivered to the client (any new/updated row belonging to it
+/// advances the aggregate), which lets it jump back in front of the client's
+/// cursor position and be delivered a second time later in the same walk —
+/// with different data. This is the exact same failure mode `memories`
+/// already solved with `MemoriesCursor::snapshot_at` (see that doc comment
+/// below), so `snapshot_at` is mirrored here with the same shape/encoding:
+/// captured once on the first page and threaded forward unchanged, it binds
+/// the whole walk to one point in time so a namespace mutated mid-walk is
+/// excluded (via `HAVING MAX(updated_at) <= $snapshot_at`) until a fresh
+/// walk starts.
+///
+/// Combining both fixes has one honest, inherent trade-off, identical to
+/// `memories`': a namespace **created** after the walk's `snapshot_at` was
+/// captured is *also* excluded by that same `<= $snapshot_at` bound — you
+/// cannot simultaneously guarantee "no re-delivery of an already-consumed
+/// row" and "immediate same-walk visibility of a row created after the walk
+/// began" from one time-based watermark. Such a namespace simply was not
+/// part of the snapshot; it surfaces on the client's next fresh walk
+/// (`cursor = None`), not the current one. This is not a regression of the
+/// drop bug this cursor was built to fix — a namespace is never *permanently*
+/// lost the way the old lexicographic cursor could lose one — but it does
+/// mean "created mid-walk" and "mutated mid-walk" resolve the same way:
+/// visible next walk, not this one.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct NamespaceCursor {
+    last_updated: chrono::DateTime<chrono::Utc>,
+    namespace: String,
+    #[serde(default)]
+    snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn decode_namespace_cursor(raw: &str) -> Result<String, AppError> {
+fn encode_namespace_cursor(
+    last_updated: chrono::DateTime<chrono::Utc>,
+    namespace: &str,
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let json = serde_json::to_vec(&NamespaceCursor {
+        last_updated,
+        namespace: namespace.to_string(),
+        snapshot_at: Some(snapshot_at),
+    })
+    .expect("cursor serializes");
+    // Same URL_SAFE_NO_PAD rationale as `encode_cursor` below — this value is
+    // echoed back verbatim as `next_cursor` and used in a URL query string.
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+fn decode_namespace_cursor(raw: &str) -> Result<NamespaceCursor, AppError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw)
         .map_err(|_| AppError::BadRequest("invalid cursor".to_string()))?;
-    String::from_utf8(bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
+    serde_json::from_slice(&bytes).map_err(|_| AppError::BadRequest("invalid cursor".to_string()))
 }
 
 /// `updated_after`/`cursor` here is a **pagination continuation token**
@@ -90,57 +145,76 @@ pub(crate) async fn query_owner_namespaces(
     limit: i64,
 ) -> Result<NamespacesResponse, AppError> {
     let limit = limit.clamp(1, MAX_NAMESPACES_LIMIT);
-    let cursor_namespace = cursor.as_deref().map(decode_namespace_cursor).transpose()?;
+    let cursor_after = cursor.as_deref().map(decode_namespace_cursor).transpose()?;
 
-    let rows: Vec<(String, i64, i64)> = if let Some(ref after) = cursor_namespace {
-        sqlx::query_as(
-            "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used
+    // See the doc comment on `NamespaceCursor::snapshot_at` (mirroring
+    // `MemoriesCursor::snapshot_at` below): bind this whole walk to one
+    // boundary, captured now on the first page and threaded forward
+    // unchanged from the incoming cursor on every later page.
+    let (after, snapshot_at) = match cursor_after {
+        Some(c) => {
+            let snapshot_at = c.snapshot_at.unwrap_or_else(chrono::Utc::now);
+            (Some((c.last_updated, c.namespace)), snapshot_at)
+        }
+        None => (None, chrono::Utc::now()),
+    };
+
+    let rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
+        if let Some((cursor_updated_at, cursor_namespace)) = after {
+            sqlx::query_as(
+                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated
              FROM vector_entries
              WHERE owner = $1
              GROUP BY namespace
-             HAVING namespace > $2
-             ORDER BY namespace
+             HAVING (MAX(updated_at), namespace) > ($2, $3) AND MAX(updated_at) <= $4
+             ORDER BY MAX(updated_at), namespace
+             LIMIT $5",
+            )
+            .bind(owner)
+            .bind(cursor_updated_at)
+            .bind(cursor_namespace)
+            .bind(snapshot_at)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await
+        } else {
+            sqlx::query_as(
+                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated
+             FROM vector_entries
+             WHERE owner = $1
+             GROUP BY namespace
+             HAVING MAX(updated_at) <= $2
+             ORDER BY MAX(updated_at), namespace
              LIMIT $3",
-        )
-        .bind(owner)
-        .bind(after)
-        .bind(limit + 1)
-        .fetch_all(pool)
-        .await
-    } else {
-        sqlx::query_as(
-            "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used
-             FROM vector_entries
-             WHERE owner = $1
-             GROUP BY namespace
-             ORDER BY namespace
-             LIMIT $2",
-        )
-        .bind(owner)
-        .bind(limit + 1)
-        .fetch_all(pool)
-        .await
-    }
-    .map_err(|e| AppError::Internal(format!("Failed to query namespaces: {}", e)))?;
+            )
+            .bind(owner)
+            .bind(snapshot_at)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await
+        }
+        .map_err(|e| AppError::Internal(format!("Failed to query namespaces: {}", e)))?;
 
     let has_more = rows.len() as i64 > limit;
     let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
 
     let next_cursor = if has_more {
         page.last()
-            .map(|(name, _, _)| encode_namespace_cursor(name))
+            .map(|(name, _, _, last_updated)| encode_namespace_cursor(*last_updated, name, snapshot_at))
     } else {
         None
     };
 
     let namespaces = page
         .into_iter()
-        .map(|(name, memory_count, storage_used)| NamespaceSummary {
-            id: name.clone(),
-            name,
-            memory_count,
-            storage_used,
-        })
+        .map(
+            |(name, memory_count, storage_used, _last_updated)| NamespaceSummary {
+                id: name.clone(),
+                name,
+                memory_count,
+                storage_used,
+            },
+        )
         .collect();
 
     Ok(NamespacesResponse {
@@ -157,7 +231,7 @@ pub async fn list_owner_namespaces(
     Path(path_owner): Path<String>,
     params: MemoriesQuery,
 ) -> Result<Json<NamespacesResponse>, AppError> {
-    if auth.owner != path_owner {
+    if !same_owner(Some(&path_owner), &auth.owner) {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
     let limit = params.limit.unwrap_or(DEFAULT_NAMESPACES_LIMIT);
@@ -169,16 +243,41 @@ pub async fn list_owner_namespaces(
     Ok(Json(result))
 }
 
+/// `snapshot_at` binds an entire keyset walk to a single point in time,
+/// captured the moment the first page (cursor = `None`) is requested and
+/// then threaded forward unchanged through every subsequent page's
+/// `next_cursor`. Without it, a row whose `updated_at` is bumped *during*
+/// the walk (e.g. an Apalis job retry re-upserting the same `vector_id`,
+/// which advances `updated_at` via `ON CONFLICT DO UPDATE ... updated_at =
+/// NOW()` in db.rs) can jump past the client's current `(updated_at, id)`
+/// cursor position and be handed back a second time later in the same walk.
+/// Filtering every page to `updated_at <= snapshot_at` excludes such rows
+/// until the client starts a fresh walk (cursor = `None`), trading
+/// "sees its own mid-walk updates immediately" for "never sees a duplicate
+/// within one walk" — rows updated after the walk began simply won't appear
+/// until the next fresh walk picks them up.
+///
+/// `Option` (not a required field) so a cursor decoded without this field
+/// degrades gracefully instead of failing to parse; `query_owner_memories`
+/// treats a missing value the same as no cursor at all, i.e. as though a
+/// fresh walk boundary were captured right now.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct MemoriesCursor {
     updated_at: chrono::DateTime<chrono::Utc>,
     id: String,
+    #[serde(default)]
+    snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn encode_cursor(updated_at: chrono::DateTime<chrono::Utc>, id: &str) -> String {
+fn encode_cursor(
+    updated_at: chrono::DateTime<chrono::Utc>,
+    id: &str,
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+) -> String {
     let json = serde_json::to_vec(&MemoriesCursor {
         updated_at,
         id: id.to_string(),
+        snapshot_at: Some(snapshot_at),
     })
     .expect("cursor serializes");
     // URL_SAFE_NO_PAD (not STANDARD): next_cursor is used verbatim in a URL
@@ -205,6 +304,18 @@ pub(crate) async fn query_owner_memories(
 ) -> Result<MemoriesResponse, AppError> {
     let limit = limit.clamp(1, MAX_MEMORIES_LIMIT);
 
+    // See the doc comment on `MemoriesCursor::snapshot_at`: bind this whole
+    // walk to one boundary, captured now on the first page and threaded
+    // forward unchanged from the incoming cursor on every later page.
+    let (after, snapshot_at) = match cursor {
+        Some(raw_cursor) => {
+            let c = decode_cursor(&raw_cursor)?;
+            let snapshot_at = c.snapshot_at.unwrap_or_else(chrono::Utc::now);
+            (Some((c.updated_at, c.id)), snapshot_at)
+        }
+        None => (None, chrono::Utc::now()),
+    };
+
     #[allow(clippy::type_complexity)]
     let rows: Vec<(
         String,
@@ -217,18 +328,18 @@ pub(crate) async fn query_owner_memories(
         Option<String>,
         Option<i32>,
         Option<chrono::DateTime<chrono::Utc>>,
-    )> = if let Some(raw_cursor) = cursor {
-        let c = decode_cursor(&raw_cursor)?;
+    )> = if let Some((cursor_updated_at, cursor_id)) = after {
         sqlx::query_as(
             "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
              FROM vector_entries
-             WHERE owner = $1 AND (updated_at, id) > ($2, $3)
+             WHERE owner = $1 AND (updated_at, id) > ($2, $3) AND updated_at <= $4
              ORDER BY updated_at, id
-             LIMIT $4",
+             LIMIT $5",
         )
         .bind(owner)
-        .bind(c.updated_at)
-        .bind(c.id)
+        .bind(cursor_updated_at)
+        .bind(cursor_id)
+        .bind(snapshot_at)
         .bind(limit + 1)
         .fetch_all(pool)
         .await
@@ -236,11 +347,12 @@ pub(crate) async fn query_owner_memories(
         sqlx::query_as(
             "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
              FROM vector_entries
-             WHERE owner = $1
+             WHERE owner = $1 AND updated_at <= $2
              ORDER BY updated_at, id
-             LIMIT $2",
+             LIMIT $3",
         )
         .bind(owner)
+        .bind(snapshot_at)
         .bind(limit + 1)
         .fetch_all(pool)
         .await
@@ -251,7 +363,7 @@ pub(crate) async fn query_owner_memories(
     let page: Vec<_> = rows.into_iter().take(limit as usize).collect();
 
     let next_cursor = if has_more {
-        page.last().map(|r| encode_cursor(r.4, &r.0))
+        page.last().map(|r| encode_cursor(r.4, &r.0, snapshot_at))
     } else {
         None
     };
@@ -335,7 +447,7 @@ pub async fn list_owner_memories(
     Path(path_owner): Path<String>,
     params: MemoriesQuery,
 ) -> Result<Json<MemoriesResponse>, AppError> {
-    if auth.owner != path_owner {
+    if !same_owner(Some(&path_owner), &auth.owner) {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
     let limit = params.limit.unwrap_or(DEFAULT_MEMORIES_LIMIT);
@@ -365,7 +477,7 @@ pub async fn list_owner_agents(
     Extension(auth): Extension<AuthInfo>,
     Path(path_owner): Path<String>,
 ) -> Result<Json<AgentsResponse>, AppError> {
-    if auth.owner != path_owner {
+    if !same_owner(Some(&path_owner), &auth.owner) {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
     // Short-TTL cached read (WALM-295 design spec: "Cached with the same
@@ -463,6 +575,8 @@ mod tests {
             let id = format!("memory-id-{i}-{}", uuid::Uuid::new_v4());
             let updated_at =
                 chrono::DateTime::from_timestamp(1_700_000_000 + i, (i as u32) * 137).unwrap();
+            let snapshot_at =
+                chrono::DateTime::from_timestamp(1_700_000_100 + i, (i as u32) * 251).unwrap();
 
             // Sanity check: prove this fixture would have been unsafe under
             // the old STANDARD engine, so the test is actually exercising the
@@ -470,6 +584,7 @@ mod tests {
             let json = serde_json::to_vec(&MemoriesCursor {
                 updated_at,
                 id: id.clone(),
+                snapshot_at: Some(snapshot_at),
             })
             .expect("cursor serializes");
             let standard_encoded = base64::engine::general_purpose::STANDARD.encode(&json);
@@ -480,7 +595,7 @@ mod tests {
                 found_standard_unsafe_case = true;
             }
 
-            let encoded = encode_cursor(updated_at, &id);
+            let encoded = encode_cursor(updated_at, &id, snapshot_at);
             assert!(
                 !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
                 "encoded cursor must be URL-safe with no padding, got: {}",
@@ -490,6 +605,7 @@ mod tests {
             let decoded = decode_cursor(&encoded).expect("round-trips");
             assert_eq!(decoded.id, id);
             assert_eq!(decoded.updated_at, updated_at);
+            assert_eq!(decoded.snapshot_at, Some(snapshot_at));
         }
 
         assert!(
@@ -560,8 +676,9 @@ mod tests {
 
     /// Mirrors `query_owner_memories_paginates_by_updated_at_and_id`'s style:
     /// seed multiple namespaces for one owner, paginate with a small limit
-    /// using the namespace-text keyset cursor, and assert the union of all
-    /// pages equals the full set exactly once (no gaps, no duplicates).
+    /// using the `(MAX(updated_at), namespace)` keyset cursor, and assert
+    /// the union of all pages equals the full set exactly once (no gaps, no
+    /// duplicates).
     #[tokio::test]
     async fn query_owner_namespaces_paginates_by_namespace_cursor() {
         let pool = test_pool().await;
@@ -611,6 +728,235 @@ mod tests {
         // just that the union matched — a shuffled union would still pass
         // the assertion above).
         assert_eq!(all_names, sorted);
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Regression test for the namespace-keyset drop bug, and for the
+    /// `snapshot_at` trade-off documented on `NamespaceCursor` above: a
+    /// namespace created *after* the walk began but sorting lexicographically
+    /// *before* everything already consumed must not be **permanently** lost
+    /// the way the old `HAVING namespace > $cursor` scheme could lose it
+    /// (that scheme could skip it for every future walk too, since a name
+    /// that never satisfies `namespace > <already-consumed name>` stays
+    /// skipped no matter how many more pages or fresh walks follow). Under
+    /// the current `(MAX(updated_at), namespace)` + `snapshot_at` cursor, a
+    /// namespace created with a *real* (not artificially backdated) timestamp
+    /// after `snapshot_at` was captured is excluded from *this* walk — that's
+    /// the documented, intentional trade-off, identical to how `memories`
+    /// already behaves — but must reliably surface on the *next fresh walk*
+    /// (`cursor = None`). This test uses the database's own `NOW()` for the
+    /// mid-walk insert rather than a hand-set backdated timestamp specifically
+    /// so it can't pass for the wrong reason.
+    #[tokio::test]
+    async fn query_owner_namespaces_surfaces_namespace_created_mid_walk_on_next_walk() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        // Seed "bravo" and "charlie" with explicit, ordered `updated_at`
+        // values so the first page is deterministic.
+        let base = chrono::Utc::now() - chrono::Duration::seconds(60);
+        for (ns, offset) in [("bravo", 0), ("charlie", 1)] {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(format!("{}-{}", owner, ns))
+            .bind(&owner)
+            .bind(ns)
+            .bind(format!("blob-{}", ns))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+                .bind(base + chrono::Duration::seconds(offset))
+                .bind(format!("{}-{}", owner, ns))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // First page: smallest MAX(updated_at) wins, so "bravo" alone. This
+        // also captures `snapshot_at` (~now) into the returned cursor.
+        let page1 = query_owner_namespaces(&pool, &owner, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(page1.namespaces.len(), 1);
+        assert_eq!(page1.namespaces[0].name, "bravo");
+        let cursor1 = page1.next_cursor.clone().expect("more pages remain");
+
+        // Now a namespace named "alpha" is created for real — sorts before
+        // both "bravo" and "charlie" alphabetically, and, critically, is
+        // inserted with the column's DEFAULT NOW() (no manual timestamp), so
+        // its `updated_at` genuinely lands after `snapshot_at` was captured
+        // above, exactly like a real concurrent write would.
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+             VALUES ($1, $2, 'alpha', $3, $4, $5)",
+        )
+        .bind(format!("{}-alpha", owner))
+        .bind(&owner)
+        .bind("blob-alpha")
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .bind(10_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Drain the rest of THIS walk from cursor1: "alpha" must NOT appear
+        // here — it postdates the walk's snapshot_at, so it's out of scope
+        // for this walk by design, not dropped by a bug.
+        let page2 = query_owner_namespaces(&pool, &owner, Some(cursor1), 10)
+            .await
+            .unwrap();
+        let page2_names: Vec<String> =
+            page2.namespaces.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(
+            page2_names,
+            vec!["charlie"],
+            "a namespace created after snapshot_at must be excluded from THIS walk \
+             (same trade-off memories already documents), got {:?}",
+            page2_names
+        );
+        assert!(page2.next_cursor.is_none(), "walk must terminate");
+
+        // A fresh walk (cursor = None) is a new snapshot and must pick up
+        // "alpha" — this is what actually rules out the old permanent-drop
+        // bug: nothing is lost forever, only deferred to the next walk.
+        let fresh = query_owner_namespaces(&pool, &owner, None, 10)
+            .await
+            .unwrap();
+        let mut fresh_names: Vec<String> =
+            fresh.namespaces.iter().map(|n| n.name.clone()).collect();
+        fresh_names.sort();
+        assert_eq!(
+            fresh_names,
+            vec!["alpha", "bravo", "charlie"],
+            "a fresh walk must see the namespace created during the previous walk, got {:?}",
+            fresh_names
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Regression test for the namespace snapshot-boundary fix: because
+    /// `MAX(updated_at)` for a namespace can advance after that namespace
+    /// has already been delivered to the client (any new/updated row
+    /// belonging to it bumps the aggregate), an unbounded `(MAX(updated_at),
+    /// namespace)` cursor lets an already-delivered namespace jump back in
+    /// front of the cursor and be delivered a second time later in the same
+    /// walk — with different data. Mirrors
+    /// `query_owner_memories_excludes_rows_updated_mid_walk`: seed two
+    /// namespaces, drain page 1 (delivers "bravo"), mutate the
+    /// already-delivered "bravo" namespace mid-walk, request page 2, and
+    /// assert "bravo" is NOT re-delivered within this walk.
+    #[tokio::test]
+    async fn query_owner_namespaces_excludes_namespace_updated_mid_walk() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        // Seed "bravo" and "charlie" with explicit, ordered `updated_at`
+        // values so the first page is deterministic.
+        let base = chrono::Utc::now() - chrono::Duration::seconds(60);
+        for (ns, offset) in [("bravo", 0), ("charlie", 1)] {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(format!("{}-{}", owner, ns))
+            .bind(&owner)
+            .bind(ns)
+            .bind(format!("blob-{}", ns))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+                .bind(base + chrono::Duration::seconds(offset))
+                .bind(format!("{}-{}", owner, ns))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Page 1 starts the walk, captures `snapshot_at` (~now, well after
+        // `base`) into its `next_cursor`, and delivers "bravo" (smallest
+        // MAX(updated_at)).
+        let page1 = query_owner_namespaces(&pool, &owner, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(page1.namespaces.len(), 1);
+        assert_eq!(page1.namespaces[0].name, "bravo");
+        assert_eq!(page1.namespaces[0].memory_count, 1);
+        let cursor1 = page1.next_cursor.clone().expect("more pages remain");
+        let snapshot_at = decode_namespace_cursor(&cursor1)
+            .unwrap()
+            .snapshot_at
+            .unwrap();
+
+        // Mutate the already-delivered "bravo" namespace mid-walk: insert a
+        // new row into it, with `updated_at` explicitly placed just past the
+        // walk's snapshot boundary (mirrors the Apalis-retry scenario in
+        // `query_owner_memories_excludes_rows_updated_mid_walk` — an
+        // already-consumed row/namespace mutated after the walk began).
+        // This bumps `MAX(updated_at)` for "bravo" past `snapshot_at` and
+        // changes its `memory_count`.
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+             VALUES ($1, $2, 'bravo', $3, $4, $5)",
+        )
+        .bind(format!("{}-bravo-2", owner))
+        .bind(&owner)
+        .bind("blob-bravo-2")
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .bind(10_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+            .bind(snapshot_at + chrono::Duration::microseconds(1))
+            .bind(format!("{}-bravo-2", owner))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Page 2 must not re-deliver "bravo" — it was already consumed on
+        // page 1, and its mutation happened after the walk's snapshot
+        // boundary, so it must stay excluded until a fresh walk starts.
+        let page2 = query_owner_namespaces(&pool, &owner, Some(cursor1), 10)
+            .await
+            .unwrap();
+        let page2_names: Vec<String> =
+            page2.namespaces.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(
+            page2_names,
+            vec!["charlie"],
+            "namespace mutated mid-walk after already being delivered must not reappear, got {:?}",
+            page2_names
+        );
+        assert!(page2.next_cursor.is_none(), "walk must terminate");
+
+        // A fresh walk (cursor = None) captures a new, later snapshot
+        // boundary and picks up "bravo"'s mutated state (memory_count now
+        // 2, from the original row plus the mid-walk insert).
+        let fresh = query_owner_namespaces(&pool, &owner, None, 10)
+            .await
+            .unwrap();
+        let bravo = fresh
+            .namespaces
+            .iter()
+            .find(|n| n.name == "bravo")
+            .expect("bravo must reappear once a fresh walk starts");
+        assert_eq!(bravo.memory_count, 2);
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
             .bind(&owner)
@@ -800,5 +1146,114 @@ mod tests {
             .bind(&owner)
             .execute(&pool)
             .await;
+    }
+
+    /// Regression test for the snapshot-boundary fix: a row whose
+    /// `updated_at` is bumped *after* a walk's first page (mirroring an
+    /// Apalis job retry re-upserting the same `vector_id`, which advances
+    /// `updated_at` via `ON CONFLICT DO UPDATE ... updated_at = NOW()`) must
+    /// not reappear later in that same walk — it must simply be excluded
+    /// until a fresh walk (cursor = `None`) starts and captures a new
+    /// snapshot boundary that includes it.
+    #[tokio::test]
+    async fn query_owner_memories_excludes_rows_updated_mid_walk() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        let base = chrono::Utc::now() - chrono::Duration::seconds(60);
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, 'default', $3, $4, $5)",
+            )
+            .bind(format!("{}-s{}", owner, i))
+            .bind(&owner)
+            .bind(format!("blob-s{}", i))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+                .bind(base + chrono::Duration::seconds(i))
+                .bind(format!("{}-s{}", owner, i))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Page 1 starts the walk and captures `snapshot_at` (~now, well
+        // after `base`) into its `next_cursor`.
+        let page1 = query_owner_memories(&pool, &owner, None, 1).await.unwrap();
+        assert_eq!(page1.memories.len(), 1);
+        assert_eq!(page1.memories[0].memory_id, format!("{}-s0", owner));
+        let cursor1 = page1.next_cursor.clone().expect("more pages remain");
+        let snapshot_at = decode_cursor(&cursor1).unwrap().snapshot_at.unwrap();
+
+        // Simulate an Apalis job retry re-upserting row `s1` mid-walk: bump
+        // its `updated_at` to just after the walk's snapshot boundary.
+        let bumped_at = snapshot_at + chrono::Duration::microseconds(1);
+        sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+            .bind(bumped_at)
+            .bind(format!("{}-s1", owner))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The rest of this walk must exclude `s1` outright (not return it a
+        // second time, not skip past it and hang) and still terminate.
+        let page2 = query_owner_memories(&pool, &owner, Some(cursor1), 10)
+            .await
+            .unwrap();
+        let page2_ids: Vec<String> = page2.memories.iter().map(|m| m.memory_id.clone()).collect();
+        assert_eq!(
+            page2_ids,
+            vec![format!("{}-s2", owner)],
+            "row mutated mid-walk must be excluded from the in-flight walk, got {:?}",
+            page2_ids
+        );
+        assert!(
+            page2.next_cursor.is_none(),
+            "walk must terminate even though `s1` was excluded"
+        );
+
+        // A fresh walk (cursor = None) captures a new, later snapshot
+        // boundary and picks the mutated row back up.
+        let fresh = query_owner_memories(&pool, &owner, None, 10).await.unwrap();
+        let fresh_ids: Vec<String> = fresh.memories.iter().map(|m| m.memory_id.clone()).collect();
+        assert!(
+            fresh_ids.contains(&format!("{}-s1", owner)),
+            "a fresh walk must see the row once its update has settled, got {:?}",
+            fresh_ids
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    /// `decode_cursor` must tolerate a cursor JSON that omits `snapshot_at`
+    /// entirely (`#[serde(default)]`) rather than failing to parse — the
+    /// call sites treat a missing value the same as "no cursor at all".
+    #[test]
+    fn decode_cursor_defaults_missing_snapshot_at_to_none() {
+        use base64::Engine as _;
+
+        #[derive(serde::Serialize)]
+        struct LegacyCursor {
+            updated_at: chrono::DateTime<chrono::Utc>,
+            id: String,
+        }
+        let legacy = LegacyCursor {
+            updated_at: chrono::Utc::now(),
+            id: "legacy-id".to_string(),
+        };
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&legacy).unwrap());
+
+        let decoded = decode_cursor(&encoded).expect("decodes without snapshot_at");
+        assert_eq!(decoded.id, "legacy-id");
+        assert_eq!(decoded.snapshot_at, None);
     }
 }

@@ -1,14 +1,50 @@
 -- services/server/migrations/012_memory_read_api_updated_at_not_null.sql
 --
--- WALM-295: finalize updated_at once 011 has backfilled every row.
--- Deliberately its own migration file/transaction (not bundled with 011)
--- so the ACCESS EXCLUSIVE this ALTER briefly takes to validate NOT NULL
--- is a short constraint-check scan, not held open across the (larger)
--- backfill UPDATE. SET DEFAULT is metadata-only and safe to bundle here.
+-- WALM-295: prove updated_at has no NULLs left (the Rust batched
+-- backfill in db.rs's backfill_updated_at() must complete before this
+-- runs -- see 011's header) WITHOUT taking the ACCESS EXCLUSIVE +
+-- full-table-scan that a bare `ALTER COLUMN ... SET NOT NULL` requires
+-- when Postgres has nothing to trust it against.
 --
--- Idempotent: SET NOT NULL / SET DEFAULT on a column that already has
--- them is a no-op, matching every other migration's re-run-on-boot
--- expectation.
+-- This used to just be `SET NOT NULL` directly. Instead:
+--   1. ADD CONSTRAINT ... CHECK (...) NOT VALID is metadata-only (brief
+--      ACCESS EXCLUSIVE, no scan).
+--   2. VALIDATE CONSTRAINT takes SHARE UPDATE EXCLUSIVE only -- it does
+--      not block concurrent reads/writes on vector_entries the way the
+--      old single-statement SET NOT NULL did.
+-- Migration 014 then does the actual `SET NOT NULL`, which since PG 12
+-- detects this validated CHECK constraint and skips its own validation
+-- scan entirely, and drops the now-redundant CHECK constraint.
+--
+-- Both steps are guarded by `pg_attribute.attnotnull` so that once 014
+-- has finished (in a prior boot), this migration does nothing at all on
+-- every subsequent boot -- every migration file here re-runs
+-- unconditionally on every `VectorDb::new()` call (no migrations
+-- table), so without this guard the VALIDATE CONSTRAINT scan would
+-- otherwise be re-paid, and the plain ADD CONSTRAINT (no
+-- "IF NOT EXISTS" variant exists in Postgres) would error, on every
+-- restart forever.
 
-ALTER TABLE vector_entries ALTER COLUMN updated_at SET NOT NULL;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'vector_entries'::regclass
+          AND attname = 'updated_at'
+          AND attnotnull
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'vector_entries_updated_at_not_null'
+        ) THEN
+            ALTER TABLE vector_entries
+                ADD CONSTRAINT vector_entries_updated_at_not_null
+                CHECK (updated_at IS NOT NULL) NOT VALID;
+        END IF;
+
+        ALTER TABLE vector_entries
+            VALIDATE CONSTRAINT vector_entries_updated_at_not_null;
+    END IF;
+END $$;
+
 ALTER TABLE vector_entries ALTER COLUMN updated_at SET DEFAULT NOW();
