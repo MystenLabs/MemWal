@@ -84,7 +84,20 @@ export function withMemWal(
         ? (...args: unknown[]) => console.warn("[Walrus Memory]", ...args)
         : () => { };
 
-    return (wrapLanguageModel as any)({
+    // Fire-and-forget auto-save writes are tracked here so short-lived
+    // callers (CLI scripts, serverless handlers) can await them via
+    // flush() before the process exits, instead of losing them silently.
+    const pendingSaves = new Set<Promise<unknown>>();
+
+    function saveInBackground(userMessage: string): void {
+        const savePromise = memwal
+            .analyze(userMessage)
+            .catch((err: unknown) => log("Auto-save failed:", err));
+        pendingSaves.add(savePromise);
+        savePromise.finally(() => pendingSaves.delete(savePromise));
+    }
+
+    const wrapped = (wrapLanguageModel as any)({
         model,
         middleware: {
             specificationVersion: 'v3', // Required by ai SDK v6+; ignored by v4/v5
@@ -129,9 +142,7 @@ export function withMemWal(
                 if (autoSave) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
-                        memwal.analyze(userMessage).catch((err: unknown) =>
-                            log("Auto-save failed:", err)
-                        );
+                        saveInBackground(userMessage);
                     }
                 }
 
@@ -145,9 +156,7 @@ export function withMemWal(
                 if (autoSave) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
-                        memwal.analyze(userMessage).catch((err: unknown) =>
-                            log("Auto-save failed:", err)
-                        );
+                        saveInBackground(userMessage);
                     }
                 }
 
@@ -155,6 +164,14 @@ export function withMemWal(
             },
         },
     });
+
+    // Lets short-lived callers await outstanding auto-save writes before
+    // exiting, e.g. `await model.flush()` right before `process.exit()`.
+    wrapped.flush = async (): Promise<void> => {
+        await Promise.allSettled([...pendingSaves]);
+    };
+
+    return wrapped;
 }
 
 // ============================================================
