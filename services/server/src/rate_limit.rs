@@ -5,6 +5,7 @@ use axum::{
     response::Response,
 };
 use percent_encoding::percent_decode_str;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1183,6 +1184,328 @@ pub async fn accounts_rate_limit_middleware(
     }
 
     next.run(request).await
+}
+
+// ============================================================
+// Owner Token — issuance rate limiting (WALM-297)
+// ============================================================
+
+/// Pre-handler rate limiting for `POST /v1/owner-tokens`, keyed by a
+/// SHA-256 hash of the caller's `x-service-credential` header value (the
+/// raw credential itself is never used as a Redis key or logged).
+///
+/// Phase 1 has exactly one shared service credential (see
+/// `routes::owner_token` module doc), so today this is effectively one
+/// deployment-wide bucket — same mechanism as
+/// `check_global_sponsor_rate_limit`'s fixed-key global cap — but hashing
+/// the credential rather than hardcoding one key means a future
+/// multi-credential Console rollout (e.g. per-integration credentials)
+/// gets independent buckets for free, with no changes needed here.
+///
+/// This is the "per-service-credential" layer only. The additional
+/// per-owner cap (`check_owner_token_owner_rate_limit`) is applied inside
+/// the `issue_token` handler itself, after the owner address has been
+/// canonicalized — not here — because this middleware runs before the
+/// request body is parsed by the handler's `Json` extractor, and
+/// buffering + re-parsing the body a second time here (mirroring
+/// `auth::verify_signature`'s body-consumption pattern) would duplicate
+/// validation the handler already has to do, for no benefit: an
+/// unauthenticated or malformed-body request is rejected by the
+/// credential gate or the handler's own `Json` extractor either way.
+///
+/// Per-IP budget on `POST /v1/owner-tokens`, independent of whether the
+/// supplied `x-service-credential` is valid. Wired as the TRUE outermost
+/// layer on this route (outside `service_credential_gate` itself) — see
+/// `main.rs`'s `owner_token_routes` wiring for why this is load-bearing:
+/// `service_credential_gate` rejects a bad credential in-process with no
+/// I/O, so `owner_token_credential_rate_limit_middleware` below (keyed by
+/// the *value* of the supplied credential, hashed) is structurally never
+/// reached by a failing-credential request, and an attacker who varies
+/// their guess every request gets a fresh Redis bucket key each time and
+/// is never throttled by it either. Without a limiter keyed by something
+/// an attacker can't freely vary (their source IP), guessing the single
+/// shared service credential has no throttling at all — this closes that
+/// gap the same way `accounts_rate_limit_middleware`/
+/// `sponsor_rate_limit_middleware` already do for their own routes (IP
+/// budget applied unconditionally, before any auth/validity check).
+/// Fails closed to 503 on Redis error, matching every other limiter here.
+pub async fn owner_token_ip_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            tracing::warn!("owner_token_ip_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.owner_token_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:ownertoken:ip:min:{}", ip);
+    let hr_key = format!("rate:ownertoken:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.ip_per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_minute
+            );
+            return rate_limit_response("owner_token_ip_burst", config.ip_per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.ip_per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_hour
+            );
+            return rate_limit_response("owner_token_ip_sustained", config.ip_per_hour, "hour", 300);
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
+pub async fn owner_token_credential_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    // Header name duplicated from `routes::owner_token::SERVICE_CREDENTIAL_HEADER`
+    // rather than imported: `rate_limit.rs` is compiled into BOTH the
+    // `main.rs` binary crate tree and the separate `lib.rs` library crate
+    // tree (see that file's module doc — it deliberately does not declare
+    // `mod routes`, only what `sui`'s dependency closure needs), so a
+    // `crate::routes::...` reference here would fail to resolve under
+    // `cargo test --lib`. Keep this literal in sync with
+    // `SERVICE_CREDENTIAL_HEADER` if that constant's value ever changes.
+    const SERVICE_CREDENTIAL_HEADER: &str = "x-service-credential";
+    let credential = request
+        .headers()
+        .get(SERVICE_CREDENTIAL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let credential_hash = hex::encode(Sha256::digest(credential.as_bytes()));
+
+    let config = &state.config.owner_token_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:ownertoken:cred:min:{credential_hash}");
+    let hr_key = format!("rate:ownertoken:cred:hr:{credential_hash}");
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [credential/min]: denied (limit={})",
+                config.per_minute
+            );
+            return rate_limit_response(
+                "owner_token_credential_burst",
+                config.per_minute,
+                "min",
+                60,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_credential_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [credential/hr]: denied (limit={})",
+                config.per_hour
+            );
+            return rate_limit_response(
+                "owner_token_credential_sustained",
+                config.per_hour,
+                "hour",
+                300,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_credential_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
+/// Per-owner cap on `POST /v1/owner-tokens` issuance (WALM-297). Keyed by
+/// the canonical (lowercased) owner address, independent of the
+/// per-service-credential budget enforced by
+/// `owner_token_credential_rate_limit_middleware` — a compromised or buggy
+/// Console instance that still holds a valid service credential must not
+/// be able to mint unbounded tokens for one owner. Called directly from
+/// the `issue_token` handler (see that function's doc comment for why this
+/// isn't middleware).
+///
+/// Reuses `SponsorRlResult` (`Allowed` / `MinuteLimitExceeded` /
+/// `HourLimitExceeded`) rather than defining a fourth near-identical
+/// two-tier rate-limit result enum — this crate already has
+/// `check_global_sponsor_rate_limit` and `check_global_accounts_rate_limit`
+/// returning the same shape for the same reason.
+///
+/// Returns `Err(())` on Redis failure so the caller can fail closed —
+/// consistent with every other limiter in this module.
+pub async fn check_owner_token_owner_rate_limit(
+    state: &crate::types::AppState,
+    owner: &str,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = format!("rate:ownertoken:owner:min:{owner}");
+    let hr_key = format!("rate:ownertoken:owner:hr:{owner}");
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("owner_token_owner_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_owner_token_owner_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("owner_token_owner_sustained");
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_owner_token_owner_rate_limit: Redis error (hour): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
 }
 
 // ============================================================

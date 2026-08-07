@@ -10,6 +10,10 @@
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
 //!   existence check)
+//! - `owner_token` — WALM-297 `POST /v1/owner-tokens` (owner-scoped bearer
+//!   token issuance) + `GET /v1/owners/{owner}/_token_probe` (a minimal
+//!   token-gated route standing in for PR #537/WALM-295's real
+//!   `/v1/owners/{owner}/...` handlers, not present in this branch)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.
@@ -19,6 +23,7 @@
 mod accounts;
 mod admin;
 mod analyze;
+pub mod owner_token;
 mod recall;
 mod remember;
 pub mod security_delete;
@@ -29,6 +34,7 @@ mod sponsor;
 pub use accounts::account_exists;
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
+pub use owner_token::{issue_token, token_probe};
 pub use recall::{recall, recall_manual};
 pub use remember::{
     remember, remember_bulk, remember_bulk_status, remember_manual, remember_status,

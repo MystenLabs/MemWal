@@ -1134,6 +1134,10 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            owner_token_secret: "owner-token-test-secret".to_string(),
+            owner_token_service_credential: "owner-token-test-credential".to_string(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: crate::types::OwnerTokenRateLimitConfig::default(),
         }
     }
 
