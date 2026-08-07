@@ -299,6 +299,9 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Rate limiting for the public, unauthenticated `GET
+    /// /api/accounts/{owner}/exists` endpoint
+    pub accounts_rate_limit: AccountsRateLimitConfig,
     /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
     /// ignores caller-supplied XFF and uses the direct peer address.
     pub trusted_proxy_hops: usize,
@@ -425,6 +428,7 @@ impl Config {
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            accounts_rate_limit: AccountsRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -733,6 +737,75 @@ impl SponsorRateLimitConfig {
             }
         }
         if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Accounts Rate Limit Config
+// ============================================================
+
+/// Per-IP rate limits for the public, unauthenticated `GET
+/// /api/accounts/{owner}/exists` endpoint.
+///
+/// This is a cheap read (one indexed Postgres lookup) rather than a
+/// state-changing, cost-incurring operation like `/sponsor`, so its per-IP
+/// limits are set a bit more generously than `SponsorRateLimitConfig`'s
+/// 10/min · 30/hour. But the endpoint is still an anonymous
+/// address-existence oracle, so it must stay well below the general
+/// authenticated per-account budget (`RateLimitConfig`'s 60/min · 500/hour)
+/// — reusing that budget as a per-IP limit (the bug this config replaces)
+/// left effectively no defense against enumeration. 20/min and 120/hour
+/// per IP is the same order of magnitude as sponsor's proportions while
+/// staying generous enough not to bother a legitimate integrator retrying
+/// a handful of lookups.
+#[derive(Debug, Clone)]
+pub struct AccountsRateLimitConfig {
+    /// Max accounts-exists requests per minute per IP (default: 20)
+    pub per_minute: i64,
+    /// Max accounts-exists requests per hour per IP (default: 120)
+    pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by IP rotation.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the DB pool this
+    /// endpoint shares with every other public route.
+    pub global_per_hour: i64,
+}
+
+impl Default for AccountsRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 20,
+            per_hour: 120,
+            global_per_minute: 200,
+            global_per_hour: 1500,
+        }
+    }
+}
+
+impl AccountsRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.global_per_hour = n;
             }
@@ -1249,6 +1322,17 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
+    /// True when this restore is known-incomplete: either more on-chain
+    /// blobs were missing locally than `limit` allowed this call to
+    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
+    /// per owner, shared across all of the owner's namespaces, hard-capped
+    /// independent of `limit`) hit its own cap before this namespace's
+    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// case can be `true` even when `total == 0` for this namespace,
+    /// since a cap hit elsewhere can starve this namespace's fetch
+    /// entirely. Raising `limit` only helps with the first case; past the
+    /// sidecar's cap, only a cursor/pagination-based restore would.
+    pub truncated: bool,
 }
 
 /// POST /api/forget — delete the vector index rows for a namespace
@@ -1265,6 +1349,16 @@ pub struct ForgetResponse {
     pub deleted: u64,
     pub namespace: String,
     pub owner: String,
+}
+
+/// GET /api/accounts/:owner/exists — does `owner` have a registered
+/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// Intentionally minimal: no `account_id`, since Console doesn't need the
+/// internal identifier and returning it would needlessly widen the API's
+/// surface for future churn.
+#[derive(Debug, Serialize)]
+pub struct AccountExistsResponse {
+    pub exists: bool,
 }
 
 /// POST /api/stats — count + stored bytes for a namespace.
@@ -1659,6 +1753,7 @@ mod tests {
             sidecar_secret: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            accounts_rate_limit: AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -2149,6 +2244,21 @@ mod tests {
         assert_eq!(config.per_hour, 30);
         assert_eq!(config.global_per_minute, 100);
         assert_eq!(config.global_per_hour, 1000);
+    }
+
+    // ── AccountsRateLimitConfig defaults ────────────────────────────────
+
+    #[test]
+    fn accounts_rate_limit_default_values() {
+        let config = AccountsRateLimitConfig::default();
+        assert_eq!(config.per_minute, 20);
+        assert_eq!(config.per_hour, 120);
+        assert_eq!(config.global_per_minute, 200);
+        assert_eq!(config.global_per_hour, 1500);
+        // Must stay well below the general authenticated per-account budget
+        // this middleware used to (bug-)reuse, or the fix regresses.
+        assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
+        assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
     }
 
     #[test]

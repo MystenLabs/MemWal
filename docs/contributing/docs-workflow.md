@@ -1,5 +1,5 @@
 ---
-title: "Docs Workflow"
+title: Docs Workflow
 description: >-
   Guidelines for contributing to Walrus Memory documentation, including source of truth,
   working rules for URL changes, and pre-ship verification steps.
@@ -10,7 +10,7 @@ keywords:
   - contributing
   - docs workflow
 goal:
-  description: Follow the docs contribution workflow — branch, edit, verify frontmatter, and open a PR — without breaking build or frontmatter validation rules.
+  description: Follow the docs contribution workflow (branch, edit, verify frontmatter, and open a PR) without breaking build or frontmatter validation rules.
   requires:
     - has_frontmatter:
         - title
@@ -33,7 +33,7 @@ answer: >-
   nav and sidebar links to verify correctness.
 ---
 
-Walrus Memory is still in beta, so documentation is an active part of product hardening.
+Walrus Memory evolves quickly, so documentation is an active part of product hardening.
 If you see unclear guidance, outdated flows, or missing examples, contributions are welcome.
 
 ## Source of Truth
