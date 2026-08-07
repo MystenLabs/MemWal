@@ -8,12 +8,15 @@
 //! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
+//! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
+//!   existence check)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.
 //! Capability-level code (embedding, extraction, OpenAI chat wire types,
 //! prompt assets) lives in `crate::services` per the Phase 2/3 refactor.
 
+mod accounts;
 mod admin;
 mod analyze;
 mod memory_read;
@@ -24,6 +27,7 @@ mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
+pub use accounts::account_exists;
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};

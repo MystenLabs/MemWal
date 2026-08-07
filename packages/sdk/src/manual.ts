@@ -896,9 +896,13 @@ export class MemWalManual {
      * @returns RestoreResult with count of restored entries
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
         });
+        // Relayers older than WALM-319 omit `truncated` entirely — treat
+        // "not present" as "not known to be truncated" rather than drop
+        // the field or require every relayer version to send it.
+        return { ...result, truncated: result.truncated ?? false };
     }
 }

@@ -76,6 +76,14 @@ pub struct OnChainBlob {
 struct QueryBlobsResponse {
     blobs: Vec<OnChainBlob>,
     total: usize,
+    /// True when the sidecar's raw on-chain candidate fetch hit its own
+    /// cap before namespace/package filtering (WALM-319) -- `blobs` may be
+    /// an incomplete view of what's actually on chain even though this
+    /// response itself isn't further truncated by `limit`. Defaulted so an
+    /// older sidecar (mid rolling-deploy) that doesn't send this field yet
+    /// still parses.
+    #[serde(rename = "sourceCapped", default)]
+    source_capped: bool,
 }
 
 /// Request/response types for sidecar HTTP API
@@ -457,7 +465,7 @@ pub async fn query_blobs_by_owner(
     namespace: Option<&str>,
     package_id: Option<&str>,
     limit: Option<usize>,
-) -> Result<Vec<OnChainBlob>, AppError> {
+) -> Result<(Vec<OnChainBlob>, bool), AppError> {
     let url = format!("{}/walrus/query-blobs", sidecar_url);
 
     let mut body = serde_json::json!({ "owner": owner_address });
@@ -510,13 +518,14 @@ pub async fn query_blobs_by_owner(
         .map_err(|e| AppError::Internal(format!("Failed to parse query-blobs response: {}", e)))?;
 
     tracing::info!(
-        "walrus query-blobs ok: {} blobs for owner={}, ns={:?}",
+        "walrus query-blobs ok: {} blobs for owner={}, ns={:?}, source_capped={}",
         result.total,
         owner_address,
-        namespace
+        namespace,
+        result.source_capped
     );
 
-    Ok(result.blobs)
+    Ok((result.blobs, result.source_capped))
 }
 
 /// Download a blob from one or more Walrus aggregators.
@@ -776,8 +785,29 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_download_errors, is_valid_blob_id};
+    use super::{aggregate_download_errors, is_valid_blob_id, QueryBlobsResponse};
     use crate::types::AppError;
+
+    // ── QueryBlobsResponse.source_capped (WALM-319) ──────────────────────
+
+    #[test]
+    fn query_blobs_response_reads_source_capped_when_present() {
+        let parsed: QueryBlobsResponse =
+            serde_json::from_str(r#"{"blobs":[],"total":0,"sourceCapped":true}"#).unwrap();
+        assert!(parsed.source_capped);
+
+        let parsed: QueryBlobsResponse =
+            serde_json::from_str(r#"{"blobs":[],"total":0,"sourceCapped":false}"#).unwrap();
+        assert!(!parsed.source_capped);
+    }
+
+    #[test]
+    fn query_blobs_response_defaults_source_capped_when_absent() {
+        // A sidecar older than this fix (mid-rolling-deploy) won't send
+        // sourceCapped at all -- must still parse, not error.
+        let parsed: QueryBlobsResponse = serde_json::from_str(r#"{"blobs":[],"total":0}"#).unwrap();
+        assert!(!parsed.source_capped);
+    }
 
     #[test]
     fn valid_blob_ids_pass_charset_check() {

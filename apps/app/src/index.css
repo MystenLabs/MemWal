@@ -11,7 +11,8 @@
 .dash-page .sd-warning, .dash-page .sd-counts, .dash-page .sd-actions, .dash-page .sd-tabs {
   display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;
 }
-.dash-page .sd-warning { margin-bottom: 1rem; color: #7d5400; }
+.dash-page .sd-warning { align-items: flex-start; margin-bottom: 1rem; color: #7d5400; }
+.dash-page .sd-warning svg { flex-shrink: 0; }
 .dash-page .sd-counts, .dash-page .sd-tabs, .dash-page .sd-actions { margin-bottom: 1rem; }
 .dash-page .sd-load-prompt { display: flex; justify-content: center; margin-top: 1.5rem; }
 .dash-page .sd-tabs .btn { border: 1px solid #faf8f5; background: #000000; color: #faf8f5; }

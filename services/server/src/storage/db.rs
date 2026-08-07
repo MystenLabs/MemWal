@@ -402,6 +402,106 @@ mod tests {
             .execute(db.pool())
             .await;
     }
+
+    // ── find_account_by_owner (backs GET /api/accounts/{owner}/exists) ──
+    //
+    // `accounts` is populated by the v2-indexer from onchain
+    // `AccountCreated` events, not by this server. This test simulates
+    // that indexer write directly (a raw INSERT) rather than driving it
+    // through any server code path, since the indexer itself is a
+    // separate service/binary outside this crate.
+
+    #[tokio::test]
+    async fn find_account_by_owner_reflects_indexed_accounts_table() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xaccount-exists-owner-{suffix}");
+        let account_id = format!("account-{suffix}");
+
+        // No indexed row yet — an address that has never created a
+        // MemWalAccount (or whose AccountCreated event hasn't been
+        // indexed yet) must resolve to `None`.
+        assert_eq!(db.find_account_by_owner(&owner).await.unwrap(), None);
+
+        // Simulate the v2-indexer inserting a row after observing
+        // `AccountCreated` onchain.
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.find_account_by_owner(&owner).await.unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// `find_account_by_owner` is an exact, case-sensitive match — it does
+    /// not itself lowercase the input. `accounts.owner` is always indexed
+    /// in lowercase hex by the v2-indexer (`hex::encode` in
+    /// `services/indexer/src/handler.rs`), so callers (the
+    /// `account_exists` route handler) are responsible for lowercasing the
+    /// caller-supplied address before calling this function. This test
+    /// pins down both halves of that contract: an uppercase/mixed-case
+    /// lookup against a lowercase-indexed row misses without
+    /// normalization, and hits once the same normalization the handler
+    /// applies (`to_ascii_lowercase`) is applied here too.
+    #[tokio::test]
+    async fn find_account_by_owner_is_case_sensitive_requiring_caller_normalization() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        // Indexed rows are always lowercase, mirroring the indexer's
+        // `hex::encode` output.
+        let owner_lower = format!("0xcase-owner-{suffix}").to_ascii_lowercase();
+        let owner_upper = owner_lower.to_ascii_uppercase();
+        let account_id = format!("account-case-{suffix}");
+
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner_lower)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Without normalization, an uppercase/mixed-case address for an
+        // account that DOES exist would false-negative — this is the bug
+        // the route handler's `to_ascii_lowercase()` fixes.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper).await.unwrap(),
+            None,
+            "find_account_by_owner must not silently case-fold internally \
+             (that would defeat the btree index via a query-side LOWER())"
+        );
+
+        // The handler's normalization step, applied here, must resolve to
+        // the same account as the canonical lowercase lookup.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper.to_ascii_lowercase())
+                .await
+                .unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner_lower)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -1082,7 +1182,6 @@ impl VectorDb {
 
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
-    #[allow(dead_code)]
     pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
         let result: Option<(String,)> =
             sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")
